@@ -41,6 +41,13 @@ pub fn install() {
         log::log!(level, "{message}");
     }
 
+    // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
+    // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
+    match crate::mods::self_dir(crate::SELF_MODULE.load(std::sync::atomic::Ordering::Relaxed)) {
+        Some(dir) => crate::mods::load_mods(&config, &dir),
+        None => log::warn!("could not locate our own module dir; skipping extra mod loading"),
+    }
+
     let cs_task = match CSTaskImp::wait_for_instance(INIT_TIMEOUT) {
         Ok(task) => task,
         Err(e) => {

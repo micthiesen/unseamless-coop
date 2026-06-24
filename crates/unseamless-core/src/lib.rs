@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod diagnostics;
+pub mod loader;
 pub mod menu;
 pub mod notifications;
 pub mod peer;

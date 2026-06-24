@@ -1,0 +1,15 @@
+[package]
+name = "launcher"
+description = "Tiny launcher that starts eldenring.exe directly (bypassing EasyAntiCheat) with the Steam app context and the unseamless-coop safety marker set, so our dinput8.dll loads and refuses to run under EAC. Ships as start_protected_game.exe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+# Replaces the game's own EAC bootstrapper, so Steam's "Play" runs us.
+name = "start_protected_game"
+path = "src/main.rs"
+
+[dependencies]
+# Only for surfacing errors via a message box (the launcher has no console).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

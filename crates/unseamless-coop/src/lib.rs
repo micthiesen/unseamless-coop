@@ -8,6 +8,7 @@
 //! locally under `reference/` (gitignored) for behavioral study — never copied (see CLAUDE.md).
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
@@ -17,18 +18,29 @@ mod app;
 mod config;
 mod feature;
 mod features;
+mod guard;
 mod logger;
+mod mods;
+mod proxy;
 mod sdk;
+
+/// Our own module handle, captured in `DllMain`, so the init thread can find the game folder (and
+/// the `mods/` dir next to it) regardless of the process working directory.
+pub(crate) static SELF_MODULE: AtomicUsize = AtomicUsize::new(0);
 
 // Only DLL_PROCESS_ATTACH is handled, deliberately. We register tasks into the game's task pool
 // that hold pointers and vtables into this DLL's image; the SDK has no way to unregister them,
 // so the DLL must stay resident for the process lifetime. Do NOT add a DLL_PROCESS_DETACH
 // cleanup path: unloading while a task is registered is a use-after-free.
 #[unsafe(no_mangle)]
-unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *mut c_void) -> BOOL {
+unsafe extern "system" fn DllMain(module: HINSTANCE, reason: u32, _: *mut c_void) -> BOOL {
     if reason == DLL_PROCESS_ATTACH {
+        SELF_MODULE.store(module.0 as usize, Ordering::Relaxed);
+        // EAC safety FIRST, synchronously: if our launcher didn't start the game, abort before
+        // anything else runs (this does not return in that case). See `guard`.
+        guard::ensure_launched_by_us_or_abort();
         // Off the loader lock and off the main thread: the init thread loads config, brings up
-        // logging, waits for the task system, then registers per-frame tasks and returns.
+        // logging, loads other mods, waits for the task system, then registers per-frame tasks.
         // `wait_for_instance` must not run on the main thread (it blocks on main-thread init).
         std::thread::spawn(app::install);
     }

@@ -31,7 +31,26 @@ pub struct Config {
     pub session: Session,
     pub save: Save,
     pub language: Language,
+    pub loader: Loader,
     pub debug: Debug,
+}
+
+/// External DLL-mod loading. Our shipped `dinput8.dll` is the game's proxy, so this mod is the
+/// parent loader: it loads other simple DLL mods dropped in `mods/` (see [`crate::loader`]). The
+/// *ordering policy* lives in `crate::loader`; this just holds the user's preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Loader {
+    /// Load other DLL mods found in `mods/`. Off → only this mod loads.
+    pub enabled: bool,
+    /// Mod filenames to load first, in this order; the rest load alphabetically after.
+    pub order: Vec<String>,
+}
+
+impl Default for Loader {
+    fn default() -> Self {
+        Self { enabled: true, order: Vec::new() }
+    }
 }
 
 /// Debugging / diagnostics. Off by default so normal play does no extra disk or network work

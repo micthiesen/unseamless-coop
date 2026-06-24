@@ -21,6 +21,10 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_SystemServices",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",       # proxy: load the real dinput8 + our mods
+    "Win32_System_SystemInformation",   # proxy: locate the system dinput8.dll
+    "Win32_System_Threading",           # EAC guard: TerminateProcess
+    "Win32_UI_WindowsAndMessaging",     # EAC guard: MessageBox
 ] }
 log = { workspace = true }
 simplelog = { version = "0.12", default-features = false }
