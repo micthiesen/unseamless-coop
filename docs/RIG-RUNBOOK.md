@@ -63,6 +63,24 @@ In rough order, each a small, reversible probe:
 - **Persistence:** find where the game tears down the session on map change and whether keeping
   it alive is viable.
 
+## Menu overlay + settings application (rig-gated UI work)
+
+The menu *model* and the settings *registry* are done and host-tested
+(`unseamless-core/menu.rs`, `settings.rs`). What needs the game:
+
+- **Overlay renderer** (`coop/features/menu_overlay.rs`, planned): hook the game's DX12 `Present`
+  and draw `Menu::rows(&cfg, &ctx)` with egui (or similar). Pick the hooking approach with the
+  game in front of you (this can't be designed blind). Toggle visibility with a hotkey, and read
+  `CSFeMan` HUD state to optionally auto-show it when the pause menu is open.
+- **Input → menu**: map keys to `select_next`/`select_prev`/`activate`/`adjust` (poll
+  `GetAsyncKeyState`). Trivial wiring; just needs the overlay to exist to verify.
+- **Building `SessionContext`**: fill `in_session`/`is_host` from `CSSessionManager`
+  (lobby/protocol state + the local player's `is_host`) — confirm the mapping from the observer
+  log first.
+- **Applying `MenuOutcome`**: `SettingChanged` → persist config (add `coop/config.rs::save`) and
+  re-apply effects (e.g. scaling); `Action(a)` → the session verb, which depends on the co-op
+  core. So menu *navigation* can be demoed early; the *actions* light up as Layer 2 lands.
+
 ## Tooling on the rig (when needed)
 
 For anything the observer log can't answer (e.g. *which* function relaxes a limit), set up
