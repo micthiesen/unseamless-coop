@@ -9,7 +9,9 @@
 //! verify locally; the cdylib stays a thin, mostly-mechanical binding layer.
 
 pub mod config;
+pub mod diagnostics;
 pub mod menu;
 pub mod protocol;
 pub mod scaling;
 pub mod settings;
+pub mod util;

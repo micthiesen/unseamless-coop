@@ -20,11 +20,15 @@
 //! ```
 
 use crate::config::Scaling;
+use crate::diagnostics::{LogLevel, LogRecord};
 
 /// Magic prefix identifying one of our side-channel frames.
 pub const MAGIC: [u8; 2] = *b"UC";
 /// Current wire version. Bump on any incompatible change; decoders reject mismatches.
 pub const VERSION: u8 = 1;
+/// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
+/// are truncated on a UTF-8 boundary at encode time.
+pub const MAX_LOG_MSG: usize = 2048;
 
 /// A message exchanged between modded clients over the side-channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,9 @@ pub enum ModMessage {
     SessionAction(SessionAction),
     /// Liveness ping carrying the sender's frame counter (cheap clock/heartbeat).
     Ping { frame: u64 },
+    /// A forwarded debug log line (sent to the host when `forward_to_host` is on). See
+    /// [`crate::diagnostics`].
+    Log(LogRecord),
 }
 
 /// The subset of config that must be identical across the party (the host enforces it). Distinct
@@ -94,6 +101,7 @@ mod tag {
     pub const CONFIG_SYNC: u8 = 1;
     pub const SESSION_ACTION: u8 = 2;
     pub const PING: u8 = 3;
+    pub const LOG: u8 = 4;
 }
 
 /// Why a frame failed to decode.
@@ -146,6 +154,14 @@ impl ModMessage {
                 w.push(tag::PING);
                 w.extend_from_slice(&frame.to_be_bytes());
             }
+            ModMessage::Log(rec) => {
+                w.push(tag::LOG);
+                w.extend_from_slice(&rec.seq.to_be_bytes());
+                w.push(rec.level.to_u8());
+                let msg = truncate_on_boundary(&rec.message, MAX_LOG_MSG);
+                w.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+                w.extend_from_slice(msg.as_bytes());
+            }
         }
         w
     }
@@ -184,6 +200,12 @@ impl ModMessage {
                 ModMessage::SessionAction(SessionAction::from_u8(r.u8()?).ok_or(DecodeError::BadValue)?)
             }
             tag::PING => ModMessage::Ping { frame: r.u64()? },
+            tag::LOG => {
+                let seq = r.u32()?;
+                let level = LogLevel::from_u8(r.u8()?).ok_or(DecodeError::BadValue)?;
+                let message = r.string_u16()?;
+                ModMessage::Log(LogRecord { seq, level, message })
+            }
             other => return Err(DecodeError::UnknownType(other)),
         };
         if !r.is_empty() {
@@ -233,9 +255,27 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, DecodeError> {
         Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }
+    /// A `u16`-length-prefixed UTF-8 string.
+    fn string_u16(&mut self) -> Result<String, DecodeError> {
+        let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
+        let bytes = self.take(len)?;
+        String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::BadValue)
+    }
     fn is_empty(&self) -> bool {
         self.pos == self.buf.len()
     }
+}
+
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 character.
+fn truncate_on_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -265,6 +305,11 @@ mod tests {
             ModMessage::SessionAction(SessionAction::LockWorld),
             ModMessage::SessionAction(SessionAction::GiveEmber),
             ModMessage::Ping { frame: u64::MAX },
+            ModMessage::Log(LogRecord {
+                seq: 42,
+                level: LogLevel::Warn,
+                message: "something looked off in WorldChrMan".into(),
+            }),
         ]
     }
 
@@ -336,5 +381,39 @@ mod tests {
     #[test]
     fn empty_input_is_truncated_not_panic() {
         assert_eq!(ModMessage::decode(&[]), Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn log_message_with_empty_and_unicode_text_round_trips() {
+        for text in ["", "plain", "unicode: 日本語 🎮 café"] {
+            let msg = ModMessage::Log(LogRecord {
+                seq: 7,
+                level: LogLevel::Debug,
+                message: text.into(),
+            });
+            assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg));
+        }
+    }
+
+    #[test]
+    fn oversized_log_message_is_truncated_on_a_char_boundary() {
+        // Multibyte chars so a naive byte cut could split one.
+        let long = "é".repeat(MAX_LOG_MSG); // 2 bytes each -> well over the cap
+        let msg = ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: long });
+        let decoded = ModMessage::decode(&msg.encode()).unwrap();
+        match decoded {
+            ModMessage::Log(rec) => {
+                assert!(rec.message.len() <= MAX_LOG_MSG);
+                assert!(rec.message.chars().all(|c| c == 'é')); // no split/replacement char
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_with_invalid_utf8_is_rejected() {
+        // magic, version, LOG tag, seq=0, level=Info(2), len=1, then an invalid UTF-8 byte.
+        let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 0, 2, 0, 1, 0xff];
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::BadValue));
     }
 }

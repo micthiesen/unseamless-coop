@@ -15,6 +15,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::diagnostics::LogLevel;
+
 /// Full mod configuration. Load with [`Config::from_toml_str`]; [`Config::default`] is a fresh
 /// install's settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -25,6 +27,24 @@ pub struct Config {
     pub session: Session,
     pub save: Save,
     pub language: Language,
+    pub debug: Debug,
+}
+
+/// Debugging / diagnostics. Off by default so normal play does no extra disk or network work
+/// (see CLAUDE.md / ARCHITECTURE.md). When `enabled`, logging drops to `level` and, if
+/// `forward_to_host`, this client also ships its records to the host for one-place inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Debug {
+    pub enabled: bool,
+    pub level: LogLevel,
+    pub forward_to_host: bool,
+}
+
+impl Default for Debug {
+    fn default() -> Self {
+        Self { enabled: false, level: LogLevel::Info, forward_to_host: false }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
