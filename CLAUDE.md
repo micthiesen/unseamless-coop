@@ -41,12 +41,11 @@ implementation is fine; copying *its code* is not. So:
 This costs nothing during development and keeps the project on solid ground. (Not legal
 advice, just the working rule.)
 
-Conveniently, a static triage found `ersc.dll` is **Themida-packed** — the logic is
-virtualized and only 8 stub imports are visible, so static decompilation is a dead end anyway.
-The rewrite is necessarily **behavioral**: reimplement from observed behavior + the public
-`fromsoftware-rs` SDK, not from their code. The feature surface is catalogued in
-[`docs/FEATURES.md`](docs/FEATURES.md); the triage and RE strategy are in
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) > "Reverse-engineering ERSC".
+`ersc.dll` is also **Themida-packed** (virtualized logic, 8 stub imports), so static
+decompilation is a dead end — the rewrite is necessarily **behavioral**: reimplement from
+observed behavior + the public SDK. For the RE workflow (triage, the diagnostic pattern, rig
+tools) use the **`/reverse-engineer`** skill; the feature surface is in
+[`docs/FEATURES.md`](docs/FEATURES.md).
 
 ## Where things run (read this first)
 
@@ -59,8 +58,8 @@ expected — the workflow is deliberately split:
   doable here.**
 - **On a separate Linux + Proton rig (async, not this machine):** deploy the DLL, launch the
   game, and watch the log to verify behavior. This is done **out of band** — do not expect to
-  launch the game or read a live log from the Mac. `scripts/deploy.sh` and the run/verify loop
-  below describe that rig, not this one.
+  launch the game or read a live log from the Mac. `scripts/deploy.sh` and the `/test-loop` skill
+  describe that rig, not this one.
 
 So: never block on "let me run the game to check." Build, commit, and push from the Mac; the
 in-game verification happens separately and asynchronously. The log-line contract (install →
@@ -108,16 +107,13 @@ cargo build --profile diag   # debugging build: keeps symbols + debug-assertions
                              #   panic backtraces (the shipping build is stripped). Use when
                              #   chasing a crash; not for release.
 scripts/test-core.sh         # run unseamless-core's tests on the host triple (macOS-runnable)
-scripts/harness.sh [scenario]  # drive the two-peer side-channel harness (no game) — the fast
-                             #   test loop. See the /test-loop skill for all the test layers.
 ```
 
-**Logging / debug:** each run writes a self-describing log under `SeamlessCoop/logs/` (last 5
-runs kept), headed by a `RunInfo` block (mod version, build, role, session id, full config) so a
-log can be debugged after the fact without context. Verbosity is `[debug]` config — **off by
-default** (only milestone lines; no constant disk churn). Set `[debug] enabled = true` for
-verbose; hot-path logs must use `log::debug!`/`trace!` so they stay silent when off. The log
-model is designed to be read by an assistant after a friend's session (`unseamless-core/diagnostics.rs`).
+Testing beyond unit tests (the host harness, the rig) is the **`/test-loop`** skill.
+
+**Logging rule:** verbosity is `[debug]` config, **off by default** (milestone lines only) — so
+hot-path logs must use `log::debug!`/`trace!` to stay silent when off, never `info!`. The
+self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
 
 The shippable artifact is `target/x86_64-pc-windows-gnu/release/unseamless_coop.dll`. The
 default cargo target is the cross target, so a bare `cargo build`/`cargo check`/`cargo clippy`
@@ -135,23 +131,18 @@ macOS).
   release `.dll` won't sha-match a local build. Compare `.text` size with
   `x86_64-w64-mingw32-objdump -h` to sanity-check equivalence.
 
-Building works on this Mac; running the game does not (see "Where things run"). The
-run/verify loop below is the separate Linux + Proton rig.
+Building works on this Mac; running the game does not (see "Where things run"). The run/verify
+loop on the Linux + Proton rig is the **`/test-loop`** skill.
 
 ## The SDK (the "pointer mappings" library)
 
-Built on `fromsoftware-rs` (`eldenring` + `fromsoftware-shared` crates), **pinned by exact
-git commit** in `Cargo.toml`. This is the high-value part for a rewrite: it exposes game
-structs as **named typed fields** rather than raw offsets, so most of ERSC's offset/pointer
-bookkeeping is already done.
+Built on `fromsoftware-rs` (`eldenring` + `fromsoftware-shared`), **pinned by exact git commit**
+in `Cargo.toml`. It exposes game structs as **named typed fields** instead of raw offsets, so
+most of ERSC's pointer bookkeeping is already done; prefer named fields over offsets always.
 
-- Always pin `eldenring` and `fromsoftware-shared` to the **same commit** — struct layouts
-  are read against a specific revision; mixing revisions is a silent UB hazard. When bumping
-  the pin, re-verify any field accesses against the new layouts.
-- Entry points seen in `er-crit-coop`: `WorldChrMan::instance()` →
-  `open_field_chr_set.base.characters()` to iterate map enemies as `&mut ChrIns`; typed
-  module access like `chr.modules.action_flag...`. Prefer named SDK fields over offsets; only
-  fall back to raw byte reads for investigation (see the diagnostic pattern below).
+**Hard rule:** pin both crates to the **same commit** — layouts are read against a specific
+revision, and mixing them is silent UB. Re-verify field accesses when bumping the pin. What the
+SDK already charts vs. what needs RE is in [`docs/SDK-COVERAGE.md`](docs/SDK-COVERAGE.md).
 
 ## Architecture & hard safety invariants
 
@@ -182,51 +173,17 @@ is a use-after-free or a data race in someone's game.
   module pointers. A `PostPhysics`-style phase keeps the window small; the fully robust form
   iterates ChrSet entries and skips any whose status isn't `Active` before dereferencing.
 
-## Logging
+## On-demand procedures live in skills
 
-File logger via `simplelog`/`log`, initialized in `DllMain`. The DLL runs inside the game's
-(Proton) working directory, normally `ELDEN RING/Game/`, so logs land there. Log the actual
-cwd at startup (Proton's cwd can differ) and install a panic hook that records panics — with
-`panic = "abort"` the process still exits, but the trace survives.
+These are loaded only when relevant (not in this always-on file):
 
-## Reverse-engineering unknown state (diagnostic pattern)
-
-When a behavior isn't a named SDK field, don't hand-diff memory dumps. `er-crit-coop`'s
-`src/diagnostic.rs` is the template: a background loop that snapshots candidate byte regions
-per `ChrIns` each tick and logs **rising edges** (0→1) of individual bits, suppressing
-high-churn bits as noise. Trigger the behavior in-game and the responsible
-region/offset/bit names itself; then map it to a typed SDK field. Keep such modes behind a
-compile-time `MODE` switch (`Patch` vs `Diagnostic`) so they ship dormant, never as the
-default.
-
-## Loading & the run/verify loop (Linux + Proton)
-
-Single `.dll` dropped in `ELDEN RING/Game/mods/`, loaded by **Elden Mod Loader**
-(`DINPUT8.dll`) via the non-EAC exe-swap launch (the loading path Seamless Co-op uses — during
-development we reuse its launcher; unseamless-coop *replaces* ERSC, it doesn't run alongside it).
-No ModEngine/me3. `scripts/deploy.sh` copies the built DLL there.
-
-Driving launch/observe/kill from the shell (from `er-crit-coop/docs/DEVELOPMENT.md`):
-
-- `steam -applaunch 1245620` launches with the ERSC exe-swap so the mod loads.
-- Watch `ELDEN RING/Game/<crate>.log` for the install line, then a per-frame heartbeat, then
-  effect lines (effect lines need real gameplay).
-- Kill with the bracket trick: `pkill -f '[e]ldenring.exe'` (plain `pkill -f eldenring.exe`
-  matches its own command line — false positive).
-- The log is truncated on DLL load (`File::create`); `rm` it before relaunch so a match means
-  a fresh load.
-- `WorldChrMan_PostPhysics` doesn't tick at the title screen (no world). To prove a task
-  *fires* without loading a save, temporarily switch its phase to
-  `CSTaskGroupIndex::FrameBegin` (ticks in menus) and watch the heartbeat, then switch back.
-- Solo-verifiable: registration, per-frame firing, stability. **Not** solo-verifiable:
-  anything needing a loaded save / co-op session — those require an in-game retest.
-
-## Releases
-
-Tag-driven, modeled on `er-crit-coop/.github/workflows/release.yml`: pushing a `vX.Y.Z` tag
-cross-compiles the DLL and publishes a GitHub release with the binary, using the annotated
-tag message as the notes. The `er-crit-coop` repo has a `/release` skill that bumps
-`Cargo.toml`, writes the notes into the tag, and pushes — replicate it here once CI exists.
+- **Testing / verifying** — the host harness, the rig, and all test layers: the **`/test-loop`**
+  skill (+ [`docs/RIG-RUNBOOK.md`](docs/RIG-RUNBOOK.md)). This is also where the run/verify loop
+  (deploy, `steam -applaunch`, the `pkill` bracket trick, the `FrameBegin` firing check) lives.
+- **Reverse-engineering** behavior — static triage, the diagnostic rising-edge pattern, and the
+  rig tools (rizin / Ghidra wrapper / Frida): the **`/reverse-engineer`** skill (+
+  [`docs/RUNTIME-RE.md`](docs/RUNTIME-RE.md)).
+- **Cutting a release** — tag-driven CI: the **`/release`** skill.
 
 ## Safety / legitimacy
 

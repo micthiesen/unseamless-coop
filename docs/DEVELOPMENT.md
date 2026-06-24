@@ -114,7 +114,20 @@ When a behavior isn't a named SDK field, use a diagnostic loop that snapshots ca
 regions per `ChrIns` and logs rising-edge bit flips (see `er-crit-coop/src/diagnostic.rs` for
 the pattern), then map the located region/offset/bit to a typed SDK field.
 
+## Logging
+
+File logger via `simplelog`/`log`, set up by `logger::init` on the init thread. The DLL runs
+inside the game's (Proton) working directory (normally `ELDEN RING/Game/`), so the run log lands
+under `SeamlessCoop/logs/`; the startup line records the actual cwd (Proton's can differ) and a
+panic hook records panics (with `panic = "abort"` the process still exits, but the trace and a
+backtrace survive). The self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
+Verbosity is `[debug]` config, **off by default** — hot-path logs must use `log::debug!`/`trace!`.
+
 ## Run + verify loop (Linux + Proton rig)
+
+> The first-rig-session procedure (deploy → observe the session FSM to unblock the co-op core) is
+> **canonical in [RIG-RUNBOOK.md](RIG-RUNBOOK.md)** and wrapped by the `/test-loop` skill. This
+> section is the general dev quick-reference for the same rig.
 
 Single `.dll` dropped in `ELDEN RING/Game/mods/`, loaded by **Elden Mod Loader**
 (`DINPUT8.dll`) via the non-EAC exe-swap launch (the loading path Seamless Co-op uses; during
