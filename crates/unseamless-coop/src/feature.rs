@@ -7,6 +7,18 @@
 
 use eldenring::cs::CSTaskGroupIndex;
 
+/// Per-frame context handed to a [`Feature`]. `frame` counts this feature's own ticks; `delta`
+/// is the frame's `FD4TaskData::delta_time` in seconds (for time-based cadence via
+/// [`unseamless_core::util::Timer`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Tick {
+    pub frame: u64,
+    // Consumed by time-based features via `unseamless_core::util::Timer`; the first such feature
+    // is still ahead, so it's plumbed through but not yet read.
+    #[allow(dead_code)]
+    pub delta: f32,
+}
+
 pub trait Feature: Send {
     /// Stable short name, used in logs.
     fn name(&self) -> &'static str;
@@ -20,5 +32,5 @@ pub trait Feature: Send {
     }
 
     /// Called once per frame in [`phase`](Feature::phase). Runs on the game's main thread.
-    fn on_frame(&mut self);
+    fn on_frame(&mut self, tick: Tick);
 }

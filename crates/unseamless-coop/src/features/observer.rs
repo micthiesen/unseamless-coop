@@ -3,30 +3,29 @@
 //! It reads `CSSessionManager` each frame and logs, on every change: the lobby/protocol state
 //! machine, the connected-player roster, the session player limit, and the per-player scaling
 //! multipliers our (host-tested) [`unseamless_core::scaling`] math would produce for the current
-//! party size. It writes nothing — it's pure observation, safe to run anywhere.
+//! party size. It writes nothing — pure observation, safe to run anywhere.
 //!
 //! Why this first: the co-op core (relaxing player limits, persistent sessions, sync) hinges on
-//! understanding this state machine and which count is the true "players in my world". That
-//! can only be learned by watching it live in a real session, so this is what we hand to the
-//! rig. The log it produces is the spec for the next phase.
+//! understanding this state machine and which count is the true "players in my world". That can
+//! only be learned by watching it live, so this is what we hand to the rig; the log it produces
+//! is the spec for the next phase.
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex};
-use fromsoftware_shared::FromStatic;
 use unseamless_core::config::Config;
+use unseamless_core::util::{FrameThrottle, Latch};
 
-use crate::feature::Feature;
-
-/// Throttle for the "still alive, no session yet" heartbeat (~30s at 60fps).
-const HEARTBEAT_FRAMES: u64 = 1800;
+use crate::feature::{Feature, Tick};
 
 pub struct SessionObserver {
     config: Config,
-    last: Option<Snapshot>,
-    frame: u64,
+    /// Fires only when the watched session state changes, so we log transitions not every frame.
+    state: Latch<Snapshot>,
+    /// "Still alive, no session yet" heartbeat (~30s at 60fps) while idle at the title screen.
+    heartbeat: FrameThrottle,
 }
 
-/// The subset of session state we diff on, so we log only on change.
-#[derive(PartialEq, Eq)]
+/// The subset of session state we diff on.
+#[derive(Clone, PartialEq, Eq)]
 struct Snapshot {
     lobby: u32,
     protocol: u32,
@@ -36,7 +35,11 @@ struct Snapshot {
 
 impl SessionObserver {
     pub fn new(config: Config) -> Self {
-        Self { config, last: None, frame: 0 }
+        Self {
+            config,
+            state: Latch::new(),
+            heartbeat: FrameThrottle::every(1800),
+        }
     }
 }
 
@@ -49,19 +52,17 @@ impl Feature for SessionObserver {
         CSTaskGroupIndex::FrameBegin
     }
 
-    fn on_frame(&mut self) {
-        self.frame += 1;
+    fn on_frame(&mut self, tick: Tick) {
+        let observed = crate::sdk::with_instance::<CSSessionManager, _>(|s| self.observe(s));
+        if observed.is_none() && self.heartbeat.tick() {
+            log::info!("observer live; no CSSessionManager yet (frame {})", tick.frame);
+        }
+    }
+}
 
-        let session = match unsafe { CSSessionManager::instance() } {
-            Ok(s) => s,
-            Err(_) => {
-                if self.frame == 1 || self.frame.is_multiple_of(HEARTBEAT_FRAMES) {
-                    log::info!("observer live; no CSSessionManager yet (frame {})", self.frame);
-                }
-                return;
-            }
-        };
-
+impl SessionObserver {
+    /// Log the session state if it changed since last frame.
+    fn observe(&mut self, session: &CSSessionManager) {
         let players = session.players.len();
         let snapshot = Snapshot {
             lobby: session.lobby_state as u32,
@@ -70,7 +71,7 @@ impl Feature for SessionObserver {
             limit: session.session_player_limit,
         };
 
-        if self.last.as_ref() == Some(&snapshot) {
+        if !self.state.changed(&snapshot) {
             return;
         }
 
@@ -91,9 +92,9 @@ impl Feature for SessionObserver {
             );
         }
 
-        // Compute what scaling WOULD be for this party size, via the host-tested core. The exact
-        // "player count" source and the application mechanism (MultiPlayCorrectionParam vs raw
-        // NpcParam) are RE-gated — this logs the candidate so we can confirm it on the rig.
+        // What scaling WOULD be for this party size, via the host-tested core. The exact
+        // player-count source and application mechanism are RE-gated; this logs the candidate so
+        // we can confirm it on the rig.
         let count = (players as u32).max(1);
         let enemy = self.config.scaling.enemy_multipliers(count);
         let boss = self.config.scaling.boss_multipliers(count);
@@ -106,7 +107,5 @@ impl Feature for SessionObserver {
             boss.damage,
             boss.posture,
         );
-
-        self.last = Some(snapshot);
     }
 }

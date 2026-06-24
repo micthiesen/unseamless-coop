@@ -16,3 +16,13 @@ opt-level = "z"
 codegen-units = 1
 lto = true
 strip = true
+
+# `cargo build --profile diag` — a debugging build: keeps symbols and turns on debug assertions
+# so panic backtraces are readable and `cfg!(debug_assertions)` reports the diag profile. Use it
+# when chasing a crash; the shipping build stays lean (stripped). Not for release.
+[profile.diag]
+inherits = "release"
+opt-level = 1
+debug = true
+strip = false
+debug-assertions = true

@@ -18,6 +18,7 @@ mod config;
 mod feature;
 mod features;
 mod logger;
+mod sdk;
 
 // Only DLL_PROCESS_ATTACH is handled, deliberately. We register tasks into the game's task pool
 // that hold pointers and vtables into this DLL's image; the SDK has no way to unregister them,
@@ -26,10 +27,9 @@ mod logger;
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllMain(_: HINSTANCE, reason: u32, _: *mut c_void) -> BOOL {
     if reason == DLL_PROCESS_ATTACH {
-        logger::init();
-        // Off the loader lock and off the main thread: the init thread waits for the task
-        // system, then registers per-frame tasks and returns. `wait_for_instance` must not run
-        // on the main thread (it blocks on main-thread initialization).
+        // Off the loader lock and off the main thread: the init thread loads config, brings up
+        // logging, waits for the task system, then registers per-frame tasks and returns.
+        // `wait_for_instance` must not run on the main thread (it blocks on main-thread init).
         std::thread::spawn(app::install);
     }
     true.into()

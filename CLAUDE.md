@@ -97,8 +97,18 @@ We reimplement ERSC's *effect*, not its design, and intentionally differ. Full l
 
 ```bash
 cargo build --release        # default target is windows-gnu -> the DLL (see .cargo/config.toml)
+cargo build --profile diag   # debugging build: keeps symbols + debug-assertions for readable
+                             #   panic backtraces (the shipping build is stripped). Use when
+                             #   chasing a crash; not for release.
 scripts/test-core.sh         # run unseamless-core's tests on the host triple (macOS-runnable)
 ```
+
+**Logging / debug:** each run writes a self-describing log under `SeamlessCoop/logs/` (last 5
+runs kept), headed by a `RunInfo` block (mod version, build, role, session id, full config) so a
+log can be debugged after the fact without context. Verbosity is `[debug]` config — **off by
+default** (only milestone lines; no constant disk churn). Set `[debug] enabled = true` for
+verbose; hot-path logs must use `log::debug!`/`trace!` so they stay silent when off. The log
+model is designed to be read by an assistant after a friend's session (`unseamless-core/diagnostics.rs`).
 
 The shippable artifact is `target/x86_64-pc-windows-gnu/release/unseamless_coop.dll`. The
 default cargo target is the cross target, so a bare `cargo build`/`cargo check`/`cargo clippy`
