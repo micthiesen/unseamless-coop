@@ -1,6 +1,6 @@
 [package]
 name = "harness"
-description = "Headless two-peer driver for the unseamless-coop side-channel (no game, no Steam). Runs the mod-coordination logic over an in-memory transport so the protocol/handshake/config-sync/log-forward flow can be exercised on the host."
+description = "Headless driver for the unseamless-coop side-channel (no game, no Steam). Runs the mod-coordination logic over an in-memory transport (incl. a seeded fault model for convergence-under-loss) and over a real localhost TCP socket between two processes, so the protocol/handshake/config-sync/log-forward/self-healing flow can be exercised on the host."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

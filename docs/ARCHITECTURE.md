@@ -75,6 +75,29 @@ We follow the same model. (Full per-subsystem inventory: [SDK-COVERAGE.md](SDK-C
 This shrinks the hard RE surface from "an entire netcode" to "how the game's session FSM
 behaves and where ERSC relaxes/persists it" — observable on the rig.
 
+### The side-channel is self-healing (robust to an unknown delivery model)
+
+We don't yet know whether `broadcast_packet` is reliable/ordered or best-effort — Steam P2P can be
+either, and we'll only know from the rig. So the side-channel is designed to **converge regardless**,
+which is robust to whatever the rig reveals:
+
+- The host **re-asserts** its authoritative `ConfigSync` every `maintain()` tick, tagged with a
+  monotonic **generation**. A dropped sync heals on the next tick; a stale/reordered one is ignored
+  (generation guard); a duplicate is a no-op.
+- Session actions and forwarded logs carry a per-sender **sequence** and are deduped (`SeqGate`), so
+  a duplicated/reordered frame applies exactly once.
+- A heartbeat `Ping` drives **liveness** (stale-peer banners). The timeout is tuned conservatively
+  and is rig-dependent (loss rate), since liveness is itself lossy and role-asymmetric.
+
+This whole layer is **host-testable** (`unseamless-core/{peer,transport}.rs` + the harness), with a
+seeded `FaultModel` proving convergence under drop/duplicate/reorder — so it's verified on the Mac
+before the rig, and the design holds whether the transport turns out reliable or not.
+
+One thing is deliberately **deferred to the rig**: a host *restart/migration* resets the host's
+generation counter, which the monotonic guard would stall on. Handling that needs a host-instance
+epoch, and its shape depends on how the game's session FSM signals a host change — a Layer-2
+observation, not something to guess at blind.
+
 ## Divergences from ERSC (deliberate — don't "fix" these back)
 
 We are reimplementing ERSC's *effect*, not copying its design, and we intentionally differ in
@@ -106,10 +129,10 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/scaling.rs` | 1 | done, tested |
 | `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
 | `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested (renderer rig-gated) |
-| `unseamless-core/protocol.rs` (side-channel) | 2 | done, tested (wiring is rig-gated) |
-| `unseamless-core/transport.rs` (`Transport` seam + `Loopback`) | 2 | done, tested |
-| `unseamless-core/peer.rs` (`Peer`/`Session` coordination) | 2 | done, tested (handshake/config-sync/actions/log-forward) |
-| `harness` bin (two-peer loop, no game) | — | done — see the `/test-loop` skill |
+| `unseamless-core/protocol.rs` (side-channel, wire v2: generation/seq identity) | 2 | done, tested (wiring is rig-gated) |
+| `unseamless-core/transport.rs` (`Transport` seam + `Loopback` + `FaultModel`) | 2 | done, tested |
+| `unseamless-core/peer.rs` (`Peer`/`Session`: handshake/config-sync/actions/log-forward/liveness, self-healing) | 2 | done, tested |
+| `harness` bin (in-memory + lossy + two-process TCP loops, no game) | — | done — see the `/test-loop` skill |
 | `unseamless-core/` player/world sync model | 2 | planned (the game's job; rig-gated) |
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |
