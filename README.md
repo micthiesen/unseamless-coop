@@ -25,6 +25,14 @@ cargo build --release --target x86_64-pc-windows-gnu
 See [`CLAUDE.md`](CLAUDE.md) for architecture, the SDK, safety invariants, and the
 build-here / verify-in-game-elsewhere split.
 
+## Independent reimplementation
+
+This is a clean reimplementation written against the public `fromsoftware-rs` SDK. It is **not
+affiliated with, endorsed by, or derived from the source code of** the original Seamless Co-op
+mod, and contains **no upstream code or assets**. Behavior was reimplemented from observation,
+not by copying. The upstream mod is referenced locally only for study and is never
+redistributed here.
+
 ## Safety
 
 Seamless Co-op runs outside EAC, so this is for co-op only. Don't take a modded session onto

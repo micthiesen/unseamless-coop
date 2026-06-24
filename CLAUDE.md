@@ -19,6 +19,27 @@ how to build, structure, load, or safely hook the game, read that repo first —
 > loads, installs a recurring frame task, and heartbeats — the harness is proven. ERSC
 > behavior is built out from `hook::on_frame`.
 
+## Clean-room hygiene (one hard rule)
+
+This is an independent reimplementation. The upstream `ersc.dll` (under `reference/`,
+gitignored) is **all-rights-reserved** — there's no license to copy its code. The legal line
+is **ideas/behavior vs. expression**: studying *what* ERSC does and writing your own
+implementation is fine; copying *its code* is not. So:
+
+- **Never paste decompiler/disassembler output (Ghidra/IDA/radare2 pseudocode) into source,
+  comments, or commits.** Read it to understand behavior, then close it and write your own.
+- When you need a record of a behavior, write it **in your own words** as an observation
+  ("on event X the mod does Y"), then implement from that note — a soft clean-room. Don't
+  transcribe their structure verbatim.
+- **Don't redistribute any upstream bytes:** not `ersc.dll`, the launcher, locale JSON, or any
+  FromSoft asset. `reference/` is gitignored to enforce this; keep it that way. Reading their
+  `.ini`/config *format* for compatibility is functional interop and fine.
+- Lean on the `fromsoftware-rs` SDK for "how the game works" — that's public knowledge and
+  keeps the work naturally on the reimplement side rather than the copy side.
+
+This costs nothing during development and keeps the project on solid ground. (Not legal
+advice, just the working rule.)
+
 ## Where things run (read this first)
 
 Development happens on a **macOS** laptop that **cannot run Elden Ring**. That's fine and
