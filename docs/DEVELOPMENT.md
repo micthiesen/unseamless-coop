@@ -93,13 +93,15 @@ can't copy code you can't read.
   rizin -q -c 'aa; s entry0; pd 20' bin                                  # analyze + disasm
   ```
   This subsumes `pefile`/`capstone` for our purposes, so we don't install those.
-- **Ghidra headless** (`brew install --cask ghidra`) — decompiler for **clean** targets only
-  (`eldenring.exe`, our own builds, an unpacked dump). Driven entirely from the CLI via
-  `scripts/re/ghidra-decompile.sh <binary> [function]`, which runs `analyzeHeadless` + the
-  `DumpDecomp.py` Jython post-script and prints decompiled C to stdout. **No GUI, no MCP
-  server** — the headless analyzer is more reproducible for scripted dumps than a GUI-backed
-  MCP bridge. Project cache lives in `.ghidra-projects/` (gitignored). Useless against the
-  Themida-packed `ersc.dll`, by design.
+- **Ghidra headless** — **optional / not installed by default.** A C decompiler is rarely
+  needed here: `ersc.dll` is Themida-packed (undecompilable) and `eldenring.exe` is already
+  charted by the `fromsoftware-rs` SDK, so we seldom decompile anything ourselves. If a clean
+  target ever needs it (a game function the SDK doesn't name, an unpacked dump), install on
+  demand (`brew install --cask ghidra`) and run `scripts/re/ghidra-decompile.sh <binary>
+  [function]` — a CLI wrapper around `analyzeHeadless` + the `DumpDecomp.py` Jython post-script
+  that prints decompiled C to stdout (no GUI, no MCP). The wrapper is committed and ready; it
+  errors cleanly if Ghidra isn't present. A lighter alternative is a rizin decompiler plugin
+  (`rz-ghidra`/`jsdec`). Project cache: `.ghidra-projects/` (gitignored).
 - **Frida** (dynamic instrumentation) — deferred. It belongs on the Linux + Proton rig where
   the game actually runs (hook/trace at runtime), not on the macOS dev host. Set it up there
   when M2/M3 behavioral work starts.
