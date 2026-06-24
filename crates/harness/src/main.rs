@@ -250,7 +250,10 @@ fn scenario_lossy() {
     println!("  client AFTER:  boss_health={}", client.peer().config().scaling.boss_health);
     match converged_at {
         Some(round) => println!("  -> converged after {round} re-assert round(s) despite loss"),
-        None => println!("  -> DID NOT converge within budget"),
+        None => {
+            eprintln!("  -> DID NOT converge within budget");
+            std::process::exit(1); // make this a real gate, not just a demo print
+        }
     }
 }
 
@@ -293,11 +296,16 @@ fn run_tcp_client(addr: &str) {
     client.connect();
 
     drive_tcp(&mut client, 40);
-    println!("[client] boss_health AFTER  = {}", client.peer().config().scaling.boss_health);
+    let synced = client.peer().config().scaling.boss_health;
+    println!("[client] boss_health AFTER  = {synced}");
     println!("[client] allow_invaders     = {}", client.peer().config().gameplay.allow_invaders);
     println!("[client] known peers        = {:?}", client.peer().known_peers());
     for b in client.peer().notifications().banners() {
         println!("[client] banner: {}", b.message);
+    }
+    if synced != 250 {
+        eprintln!("[client] FAILED: never synced the host's config over TCP");
+        std::process::exit(1); // gate, so scripts/harness-tcp.sh fails on a real regression
     }
     println!("[client] done");
 }

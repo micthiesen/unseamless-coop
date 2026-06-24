@@ -31,7 +31,15 @@ use crate::util::{RateLimiter, Version};
 /// Maintenance ticks ([`Peer::maintain`] calls) we tolerate hearing nothing from a peer before
 /// flagging it as lost. The wall-clock timeout is this times the maintenance cadence the binding
 /// layer chooses — so the cadence is load-bearing (see [`Peer::maintain`]); pick it deliberately.
-const LIVENESS_TIMEOUT_TICKS: u64 = 10;
+///
+/// Set conservatively because liveness is **lossy and role-asymmetric**: a peer is "heard" only via
+/// frames that survive the channel, and the host emits two frames per tick (Ping + ConfigSync re-
+/// assert) while a client emits one (Ping), so the host→client signal survives loss better than
+/// client→host. A small timeout would flicker spurious "Lost contact" banners at a live peer under
+/// heavy loss (e.g. ~`drop_rate^(N+1)` per tick of N consecutive lost pings). The banner self-clears
+/// on the next received frame, so it's a soft signal; the final value is a tuning decision that
+/// wants the rig's measured Steam-P2P loss rate.
+const LIVENESS_TIMEOUT_TICKS: u64 = 30;
 /// Burst of forwarded log records a client may emit before the limiter throttles it.
 const LOG_FORWARD_BURST: u32 = 32;
 /// Forwarded-log tokens restored per [`Peer::maintain`] call (the steady-state forwarding rate).
@@ -154,7 +162,9 @@ impl Peer {
         if from == self.id {
             return vec![];
         }
-        // Any frame is evidence the sender is alive.
+        // Any frame is evidence the sender is alive — even one the body then discards (a duplicate
+        // ConfigSync, a gate-rejected action). This write must stay UNCONDITIONAL: moving it inside
+        // the match to "skip rejected frames" would worsen liveness false-positives under loss.
         self.last_seen.insert(from, self.local_tick);
 
         match msg {
@@ -556,38 +566,39 @@ mod tests {
 
     #[test]
     fn config_self_heals_under_heavy_packet_loss() {
+        // Deliberately NO connect(): the Hello->ConfigSync handshake is suppressed so the ONLY path
+        // to convergence is the host's periodic re-assertion in maintain(). That isolates the
+        // self-heal mechanism under test (otherwise a single surviving Hello reply could mask it).
         let v = Version::new(0, 1, 0);
         let faults = FaultModel { drop_rate: 0.6, ..Default::default() };
         let (mut host, mut client) = pair_over(Loopback::mesh_with_faults(&[HOST, CLIENT], faults, 0xBADF00D), v, v);
         host.peer_mut().config_mut().scaling.boss_health = 250;
         host.peer_mut().mark_config_changed();
-        host.connect();
-        client.connect();
 
         run_lossy(&mut host, &mut client, 500, |c| c.peer().config().scaling.boss_health == 250);
         assert_eq!(
             client.peer().config().scaling.boss_health,
             250,
-            "host's re-assertion eventually lands despite 60% loss"
+            "the host's maintain() re-assertion eventually lands despite 60% loss"
         );
     }
 
     #[test]
-    fn duplicated_delivery_applies_config_once() {
-        // Every frame is delivered twice; the generation guard must make the second a no-op (one
-        // "synced" toast, not two).
+    fn same_generation_redelivery_does_not_reapply() {
+        // The generation guard, isolated: a re-delivered frame at the SAME generation must be a
+        // no-op even if its payload differs (which is what a stale duplicate looks like). This bites
+        // the `generation > applied` guard directly — flip it to `>=` and the second clobbers.
         let v = Version::new(0, 1, 0);
-        let faults = FaultModel { duplicate_rate: 1.0, ..Default::default() };
-        let (mut host, mut client) = pair_over(Loopback::mesh_with_faults(&[HOST, CLIENT], faults, 1), v, v);
-        host.peer_mut().config_mut().scaling.boss_health = 175;
-        host.peer_mut().mark_config_changed();
-        host.connect();
-        client.connect();
-        run(&mut [&mut host, &mut client]);
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default());
+        let mut first = SharedSettings::from(&Config::default());
+        first.scaling.boss_health = 175;
+        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: first });
+        assert_eq!(client.config().scaling.boss_health, 175);
 
-        assert_eq!(client.peer().config().scaling.boss_health, 175);
-        let synced = client.peer().notifications().toasts().iter().filter(|t| t.message.contains("synced")).count();
-        assert_eq!(synced, 1, "duplicate ConfigSync must not re-apply / re-toast");
+        let mut spoof = SharedSettings::from(&Config::default());
+        spoof.scaling.boss_health = 999;
+        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: spoof });
+        assert_eq!(client.config().scaling.boss_health, 175, "same generation must not re-apply");
     }
 
     #[test]
@@ -635,10 +646,13 @@ mod tests {
         let mut host = Peer::new(HOST, HOST, v, Config::default());
         host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32() }); // seen at tick 0
 
-        for _ in 0..(LIVENESS_TIMEOUT_TICKS + 1) {
+        // Pin the boundary: tolerated through exactly LIVENESS_TIMEOUT_TICKS of silence...
+        for _ in 0..LIVENESS_TIMEOUT_TICKS {
             host.maintain(); // no ping from CLIENT arrives
         }
-        assert!(host.is_stale(CLIENT), "silent peer flagged after the timeout");
+        assert!(!host.is_stale(CLIENT), "not flagged at the tolerance boundary");
+        host.maintain(); // ...flagged one tick past it.
+        assert!(host.is_stale(CLIENT), "silent peer flagged one tick past the timeout");
         assert!(host.notifications().banners().iter().any(|b| b.message.contains("Lost contact")));
 
         host.handle(CLIENT, ModMessage::Ping { frame: 1 }); // it comes back
@@ -663,9 +677,14 @@ mod tests {
         assert_eq!(emitted, LOG_FORWARD_BURST, "only the burst is forwarded");
         assert_eq!(client.dropped_logs(), 10, "the rest are counted as dropped");
 
-        // A maintenance tick refills some tokens, allowing forwarding to resume.
+        // A maintenance tick refills exactly LOG_FORWARD_REFILL_PER_TICK tokens — pin the amount, not
+        // just "some came back", so a change to the refill constant is caught here too.
         client.maintain();
-        assert!(!client.forward_log(LogLevel::Trace, "after refill").is_empty());
+        let mut after_refill = 0;
+        while !client.forward_log(LogLevel::Trace, "after refill").is_empty() {
+            after_refill += 1;
+        }
+        assert_eq!(after_refill, LOG_FORWARD_REFILL_PER_TICK as u32, "one tick grants exactly the refill");
     }
 
     #[test]
@@ -702,8 +721,8 @@ mod tests {
         host.peer_mut().config_mut().scaling.enemy_health = 80;
         host.peer_mut().config_mut().gameplay.allow_summons = false;
         host.peer_mut().mark_config_changed();
-        host.connect();
-        client.connect();
+        // No connect(): convergence here is solely via the host's maintain() re-assertion, proving
+        // the self-heal survives drop + duplicate + reorder all at once, not just a lucky handshake.
 
         run_lossy(&mut host, &mut client, 800, |c| {
             c.peer().config().scaling.enemy_health == 80 && !c.peer().config().gameplay.allow_summons
