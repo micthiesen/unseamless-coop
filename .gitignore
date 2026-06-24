@@ -5,3 +5,6 @@
 # Reference download of the upstream Seamless Co-op mod, kept locally for
 # reverse-engineering. Not redistributable — never commit the binaries.
 /reference
+
+# Ghidra headless project cache (scripts/re/ghidra-decompile.sh)
+/.ghidra-projects

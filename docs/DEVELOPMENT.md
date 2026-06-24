@@ -82,6 +82,28 @@ the network, and save files, and reimplement from the public `fromsoftware-rs` S
 modding community's knowledge. This happens to fit the clean-room posture perfectly — you
 can't copy code you can't read.
 
+### RE toolchain (all headless / CLI, no GUI)
+
+- **rizin** (`brew install rizin`) — primary static triage and disasm. Headless and scriptable;
+  every command has a JSON form for piping to `jq`. Examples:
+  ```bash
+  rizin -q -c 'iSj' bin | jq -r '.[] | "\(.name)\t\(.size)\t\(.perm)"'   # sections
+  rizin -q -c 'ilj' bin                                                  # linked libraries
+  rizin -q -c 'iij' bin | jq                                             # imports
+  rizin -q -c 'aa; s entry0; pd 20' bin                                  # analyze + disasm
+  ```
+  This subsumes `pefile`/`capstone` for our purposes, so we don't install those.
+- **Ghidra headless** (`brew install --cask ghidra`) — decompiler for **clean** targets only
+  (`eldenring.exe`, our own builds, an unpacked dump). Driven entirely from the CLI via
+  `scripts/re/ghidra-decompile.sh <binary> [function]`, which runs `analyzeHeadless` + the
+  `DumpDecomp.py` Jython post-script and prints decompiled C to stdout. **No GUI, no MCP
+  server** — the headless analyzer is more reproducible for scripted dumps than a GUI-backed
+  MCP bridge. Project cache lives in `.ghidra-projects/` (gitignored). Useless against the
+  Themida-packed `ersc.dll`, by design.
+- **Frida** (dynamic instrumentation) — deferred. It belongs on the Linux + Proton rig where
+  the game actually runs (hook/trace at runtime), not on the macOS dev host. Set it up there
+  when M2/M3 behavioral work starts.
+
 **Clean-room rule:** never paste decompiler/disassembler output into source or commits, and
 never redistribute upstream bytes (`reference/` stays gitignored). Read to understand, record
 behavior in your own words, implement from that. See CLAUDE.md > "Clean-room hygiene".
