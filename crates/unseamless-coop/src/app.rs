@@ -22,6 +22,9 @@ struct App {
     features: Vec<Box<dyn Feature>>,
     /// Per-feature tick counters (index-aligned with `features`).
     frames: Vec<u64>,
+    /// Per-feature kill switch (index-aligned): set when a feature's `on_frame` panics, so it
+    /// isn't re-ticked on possibly-torn internal state every subsequent frame.
+    disabled: Vec<bool>,
 }
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
@@ -48,6 +51,7 @@ pub fn install() {
 
     let features: Vec<Box<dyn Feature>> = vec![Box::new(SessionObserver::new(config))];
     let frames = vec![0u64; features.len()];
+    let disabled = vec![false; features.len()];
 
     // Snapshot (index, name, phase) before moving the app into the global.
     let registrations: Vec<(usize, &'static str, _)> = features
@@ -56,7 +60,7 @@ pub fn install() {
         .map(|(i, f)| (i, f.name(), f.phase()))
         .collect();
 
-    if APP.set(Mutex::new(App { features, frames })).is_err() {
+    if APP.set(Mutex::new(App { features, frames, disabled })).is_err() {
         log::error!("install() called twice; ignoring");
         return;
     }
@@ -71,7 +75,10 @@ pub fn install() {
                 // boundary — that's UB. Under the shipped `panic = "abort"` profiles a panic
                 // aborts before unwinding (so this is a no-op there), but a default `cargo build`
                 // uses `panic = "unwind"`, and this catch is what keeps that build sound.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data)));
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data))).is_err()
+                {
+                    disable_feature(index);
+                }
             },
             phase,
         );
@@ -80,12 +87,17 @@ pub fn install() {
     }
 }
 
-/// Per-frame entry for the feature at `index`, in its phase.
+/// Per-frame entry for the feature at `index`, in its phase. Skips features disabled by a prior
+/// panic so they're not re-ticked on torn internal state.
 fn tick(index: usize, data: &FD4TaskData) {
     let Some(app) = APP.get() else { return };
-    // Recover from a poisoned lock so one feature's (caught) panic doesn't wedge the rest forever.
-    // The vectors unwind intact, so continuing is sound; the panic hook already logged the cause.
+    // Recover from a poisoned lock: the `App` container (the Vecs) unwinds structurally intact, so
+    // re-locking is memory-safe. The *feature* that panicked may have torn its own invariants, but
+    // we never re-tick it — `disable_feature` flags it below.
     let mut app = app.lock().unwrap_or_else(|poison| poison.into_inner());
+    if app.disabled.get(index).copied().unwrap_or(true) {
+        return;
+    }
     let Some(frame) = app.frames.get_mut(index).map(|f| {
         *f += 1;
         *f
@@ -96,4 +108,16 @@ fn tick(index: usize, data: &FD4TaskData) {
     if let Some(feature) = app.features.get_mut(index) {
         feature.on_frame(tick);
     }
+}
+
+/// Mark a feature as permanently disabled after its `on_frame` panicked (the panic hook already
+/// logged the backtrace). Keeps one bad feature from wedging or spamming the rest.
+fn disable_feature(index: usize) {
+    let Some(app) = APP.get() else { return };
+    let mut app = app.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(slot) = app.disabled.get_mut(index) {
+        *slot = true;
+    }
+    let name = app.features.get(index).map(|f| f.name()).unwrap_or("?");
+    log::error!("feature '{name}' (index {index}) panicked; disabled for the rest of the session");
 }

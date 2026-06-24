@@ -60,6 +60,10 @@ In rough order, each a small, reversible probe:
 - **Side-channel:** register a `receive_packet` task on a custom packet type and a manual
   `broadcast_packet` send; confirm round-trip between two modded clients. This is the foundation
   for config sync and session actions.
+- **Inbound action authorization:** when wiring the apply layer, gate host-only `SessionAction`s
+  (lock/unlock world, the toggles) on the *sender's* host status, not the local client's. The
+  menu's `SessionContext` gating only constrains the local UI; a decoded action from a peer is
+  structurally valid regardless of who sent it, so the apply site must re-check the sender role.
 - **Debug log forwarding:** once the side-channel round-trips, wire `ModMessage::Log` →
   `broadcast_packet` on clients with `[debug] forward_to_host`, and on the host feed received
   records into `diagnostics::LogBundle` and write the merged file. Then a friend's whole session

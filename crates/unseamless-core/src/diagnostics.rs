@@ -106,11 +106,36 @@ pub struct RunInfo {
     pub role: SessionRole,
     /// Shared across all machines in one session once joined; lets logs be correlated.
     pub session_id: Option<String>,
-    /// The full effective config (TOML), so settings are never in question.
-    pub config_toml: String,
+    /// The effective config as TOML, **with secrets redacted** (see [`RunInfo::from_config`]).
+    /// Private so the only way to populate it is the redacting constructor — a struct literal
+    /// can't smuggle in an un-redacted config and leak the password into a shareable log.
+    config_toml: String,
 }
 
 impl RunInfo {
+    /// Build a header from the live config, **redacting secrets** (the session password) so the
+    /// shareable log never carries them. The cdylib supplies the clock/OS/build strings (core has
+    /// no clock); `role`/`session_id` default to unknown and may be set afterward.
+    pub fn from_config(
+        config: &crate::config::Config,
+        run_id: String,
+        mod_version: String,
+        build_profile: String,
+        platform: String,
+        started_at: String,
+    ) -> Self {
+        Self {
+            run_id,
+            mod_version,
+            build_profile,
+            platform,
+            started_at,
+            role: SessionRole::Unknown,
+            session_id: None,
+            config_toml: config.to_redacted_toml_string(),
+        }
+    }
+
     /// Render the header block that prefixes a log file. Delimited and greppable.
     pub fn header_block(&self) -> String {
         let session = self.session_id.as_deref().unwrap_or("(not joined)");
@@ -156,12 +181,19 @@ pub struct LogBundle {
     entries: Vec<(String, LogRecord)>,
 }
 
+/// Cap on retained records, so a peer flooding forwarded `Log` frames can't grow the bundle
+/// (or its render cost) without bound. Oldest records are dropped first.
+const MAX_BUNDLE_ENTRIES: usize = 50_000;
+
 impl LogBundle {
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn add(&mut self, peer: impl Into<String>, record: LogRecord) {
+        if self.entries.len() >= MAX_BUNDLE_ENTRIES {
+            self.entries.remove(0); // drop-oldest; bounds memory against a hostile flood
+        }
         self.entries.push((peer.into(), record));
     }
 
@@ -186,12 +218,10 @@ impl LogBundle {
                 .collect();
             records.sort_by_key(|r| r.seq);
             for r in records {
-                out.push_str(&format!(
-                    "[{:>5}] {:<5} {}\n",
-                    r.seq,
-                    level_tag(r.level),
-                    r.message
-                ));
+                // Indent continuation lines so a multi-line message (e.g. a forwarded backtrace)
+                // stays visibly attributed to this peer and can't masquerade as a new peer header.
+                let message = r.message.replace('\n', "\n        ");
+                out.push_str(&format!("[{:>5}] {:<5} {}\n", r.seq, level_tag(r.level), message));
             }
         }
         out
@@ -202,16 +232,18 @@ impl LogBundle {
 ///
 /// A raw 64-bit SteamID resolves directly to a person's Steam profile, so writing other players'
 /// IDs into a log that gets handed to a host or an assistant leaks their identity. This hashes
-/// the ID to a 16-bit tag (`peer-XXXX`) that's stable within and across a session's logs — enough
-/// to correlate "the same player" across machines — without disclosing who they are. (FNV-1a;
-/// not a security primitive, just identity-obscuring for logs.)
+/// the ID to a 32-bit tag (`peer-XXXXXXXX`) that's stable within and across a session's logs —
+/// enough to correlate "the same player" across machines — without disclosing who they are. The
+/// 32-bit space keeps collisions negligible for realistic party sizes (two distinct players
+/// sharing a tag is possible but vanishingly unlikely). FNV-1a; not a security primitive, just
+/// identity-obscuring for logs.
 pub fn peer_tag(steam_id: u64) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in steam_id.to_le_bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("peer-{:04x}", (hash & 0xffff) as u16)
+    format!("peer-{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
 fn level_tag(level: LogLevel) -> &'static str {
@@ -274,9 +306,59 @@ mod tests {
         let id = 0x1100_0011_4514_1919u64;
         let tag = peer_tag(id);
         assert_eq!(tag, peer_tag(id), "must be deterministic for correlation");
-        assert!(tag.starts_with("peer-") && tag.len() == 9);
+        assert!(tag.starts_with("peer-") && tag.len() == 13, "32-bit tag: peer-XXXXXXXX");
         assert!(!tag.contains(&format!("{id:x}")), "must not embed the raw id");
         assert_ne!(peer_tag(id), peer_tag(id + 1), "distinct ids should usually differ");
+    }
+
+    #[test]
+    fn from_config_redacts_password_in_the_header() {
+        let mut cfg = crate::config::Config::default();
+        cfg.session.password = "topsecret".into();
+        let info = RunInfo::from_config(
+            &cfg,
+            "rid".into(),
+            "0.1.0".into(),
+            "release (stripped)".into(),
+            "p".into(),
+            "t".into(),
+        );
+        let header = info.header_block();
+        assert!(!header.contains("topsecret"), "password leaked into header:\n{header}");
+        assert!(header.contains("<redacted>"));
+    }
+
+    #[test]
+    fn loglevel_serde_strings_round_trip() {
+        // The serde (TOML) encoding is a *second* wire surface beside the protocol byte; pin it so
+        // a variant rename is caught as the breaking config change it is.
+        for (level, expected) in [
+            (LogLevel::Error, "\"error\""),
+            (LogLevel::Warn, "\"warn\""),
+            (LogLevel::Info, "\"info\""),
+            (LogLevel::Debug, "\"debug\""),
+            (LogLevel::Trace, "\"trace\""),
+        ] {
+            let json_like = toml::to_string(&Wrap { level }).unwrap();
+            assert!(json_like.contains(expected), "{level:?} -> {json_like}");
+            let back: Wrap = toml::from_str(&json_like).unwrap();
+            assert_eq!(back.level, level);
+        }
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Wrap {
+        level: LogLevel,
+    }
+
+    #[test]
+    fn render_indents_multi_line_messages_under_their_peer() {
+        let mut b = LogBundle::new();
+        b.add("peer-0001", LogRecord { seq: 1, level: LogLevel::Error, message: "boom\nat foo".into() });
+        let out = b.render();
+        // The second line must be indented (not flush-left, where it could look like a new header).
+        assert!(out.contains("boom\n        at foo"), "continuation not indented:\n{out}");
+        assert_eq!(out.matches("---- peer:").count(), 1);
     }
 
     #[test]

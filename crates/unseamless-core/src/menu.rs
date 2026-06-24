@@ -121,8 +121,8 @@ impl Menu {
         }
     }
 
-    /// Move the cursor by `delta` rows (usually ±1), skipping disabled rows and wrapping. No-op
-    /// if every row is disabled.
+    /// Move the cursor one enabled row in the direction of `delta`'s sign (forward if `>= 0`),
+    /// skipping disabled rows and wrapping. No-op if every row is disabled.
     pub fn move_selection(&mut self, delta: isize, ctx: &SessionContext) {
         let n = self.items.len();
         if n == 0 {
@@ -138,6 +138,19 @@ impl Menu {
             }
         }
         // all disabled: leave cursor where it was
+    }
+
+    /// Home the cursor onto the first enabled row for `ctx`. Call this when the menu opens or the
+    /// session context changes, otherwise the initial selection (`OpenWorld`) can be a disabled
+    /// row when opened mid-session — a dead first keypress and a highlighted-but-unusable row.
+    pub fn home(&mut self, ctx: &SessionContext) {
+        if self.is_enabled(self.selected, ctx) {
+            return;
+        }
+        self.selected = 0;
+        if !self.is_enabled(0, ctx) {
+            self.move_selection(1, ctx);
+        }
     }
 
     pub fn select_next(&mut self, ctx: &SessionContext) {
@@ -260,6 +273,22 @@ mod tests {
             menu.activate(&mut cfg, &out_of_session),
             MenuOutcome::Action(SessionAction::OpenWorld),
         );
+    }
+
+    #[test]
+    fn home_moves_off_a_disabled_first_row_when_opened_in_session() {
+        let mut menu = Menu::new();
+        let in_session = SessionContext { in_session: true, is_host: false };
+        // Row 0 (OpenWorld) is disabled in-session; without home() the cursor sits on it.
+        assert!(!menu.rows(&Config::default(), &in_session)[0].enabled);
+        menu.home(&in_session);
+        let rows = menu.rows(&Config::default(), &in_session);
+        let sel = rows.iter().position(|r| r.selected).unwrap();
+        assert!(rows[sel].enabled, "home() must land on an enabled row");
+        // Out of session, the first row is already enabled, so home() is a no-op.
+        let mut menu2 = Menu::new();
+        menu2.home(&SessionContext::default());
+        assert_eq!(menu2.selected(), 0);
     }
 
     #[test]

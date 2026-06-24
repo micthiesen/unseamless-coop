@@ -8,7 +8,7 @@
 //! This is pure arithmetic on [`Scaling`] so it's fully unit-tested on the host; the cdylib
 //! just multiplies the relevant param rows by these factors on the host's machine.
 
-use crate::config::Scaling;
+use crate::config::{MAX_SCALING_PERCENT, Scaling};
 
 /// Multipliers for one enemy category (enemy or boss).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,12 +33,39 @@ pub fn multiplier(per_player_percent: u32, players: u32) -> f32 {
 
 /// Apply a multiplier to an integer stat (e.g. a param's HP field), rounding to nearest.
 /// Saturates into `i32` and never goes below zero.
+///
+/// Intended for non-negative count/HP-style fields. The clamp-to-0 means it must NOT be run over
+/// a param field that can be legitimately negative (some ER params use negative sentinels) — that
+/// would turn the sentinel into 0. The caller (the future param-application feature) is
+/// responsible for only scaling fields where 0 is a valid floor.
 pub fn scale_i32(base: i32, mult: f32) -> i32 {
     let scaled = (base as f32 * mult).round();
     scaled.clamp(0.0, i32::MAX as f32) as i32
 }
 
 impl Scaling {
+    /// Clamp every percentage to [`MAX_SCALING_PERCENT`], returning the names of the fields that
+    /// were out of range. Used by **both** [`crate::config::Config::validate`] (file path) and the
+    /// `ConfigSync` decoder (wire path), so a hand-edited file and an untrusted peer are held to
+    /// the same bound.
+    pub fn clamp_percentages(&mut self) -> Vec<&'static str> {
+        let mut clamped = Vec::new();
+        for (name, field) in [
+            ("enemy_health", &mut self.enemy_health),
+            ("enemy_damage", &mut self.enemy_damage),
+            ("enemy_posture", &mut self.enemy_posture),
+            ("boss_health", &mut self.boss_health),
+            ("boss_damage", &mut self.boss_damage),
+            ("boss_posture", &mut self.boss_posture),
+        ] {
+            if *field > MAX_SCALING_PERCENT {
+                *field = MAX_SCALING_PERCENT;
+                clamped.push(name);
+            }
+        }
+        clamped
+    }
+
     /// Multipliers for regular (non-boss) enemies at the given party size.
     pub fn enemy_multipliers(&self, players: u32) -> StatMultipliers {
         StatMultipliers {

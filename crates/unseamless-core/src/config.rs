@@ -215,23 +215,14 @@ impl Config {
     pub fn validate(&mut self) -> Vec<ConfigWarning> {
         let mut warnings = Vec::new();
 
-        // Scaling percentages share their upper bound with the menu, so a hand-edited file can't
-        // exceed what the UI allows (and downstream multiplier math stays in a sane range).
-        for (name, field) in [
-            ("enemy_health", &mut self.scaling.enemy_health),
-            ("enemy_damage", &mut self.scaling.enemy_damage),
-            ("enemy_posture", &mut self.scaling.enemy_posture),
-            ("boss_health", &mut self.scaling.boss_health),
-            ("boss_damage", &mut self.scaling.boss_damage),
-            ("boss_posture", &mut self.scaling.boss_posture),
-        ] {
-            if *field > MAX_SCALING_PERCENT {
-                warnings.push(ConfigWarning {
-                    field: format!("scaling.{name}"),
-                    message: format!("{field} exceeds {MAX_SCALING_PERCENT}%; clamped"),
-                });
-                *field = MAX_SCALING_PERCENT;
-            }
+        // Scaling percentages share their upper bound with the menu and the wire decoder, so a
+        // hand-edited file can't exceed what the UI allows (and downstream multiplier math stays
+        // in a sane range). Same clamp the ConfigSync decoder applies to untrusted peers.
+        for name in self.scaling.clamp_percentages() {
+            warnings.push(ConfigWarning {
+                field: format!("scaling.{name}"),
+                message: format!("exceeded {MAX_SCALING_PERCENT}%; clamped"),
+            });
         }
 
         if self.gameplay.default_boot_master_volume > 10 {

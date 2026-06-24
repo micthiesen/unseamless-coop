@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use simplelog::{ConfigBuilder, WriteLogger};
 use unseamless_core::config::Config;
-use unseamless_core::diagnostics::{RunInfo, SessionRole};
+use unseamless_core::diagnostics::RunInfo;
 
 /// Where logs go, relative to the game's working directory — next to the config, easy to zip
 /// and share.
@@ -20,9 +20,11 @@ const LOG_DIR: &str = "SeamlessCoop/logs";
 /// How many past run logs to keep.
 const KEEP_LOGS: usize = 5;
 
-/// Build profile string — also tells a log reader whether backtraces will have symbols.
+/// Build profile string — tells a log reader whether panic backtraces will have symbols. Keyed
+/// on `debug_assertions` (on for both the `dev` and `diag` profiles, off for `release`), so it
+/// names the symbol status it can actually detect rather than a specific profile it can't.
 const PROFILE: &str = if cfg!(debug_assertions) {
-    "diag (symbols)"
+    "debug-assertions on (symbols)"
 } else {
     "release (stripped)"
 };
@@ -38,17 +40,16 @@ pub fn init(config: &Config) {
     };
 
     let run_id = run_id();
-    let info = RunInfo {
-        run_id: run_id.clone(),
-        mod_version: env!("CARGO_PKG_VERSION").to_string(),
-        build_profile: PROFILE.to_string(),
-        platform: platform(),
-        started_at: run_id.clone(),
-        role: SessionRole::Unknown,
-        session_id: None,
-        // Redacted: this header lands in a shareable log, and the session password must not.
-        config_toml: config.to_redacted_toml_string(),
-    };
+    // from_config redacts secrets internally — the header lands in a shareable log, so the type
+    // makes it impossible to smuggle in an un-redacted config (and the password).
+    let info = RunInfo::from_config(
+        config,
+        run_id.clone(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        PROFILE.to_string(),
+        platform(),
+        run_id.clone(),
+    );
 
     // Always set the panic hook, even if file logging fails to open.
     install_panic_hook();
@@ -81,10 +82,16 @@ pub fn init(config: &Config) {
 
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        // force_capture works regardless of RUST_BACKTRACE; symbol quality depends on the build
-        // profile (use `--profile diag` for readable frames).
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        log::error!("PANIC: {info}\nbacktrace:\n{backtrace}");
+        // The hook itself must never panic: a panic-while-panicking escalates to an immediate
+        // abort, which the FFI firewall's catch_unwind (app.rs) cannot intercept. Capturing a
+        // backtrace, formatting, and writing to the log file all allocate and could fail, so
+        // swallow any failure here — degrade to "no log line", never to an abort.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // force_capture works regardless of RUST_BACKTRACE; symbol quality depends on the
+            // build profile (use `--profile diag` for readable frames).
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            log::error!("PANIC: {info}\nbacktrace:\n{backtrace}");
+        }));
     }));
 }
 

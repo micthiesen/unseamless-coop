@@ -33,8 +33,9 @@ pub const MAX_LOG_MSG: usize = 2048;
 /// A message exchanged between modded clients over the side-channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModMessage {
-    /// Sent on connect to advertise the sender's mod version. Mismatches let clients warn the
-    /// user rather than desync silently.
+    /// Sent on connect to advertise the sender's mod version (pack a [`crate::util::Version`] via
+    /// `to_u32`). Intended so clients can warn on a version mismatch; the compatibility check
+    /// itself is not yet wired (rig-gated), so today this only carries the value.
     Hello { mod_version: u32 },
     /// The host's authoritative shared settings, pushed to clients so everyone agrees on rules.
     ConfigSync(SharedSettings),
@@ -180,7 +181,7 @@ impl ModMessage {
         let msg = match tag {
             tag::HELLO => ModMessage::Hello { mod_version: r.u32()? },
             tag::CONFIG_SYNC => {
-                let scaling = Scaling {
+                let mut scaling = Scaling {
                     enemy_health: r.u32()?,
                     enemy_damage: r.u32()?,
                     enemy_posture: r.u32()?,
@@ -188,6 +189,9 @@ impl ModMessage {
                     boss_damage: r.u32()?,
                     boss_posture: r.u32()?,
                 };
+                // Untrusted peer: hold wire scaling to the same bound as a local config file, so a
+                // malicious host can't push an out-of-range multiplier the user never consented to.
+                scaling.clamp_percentages();
                 let [allow_invaders, death_debuffs, allow_summons] = unpack_bools(r.u8()?);
                 ModMessage::ConfigSync(SharedSettings {
                     scaling,
@@ -318,6 +322,23 @@ mod tests {
         for msg in samples() {
             let bytes = msg.encode();
             assert_eq!(ModMessage::decode(&bytes), Ok(msg.clone()), "round-trip failed for {msg:?}");
+        }
+    }
+
+    #[test]
+    fn config_sync_clamps_out_of_range_scaling_from_the_wire() {
+        // A hostile peer sends an absurd multiplier; decode must bound it just like a local file.
+        let mut evil = shared();
+        evil.scaling.enemy_health = u32::MAX;
+        evil.scaling.boss_health = 9999;
+        match ModMessage::decode(&ModMessage::ConfigSync(evil).encode()).unwrap() {
+            ModMessage::Log(_) => unreachable!(),
+            ModMessage::ConfigSync(s) => {
+                assert_eq!(s.scaling.enemy_health, crate::config::MAX_SCALING_PERCENT);
+                assert_eq!(s.scaling.boss_health, crate::config::MAX_SCALING_PERCENT);
+                assert_eq!(s.scaling.enemy_posture, shared().scaling.enemy_posture); // in-range kept
+            }
+            other => panic!("wrong variant: {other:?}"),
         }
     }
 
