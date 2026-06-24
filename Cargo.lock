@@ -528,6 +528,7 @@ name = "unseamless-core"
 version = "0.1.0"
 dependencies = [
  "log",
+ "num_enum",
  "serde",
  "toml",
 ]

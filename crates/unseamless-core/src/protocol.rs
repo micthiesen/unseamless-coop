@@ -19,6 +19,8 @@
 //! +------+---------+------+-----------------+
 //! ```
 
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+
 use crate::config::{Config, Scaling};
 use crate::diagnostics::{LogLevel, LogRecord};
 
@@ -84,8 +86,10 @@ impl SharedSettings {
 }
 
 /// Host/client session actions, mirroring ERSC's `OPTIONSELECT_*` menu surface (FEATURES.md).
-/// Discriminants are explicit so the wire value is stable across refactors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Discriminants are explicit and the wire conversions are **derived** (`num_enum`), so adding a
+/// variant can't drift the encoder and decoder apart. `u8::from(action)` encodes;
+/// `SessionAction::try_from(byte)` decodes (rejecting unknown values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum SessionAction {
     OpenWorld = 0,
@@ -99,26 +103,6 @@ pub enum SessionAction {
     ToggleFriendlyFire = 8,
     ToggleDriedFinger = 9,
     GiveEmber = 10,
-}
-
-impl SessionAction {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        use SessionAction::*;
-        Some(match v {
-            0 => OpenWorld,
-            1 => JoinWorld,
-            2 => BreakInWorld,
-            3 => LeaveWorld,
-            4 => LockWorld,
-            5 => UnlockWorld,
-            6 => TogglePvp,
-            7 => TogglePvpTeams,
-            8 => ToggleFriendlyFire,
-            9 => ToggleDriedFinger,
-            10 => GiveEmber,
-            _ => return None,
-        })
-    }
 }
 
 /// Message type tags (the 4th frame byte).
@@ -174,7 +158,7 @@ impl ModMessage {
             }
             ModMessage::SessionAction(a) => {
                 w.push(tag::SESSION_ACTION);
-                w.push(*a as u8);
+                w.push(u8::from(*a));
             }
             ModMessage::Ping { frame } => {
                 w.push(tag::PING);
@@ -183,7 +167,7 @@ impl ModMessage {
             ModMessage::Log(rec) => {
                 w.push(tag::LOG);
                 w.extend_from_slice(&rec.seq.to_be_bytes());
-                w.push(rec.level.to_u8());
+                w.push(u8::from(rec.level));
                 let msg = truncate_on_boundary(&rec.message, MAX_LOG_MSG);
                 w.extend_from_slice(&(msg.len() as u16).to_be_bytes());
                 w.extend_from_slice(msg.as_bytes());
@@ -226,12 +210,14 @@ impl ModMessage {
                 })
             }
             tag::SESSION_ACTION => {
-                ModMessage::SessionAction(SessionAction::from_u8(r.u8()?).ok_or(DecodeError::BadValue)?)
+                ModMessage::SessionAction(
+                    SessionAction::try_from(r.u8()?).map_err(|_| DecodeError::BadValue)?,
+                )
             }
             tag::PING => ModMessage::Ping { frame: r.u64()? },
             tag::LOG => {
                 let seq = r.u32()?;
-                let level = LogLevel::from_u8(r.u8()?).ok_or(DecodeError::BadValue)?;
+                let level = LogLevel::try_from(r.u8()?).map_err(|_| DecodeError::BadValue)?;
                 let message = r.string_u16()?;
                 ModMessage::Log(LogRecord { seq, level, message })
             }

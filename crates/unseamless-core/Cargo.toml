@@ -10,5 +10,6 @@ name = "unseamless_core"
 
 [dependencies]
 log = { workspace = true }
+num_enum = "0.7"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

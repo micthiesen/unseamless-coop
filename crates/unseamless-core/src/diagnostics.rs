@@ -15,14 +15,17 @@
 
 use std::collections::VecDeque;
 
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
 
 /// Verbosity, mirroring `log`'s levels but serde-friendly and stable on the wire.
 ///
-/// `#[repr(u8)]` with explicit discriminants pins the wire byte ([`to_u8`](LogLevel::to_u8) is
-/// `self as u8`): reordering or inserting variants is then a visible, reviewable change instead
-/// of a silent wire shift. Keep the values fixed and append new ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// `#[repr(u8)]` with explicit discriminants pins the wire byte, and the conversions are
+/// **derived** (`num_enum`): `u8::from(level)` encodes, `LogLevel::try_from(byte)` decodes, so the
+/// two can't drift. Keep the values fixed and append new ones.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, IntoPrimitive, TryFromPrimitive,
+)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub enum LogLevel {
@@ -52,22 +55,6 @@ impl LogLevel {
             log::Level::Debug => LogLevel::Debug,
             log::Level::Trace => LogLevel::Trace,
         }
-    }
-
-    /// Stable wire byte.
-    pub fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_u8(v: u8) -> Option<Self> {
-        Some(match v {
-            0 => LogLevel::Error,
-            1 => LogLevel::Warn,
-            2 => LogLevel::Info,
-            3 => LogLevel::Debug,
-            4 => LogLevel::Trace,
-            _ => return None,
-        })
     }
 }
 
@@ -397,9 +384,10 @@ mod tests {
             LogLevel::Debug,
             LogLevel::Trace,
         ] {
-            assert_eq!(LogLevel::from_u8(l.to_u8()), Some(l));
+            // Derived (num_enum) wire conversions: u8::from / try_from.
+            assert_eq!(LogLevel::try_from(u8::from(l)).ok(), Some(l));
         }
-        assert_eq!(LogLevel::from_u8(99), None);
+        assert!(LogLevel::try_from(99u8).is_err());
         assert!(LogLevel::Error < LogLevel::Trace);
     }
 
