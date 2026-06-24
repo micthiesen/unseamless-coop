@@ -59,12 +59,28 @@ without a save); real game-state work moves to an appropriate phase as it's buil
 
 ## Reverse-engineering ERSC
 
-The upstream mod lives under `reference/seamless-coop-v1.9.9/` (gitignored, not redistributable):
+The upstream mod lives under `reference/seamless-coop-v1.9.9/` (gitignored, not redistributable).
+A static triage (`rz-bin -l/-S/-E/-i ersc.dll`) found the decisive fact up front:
 
-- `SeamlessCoop/ersc.dll` — the target. A ~7MB stripped C++ release binary; use a
-  disassembler/decompiler (Ghidra/IDA/radare2), not direct reading.
-- `SeamlessCoop/ersc_settings.ini` and `SeamlessCoop/locale/english.json` — plain-text
-  enumerations of the feature set. Cheapest early map of what to re-implement.
+**`ersc.dll` is Themida-packed.** ~5.5MB of its ~7.4MB is a single `.themida` section
+(`-rwx`, self-modifying); the real code is virtualized and the import table is a stub (only
+**8** visible imports, one per linked library). So **static decompilation is mostly a dead
+end** — Ghidra/IDA will show you the unpacker and the stub IAT, not the logic. Don't sink time
+into "decompile ersc.dll." A disassembler is still worth having for `eldenring.exe`, for any
+runtime-unpacked memory dump, for strings, and for checking our own builds.
+
+What the triage *does* tell us (factual metadata, safe to use):
+- **Linked libraries** name the architecture: `steam_api64.dll` (Steam P2P), `ws2_32.dll`
+  (Winsock), `crypt32`/`wldap32`/`normaliz` (TLS/crypto), plus `user32` (`GetAsyncKeyState` →
+  hotkeys). So: Steam-transport networking with a crypto layer.
+- **Export `modengine_ext_init`** → it's a ModEngine2 extension (a public, documented load API).
+- `ersc_settings.ini` + `english.json` are plain text — the cheapest map of the feature set
+  (catalogued in [FEATURES.md](FEATURES.md)).
+
+So the realistic RE path is **behavioral, not static**: observe what it does to game memory,
+the network, and save files, and reimplement from the public `fromsoftware-rs` SDK + the ER
+modding community's knowledge. This happens to fit the clean-room posture perfectly — you
+can't copy code you can't read.
 
 **Clean-room rule:** never paste decompiler/disassembler output into source or commits, and
 never redistribute upstream bytes (`reference/` stays gitignored). Read to understand, record

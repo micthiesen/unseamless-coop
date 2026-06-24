@@ -40,6 +40,13 @@ implementation is fine; copying *its code* is not. So:
 This costs nothing during development and keeps the project on solid ground. (Not legal
 advice, just the working rule.)
 
+Conveniently, a static triage found `ersc.dll` is **Themida-packed** — the logic is
+virtualized and only 8 stub imports are visible, so static decompilation is a dead end anyway.
+The rewrite is necessarily **behavioral**: reimplement from observed behavior + the public
+`fromsoftware-rs` SDK, not from their code. The feature surface is catalogued in
+[`docs/FEATURES.md`](docs/FEATURES.md); the triage and RE strategy are in
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) > "Reverse-engineering ERSC".
+
 ## Where things run (read this first)
 
 Development happens on a **macOS** laptop that **cannot run Elden Ring**. That's fine and
