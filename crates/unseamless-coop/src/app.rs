@@ -34,19 +34,25 @@ static APP: OnceLock<Mutex<App>> = OnceLock::new();
 /// first so we capture as much as possible; then features register as recurring tasks. The
 /// registrations are permanent for the process lifetime.
 pub fn install() {
+    // Anchor config, logs, and mods to the install dir (our DLL's folder), not the process cwd —
+    // Proton/Steam can set cwd elsewhere, and the user edits files next to the game. Fall back to
+    // cwd (".") only if we can't locate our own module.
+    let module = crate::SELF_MODULE.load(std::sync::atomic::Ordering::Relaxed);
+    let base = crate::mods::self_dir(module).unwrap_or_else(|| std::path::PathBuf::from("."));
+
     // Config before logging: the logger picks its level and writes its header from the config.
-    let (config, notes) = crate::config::load();
-    crate::logger::init(&config);
+    let (config, notes) = crate::config::load(&base);
+    crate::logger::init(&config, &base);
     for (level, message) in notes {
         log::log!(level, "{message}");
+    }
+    if base == std::path::Path::new(".") {
+        log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
 
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
-    match crate::mods::self_dir(crate::SELF_MODULE.load(std::sync::atomic::Ordering::Relaxed)) {
-        Some(dir) => crate::mods::load_mods(&config, &dir),
-        None => log::warn!("could not locate our own module dir; skipping extra mod loading"),
-    }
+    crate::mods::load_mods(&config, &base);
 
     let cs_task = match CSTaskImp::wait_for_instance(INIT_TIMEOUT) {
         Ok(task) => task,

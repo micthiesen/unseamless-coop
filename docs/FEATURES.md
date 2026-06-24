@@ -17,10 +17,10 @@ Difficulty legend (rough, from our side of the rewrite):
 | Feature | What it does | Diff | Notes |
 |---|---|---|---|
 | Session / networking layer | Replaces vanilla matchmaking so partners share one persistent world. Confirmed deps: `steam_api64` (Steam P2P), `ws2_32` (Winsock), `crypt32`/`wldap32`/`normaliz` (TLS/crypto). | **H** | The 80%. **Legally most sensitive** (wire protocol) — reimplement from observed behavior, and only pursue ERSC-session interop deliberately. |
-| Load mechanism | `ersc.dll` exports `modengine_ext_init` → it's a **ModEngine2 extension**; also ships `ersc_launcher.exe` (exe-swap). | **done** | We diverge: we own it. The cdylib ships as the game's `dinput8.dll` proxy (auto-loaded; also loads `mods/`), and our `start_protected_game.exe` launcher starts the game outside EAC with a marker the DLL requires. No ModEngine2/EML. |
+| Load mechanism | `ersc.dll` exports `modengine_ext_init` → it's a **ModEngine2 extension**; also ships `ersc_launcher.exe` (exe-swap). | **built, rig-gated** | We diverge: we own it. The cdylib ships as the game's `dinput8.dll` proxy (auto-loaded; also loads `mods/`), and our `start_protected_game.exe` launcher starts the game outside EAC with a marker the DLL requires. No ModEngine2/EML. Export-table verified on the Mac; live load unproven on the rig. |
 | Player state sync | Positions, animation/HP/SP, equipment, events across the session. | **H** | Implied by co-op; the second-hardest piece after transport. |
 | Separate co-op saves | Distinct save extension (`save_file_extension = co2`) so co-op doesn't touch vanilla `.sl2`. | **M** | Hook the save path; SDK/file-IO. |
-| Offline / non-EAC launch | Runs outside EasyAntiCheat (why it's co-op-safe). | **done** | Our `start_protected_game.exe` launcher starts the game directly (no EAC); the DLL aborts if it wasn't launched that way (`coop/guard.rs`). Rig-validated. |
+| Offline / non-EAC launch | Runs outside EasyAntiCheat (why it's co-op-safe). | **built, rig-gated** | Our `start_protected_game.exe` launcher starts the game directly (no EAC); the DLL aborts if it wasn't launched that way (`coop/guard.rs`). Logic written; the EAC bypass + abort behavior are **not yet validated on the rig**. |
 
 ## Session management (menu/hotkey actions — M)
 

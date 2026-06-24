@@ -7,15 +7,14 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use simplelog::{ConfigBuilder, WriteLogger};
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::RunInfo;
 
-/// Where logs go, relative to the game's working directory — next to the config, easy to zip
-/// and share.
+/// Where logs go, relative to the install dir — next to the config, easy to zip and share.
 const LOG_DIR: &str = "unseamless-coop/logs";
 /// How many past run logs to keep.
 const KEEP_LOGS: usize = 5;
@@ -29,10 +28,11 @@ const PROFILE: &str = if cfg!(debug_assertions) {
     "release (stripped)"
 };
 
-/// Initialize logging from the loaded config. Picks the level (verbose only when
+/// Initialize logging from the loaded config. Logs go under `<base>/unseamless-coop/logs/` (the
+/// install dir, so they don't depend on the process cwd). Picks the level (verbose only when
 /// `debug.enabled`), opens a fresh run log with the [`RunInfo`] header, prunes old logs, and
 /// installs a panic hook that captures a backtrace.
-pub fn init(config: &Config) {
+pub fn init(config: &Config, base: &Path) {
     let level = if config.debug.enabled {
         config.debug.level.to_level_filter()
     } else {
@@ -54,7 +54,7 @@ pub fn init(config: &Config) {
     // Always set the panic hook, even if file logging fails to open.
     install_panic_hook();
 
-    let dir = PathBuf::from(LOG_DIR);
+    let dir = base.join(LOG_DIR);
     if let Err(e) = fs::create_dir_all(&dir) {
         eprintln!("unseamless-coop: cannot create {LOG_DIR}: {e}");
         return;

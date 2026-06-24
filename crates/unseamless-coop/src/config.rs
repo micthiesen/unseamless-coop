@@ -6,21 +6,23 @@
 //! notes for [`crate::app::install`] to replay once logging is up.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 
 use log::Level;
 use unseamless_core::config::Config;
 
-/// Config path relative to the game's working directory (normally `ELDEN RING/Game/`).
+/// Config path relative to the install dir (the folder our DLL lives in).
 const CONFIG_REL: &str = "unseamless-coop/unseamless_coop.toml";
 
 /// A deferred log line: `(level, message)`, replayed after the logger initializes.
 pub type Note = (Level, String);
 
-/// Load the config, writing a default file if none exists. Always returns a usable [`Config`]
-/// (defaults on any error) plus notes to log once the logger is up.
-pub fn load() -> (Config, Vec<Note>) {
-    let path = PathBuf::from(CONFIG_REL);
+/// Load the config from `<base>/unseamless-coop/unseamless_coop.toml`, writing a default file if
+/// none exists. `base` is the install dir (our DLL's folder), so config is found regardless of the
+/// process working directory. Always returns a usable [`Config`] (defaults on any error) plus notes
+/// to log once the logger is up.
+pub fn load(base: &Path) -> (Config, Vec<Note>) {
+    let path = base.join(CONFIG_REL);
     let mut notes = Vec::new();
 
     match fs::read_to_string(&path) {

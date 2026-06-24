@@ -27,8 +27,9 @@ A drop-in, no-installer bundle. From a release zip, copy into your `ELDEN RING/G
 - `start_protected_game.exe` — our launcher, which **replaces** the game's EasyAntiCheat
   bootstrapper of the same name. Steam's "Play" then starts the game outside EAC with the mod
   loaded. (Same install on Windows, Linux/Proton, and Steam Deck.)
-- `mods/` — the (optional) folder other DLL mods go in; the mod creates it on first run if absent,
-  and writes its config + logs to a `unseamless-coop/` folder next to the game.
+- `mods/` — the (optional) folder other DLL mods go in (it ships in the bundle). The mod writes its
+  config + logs to a `unseamless-coop/` folder next to the game. Note: a broken or incompatible DLL
+  in `mods/` can prevent the game from launching — if that happens, remove it.
 
 Then just press **Play** in Steam.
 
@@ -43,8 +44,8 @@ Installed Files → **Verify integrity of game files** (this re-downloads the re
 
 A game update can restore the original `start_protected_game.exe` while leaving `dinput8.dll` in
 place — which would boot **EAC with a mod present**, risking your account. The mod guards against
-this (it refuses to run and closes the game if it wasn't started by our launcher), but you should
-still **re-copy the mod files after any update before pressing Play.** Use at your own risk; this
+this common case (it refuses to run and closes the game if it wasn't started by our launcher), but
+you should still **re-copy the mod files after any update before pressing Play.** Use at your own risk; this
 mod is for co-op only and must never touch the official servers.
 
 The guard works off a launch marker the launcher sets. **Never set `UNSEAMLESS_LAUNCH` as a

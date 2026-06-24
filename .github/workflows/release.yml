@@ -56,6 +56,7 @@ jobs:
           cat > dist/mods/README.txt <<'TXT'
           Drop additional simple DLL mods here; unseamless-coop (dinput8.dll) loads them on launch.
           Control load order with the [loader] order list in unseamless-coop/unseamless_coop.toml.
+          A broken or incompatible DLL here can stop the game from launching; if that happens, remove it.
           TXT
           (cd dist && zip -r "../$zip" dinput8.dll start_protected_game.exe README.md mods)
           echo "ZIP=$zip" >> "$GITHUB_ENV"
