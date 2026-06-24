@@ -60,14 +60,24 @@ This is the same install on Windows, Linux/Proton, and Steam Deck.
 
 Settings live at `ELDEN RING/Game/unseamless-coop/unseamless_coop.toml` (logs sit beside it under
 `unseamless-coop/logs/`). It's created with sensible defaults on first launch; edit it and relaunch
-to apply changes. The main sections:
+to apply changes.
 
-- `[session]` — `password`, the shared co-op key (step 3 above); at least 5 characters.
-- `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
-- `[gameplay]` — allow invaders/summons, death debuffs, overhead display, skip splash screens, …
-- `[loader]` — `enabled`, and an `order` list to pin the load order of other `mods/` DLLs.
-- `[debug]` — verbose logging, and (once co-op lands) forwarding your logs to the host.
-- `[save]` / `[language]` — the co-op save-file extension and a locale override.
+**Who sets what** (once co-op is wired up):
+
+- **Everyone must match** — `[session] password`, the matchmaking key. It has to be identical for
+  the whole party (≥ 5 characters).
+- **The host decides for everyone** — the host's values for these are pushed to the party and
+  override each client's own:
+  - `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
+  - the `[gameplay]` *rules*: `allow_invaders`, `allow_summons`, `death_debuffs`.
+- **Per-player** — each person sets their own; not shared:
+  - the rest of `[gameplay]` — overhead display, skip splash screens, append steam id,
+    spectate-on-death, boot volume.
+  - `[loader]` (your own `mods/`), `[debug]` (your logging), `[save]` (save-file extension),
+    `[language]` (locale).
+
+So in practice: everyone agrees on the password, the host dials in the difficulty/rules, and
+everything else is personal preference.
 
 The config isn't part of the install bundle, so re-copying the mod after a game update never
 overwrites your settings.
