@@ -106,4 +106,16 @@ mod tests {
         assert_eq!(scale_i32(0, 3.0), 0);
         assert_eq!(scale_i32(100, 0.0), 0);
     }
+
+    #[test]
+    fn scale_i32_saturates_and_never_goes_negative() {
+        // Large product saturates to i32::MAX rather than wrapping/panicking.
+        assert_eq!(scale_i32(i32::MAX, 2.0), i32::MAX);
+        assert_eq!(scale_i32(10_000_000, 1000.0), i32::MAX); // 1e10 > i32::MAX -> saturates
+        // Negative base clamps to 0 (the doc contract), not a negative stat.
+        assert_eq!(scale_i32(-100, 1.0), 0);
+        // Worst-case config: max percent (1000) at a large party still saturates cleanly.
+        let m = multiplier(1000, 64);
+        assert_eq!(scale_i32(i32::MAX, m), i32::MAX);
+    }
 }

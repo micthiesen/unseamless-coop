@@ -114,20 +114,24 @@ impl Edge {
 }
 
 /// A `major.minor.patch` version, for the side-channel handshake (warn on mismatch).
+///
+/// Field widths (`u8`/`u8`/`u16`) match the wire layout exactly, so [`to_u32`](Version::to_u32)
+/// /[`from_u32`](Version::from_u32) is a **lossless** round-trip for every constructible value —
+/// no silent truncation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
-    pub major: u16,
-    pub minor: u16,
+    pub major: u8,
+    pub minor: u8,
     pub patch: u16,
 }
 
 impl Version {
-    pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
+    pub const fn new(major: u8, minor: u8, patch: u16) -> Self {
         Self { major, minor, patch }
     }
 
     /// Parse `"X.Y.Z"` (extra pre-release/build metadata after `-`/`+` is ignored). Returns
-    /// `None` on anything malformed.
+    /// `None` on anything malformed, including components that overflow their field width.
     pub fn parse(s: &str) -> Option<Self> {
         let core = s.split(['-', '+']).next().unwrap_or(s);
         let mut parts = core.split('.');
@@ -140,18 +144,15 @@ impl Version {
         Some(Self { major, minor, patch })
     }
 
-    /// Pack into a `u32` for the wire (`major<<24 | minor<<16 | patch`). Components saturate to
-    /// their field widths.
+    /// Pack into a `u32` for the wire (`major<<24 | minor<<16 | patch`). Lossless.
     pub fn to_u32(self) -> u32 {
-        ((self.major.min(0xff) as u32) << 24)
-            | ((self.minor.min(0xff) as u32) << 16)
-            | (self.patch as u32 & 0xffff)
+        ((self.major as u32) << 24) | ((self.minor as u32) << 16) | (self.patch as u32)
     }
 
     pub fn from_u32(v: u32) -> Self {
         Self {
-            major: ((v >> 24) & 0xff) as u16,
-            minor: ((v >> 16) & 0xff) as u16,
+            major: ((v >> 24) & 0xff) as u8,
+            minor: ((v >> 16) & 0xff) as u8,
             patch: (v & 0xffff) as u16,
         }
     }
@@ -237,7 +238,17 @@ mod tests {
 
     #[test]
     fn version_round_trips_through_u32() {
-        let v = Version::new(1, 7, 300);
-        assert_eq!(Version::from_u32(v.to_u32()), v);
+        // Lossless for every constructible value, including the field-width extremes.
+        for v in [Version::new(1, 7, 300), Version::new(0, 0, 0), Version::new(255, 255, 65535)] {
+            assert_eq!(Version::from_u32(v.to_u32()), v);
+        }
+    }
+
+    #[test]
+    fn version_parse_rejects_out_of_range_components() {
+        assert_eq!(Version::parse("256.0.0"), None); // major > u8
+        assert_eq!(Version::parse("1.999.0"), None); // minor > u8
+        assert_eq!(Version::parse("1.0.70000"), None); // patch > u16
+        assert_eq!(Version::parse("255.255.65535"), Some(Version::new(255, 255, 65535)));
     }
 }

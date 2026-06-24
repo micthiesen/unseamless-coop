@@ -83,9 +83,11 @@ impl SessionObserver {
             session.session_player_limit,
         );
         for (i, p) in session.players.iter().enumerate() {
+            // Pseudonymous tag, not the raw 64-bit Steam ID: this log is shareable, and a raw
+            // SteamID would leak other players' identities (see diagnostics::peer_tag).
             log::info!(
-                "  player[{i}] steam_id={:#018x} host={} local={} cid={}",
-                p.base.steam_id,
+                "  player[{i}] {} host={} local={} cid={}",
+                unseamless_core::diagnostics::peer_tag(p.base.steam_id),
                 p.is_host,
                 p.is_local_player,
                 p.character_event_id,
@@ -94,8 +96,8 @@ impl SessionObserver {
 
         // What scaling WOULD be for this party size, via the host-tested core. The exact
         // player-count source and application mechanism are RE-gated; this logs the candidate so
-        // we can confirm it on the rig.
-        let count = (players as u32).max(1);
+        // we can confirm it on the rig. Bounded before the cast so a bogus roster can't overflow.
+        let count = (players.min(64) as u32).max(1);
         let enemy = self.config.scaling.enemy_multipliers(count);
         let boss = self.config.scaling.boss_multipliers(count);
         log::info!(

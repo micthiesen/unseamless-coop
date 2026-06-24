@@ -65,7 +65,16 @@ pub fn install() {
         // Permanent registration: the SDK never unregisters (its `cancel()` is a no-op stub and
         // the task self-references). Forget the handle so its `Drop` can't flip the cancel flag.
         // The DLL must stay resident for the process lifetime — see the no-DETACH note in lib.rs.
-        let handle = cs_task.run_recurring(move |data: &FD4TaskData| tick(index, data), phase);
+        let handle = cs_task.run_recurring(
+            move |data: &FD4TaskData| {
+                // FFI firewall: a panic must NEVER unwind across the SDK's `extern "C"` task
+                // boundary — that's UB. Under the shipped `panic = "abort"` profiles a panic
+                // aborts before unwinding (so this is a no-op there), but a default `cargo build`
+                // uses `panic = "unwind"`, and this catch is what keeps that build sound.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data)));
+            },
+            phase,
+        );
         std::mem::forget(handle);
         log::info!("registered feature '{name}' in {phase:?}");
     }
@@ -74,7 +83,9 @@ pub fn install() {
 /// Per-frame entry for the feature at `index`, in its phase.
 fn tick(index: usize, data: &FD4TaskData) {
     let Some(app) = APP.get() else { return };
-    let Ok(mut app) = app.lock() else { return }; // poisoned only if a feature panicked
+    // Recover from a poisoned lock so one feature's (caught) panic doesn't wedge the rest forever.
+    // The vectors unwind intact, so continuing is sound; the panic hook already logged the cause.
+    let mut app = app.lock().unwrap_or_else(|poison| poison.into_inner());
     let Some(frame) = app.frames.get_mut(index).map(|f| {
         *f += 1;
         *f

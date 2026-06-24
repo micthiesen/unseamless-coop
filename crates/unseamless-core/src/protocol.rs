@@ -331,12 +331,17 @@ mod tests {
     }
 
     #[test]
-    fn bool_packing_is_independent_per_bit() {
-        // death_debuffs=false must not leak into the other two flags.
-        let s = shared();
-        assert!(s.allow_invaders && !s.death_debuffs && s.allow_summons);
-        let decoded = ModMessage::decode(&ModMessage::ConfigSync(s).encode()).unwrap();
-        assert_eq!(decoded, ModMessage::ConfigSync(s));
+    fn bool_packing_is_independent_across_all_combinations() {
+        // Every one of the 2^3 flag combinations must round-trip exactly — proves no bit
+        // cross-contaminates another (a single-combo test couldn't catch an OR-ing bug).
+        for bits in 0u8..8 {
+            let mut s = shared();
+            s.allow_invaders = bits & 1 != 0;
+            s.death_debuffs = bits & 2 != 0;
+            s.allow_summons = bits & 4 != 0;
+            let decoded = ModMessage::decode(&ModMessage::ConfigSync(s).encode()).unwrap();
+            assert_eq!(decoded, ModMessage::ConfigSync(s), "combo {bits:03b} corrupted");
+        }
     }
 
     #[test]
@@ -397,17 +402,29 @@ mod tests {
 
     #[test]
     fn oversized_log_message_is_truncated_on_a_char_boundary() {
-        // Multibyte chars so a naive byte cut could split one.
-        let long = "é".repeat(MAX_LOG_MSG); // 2 bytes each -> well over the cap
+        // 3-byte chars so the cap (2048) does NOT fall on a char boundary (2048 % 3 != 0): a
+        // naive `&s[..MAX_LOG_MSG]` would panic mid-character, so this actually exercises the
+        // boundary-backoff loop in truncate_on_boundary.
+        assert_ne!(MAX_LOG_MSG % 3, 0, "test premise: cap must land mid-char for a 3-byte char");
+        let long = "あ".repeat(MAX_LOG_MSG); // 3 bytes each -> well over the cap
         let msg = ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: long });
         let decoded = ModMessage::decode(&msg.encode()).unwrap();
         match decoded {
             ModMessage::Log(rec) => {
                 assert!(rec.message.len() <= MAX_LOG_MSG);
-                assert!(rec.message.chars().all(|c| c == 'é')); // no split/replacement char
+                assert!(rec.message.len() > MAX_LOG_MSG - 3, "should fill up to the last whole char");
+                assert!(rec.message.chars().all(|c| c == 'あ')); // no split/replacement char
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn log_length_prefix_overrun_is_rejected() {
+        // A hostile Log frame claiming a 0xFFFF-byte string but carrying only a few bytes must
+        // be rejected as Truncated, never over-read or over-allocate.
+        let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 7, 2, 0xff, 0xff, b'h', b'i'];
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::Truncated));
     }
 
     #[test]

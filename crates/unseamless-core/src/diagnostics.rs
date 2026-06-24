@@ -16,14 +16,19 @@
 use serde::{Deserialize, Serialize};
 
 /// Verbosity, mirroring `log`'s levels but serde-friendly and stable on the wire.
+///
+/// `#[repr(u8)]` with explicit discriminants pins the wire byte ([`to_u8`](LogLevel::to_u8) is
+/// `self as u8`): reordering or inserting variants is then a visible, reviewable change instead
+/// of a silent wire shift. Keep the values fixed and append new ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
+    Trace = 4,
 }
 
 impl LogLevel {
@@ -91,7 +96,8 @@ pub struct RunInfo {
     /// Unique per process launch (the cdylib generates it, e.g. timestamp+pid).
     pub run_id: String,
     pub mod_version: String,
-    /// `"release"` or `"diag"` — so the reader knows whether backtraces will have symbols.
+    /// Build profile string, e.g. `"release (stripped)"` or `"diag (symbols)"` — tells the
+    /// reader whether panic backtraces in this log will have symbols.
     pub build_profile: String,
     /// e.g. `"windows-x86_64 (proton)"`.
     pub platform: String,
@@ -192,6 +198,22 @@ impl LogBundle {
     }
 }
 
+/// A short, stable, non-reversible tag for a peer's Steam ID, for use in **shareable** logs.
+///
+/// A raw 64-bit SteamID resolves directly to a person's Steam profile, so writing other players'
+/// IDs into a log that gets handed to a host or an assistant leaks their identity. This hashes
+/// the ID to a 16-bit tag (`peer-XXXX`) that's stable within and across a session's logs — enough
+/// to correlate "the same player" across machines — without disclosing who they are. (FNV-1a;
+/// not a security primitive, just identity-obscuring for logs.)
+pub fn peer_tag(steam_id: u64) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in steam_id.to_le_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("peer-{:04x}", (hash & 0xffff) as u16)
+}
+
 fn level_tag(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Error => "ERROR",
@@ -245,6 +267,16 @@ mod tests {
             config_toml: String::new(),
         };
         assert!(info.header_block().contains("session_id  = (not joined)"));
+    }
+
+    #[test]
+    fn peer_tag_is_stable_and_hides_the_raw_id() {
+        let id = 0x1100_0011_4514_1919u64;
+        let tag = peer_tag(id);
+        assert_eq!(tag, peer_tag(id), "must be deterministic for correlation");
+        assert!(tag.starts_with("peer-") && tag.len() == 9);
+        assert!(!tag.contains(&format!("{id:x}")), "must not embed the raw id");
+        assert_ne!(peer_tag(id), peer_tag(id + 1), "distinct ids should usually differ");
     }
 
     #[test]

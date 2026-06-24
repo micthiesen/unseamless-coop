@@ -46,7 +46,8 @@ pub fn init(config: &Config) {
         started_at: run_id.clone(),
         role: SessionRole::Unknown,
         session_id: None,
-        config_toml: config.to_toml_string(),
+        // Redacted: this header lands in a shareable log, and the session password must not.
+        config_toml: config.to_redacted_toml_string(),
     };
 
     // Always set the panic hook, even if file logging fails to open.

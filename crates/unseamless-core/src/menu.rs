@@ -82,6 +82,7 @@ impl Menu {
             enabled,
         };
 
+        let settings = registry();
         let mut items = vec![
             action(OpenWorld, "Host / open world", not_in_session),
             action(JoinWorld, "Join world", not_in_session),
@@ -95,9 +96,9 @@ impl Menu {
             action(ToggleDriedFinger, "Toggle dried finger", host_in_session),
             action(GiveEmber, "Give ember", in_session),
         ];
-        items.extend(registry().iter().map(|s| MenuItem::Setting(s.id)));
+        items.extend(settings.iter().map(|s| MenuItem::Setting(s.id)));
 
-        Menu { items, settings: registry(), selected: 0 }
+        Menu { items, settings, selected: 0 }
     }
 
     pub fn selected(&self) -> usize {

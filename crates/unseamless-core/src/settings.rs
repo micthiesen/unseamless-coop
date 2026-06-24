@@ -9,7 +9,7 @@
 //! [`Setting`] entry to [`registry`]. Both the config file and the menu pick it up. See
 //! `docs/ARCHITECTURE.md` > Divergences.
 
-use crate::config::Config;
+use crate::config::{Config, MAX_SCALING_PERCENT, OverheadDisplay};
 
 /// Stable identifier for a setting, used to address it from the menu / over the wire. Discriminant
 /// stability matters (it can appear in saved UI state), so keep values fixed and append new ones.
@@ -48,8 +48,9 @@ pub enum SettingKind {
     },
     /// A cycle through named choices (e.g. the overhead-display modes).
     Choice {
-        /// `(wire_value, label)` for each choice, in cycle order.
-        choices: &'static [(u32, &'static str)],
+        /// `(wire_value, label)` for each choice, in cycle order. Owned so the list can be
+        /// derived from the source enum rather than hand-duplicated as a `'static` literal.
+        choices: Vec<(u32, &'static str)>,
         get: fn(&Config) -> u32,
         set: fn(&mut Config, u32),
     },
@@ -111,18 +112,13 @@ impl Setting {
     }
 }
 
-/// Overhead-display choices, derived from [`OverheadDisplay::ALL`] so adding a variant updates
-/// the menu automatically.
-fn overhead_choices() -> &'static [(u32, &'static str)] {
-    // Kept in sync with OverheadDisplay::ALL by value; labels are display strings.
-    &[
-        (0, "Normal"),
-        (1, "None"),
-        (2, "Ping"),
-        (3, "Soul level"),
-        (4, "Death count"),
-        (5, "Soul level and ping"),
-    ]
+/// Overhead-display choices, genuinely derived from [`OverheadDisplay::ALL`] + its `label()`, so
+/// the enum is the single source of truth and adding a variant updates the menu automatically.
+fn overhead_choices() -> Vec<(u32, &'static str)> {
+    OverheadDisplay::ALL
+        .into_iter()
+        .map(|d| (d as u32, d.label()))
+        .collect()
 }
 
 /// The full, ordered registry of tunable settings. Add a new option here (and a `Config` field)
@@ -133,7 +129,7 @@ pub fn registry() -> Vec<Setting> {
 
     let pct = |get: fn(&Config) -> u32, set: fn(&mut Config, u32)| Range {
         min: 0,
-        max: 1000,
+        max: MAX_SCALING_PERCENT,
         step: 5,
         get,
         set,
