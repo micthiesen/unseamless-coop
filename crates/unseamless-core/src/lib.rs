@@ -8,6 +8,13 @@
 //! message types) means the parts most prone to subtle bugs are the parts we can actually
 //! verify locally; the cdylib stays a thin, mostly-mechanical binding layer.
 
+/// Environment variable our launcher sets before starting the game, and the cdylib's EAC guard
+/// requires (absent → the mod aborts the process). Defined here, in the dependency both the
+/// `launcher` and the `unseamless-coop` cdylib share, so the two can't drift out of sync — a
+/// mismatch would silently abort every legitimate launch. It must only ever be set per-launch by
+/// the launcher, never as a persistent user environment variable (that would disarm the guard).
+pub const LAUNCH_MARKER: &str = "UNSEAMLESS_LAUNCH";
+
 pub mod config;
 pub mod diagnostics;
 pub mod loader;

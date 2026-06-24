@@ -11,13 +11,10 @@
 //! That's version-proof (no dependency on EAC's module names) and fail-safe (anything but our
 //! launch path dies). See README "After an ELDEN RING update".
 
+use unseamless_core::LAUNCH_MARKER;
 use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SYSTEMMODAL, MessageBoxW};
 use windows::core::w;
-
-/// Environment variable our launcher sets before `CreateProcess(eldenring.exe)`. Its presence is
-/// our proof we were started by the EAC-bypassing path. Keep in sync with the `launcher` crate.
-const LAUNCH_MARKER: &str = "UNSEAMLESS_LAUNCH";
 
 /// Proceed only if our launcher started us. Otherwise show a message and **terminate the process**
 /// (this does not return). Called first thing in `DllMain`, synchronously, so the game is frozen at

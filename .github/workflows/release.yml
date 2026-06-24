@@ -27,6 +27,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Check tag matches workspace version
+        # Guard against tag/binary drift: the binaries embed the workspace version, so it must equal
+        # the tag (vX.Y.Z). The /release skill bumps Cargo.toml before tagging; this catches a miss.
+        run: |
+          ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="${GITHUB_REF_NAME#v}"
+          if [[ "$ver" != "$tag" ]]; then
+            echo "::error::workspace version $ver != tag $GITHUB_REF_NAME (bump Cargo.toml before tagging)"
+            exit 1
+          fi
+
       - name: Build
         # Builds the whole workspace: the cdylib (unseamless_coop.dll) and the launcher
         # (start_protected_game.exe).

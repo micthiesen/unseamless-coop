@@ -9,10 +9,11 @@
 /// Decide the order to load `discovered` mod filenames in.
 ///
 /// Names listed in `configured` load **first, in that order** (so a user can pin "load X before
-/// Y"), then everything else loads in case-insensitive alphabetical order for a stable default.
-/// Matching is case-insensitive (Windows filenames are), a configured name not actually present is
-/// skipped, and duplicates (in either list) collapse to one load. The returned names are the
-/// actual `discovered` spellings, so the caller can use them as-is for the path.
+/// Y"), then everything else loads in alphabetical order for a stable default. Matching is
+/// **ASCII-case-insensitive** (enough for Windows filenames in practice; a non-ASCII name configured
+/// in a different case just falls to the alphabetical rest, never dropped), a configured name not
+/// actually present is skipped, and duplicates (in either list) collapse to one load. The returned
+/// names are the actual `discovered` spellings, so the caller can use them as-is for the path.
 pub fn mod_load_order(discovered: &[String], configured: &[String]) -> Vec<String> {
     let key = |s: &str| s.to_ascii_lowercase();
 
@@ -32,12 +33,13 @@ pub fn mod_load_order(discovered: &[String], configured: &[String]) -> Vec<Strin
         }
     }
 
-    // Then the remaining discovered mods, alphabetical (case-insensitive) for a stable order.
-    let mut rest: Vec<&String> = discovered.iter().filter(|d| !taken.contains(&key(d))).collect();
+    // Then the remaining discovered mods, alphabetical (case-insensitive) for a stable order. The
+    // `taken.insert` guard alone skips already-placed configured names and collapses duplicates, so
+    // no pre-filter is needed.
+    let mut rest: Vec<&String> = discovered.iter().collect();
     rest.sort_by_key(|d| key(d));
     for d in rest {
-        let k = key(d);
-        if taken.insert(k) {
+        if taken.insert(key(d)) {
             ordered.push(d.clone());
         }
     }
@@ -86,6 +88,15 @@ mod tests {
         let discovered = v(&["a.dll", "b.dll"]);
         let configured = v(&["a.dll", "a.dll", "b.dll"]);
         assert_eq!(mod_load_order(&discovered, &configured), v(&["a.dll", "b.dll"]));
+    }
+
+    #[test]
+    fn case_variant_configured_entries_collapse() {
+        // Two configured entries differing only in case map to the same on-disk mod: load it once
+        // (exercises the case-insensitive `taken` guard on the configured pass, not just the rest).
+        let discovered = v(&["a.dll"]);
+        let configured = v(&["A.dll", "a.DLL"]);
+        assert_eq!(mod_load_order(&discovered, &configured), v(&["a.dll"]));
     }
 
     #[test]

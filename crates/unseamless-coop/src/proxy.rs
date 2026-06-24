@@ -27,7 +27,9 @@ const CLASS_E_CLASSNOTAVAILABLE: HRESULT = HRESULT(0x8004_0111_u32 as i32);
 static REAL: OnceLock<usize> = OnceLock::new();
 
 /// Load the real `dinput8.dll` from the Windows system directory (explicitly, so we never recurse
-/// into our own copy in the game folder). Cached for the process; null handle if unavailable.
+/// into our own copy in the game folder). The result is cached for the process — including a
+/// failure (cached as `0`), since the system DLL not loading means the OS is broken, not a transient
+/// condition worth retrying. An absolute path is passed, so `LoadLibraryW` bypasses the search order.
 fn real_dinput8() -> HMODULE {
     let h = *REAL.get_or_init(|| unsafe {
         let mut buf = [0u16; 320];

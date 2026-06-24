@@ -27,6 +27,8 @@ A drop-in, no-installer bundle. From a release zip, copy into your `ELDEN RING/G
 - `start_protected_game.exe` — our launcher, which **replaces** the game's EasyAntiCheat
   bootstrapper of the same name. Steam's "Play" then starts the game outside EAC with the mod
   loaded. (Same install on Windows, Linux/Proton, and Steam Deck.)
+- `mods/` — the (optional) folder other DLL mods go in; the mod creates it on first run if absent,
+  and writes its config + logs to a `unseamless-coop/` folder next to the game.
 
 Then just press **Play** in Steam.
 
@@ -45,6 +47,10 @@ this (it refuses to run and closes the game if it wasn't started by our launcher
 still **re-copy the mod files after any update before pressing Play.** Use at your own risk; this
 mod is for co-op only and must never touch the official servers.
 
+The guard works off a launch marker the launcher sets. **Never set `UNSEAMLESS_LAUNCH` as a
+permanent environment variable** — doing so disarms the guard and would let the game boot under EAC
+with the mod loaded. It's meant to be set only per-launch, by our launcher.
+
 ## Build & test
 
 Cross-compiles to a Windows DLL — no Windows host needed:
@@ -53,6 +59,7 @@ Cross-compiles to a Windows DLL — no Windows host needed:
 # needs mingw-w64 (macOS: brew install mingw-w64). The cross target is pinned in
 # rust-toolchain.toml and is the default (see .cargo/config.toml).
 cargo build --release      # -> target/x86_64-pc-windows-gnu/release/unseamless_coop.dll
+                           #    (installed as dinput8.dll) + start_protected_game.exe
 scripts/test-core.sh       # run the platform-independent core's unit tests on the host
 ```
 

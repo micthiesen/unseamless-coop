@@ -13,8 +13,8 @@
 
 use std::process::Command;
 
-/// Kept in sync with `unseamless-coop`'s `guard::LAUNCH_MARKER`.
-const LAUNCH_MARKER: &str = "UNSEAMLESS_LAUNCH";
+use unseamless_core::LAUNCH_MARKER;
+
 /// ELDEN RING's Steam app id.
 const STEAM_APP_ID: &str = "1245620";
 const GAME_EXE: &str = "eldenring.exe";

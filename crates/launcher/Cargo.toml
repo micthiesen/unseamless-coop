@@ -11,5 +11,7 @@ name = "start_protected_game"
 path = "src/main.rs"
 
 [dependencies]
+# Shares the launch-marker constant so the guard in the cdylib can't drift from the launcher.
+unseamless-core = { path = "../unseamless-core" }
 # Only for surfacing errors via a message box (the launcher has no console).
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

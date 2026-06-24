@@ -29,8 +29,10 @@ pub fn self_dir(module: usize) -> Option<PathBuf> {
 }
 
 /// Discover and load the other DLL mods in `<self_dir>/mods/`, in the configured order. Logs each
-/// outcome. No-op when loading is disabled or the folder is empty/absent. A failed mod is logged
-/// and skipped — one bad mod must not stop the rest (or us).
+/// outcome. No-op when loading is disabled or the folder is empty/absent. A mod whose `LoadLibrary`
+/// *returns* failure is logged and skipped so the rest still load — but note we can't contain a mod
+/// that crashes or calls `ExitProcess` from its own `DllMain` (that runs synchronously inside
+/// `LoadLibrary` and would take the process down regardless).
 pub fn load_mods(config: &Config, self_dir: &Path) {
     if !config.loader.enabled {
         log::info!("extra mod loading disabled ([loader] enabled = false)");
@@ -55,7 +57,8 @@ pub fn load_mods(config: &Config, self_dir: &Path) {
     }
 }
 
-/// Filenames of `*.dll` regular files in `dir` (non-recursive). Empty if the dir can't be read.
+/// Filenames of `*.dll` regular files in `dir` (non-recursive). Non-`.dll` files (e.g. the bundle's
+/// `mods/README.txt`) and subdirectories are ignored. Empty if the dir can't be read.
 fn discover_dlls(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
