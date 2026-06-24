@@ -15,38 +15,54 @@ patterns proven in the sibling project [`er-crit-coop`](https://github.com/micth
 > reverse-engineering-gated and waits on a live observation run, so this is **not yet a functional
 > Seamless Co-op replacement.**
 
-## Install
+## Install & play
 
-A drop-in, no-installer bundle. From a [release](../../releases) zip, copy the contents into your
-`ELDEN RING/Game/` folder — the one next to `eldenring.exe`. (To find it: in Steam, right-click
-**ELDEN RING → Manage → Browse local files**, then open the `Game` folder.) You'll be adding:
+A drop-in, no-installer bundle. Getting from download to a co-op session with friends:
+
+1. **Get the files.** From a [release](../../releases), extract the zip's contents into your
+   `ELDEN RING/Game/` folder — the one next to `eldenring.exe`. (To find it: in Steam, right-click
+   **ELDEN RING → Manage → Browse local files**, then open the `Game` folder.) You're adding
+   `dinput8.dll`, `start_protected_game.exe`, and a `mods/` folder — see
+   [What's in the bundle](#whats-in-the-bundle).
+
+2. **Launch once.** Press **Play** in Steam. The mod boots outside EasyAntiCheat and, on this first
+   run, writes its config — including a **random co-op password** — to
+   `ELDEN RING/Game/unseamless-coop/unseamless_coop.toml`.
+
+3. **Match passwords with your group.** Co-op pairs players by a **shared password**: everyone must
+   use the *same* one. The easy path is to use the generated default — one person opens their config,
+   copies the `password = "…"` value, and everyone else pastes it into theirs. (You can change it to
+   any shared phrase instead; it just has to match across the group, and must be **at least 5
+   characters** — the mod won't launch with an empty or too-short password.) Save and relaunch.
+
+4. **Play.** Host or join as usual — anyone running the mod with the same password joins your session.
+
+> Want to set the password (or anything else) *before* your first session? Launch once, quit at the
+> title screen, edit the config, then relaunch.
+
+This is the same install on Windows, Linux/Proton, and Steam Deck.
+
+### What's in the bundle
 
 - `dinput8.dll` — the mod itself. The game auto-loads it (it's a proxy for the system `dinput8`),
-  so there's **no separate mod loader**. It's also the parent loader: drop other simple DLL mods in
-  `mods/` and it loads them too (order them with the `[loader]` list in the generated
-  `unseamless-coop/unseamless_coop.toml`).
-- `start_protected_game.exe` — our launcher, which **replaces** the game's EasyAntiCheat
-  bootstrapper of the same name. Steam's "Play" then starts the game outside EAC with the mod
-  loaded. (Same install on Windows, Linux/Proton, and Steam Deck.)
-- `mods/` — the (optional) folder other DLL mods go in (it ships in the bundle). Note: a broken or
-  incompatible DLL in `mods/` can prevent the game from launching — if that happens, remove it.
-
-Then just press **Play** in Steam.
+  so there's **no separate mod loader**. It's also the parent loader: other DLL mods you drop in
+  `mods/` are loaded too.
+- `start_protected_game.exe` — the launcher, which **replaces** the game's EasyAntiCheat
+  bootstrapper of the same name, so Steam's "Play" starts the game outside EAC with the mod loaded.
+- `mods/` — the (optional) folder other DLL mods go in. A broken or incompatible DLL here can stop
+  the game from launching — if that happens, remove it.
 
 ### Configuring
 
-The mod runs with sensible defaults, so it's playable with no setup. On its **first launch** it
-creates a config file and a logs folder next to the game:
+Settings live at `ELDEN RING/Game/unseamless-coop/unseamless_coop.toml` (logs sit beside it under
+`unseamless-coop/logs/`). It's created with sensible defaults on first launch; edit it and relaunch
+to apply changes. The main sections:
 
-```
-ELDEN RING/Game/unseamless-coop/unseamless_coop.toml   <- your settings
-ELDEN RING/Game/unseamless-coop/logs/                  <- per-run logs
-```
-
-Edit that `.toml` to change settings — co-op password, per-extra-player enemy/boss scaling, allowed
-summons/invaders, the `[loader]` order for other mods, and so on. Changes take effect on the next
-launch. To set something **before your first session** (e.g. a host password), launch once, quit at
-the title screen, then edit the file and relaunch.
+- `[session]` — `password`, the shared co-op key (step 3 above); at least 5 characters.
+- `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
+- `[gameplay]` — allow invaders/summons, death debuffs, overhead display, skip splash screens, …
+- `[loader]` — `enabled`, and an `order` list to pin the load order of other `mods/` DLLs.
+- `[debug]` — verbose logging, and (once co-op lands) forwarding your logs to the host.
 
 The config isn't part of the install bundle, so re-copying the mod after a game update never
 overwrites your settings.

@@ -50,6 +50,18 @@ pub fn install() {
         log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
 
+    // Reject an empty/too-short co-op password (the session key). The generated default always
+    // passes, so this only fires on a deliberately-cleared password — fail loudly, like the EAC
+    // guard, since a weak key risks accidental or trivially-joinable sessions.
+    if !config.password_is_valid() {
+        log::error!("co-op password too short; aborting");
+        crate::guard::fatal(&format!(
+            "Your co-op password is too short — it must be at least {} characters.\n\n\
+             Set it in unseamless-coop/unseamless_coop.toml, then relaunch.",
+            unseamless_core::config::MIN_PASSWORD_LEN
+        ));
+    }
+
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(&config, &base);

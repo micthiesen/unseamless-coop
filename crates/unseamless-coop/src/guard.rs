@@ -14,7 +14,21 @@
 use unseamless_core::LAUNCH_MARKER;
 use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
 use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MB_SYSTEMMODAL, MessageBoxW};
-use windows::core::w;
+use windows::core::{HSTRING, w};
+
+/// Show a fatal startup error to the user and kill the process — for an unrecoverable condition
+/// (wrong launch path, invalid config). **Never returns.** Safe from `DllMain` or the init thread:
+/// the `MessageBox` is courtesy (if it can't display this early, we still die), and after
+/// `TerminateProcess` we `abort()` as a guaranteed stop so this can never fall through to running
+/// the game.
+pub fn fatal(message: &str) -> ! {
+    let text = HSTRING::from(message);
+    unsafe {
+        let _ = MessageBoxW(None, &text, w!("unseamless-coop"), MB_OK | MB_ICONERROR | MB_SYSTEMMODAL);
+        let _ = TerminateProcess(GetCurrentProcess(), 1);
+    }
+    std::process::abort();
+}
 
 /// Proceed only if our launcher started us. Otherwise show a message and **terminate the process**
 /// (this does not return). Called first thing in `DllMain`, synchronously, so the game is frozen at
@@ -26,19 +40,10 @@ pub fn ensure_launched_by_us_or_abort() {
     if std::env::var_os(LAUNCH_MARKER).is_some() {
         return;
     }
-    unsafe {
-        let _ = MessageBoxW(
-            None,
-            w!(
-                "unseamless-coop was not started by its launcher.\n\n\
-                 An ELDEN RING update may have reverted the mod launcher. Re-copy the mod files \
-                 (see the README) before playing.\n\n\
-                 Closing the game now to protect your account from anti-cheat."
-            ),
-            w!("unseamless-coop"),
-            MB_OK | MB_ICONERROR | MB_SYSTEMMODAL,
-        );
-        // Bluntest possible stop: do not let the game proceed to EAC/networking.
-        let _ = TerminateProcess(GetCurrentProcess(), 1);
-    }
+    fatal(
+        "unseamless-coop was not started by its launcher.\n\n\
+         An ELDEN RING update may have reverted the mod launcher. Re-copy the mod files \
+         (see the README) before playing.\n\n\
+         Closing the game now to protect your account from anti-cheat.",
+    );
 }

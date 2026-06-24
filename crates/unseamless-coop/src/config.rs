@@ -7,9 +7,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::Level;
-use unseamless_core::config::Config;
+use unseamless_core::config::{Config, DEFAULT_PASSWORD_LEN, generate_password};
+use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 
 /// Config path relative to the install dir (the folder our DLL lives in).
 const CONFIG_REL: &str = "unseamless-coop/unseamless_coop.toml";
@@ -44,15 +46,44 @@ pub fn load(base: &Path) -> (Config, Vec<Note>) {
         },
         Err(e) => {
             notes.push((Level::Warn, format!("no config at {} ({e}); using defaults", path.display())));
-            let cfg = Config::default();
+            // Fresh install: seed a unique random session password so two unrelated installs that
+            // never set one don't accidentally share a session (everyone in a party then sets the
+            // same value). Generated here because core has no entropy source.
+            let mut cfg = Config::default();
+            cfg.session.password = generate_password(&random_bytes(DEFAULT_PASSWORD_LEN));
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             match fs::write(&path, cfg.to_toml_string()) {
-                Ok(()) => notes.push((Level::Info, format!("wrote default config to {}", path.display()))),
+                Ok(()) => {
+                    notes.push((Level::Info, format!("wrote default config to {}", path.display())));
+                    // Never log the value — it lands in shareable logs. Point at the file instead.
+                    notes.push((
+                        Level::Info,
+                        "generated a random co-op password; share it with friends (it's in the config file)".into(),
+                    ));
+                }
                 Err(e) => notes.push((Level::Warn, format!("couldn't write default config: {e}"))),
             }
             (cfg, notes)
         }
     }
+}
+
+/// Cryptographically-random bytes from the OS CSPRNG (for the generated default password). Falls
+/// back to a weak time/pid-derived seed only if BCrypt somehow fails, so we never end up writing an
+/// empty password.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    // No algorithm handle: the system-preferred-RNG flag selects the OS CSPRNG.
+    let status = unsafe { BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.is_ok() {
+        return buf;
+    }
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(1)
+        ^ (std::process::id() as u128);
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = (seed >> ((i % 16) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
+    }
+    buf
 }

@@ -99,8 +99,26 @@ pub struct Scaling {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-    /// Co-op session password. Empty = no password.
+    /// Co-op session password — the shared key that pairs you with your friends. A fresh install
+    /// gets a random one (see [`generate_password`]); everyone in a party must use the *same* value.
     pub password: String,
+}
+
+/// Characters a generated password is drawn from: upper-case letters + digits, minus the
+/// ambiguous ones (`0/O`, `1/I/L`), so it's easy to read aloud and retype.
+const PASSWORD_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+/// How many characters a generated default password has (and so how many entropy bytes to supply).
+pub const DEFAULT_PASSWORD_LEN: usize = 12;
+/// Minimum acceptable co-op password length. Shorter (including empty) is rejected at startup: the
+/// password is the session key, and an empty/weak one risks accidental or trivially-joinable
+/// sessions. A fresh install's generated password ([`DEFAULT_PASSWORD_LEN`]) always clears this.
+pub const MIN_PASSWORD_LEN: usize = 5;
+
+/// Build a session password from raw entropy: one [`PASSWORD_ALPHABET`] char per input byte. Pure
+/// (the charset/format is host-tested) — the cdylib supplies the random bytes, since core has no
+/// entropy source. Pass [`DEFAULT_PASSWORD_LEN`] bytes for a standard-length password.
+pub fn generate_password(entropy: &[u8]) -> String {
+    entropy.iter().map(|b| PASSWORD_ALPHABET[*b as usize % PASSWORD_ALPHABET.len()] as char).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,6 +248,13 @@ impl Config {
         redacted.to_toml_string()
     }
 
+    /// Whether the co-op password meets [`MIN_PASSWORD_LEN`]. A too-short (or empty) password is a
+    /// hard error the binding layer rejects at startup, rather than a clampable [`validate`] warning
+    /// — there's no safe value to substitute for a session key the user must choose.
+    pub fn password_is_valid(&self) -> bool {
+        self.session.password.chars().count() >= MIN_PASSWORD_LEN
+    }
+
     /// Clamp/repair out-of-range values in place, reporting what changed.
     pub fn validate(&mut self) -> Vec<ConfigWarning> {
         let mut warnings = Vec::new();
@@ -323,6 +348,34 @@ mod tests {
         assert_eq!(round.language.override_locale, "french");
         // TOML key is `override`, not the Rust field name.
         assert!(cfg.to_toml_string().contains("override = \"french\""));
+    }
+
+    #[test]
+    fn generated_password_is_deterministic_and_uses_the_safe_charset() {
+        // One char per byte, taken from the unambiguous alphabet; deterministic given the bytes.
+        assert_eq!(super::generate_password(&[0, 0, 0]), "AAA");
+        let pw = super::generate_password(&[0, 1, 2, 30, 31, 255]); // bytes wrap into the alphabet
+        assert_eq!(pw.len(), 6);
+        assert!(pw.bytes().all(|b| super::PASSWORD_ALPHABET.contains(&b)), "only safe chars: {pw}");
+        // None of the ambiguous characters can appear.
+        assert!(!pw.contains(['0', 'O', '1', 'I', 'L']));
+        // DEFAULT_PASSWORD_LEN bytes yields a DEFAULT_PASSWORD_LEN-char password.
+        assert_eq!(super::generate_password(&[7; super::DEFAULT_PASSWORD_LEN]).len(), super::DEFAULT_PASSWORD_LEN);
+    }
+
+    #[test]
+    fn password_validity_enforces_minimum_length() {
+        let with = |pw: &str| {
+            let mut c = Config::default();
+            c.session.password = pw.into();
+            c.password_is_valid()
+        };
+        assert!(!with(""), "empty rejected");
+        assert!(!with("abcd"), "4 chars rejected");
+        assert!(with("abcde"), "exactly the minimum accepted");
+        assert!(with("a-strong-password"), "longer accepted");
+        // A freshly generated default always clears the bar.
+        assert!(super::generate_password(&[1; super::DEFAULT_PASSWORD_LEN]).chars().count() >= super::MIN_PASSWORD_LEN);
     }
 
     #[test]
