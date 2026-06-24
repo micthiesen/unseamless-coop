@@ -498,6 +498,13 @@ mod tests {
     }
 
     #[test]
+    fn log_with_out_of_range_level_is_rejected() {
+        // magic, version, LOG tag, seq=0, level=5 (undefined; valid range is 0..=4), len=0.
+        let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 0, 5, 0, 0];
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::BadValue));
+    }
+
+    #[test]
     fn log_with_invalid_utf8_is_rejected() {
         // magic, version, LOG tag, seq=0, level=Info(2), len=1, then an invalid UTF-8 byte.
         let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 0, 2, 0, 1, 0xff];
