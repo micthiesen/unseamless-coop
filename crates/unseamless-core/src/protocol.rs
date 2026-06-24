@@ -105,6 +105,19 @@ pub enum SessionAction {
     GiveEmber = 10,
 }
 
+impl SessionAction {
+    /// Whether only the host may perform this action (lock/unlock and the PvP/dried-finger
+    /// toggles). The apply layer authorizes an inbound action by the **sender's** role using this,
+    /// since the menu's local-UI gating doesn't constrain a packet from a peer.
+    pub fn is_host_only(self) -> bool {
+        use SessionAction::*;
+        matches!(
+            self,
+            LockWorld | UnlockWorld | TogglePvp | TogglePvpTeams | ToggleFriendlyFire | ToggleDriedFinger
+        )
+    }
+}
+
 /// Message type tags (the 4th frame byte).
 mod tag {
     pub const HELLO: u8 = 0;

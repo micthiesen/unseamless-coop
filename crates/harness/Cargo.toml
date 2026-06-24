@@ -1,0 +1,13 @@
+[package]
+name = "harness"
+description = "Headless two-peer driver for the unseamless-coop side-channel (no game, no Steam). Runs the mod-coordination logic over an in-memory transport so the protocol/handshake/config-sync/log-forward flow can be exercised on the host."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+unseamless-core = { path = "../unseamless-core" }
