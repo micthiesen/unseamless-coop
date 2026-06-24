@@ -60,6 +60,11 @@ In rough order, each a small, reversible probe:
 - **Side-channel:** register a `receive_packet` task on a custom packet type and a manual
   `broadcast_packet` send; confirm round-trip between two modded clients. This is the foundation
   for config sync and session actions.
+- **Debug log forwarding:** once the side-channel round-trips, wire `ModMessage::Log` →
+  `broadcast_packet` on clients with `[debug] forward_to_host`, and on the host feed received
+  records into `diagnostics::LogBundle` and write the merged file. Then a friend's whole session
+  lands in one place on the host. Model + message are already host-tested; this is just the
+  transport glue. Rate-limit it so debug logging can't flood the channel.
 - **Persistence:** find where the game tears down the session on map change and whether keeping
   it alive is viable.
 

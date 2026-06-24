@@ -79,6 +79,13 @@ Two crates, split by what can be verified where (full design in
   loads config and registers `Feature`s as recurring tasks. Binds core to the live game via the
   SDK. Its correctness needs the rig.
 
+## Workflow
+
+This is a personal project: **commit and push directly to `main` as needed** — no draft PRs, no
+stacked branches, no PR descriptions. Keep commits small and well-described, keep `main` green
+(`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
+pass before pushing). This overrides the global draft-PR/stacking workflow.
+
 ## Deliberate divergences from ERSC (don't "fix" back)
 
 We reimplement ERSC's *effect*, not its design, and intentionally differ. Full list in
