@@ -75,16 +75,42 @@ We follow the same model:
 This shrinks the hard RE surface from "an entire netcode" to "how the game's session FSM
 behaves and where ERSC relaxes/persists it" — observable on the rig.
 
+## Divergences from ERSC (deliberate — don't "fix" these back)
+
+We are reimplementing ERSC's *effect*, not copying its design, and we intentionally differ in
+several places. Recorded here so future work doesn't pattern-match ERSC and undo a choice:
+
+1. **Config is TOML + serde, not ERSC's `ersc_settings.ini`.** Adding an option is a struct field
+   (`unseamless-core/config.rs`); serde handles load/save and ignores unknown keys (forward/back
+   compatible). We do **not** parse ERSC's `.ini` — no drop-in compat is needed since everyone
+   runs our mod. Don't reintroduce a hand-written INI parser.
+2. **Settings live in one declarative registry** (`unseamless-core/settings.rs`). Each option is
+   described once (label, kind, get/set) and that single declaration powers *both* the config
+   file and the in-game menu. Don't hand-wire per-option UI.
+3. **Session actions are a menu, not items/hotkeys.** ERSC triggers host/join/leave via custom
+   in-game **goods** (the `MODGOODS_*` items) and fixed hotkeys. We drive them through a menu
+   model (`unseamless-core/menu.rs`) rendered as an **ImGui overlay**. We are **not** reproducing
+   the custom goods, and we are **not** injecting a native pause-menu entry — the SDK exposes no
+   API for that and it's heavy UI RE (an overlay is simpler and fully ours). If you see the
+   `MODGOODS_*`/item machinery in FEATURES.md, it's catalogued for reference, not as a build target.
+4. **Networking: drive the game's own session layer; add a small private side-channel.** No
+   bespoke transport, and **no interop with vanilla-ERSC's** side-channel packet format (see the
+   "Key decision" section above).
+
 ## Module map (current + planned)
 
 | Path | Layer | Status |
 |---|---|---|
-| `unseamless-core/config.rs` | 1 | done, tested |
+| `unseamless-core/config.rs` (TOML/serde) | 1 | done, tested |
+| `unseamless-core/settings.rs` (registry) | 1 | done, tested |
 | `unseamless-core/scaling.rs` | 1 | done, tested |
-| `unseamless-core/` sync model + packet types | 2 | planned (host-testable once shape is known) |
+| `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
+| `unseamless-core/protocol.rs` (side-channel) | 2 | done, tested (wiring is rig-gated) |
+| `unseamless-core/` sync state model | 2 | planned (host-testable once shape is known) |
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |
 | `coop/features/observer.rs` | 2 | done (read-only) |
+| `coop/features/menu_overlay.rs` (DX12 hook + egui) | 2 | planned — renders `menu.rs`; rig-gated |
 | `coop/features/scaling.rs` (apply) | 1/2 | gated: application mechanism needs rig confirm |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |
 

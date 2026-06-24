@@ -79,6 +79,20 @@ Two crates, split by what can be verified where (full design in
   loads config and registers `Feature`s as recurring tasks. Binds core to the live game via the
   SDK. Its correctness needs the rig.
 
+## Deliberate divergences from ERSC (don't "fix" back)
+
+We reimplement ERSC's *effect*, not its design, and intentionally differ. Full list in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) > Divergences; the load-bearing ones:
+
+- **Config = TOML + serde** (`unseamless-core/config.rs`), not ERSC's `.ini`. Don't add an INI parser.
+- **One settings registry** (`unseamless-core/settings.rs`) drives both the config file and the
+  menu — declare an option once. Don't hand-wire per-option UI.
+- **Session actions = an overlay menu** (`unseamless-core/menu.rs` model + a planned egui/DX12
+  overlay), **not** ERSC's custom in-game items (`MODGOODS_*`) or a native pause-menu entry (no
+  SDK API for that). The `MODGOODS_*` surface in FEATURES.md is reference, not a build target.
+- **Networking = drive the game's own session layer + a private side-channel**
+  (`unseamless-core/protocol.rs`); no bespoke transport, no vanilla-ERSC interop.
+
 ## Build & test
 
 ```bash

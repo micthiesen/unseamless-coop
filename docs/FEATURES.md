@@ -24,6 +24,10 @@ Difficulty legend (rough, from our side of the rewrite):
 
 ## Session management (menu/hotkey actions — M)
 
+> **Divergence:** ERSC triggers these via in-game items + hotkeys; we drive them through an
+> overlay **menu** (`unseamless-core/menu.rs`). The actions below are the verbs; the trigger
+> mechanism is ours. See ARCHITECTURE.md > Divergences.
+
 From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
 - Open / Join / Lock / Unlock / Leave world
@@ -59,7 +63,10 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 - **Enemy rush:** easy / med / hard / infinite
 - **Boss rush** (+ base-DLC variants); arena waves (`YKBR2_*` battle start/wave/end)
 - **Custom mod goods** (`MODGOODS_*`): hosting / joining / break-in / leaving / game-rule-change
-  / rune-arc / Rot items ×5 / dried-finger items — custom inventory items driving session actions
+  / rune-arc / Rot items ×5 / dried-finger items — custom inventory items driving session actions.
+  **Divergence: not a build target.** These exist in ERSC only because items were its easiest
+  action trigger; we use the overlay menu instead (ARCHITECTURE.md > Divergences). Catalogued
+  here for reference only.
 - Rune arc sharing
 
 ## UI / locale (M)
