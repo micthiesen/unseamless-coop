@@ -26,8 +26,10 @@ use crate::diagnostics::{LogLevel, LogRecord};
 
 /// Magic prefix identifying one of our side-channel frames.
 pub const MAGIC: [u8; 2] = *b"UC";
-/// Current wire version. Bump on any incompatible change; decoders reject mismatches.
-pub const VERSION: u8 = 1;
+/// Current wire version. Bump on any incompatible change; decoders reject mismatches. v2 added the
+/// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`, so a v1 peer is rejected as
+/// `UnknownVersion` rather than silently misparsing the shifted payload.
+pub const VERSION: u8 = 2;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
@@ -452,6 +454,24 @@ mod tests {
         let mut bytes = ModMessage::Ping { frame: 1 }.encode();
         bytes[2] = 99;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(99)));
+    }
+
+    #[test]
+    fn rejects_superseded_v1_frame() {
+        // A peer on the pre-identity (v1) format is rejected by the version gate, so the layout
+        // skew can never reach the field decoders and silently misparse.
+        let mut bytes = ModMessage::Ping { frame: 1 }.encode();
+        bytes[2] = 1;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(1)));
+    }
+
+    #[test]
+    fn config_sync_generation_sits_at_a_fixed_offset() {
+        // Pin the on-wire position of `generation` (bytes 4..8, right after magic+version+tag), so
+        // an encoder offset regression that a symmetric decode bug would hide is still caught.
+        let bytes = ModMessage::ConfigSync { generation: 0x0A0B_0C0D, settings: shared() }.encode();
+        assert_eq!(&bytes[3..4], &[tag::CONFIG_SYNC]);
+        assert_eq!(&bytes[4..8], &0x0A0B_0C0Du32.to_be_bytes());
     }
 
     #[test]

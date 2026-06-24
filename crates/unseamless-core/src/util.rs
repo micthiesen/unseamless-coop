@@ -277,6 +277,18 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_refill_grants_exactly_that_many_takes() {
+        let mut rl = RateLimiter::new(100);
+        while rl.try_take() {} // drain to empty
+        rl.refill(8.0);
+        let mut granted = 0;
+        while rl.try_take() {
+            granted += 1;
+        }
+        assert_eq!(granted, 8, "a refill of N grants exactly N takes");
+    }
+
+    #[test]
     fn rate_limiter_caps_at_capacity_and_ignores_bad_refills() {
         let mut rl = RateLimiter::new(2);
         rl.refill(100.0); // can't exceed capacity

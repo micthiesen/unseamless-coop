@@ -258,13 +258,12 @@ fn scenario_lossy() {
 
 /// Drive a TCP-backed session for a fixed number of maintenance ticks, sleeping between them so the
 /// two processes interleave over the real socket.
-fn drive_tcp(label: &str, session: &mut Session<TcpTransport>, ticks: usize) {
+fn drive_tcp(session: &mut Session<TcpTransport>, ticks: usize) {
     for _ in 0..ticks {
         session.maintain();
         session.pump();
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = label;
 }
 
 fn run_tcp_host(addr: &str) {
@@ -281,7 +280,7 @@ fn run_tcp_host(addr: &str) {
     let changed = host.peer_mut().mark_config_changed();
     host.broadcast(changed);
 
-    drive_tcp("host", &mut host, 40);
+    drive_tcp(&mut host, 40);
     println!("[host] final known peers: {:?}", host.peer().known_peers());
     println!("[host] done");
 }
@@ -293,7 +292,7 @@ fn run_tcp_client(addr: &str) {
     println!("[client] boss_health BEFORE = {}", client.peer().config().scaling.boss_health);
     client.connect();
 
-    drive_tcp("client", &mut client, 40);
+    drive_tcp(&mut client, 40);
     println!("[client] boss_health AFTER  = {}", client.peer().config().scaling.boss_health);
     println!("[client] allow_invaders     = {}", client.peer().config().gameplay.allow_invaders);
     println!("[client] known peers        = {:?}", client.peer().known_peers());

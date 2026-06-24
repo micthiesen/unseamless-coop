@@ -30,12 +30,37 @@ use crate::util::{RateLimiter, Version};
 
 /// Maintenance ticks ([`Peer::maintain`] calls) we tolerate hearing nothing from a peer before
 /// flagging it as lost. The wall-clock timeout is this times the maintenance cadence the binding
-/// layer chooses.
+/// layer chooses — so the cadence is load-bearing (see [`Peer::maintain`]); pick it deliberately.
 const LIVENESS_TIMEOUT_TICKS: u64 = 10;
 /// Burst of forwarded log records a client may emit before the limiter throttles it.
 const LOG_FORWARD_BURST: u32 = 32;
 /// Forwarded-log tokens restored per [`Peer::maintain`] call (the steady-state forwarding rate).
+/// Like [`LIVENESS_TIMEOUT_TICKS`], this is denominated in maintenance ticks, so its real
+/// logs-per-second is the binding layer's maintain cadence times this — keep that cadence stable.
 const LOG_FORWARD_REFILL_PER_TICK: f64 = 8.0;
+
+/// Per-sender monotonic sequence gate: accepts a frame only if its `seq` advances past everything
+/// seen from that sender, so a duplicated or reordered-old frame is rejected. The session-action
+/// and log-forward dedups share this one tested concept rather than open-coding the comparison
+/// (in two easily-skewed directions) at each site.
+#[derive(Default)]
+struct SeqGate {
+    seen: BTreeMap<PeerId, u32>,
+}
+
+impl SeqGate {
+    /// `true` (and records `seq`) if it's newer than anything seen from `from`; `false` for a
+    /// duplicate or reordered-old frame. The first real seq (`>= 1`) always passes the `0` floor.
+    fn accept(&mut self, from: PeerId, seq: u32) -> bool {
+        let last = self.seen.get(&from).copied().unwrap_or(0);
+        if seq > last {
+            self.seen.insert(from, seq);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 pub struct Peer {
     id: PeerId,
@@ -60,12 +85,16 @@ pub struct Peer {
     ping_frame: u64,
 
     // --- inbound high-water marks (drop stale/duplicate frames) ---
-    /// Highest config generation we've applied from the host (`None` until the first sync).
+    /// Highest config generation we've applied from the host (`None` until the first sync). This
+    /// assumes the host's generation is monotonic across our lifetime, which holds within one host
+    /// session. A host *restart* or host migration resets the source counter and would stall here;
+    /// handling that needs a host-instance epoch, deferred until the rig shows how the game's
+    /// session FSM signals a host change (it's a Layer-2 concern — see ARCHITECTURE.md).
     applied_config_gen: Option<u32>,
-    /// Highest action seq seen from each sender.
-    last_action_seq: BTreeMap<PeerId, u32>,
-    /// Highest forwarded-log seq seen from each sender (host-side dedup).
-    last_log_seq: BTreeMap<PeerId, u32>,
+    /// Dedup gate for inbound session actions (exactly-once apply per sender).
+    action_gate: SeqGate,
+    /// Dedup gate for inbound forwarded logs (host-side, exactly-once aggregation per sender).
+    log_gate: SeqGate,
 
     // --- liveness ---
     /// Maintenance-tick clock; advances once per `maintain()`.
@@ -98,8 +127,8 @@ impl Peer {
             out_log_seq: 0,
             ping_frame: 0,
             applied_config_gen: None,
-            last_action_seq: BTreeMap::new(),
-            last_log_seq: BTreeMap::new(),
+            action_gate: SeqGate::default(),
+            log_gate: SeqGate::default(),
             local_tick: 0,
             last_seen: BTreeMap::new(),
             stale_peers: BTreeSet::new(),
@@ -120,6 +149,11 @@ impl Peer {
 
     /// Process one inbound message; return any outbound responses to broadcast.
     pub fn handle(&mut self, from: PeerId, msg: ModMessage) -> Vec<ModMessage> {
+        // Ignore our own broadcast if the transport ever echoes it back (a real P2P mesh might):
+        // self-frames would otherwise pollute the peer roster and liveness with our own id.
+        if from == self.id {
+            return vec![];
+        }
         // Any frame is evidence the sender is alive.
         self.last_seen.insert(from, self.local_tick);
 
@@ -157,10 +191,9 @@ impl Peer {
             }
             ModMessage::SessionAction { seq, action } => {
                 // Drop duplicate/reordered-old action frames (apply each exactly once).
-                if seq <= self.last_action_seq.get(&from).copied().unwrap_or(0) {
+                if !self.action_gate.accept(from, seq) {
                     return vec![];
                 }
-                self.last_action_seq.insert(from, seq);
                 // Authorize host-only actions by the SENDER's role (not the local UI).
                 if action.is_host_only() && from != self.host_id {
                     self.notifications.warn(format!(
@@ -176,8 +209,7 @@ impl Peer {
             ModMessage::Ping { .. } => vec![],
             ModMessage::Log(record) => {
                 // Only the host aggregates forwarded logs, and only newer records per sender.
-                if self.is_host() && record.seq > self.last_log_seq.get(&from).copied().unwrap_or(0) {
-                    self.last_log_seq.insert(from, record.seq);
+                if self.is_host() && self.log_gate.accept(from, record.seq) {
                     self.log_bundle.add(peer_tag(from), record);
                 }
                 vec![]
@@ -229,10 +261,16 @@ impl Peer {
         vec![ModMessage::Log(LogRecord { seq: self.out_log_seq, level, message: message.into() })]
     }
 
-    /// One maintenance tick, driven by the binding layer on a cadence (e.g. once a second). Returns
-    /// the frames to broadcast: a liveness heartbeat from everyone, plus the host's authoritative
-    /// config re-assertion (which heals any dropped sync). Also refills the forward limiter and
-    /// updates per-peer liveness.
+    /// One maintenance tick, driven by the binding layer on a **fixed cadence** (e.g. once a
+    /// second). Returns the frames to broadcast: a liveness heartbeat from everyone, plus the
+    /// host's authoritative config re-assertion (which heals any dropped sync). Also advances the
+    /// liveness clock + sweep and refills the forward limiter.
+    ///
+    /// These concerns are intentionally bundled at one cadence because they share one logical
+    /// clock — `LIVENESS_TIMEOUT_TICKS` and `LOG_FORWARD_REFILL_PER_TICK` are both per-tick, so the
+    /// cadence must stay stable for their wall-clock meaning to hold. If a future consumer needs
+    /// the config re-assert on a *slower* beat than the heartbeat, split this into separate
+    /// emitters (a `util::Timer` per concern); there's no such consumer yet, so it stays one call.
     pub fn maintain(&mut self) -> Vec<ModMessage> {
         self.local_tick = self.local_tick.wrapping_add(1);
         self.log_limiter.refill(LOG_FORWARD_REFILL_PER_TICK);
@@ -312,11 +350,14 @@ fn fmt_version(v: Version) -> String {
 pub struct Session<T: Transport> {
     peer: Peer,
     transport: T,
+    /// Inbound frames that failed to decode (foreign/corrupt). Surfaced so the binding layer can
+    /// tell "quiet" from "receiving garbage" on an unknown P2P channel.
+    decode_failures: u64,
 }
 
 impl<T: Transport> Session<T> {
     pub fn new(peer: Peer, transport: T) -> Self {
-        Self { peer, transport }
+        Self { peer, transport, decode_failures: 0 }
     }
 
     /// Announce ourselves to the session (sends `Hello`).
@@ -332,12 +373,20 @@ impl<T: Transport> Session<T> {
         let count = inbound.len();
         for (from, bytes) in inbound {
             // Malformed/foreign frames are dropped — the decoder already rejects hostile input.
-            if let Ok(msg) = ModMessage::decode(&bytes) {
-                let out = self.peer.handle(from, msg);
-                self.broadcast(out);
+            match ModMessage::decode(&bytes) {
+                Ok(msg) => {
+                    let out = self.peer.handle(from, msg);
+                    self.broadcast(out);
+                }
+                Err(_) => self.decode_failures = self.decode_failures.wrapping_add(1),
             }
         }
         count
+    }
+
+    /// Count of inbound frames that failed to decode over this session's life.
+    pub fn decode_failures(&self) -> u64 {
+        self.decode_failures
     }
 
     /// One maintenance tick: broadcast the peer's heartbeat + host config re-assertion (drives
@@ -365,7 +414,7 @@ impl<T: Transport> Session<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::{FaultModel, Loopback};
+    use crate::transport::{FaultModel, Loopback, Transport};
 
     const HOST: PeerId = 1;
     const CLIENT: PeerId = 2;
@@ -617,6 +666,31 @@ mod tests {
         // A maintenance tick refills some tokens, allowing forwarding to resume.
         client.maintain();
         assert!(!client.forward_log(LogLevel::Trace, "after refill").is_empty());
+    }
+
+    #[test]
+    fn self_frames_are_ignored() {
+        // If the transport ever echoes our own broadcast back, it must not enter the roster or
+        // liveness as a phantom peer.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, Config::default());
+        let out = host.handle(HOST, ModMessage::Hello { mod_version: v.to_u32() });
+        assert!(out.is_empty());
+        assert!(host.known_peers().is_empty(), "self must not be added to the roster");
+        assert!(!host.is_stale(HOST));
+    }
+
+    #[test]
+    fn session_counts_undecodable_frames() {
+        let v = Version::new(0, 1, 0);
+        let mut ends = Loopback::mesh(&[HOST, CLIENT]);
+        let mut raw = ends.pop().unwrap(); // CLIENT raw endpoint
+        let host_end = ends.pop().unwrap(); // HOST endpoint
+        let mut host = Session::new(Peer::new(HOST, HOST, v, Config::default()), host_end);
+
+        raw.send(b"not a UC frame at all");
+        host.pump();
+        assert_eq!(host.decode_failures(), 1, "garbage on the wire is observable, not silent");
     }
 
     #[test]

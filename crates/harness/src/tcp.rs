@@ -17,6 +17,11 @@ use std::net::{TcpListener, TcpStream};
 use unseamless_core::transport::{PeerId, Transport};
 
 const HEADER_LEN: usize = 4 + 8; // u32 len + u64 sender
+/// Reject a frame claiming more than this payload — a desynced or hostile peer otherwise grows
+/// `inbuf` without bound while we wait for a frame that never completes. Side-channel `ModMessage`s
+/// are tiny (a forwarded log caps at ~2 KiB), so 64 KiB is generous. This matters most when this
+/// framing graduates to the layer-3 debug bridge, whose peer is the live mod.
+const MAX_FRAME: usize = 64 * 1024;
 
 pub struct TcpTransport {
     local_id: PeerId,
@@ -61,7 +66,10 @@ impl TcpTransport {
             match self.stream.write(&buf[written..]) {
                 Ok(0) => return, // peer closed
                 Ok(n) => written += n,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::yield_now(),
+                // Back off a touch instead of busy-spinning if the send buffer is full.
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_micros(200))
+                }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(_) => return,
             }
@@ -96,6 +104,14 @@ impl Transport for TcpTransport {
         let mut pos = 0;
         while self.inbuf.len() - pos >= HEADER_LEN {
             let len = u32::from_be_bytes(self.inbuf[pos..pos + 4].try_into().unwrap()) as usize;
+            if len > MAX_FRAME {
+                // Framing desync or a hostile peer — don't buffer unboundedly. Drop everything
+                // buffered and resync from the next read; over a trusted localhost link this
+                // shouldn't happen, so make it loud.
+                eprintln!("[tcp] frame len {len} exceeds MAX_FRAME {MAX_FRAME}; dropping buffer");
+                self.inbuf.clear();
+                return out;
+            }
             if self.inbuf.len() - pos < HEADER_LEN + len {
                 break; // header says more payload than we've received yet
             }
