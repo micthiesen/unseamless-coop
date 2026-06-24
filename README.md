@@ -17,6 +17,10 @@ patterns proven in the sibling project [`er-crit-coop`](https://github.com/micth
 
 ## Install & play
 
+> Heads up: **co-op itself isn't wired up yet** (see the status note above). Today this installs the
+> framework, boots outside EAC, and creates/validates your config — it does **not** connect you to
+> friends. The flow below is the intended end-to-end experience and how to set up for it now.
+
 A drop-in, no-installer bundle. Getting from download to a co-op session with friends:
 
 1. **Get the files.** From a [release](../../releases), extract the zip's contents into your
@@ -63,6 +67,7 @@ to apply changes. The main sections:
 - `[gameplay]` — allow invaders/summons, death debuffs, overhead display, skip splash screens, …
 - `[loader]` — `enabled`, and an `order` list to pin the load order of other `mods/` DLLs.
 - `[debug]` — verbose logging, and (once co-op lands) forwarding your logs to the host.
+- `[save]` / `[language]` — the co-op save-file extension and a locale override.
 
 The config isn't part of the install bundle, so re-copying the mod after a game update never
 overwrites your settings.
