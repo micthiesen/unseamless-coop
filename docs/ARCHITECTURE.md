@@ -105,6 +105,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/settings.rs` (registry) | 1 | done, tested |
 | `unseamless-core/scaling.rs` | 1 | done, tested |
 | `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
+| `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested (renderer rig-gated) |
 | `unseamless-core/protocol.rs` (side-channel) | 2 | done, tested (wiring is rig-gated) |
 | `unseamless-core/` sync state model | 2 | planned (host-testable once shape is known) |
 | `coop/app.rs`, `feature.rs` | — | done |

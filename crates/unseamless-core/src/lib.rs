@@ -11,6 +11,7 @@
 pub mod config;
 pub mod diagnostics;
 pub mod menu;
+pub mod notifications;
 pub mod protocol;
 pub mod scaling;
 pub mod settings;
