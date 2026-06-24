@@ -14,10 +14,11 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **early skeleton.** `Cargo.toml`, `rust-toolchain.toml`, `src/` (`lib.rs` +
-> `logger.rs` + `hook.rs`), CI, and `scripts/` are scaffolded from `er-crit-coop`. The DLL
-> loads, installs a recurring frame task, and heartbeats — the harness is proven. ERSC
-> behavior is built out from `hook::on_frame`.
+> Status: **framework in place.** Cargo workspace (host-tested `unseamless-core` + the
+> `unseamless-coop` cdylib). Config parsing and scaling math are done and unit-tested on the
+> Mac; the cdylib loads config, registers `Feature`s as frame tasks, and ships a read-only
+> session observer. The co-op core (Layer 2) is RE-gated and waits on a rig observation run —
+> see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/RIG-RUNBOOK.md`](docs/RIG-RUNBOOK.md).
 
 ## Clean-room hygiene (one hard rule)
 
@@ -66,14 +67,30 @@ in-game verification happens separately and asynchronously. The log-line contrac
 heartbeat → effect lines) is the handoff between the two — write code so its behavior is
 legible from the log, since that's all the remote verifier sees.
 
-## Build
+## Code layout (workspace)
 
-A Windows DLL (`cdylib`) cross-compiled to `x86_64-pc-windows-gnu` — no Windows host needed.
+Two crates, split by what can be verified where (full design in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
+
+- **`crates/unseamless-core`** — pure Rust, **no game/OS deps**. Config, scaling math, and
+  (later) the sync model + protocol types. **Runs its tests on macOS** — this is where logic is
+  *verified*, not just hoped. Keep decision logic here.
+- **`crates/unseamless-coop`** — the `cdylib`. Thin binding layer: `DllMain` → `app::install`
+  loads config and registers `Feature`s as recurring tasks. Binds core to the live game via the
+  SDK. Its correctness needs the rig.
+
+## Build & test
 
 ```bash
-cargo build --release --target x86_64-pc-windows-gnu
-# -> target/x86_64-pc-windows-gnu/release/<crate>.dll
+cargo build --release        # default target is windows-gnu -> the DLL (see .cargo/config.toml)
+scripts/test-core.sh         # run unseamless-core's tests on the host triple (macOS-runnable)
 ```
+
+The shippable artifact is `target/x86_64-pc-windows-gnu/release/unseamless_coop.dll`. The
+default cargo target is the cross target, so a bare `cargo build`/`cargo check`/`cargo clippy`
+works on the Mac. The core crate has no windows deps, so `scripts/test-core.sh` compiles and
+runs its unit tests natively (a bare `cargo test` would target windows-gnu and can't execute on
+macOS).
 
 - The cross target is pinned in `rust-toolchain.toml` (`channel = "stable"`,
   `targets = ["x86_64-pc-windows-gnu"]`) so `rustup` installs it automatically.
