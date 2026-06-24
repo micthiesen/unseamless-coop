@@ -13,6 +13,8 @@
 //! This module is pure (the timestamp/run-id/platform strings are supplied by the cdylib, which
 //! has the clock/OS); it's fully host-tested.
 
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
 
 /// Verbosity, mirroring `log`'s levels but serde-friendly and stable on the wire.
@@ -178,7 +180,9 @@ pub struct LogRecord {
 /// this is the "everything in one place" convenience.
 #[derive(Debug, Default)]
 pub struct LogBundle {
-    entries: Vec<(String, LogRecord)>,
+    // VecDeque so drop-oldest is O(1) — the cap defends against a flood, so eviction must not
+    // itself be O(n) per add (which `Vec::remove(0)` would be).
+    entries: VecDeque<(String, LogRecord)>,
 }
 
 /// Cap on retained records, so a peer flooding forwarded `Log` frames can't grow the bundle
@@ -192,9 +196,9 @@ impl LogBundle {
 
     pub fn add(&mut self, peer: impl Into<String>, record: LogRecord) {
         if self.entries.len() >= MAX_BUNDLE_ENTRIES {
-            self.entries.remove(0); // drop-oldest; bounds memory against a hostile flood
+            self.entries.pop_front(); // O(1) drop-oldest; bounds memory against a hostile flood
         }
-        self.entries.push((peer.into(), record));
+        self.entries.push_back((peer.into(), record));
     }
 
     /// Render grouped by peer, each peer's lines ordered by `seq`. Stable and easy to scan.

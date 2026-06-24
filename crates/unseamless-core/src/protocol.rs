@@ -19,7 +19,7 @@
 //! +------+---------+------+-----------------+
 //! ```
 
-use crate::config::Scaling;
+use crate::config::{Config, Scaling};
 use crate::diagnostics::{LogLevel, LogRecord};
 
 /// Magic prefix identifying one of our side-channel frames.
@@ -56,6 +56,19 @@ pub struct SharedSettings {
     pub allow_invaders: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
+}
+
+/// Project a [`Config`] into the host-enforced subset broadcast over the wire. Keeps the
+/// "which fields are session-wide" decision in core (host-tested) rather than in the cdylib.
+impl From<&Config> for SharedSettings {
+    fn from(c: &Config) -> Self {
+        Self {
+            scaling: c.scaling,
+            allow_invaders: c.gameplay.allow_invaders,
+            death_debuffs: c.gameplay.death_debuffs,
+            allow_summons: c.gameplay.allow_summons,
+        }
+    }
 }
 
 /// Host/client session actions, mirroring ERSC's `OPTIONSELECT_*` menu surface (FEATURES.md).
@@ -323,6 +336,22 @@ mod tests {
             let bytes = msg.encode();
             assert_eq!(ModMessage::decode(&bytes), Ok(msg.clone()), "round-trip failed for {msg:?}");
         }
+    }
+
+    #[test]
+    fn shared_settings_projects_the_host_enforced_subset_of_config() {
+        let mut cfg = crate::config::Config::default();
+        cfg.gameplay.allow_invaders = false;
+        cfg.scaling.boss_health = 200;
+        cfg.session.password = "secret".into(); // NOT part of the shared subset
+        let shared = SharedSettings::from(&cfg);
+        assert!(!shared.allow_invaders);
+        assert_eq!(shared.scaling.boss_health, 200);
+        // Round-trips over the wire unchanged.
+        assert_eq!(
+            ModMessage::decode(&ModMessage::ConfigSync(shared).encode()),
+            Ok(ModMessage::ConfigSync(shared)),
+        );
     }
 
     #[test]
