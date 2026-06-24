@@ -1,0 +1,24 @@
+//! The feature abstraction.
+//!
+//! A [`Feature`] is one unit of mod behavior that runs each frame in a chosen task phase. The
+//! [`App`](crate::app) owns a set of features and drives them from the game's scheduler. Keeping
+//! features small and self-contained is what lets the rewrite stay legible where ERSC is one
+//! monolith.
+
+use eldenring::cs::CSTaskGroupIndex;
+
+pub trait Feature: Send {
+    /// Stable short name, used in logs.
+    fn name(&self) -> &'static str;
+
+    /// Which frame phase this feature runs in. Default `FrameBegin` ticks every frame including
+    /// menus/title (good for session-state work that exists before a save loads). Features that
+    /// touch world/combat state should override with a phase ordered against that state (e.g.
+    /// `ChrIns_PostPhysics`).
+    fn phase(&self) -> CSTaskGroupIndex {
+        CSTaskGroupIndex::FrameBegin
+    }
+
+    /// Called once per frame in [`phase`](Feature::phase). Runs on the game's main thread.
+    fn on_frame(&mut self);
+}

@@ -407,9 +407,7 @@ impl Ini {
 /// Strip a trailing `;`/`#` comment. Note: ERSC values are plain (no quoting/escaping), and a
 /// `;` or `#` never appears in a legitimate value here, so a simple split is correct.
 fn strip_comment(line: &str) -> &str {
-    let cut = line
-        .find(|c| c == ';' || c == '#')
-        .unwrap_or(line.len());
+    let cut = line.find([';', '#']).unwrap_or(line.len());
     &line[..cut]
 }
 
