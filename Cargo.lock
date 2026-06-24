@@ -168,7 +168,7 @@ checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
 
 [[package]]
 name = "harness"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "unseamless-core",
 ]
@@ -520,7 +520,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unseamless-coop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eldenring",
  "fromsoftware-shared",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "unseamless-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "log",
  "num_enum",
