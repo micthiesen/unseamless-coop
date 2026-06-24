@@ -107,7 +107,10 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
 | `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested (renderer rig-gated) |
 | `unseamless-core/protocol.rs` (side-channel) | 2 | done, tested (wiring is rig-gated) |
-| `unseamless-core/` sync state model | 2 | planned (host-testable once shape is known) |
+| `unseamless-core/transport.rs` (`Transport` seam + `Loopback`) | 2 | done, tested |
+| `unseamless-core/peer.rs` (`Peer`/`Session` coordination) | 2 | done, tested (handshake/config-sync/actions/log-forward) |
+| `harness` bin (two-peer loop, no game) | — | done — see the `/test-loop` skill |
+| `unseamless-core/` player/world sync model | 2 | planned (the game's job; rig-gated) |
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |
 | `coop/features/observer.rs` | 2 | done (read-only) |

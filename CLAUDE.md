@@ -108,6 +108,8 @@ cargo build --profile diag   # debugging build: keeps symbols + debug-assertions
                              #   panic backtraces (the shipping build is stripped). Use when
                              #   chasing a crash; not for release.
 scripts/test-core.sh         # run unseamless-core's tests on the host triple (macOS-runnable)
+scripts/harness.sh [scenario]  # drive the two-peer side-channel harness (no game) — the fast
+                             #   test loop. See the /test-loop skill for all the test layers.
 ```
 
 **Logging / debug:** each run writes a self-describing log under `SeamlessCoop/logs/` (last 5
