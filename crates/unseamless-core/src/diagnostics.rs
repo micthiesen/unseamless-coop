@@ -201,6 +201,15 @@ impl LogBundle {
         self.entries.push_back((peer.into(), record));
     }
 
+    /// Number of retained records (bounded by [`MAX_BUNDLE_ENTRIES`]).
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     /// Render grouped by peer, each peer's lines ordered by `seq`. Stable and easy to scan.
     pub fn render(&self) -> String {
         // Collect distinct peers in first-seen order.
@@ -353,6 +362,20 @@ mod tests {
     #[derive(serde::Serialize, serde::Deserialize)]
     struct Wrap {
         level: LogLevel,
+    }
+
+    #[test]
+    fn bundle_caps_at_max_dropping_oldest() {
+        let mut b = LogBundle::new();
+        let overflow = 5;
+        for seq in 0..(MAX_BUNDLE_ENTRIES + overflow) as u32 {
+            b.add("p", LogRecord { seq, level: LogLevel::Info, message: String::new() });
+        }
+        assert_eq!(b.len(), MAX_BUNDLE_ENTRIES, "retained count is capped");
+        // The oldest `overflow` records (seq 0..5) were evicted; the window is seq 5.. .
+        let rendered = b.render();
+        assert!(!rendered.contains("[    0]"), "oldest record dropped");
+        assert!(rendered.contains(&format!("[{:>5}]", MAX_BUNDLE_ENTRIES + overflow - 1)), "newest kept");
     }
 
     #[test]

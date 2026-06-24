@@ -60,7 +60,7 @@ cipher; there are dedicated `TaskLineIdx_FrpgNet_*` and `NetFlushSendData` task 
 
 So ERSC almost certainly does **not** implement its own transport — it **drives the game's
 existing session/matchmaking** with the restrictions relaxed and the session made persistent.
-We follow the same model:
+We follow the same model. (Full per-subsystem inventory: [SDK-COVERAGE.md](SDK-COVERAGE.md).)
 
 - **Transport = the game's** (Steam P2P, already encrypted). We do not reinvent it.
 - **What the mod adds:** relax `session_player_limit` and area-boundary teardown; keep sessions

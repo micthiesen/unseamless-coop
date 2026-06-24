@@ -200,8 +200,9 @@ default.
 ## Loading & the run/verify loop (Linux + Proton)
 
 Single `.dll` dropped in `ELDEN RING/Game/mods/`, loaded by **Elden Mod Loader**
-(`DINPUT8.dll`); coexists with Seamless Co-op via the exe-swap launch. No ModEngine/me3.
-`scripts/deploy.sh` copies the built DLL there.
+(`DINPUT8.dll`) via the non-EAC exe-swap launch (the loading path Seamless Co-op uses — during
+development we reuse its launcher; unseamless-coop *replaces* ERSC, it doesn't run alongside it).
+No ModEngine/me3. `scripts/deploy.sh` copies the built DLL there.
 
 Driving launch/observe/kill from the shell (from `er-crit-coop/docs/DEVELOPMENT.md`):
 
@@ -227,6 +228,6 @@ tag message as the notes. The `er-crit-coop` repo has a `/release` skill that bu
 
 ## Safety / legitimacy
 
-Seamless Co-op runs **outside EAC**, so these mods are for co-op only. Never take a modded
-session onto the official servers. The mod must not touch `regulation.bin` (so it can't block
-players from connecting).
+unseamless-coop loads **outside EAC** (the non-EAC path Seamless Co-op uses), so it's for co-op
+only. Never take a modded session onto the official servers. The mod must not touch
+`regulation.bin` (so it can't block players from connecting).

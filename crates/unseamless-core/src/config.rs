@@ -353,6 +353,18 @@ mod tests {
     }
 
     #[test]
+    fn scaling_clamp_boundary_is_exact() {
+        // MAX is valid (untouched, no warning); MAX+1 clamps.
+        let max = super::MAX_SCALING_PERCENT;
+        let (cfg, w) = Config::from_toml_str(&format!("[scaling]\nenemy_health = {max}\n")).unwrap();
+        assert_eq!(cfg.scaling.enemy_health, max);
+        assert!(w.is_empty());
+        let (cfg, w) = Config::from_toml_str(&format!("[scaling]\nenemy_health = {}\n", max + 1)).unwrap();
+        assert_eq!(cfg.scaling.enemy_health, max);
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
     fn volume_boundary_is_exact() {
         // 10 is valid (no warning); 11 clamps.
         let (cfg, w) = Config::from_toml_str("[gameplay]\ndefault_boot_master_volume = 10\n").unwrap();

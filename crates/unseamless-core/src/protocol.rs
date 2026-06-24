@@ -71,6 +71,18 @@ impl From<&Config> for SharedSettings {
     }
 }
 
+impl SharedSettings {
+    /// Apply a received host-enforced subset onto a local [`Config`] (the inverse of
+    /// [`From<&Config>`]). A client calls this when it receives the host's `ConfigSync` so its
+    /// local rules match — the per-field mapping lives here in core, not in the cdylib.
+    pub fn apply_to(&self, cfg: &mut Config) {
+        cfg.scaling = self.scaling;
+        cfg.gameplay.allow_invaders = self.allow_invaders;
+        cfg.gameplay.death_debuffs = self.death_debuffs;
+        cfg.gameplay.allow_summons = self.allow_summons;
+    }
+}
+
 /// Host/client session actions, mirroring ERSC's `OPTIONSELECT_*` menu surface (FEATURES.md).
 /// Discriminants are explicit so the wire value is stable across refactors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,19 +351,41 @@ mod tests {
     }
 
     #[test]
-    fn shared_settings_projects_the_host_enforced_subset_of_config() {
+    fn shared_settings_projects_every_host_enforced_field() {
+        // Set each projected field to a non-default value so a wrong mapping (e.g. two fields
+        // reading the same config bool) is caught.
         let mut cfg = crate::config::Config::default();
         cfg.gameplay.allow_invaders = false;
+        cfg.gameplay.death_debuffs = false;
+        cfg.gameplay.allow_summons = false;
         cfg.scaling.boss_health = 200;
-        cfg.session.password = "secret".into(); // NOT part of the shared subset
+        cfg.session.password = "secret".into(); // machine-local; SharedSettings has no such field
         let shared = SharedSettings::from(&cfg);
         assert!(!shared.allow_invaders);
+        assert!(!shared.death_debuffs);
+        assert!(!shared.allow_summons);
         assert_eq!(shared.scaling.boss_health, 200);
-        // Round-trips over the wire unchanged.
         assert_eq!(
             ModMessage::decode(&ModMessage::ConfigSync(shared).encode()),
             Ok(ModMessage::ConfigSync(shared)),
         );
+    }
+
+    #[test]
+    fn shared_settings_apply_to_is_the_inverse_of_projection() {
+        let mut host = crate::config::Config::default();
+        host.gameplay.allow_invaders = false;
+        host.gameplay.allow_summons = false;
+        host.scaling.enemy_health = 80;
+        let shared = SharedSettings::from(&host);
+
+        // A client with different local settings receives and applies the host's subset.
+        let mut client = crate::config::Config::default();
+        client.session.password = "client-local".into(); // must be untouched (not shared)
+        shared.apply_to(&mut client);
+
+        assert_eq!(SharedSettings::from(&client), shared, "client now agrees on the shared subset");
+        assert_eq!(client.session.password, "client-local", "machine-local fields untouched");
     }
 
     #[test]

@@ -117,8 +117,9 @@ the pattern), then map the located region/offset/bit to a typed SDK field.
 ## Run + verify loop (Linux + Proton rig)
 
 Single `.dll` dropped in `ELDEN RING/Game/mods/`, loaded by **Elden Mod Loader**
-(`DINPUT8.dll`); coexists with Seamless Co-op via the exe-swap launch. `scripts/deploy.sh`
-copies the built DLL there. Driving launch/observe/kill from the shell:
+(`DINPUT8.dll`) via the non-EAC exe-swap launch (the loading path Seamless Co-op uses; during
+development we reuse its launcher — unseamless-coop replaces ERSC rather than running alongside
+it). `scripts/deploy.sh` copies the built DLL there. Driving launch/observe/kill from the shell:
 
 ```bash
 steam -applaunch 1245620                 # launches with the ersc exe-swap so the mod loads

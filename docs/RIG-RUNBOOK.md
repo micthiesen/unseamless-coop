@@ -83,11 +83,16 @@ The menu *model* and the settings *registry* are done and host-tested
   `CSFeMan` HUD state to optionally auto-show it when the pause menu is open.
 - **Input → menu**: map keys to `select_next`/`select_prev`/`activate`/`adjust` (poll
   `GetAsyncKeyState`). Trivial wiring; just needs the overlay to exist to verify.
-- **Notifications renderer**: draw `Notifications::toasts()` (transient) and `banners()`
-  (persistent) from the same overlay, and call `Notifications::tick(delta)` each frame to expire
-  toasts. The model (`unseamless-core/notifications.rs`) is host-tested; alternatively forward
-  banners/toasts to the game's native announcement system (the `YKNX3_*`-style on-screen messages)
-  once that display function is reverse-engineered — the model feeds either renderer.
+- **Notifications renderer + wiring**: draw `Notifications::toasts()` (transient) and `banners()`
+  (persistent) from the same overlay, or forward them to the game's native announcement system
+  (the `YKNX3_*`-style messages) once that display function is reverse-engineered — the model
+  (`unseamless-core/notifications.rs`) feeds either. Wiring decisions to make then:
+  - **Owner/cadence:** put one `Notifications` in `App` and `tick(delta)` it **once per frame**
+    (not per feature, or toasts age N× too fast). Features reach it through shared app state.
+  - **Producers to connect:** the cdylib config-load `Note`s (currently only `log::log!`-replayed
+    in `app::install`) → toasts via `Severity::from(log::Level)`; the `Hello` version handshake →
+    a `set_banner("version", …)`; the session observer's roster/state changes → "player joined"
+    toasts and a "connection lost" banner (`clear_all_banners()` on disconnect).
 - **Building `SessionContext`**: fill `in_session`/`is_host` from `CSSessionManager`
   (lobby/protocol state + the local player's `is_host`) — confirm the mapping from the observer
   log first.

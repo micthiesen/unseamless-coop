@@ -37,8 +37,8 @@ redistributed here.
 
 ## Safety
 
-Seamless Co-op runs outside EAC, so this is for co-op only. Don't take a modded session onto
-the official servers.
+unseamless-coop loads outside EAC, so it's for co-op only. Don't take a modded session onto the
+official servers.
 
 ## License
 
