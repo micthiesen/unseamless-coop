@@ -1,0 +1,30 @@
+[package]
+name = "unseamless-coop"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust rewrite of the Elden Ring Seamless Co-op (ERSC) mod, built on the fromsoftware-rs SDK"
+license = "MIT"
+
+[lib]
+name = "unseamless_coop"
+crate-type = ["cdylib"]
+
+[dependencies]
+# FromSoftware reverse-engineering SDK (vswarte/fromsoftware-rs). Pin both crates to the
+# EXACT SAME commit the struct layouts were read against — mixing revisions is silent UB.
+eldenring = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
+fromsoftware-shared = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
+
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemServices",
+] }
+log = "0.4"
+simplelog = { version = "0.12", default-features = false }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+codegen-units = 1
+lto = true
+strip = true

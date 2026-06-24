@@ -14,8 +14,29 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: greenfield. At time of writing the repo is essentially empty. Expect to scaffold
-> `Cargo.toml`, `rust-toolchain.toml`, `src/`, CI, and `scripts/` modeled on `er-crit-coop`.
+> Status: **early skeleton.** `Cargo.toml`, `rust-toolchain.toml`, `src/` (`lib.rs` +
+> `logger.rs` + `hook.rs`), CI, and `scripts/` are scaffolded from `er-crit-coop`. The DLL
+> loads, installs a recurring frame task, and heartbeats — the harness is proven. ERSC
+> behavior is built out from `hook::on_frame`.
+
+## Where things run (read this first)
+
+Development happens on a **macOS** laptop that **cannot run Elden Ring**. That's fine and
+expected — the workflow is deliberately split:
+
+- **On this Mac (the dev host):** edit code, cross-compile the DLL, run `cargo check`/`clippy`,
+  reason about the SDK and the reference `ersc.dll`. The full build toolchain works here
+  (`brew install mingw-w64` + the pinned cross target). **Everything in normal development is
+  doable here.**
+- **On a separate Linux + Proton rig (async, not this machine):** deploy the DLL, launch the
+  game, and watch the log to verify behavior. This is done **out of band** — do not expect to
+  launch the game or read a live log from the Mac. `scripts/deploy.sh` and the run/verify loop
+  below describe that rig, not this one.
+
+So: never block on "let me run the game to check." Build, commit, and push from the Mac; the
+in-game verification happens separately and asynchronously. The log-line contract (install →
+heartbeat → effect lines) is the handoff between the two — write code so its behavior is
+legible from the log, since that's all the remote verifier sees.
 
 ## Build
 
@@ -36,8 +57,8 @@ cargo build --release --target x86_64-pc-windows-gnu
   release `.dll` won't sha-match a local build. Compare `.text` size with
   `x86_64-w64-mingw32-objdump -h` to sanity-check equivalence.
 
-This dev host is **macOS**, which cannot run Elden Ring. Building and reasoning happen here;
-the actual run/verify loop (below) is Linux + Proton and was done on the `er-crit-coop` rig.
+Building works on this Mac; running the game does not (see "Where things run"). The
+run/verify loop below is the separate Linux + Proton rig.
 
 ## The SDK (the "pointer mappings" library)
 
