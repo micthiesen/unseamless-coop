@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Set up Rust toolchain
+        # rust-toolchain.toml pins the channel; ensure the cross target + clippy are present.
+        run: |
+          rustup show
+          rustup target add x86_64-pc-windows-gnu
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The DLL: default target is windows-gnu (.cargo/config.toml), so a bare build is the DLL.
+      - name: Build DLL
+        run: cargo build --release
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --release -- -D warnings
+
+      # unseamless-core is pure Rust with no game/OS deps, so its tests run on the Linux host.
+      - name: Test core
+        run: cargo test -p unseamless-core --target x86_64-unknown-linux-gnu
