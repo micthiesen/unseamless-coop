@@ -15,7 +15,7 @@ patterns proven in the sibling project [`er-crit-coop`](https://github.com/micth
 > reverse-engineering-gated and waits on a live observation run, so this is **not yet a functional
 > Seamless Co-op replacement.**
 
-## Install & play
+## Install & Play
 
 > Heads up: **co-op itself isn't wired up yet** (see the status note above). Today this installs the
 > framework, boots outside EAC, and creates/validates your config — it does **not** connect you to
@@ -46,7 +46,7 @@ A drop-in, no-installer bundle. Getting from download to a co-op session with fr
 
 This is the same install on Windows, Linux/Proton, and Steam Deck.
 
-### What's in the bundle
+### What's in the Bundle
 
 - `dinput8.dll` — the mod itself. The game auto-loads it (it's a proxy for the system `dinput8`),
   so there's **no separate mod loader**. It's also the parent loader: other DLL mods you drop in
@@ -82,14 +82,14 @@ everything else is personal preference.
 The config isn't part of the install bundle, so re-copying the mod after a game update never
 overwrites your settings.
 
-### Uninstalling / playing vanilla online
+### Uninstalling / Playing Vanilla Online
 
 While installed, every launch is modded/no-EAC, so you can't reach the official servers. To go
 back to vanilla online, restore the original launcher: Steam → ELDEN RING → Properties →
 Installed Files → **Verify integrity of game files** (this re-downloads the real
 `start_protected_game.exe`). Delete `dinput8.dll` to fully remove the mod.
 
-### ⚠️ After an ELDEN RING update
+### After an ELDEN RING Update
 
 A game update can restore the original `start_protected_game.exe` while leaving `dinput8.dll` in
 place — which would boot **EAC with a mod present**, risking your account. The mod guards against
@@ -101,7 +101,7 @@ The guard works off a launch marker the launcher sets. **Never set `UNSEAMLESS_L
 permanent environment variable** — doing so disarms the guard and would let the game boot under EAC
 with the mod loaded. It's meant to be set only per-launch, by our launcher.
 
-## Build & test
+## Build & Test
 
 Cross-compiles to a Windows DLL — no Windows host needed:
 
@@ -116,7 +116,7 @@ scripts/test-core.sh       # run the platform-independent core's unit tests on t
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`CLAUDE.md`](CLAUDE.md)
 for the SDK, safety invariants, and the build-here / verify-in-game-elsewhere split.
 
-## Independent reimplementation
+## Independent Reimplementation
 
 This is a clean reimplementation written against the public `fromsoftware-rs` SDK. It is **not
 affiliated with, endorsed by, or derived from the source code of** the original Seamless Co-op
@@ -127,8 +127,8 @@ redistributed here.
 ## Safety
 
 unseamless-coop loads outside EAC, so it's for co-op only. Don't take a modded session onto the
-official servers. See the post-update warning under [Install](#-after-an-elden-ring-update) — the
-mod self-aborts if it wasn't started by our launcher, but re-copy the files after any game update.
+official servers. See the [post-update warning](#after-an-elden-ring-update) — the mod self-aborts
+if it wasn't started by our launcher, but re-copy the files after any game update.
 
 ## License
 

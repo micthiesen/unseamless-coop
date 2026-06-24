@@ -85,6 +85,13 @@ stacked branches, no PR descriptions. Keep commits small and well-described, kee
 (`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
 pass before pushing). This overrides the global draft-PR/stacking workflow.
 
+## Docs & naming
+
+- The project name is always **`unseamless-coop`** — lowercase, hyphenated. Never title-case or
+  capitalize it (not "Unseamless-Coop", not "Unseamless Coop"), including in Markdown headers.
+- Otherwise use **title case for Markdown headers** in the README/docs (e.g. "Install & Play",
+  "What's in the Bundle"). Keep `ELDEN RING` in caps (the game's own styling).
+
 ## Deliberate divergences from ERSC (don't "fix" back)
 
 We reimplement ERSC's *effect*, not its design, and intentionally differ. Full list in
