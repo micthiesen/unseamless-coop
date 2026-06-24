@@ -1,0 +1,12 @@
+[package]
+name = "unseamless-core"
+description = "Platform-independent core for unseamless-coop: config, scaling, sync model, protocol types. No game/OS deps — host-testable."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "unseamless_core"
+
+[dependencies]
+log = { workspace = true }

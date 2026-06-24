@@ -459,7 +459,15 @@ dependencies = [
  "fromsoftware-shared",
  "log",
  "simplelog",
+ "unseamless-core",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "unseamless-core"
+version = "0.1.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]

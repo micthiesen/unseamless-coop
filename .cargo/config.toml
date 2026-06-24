@@ -1,0 +1,9 @@
+# The shippable artifact is a Windows DLL, and we develop on macOS, so make the cross
+# target the default: plain `cargo build` / `cargo check` produce the DLL and check the
+# game-bound crate against the real (windows-only) SDK.
+#
+# The pure `unseamless-core` crate has no SDK/OS deps and is host-testable. Because the
+# default target is windows-gnu (which can't RUN on macOS), test it against the host triple:
+#   cargo test -p unseamless-core --target aarch64-apple-darwin     (or: scripts/test-core.sh)
+[build]
+target = "x86_64-pc-windows-gnu"
