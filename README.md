@@ -17,8 +17,9 @@ patterns proven in the sibling project [`er-crit-coop`](https://github.com/micth
 
 ## Install
 
-A drop-in, no-installer bundle. From a release zip, copy into your `ELDEN RING/Game/` folder
-(next to `eldenring.exe`):
+A drop-in, no-installer bundle. From a [release](../../releases) zip, copy the contents into your
+`ELDEN RING/Game/` folder — the one next to `eldenring.exe`. (To find it: in Steam, right-click
+**ELDEN RING → Manage → Browse local files**, then open the `Game` folder.) You'll be adding:
 
 - `dinput8.dll` — the mod itself. The game auto-loads it (it's a proxy for the system `dinput8`),
   so there's **no separate mod loader**. It's also the parent loader: drop other simple DLL mods in
@@ -27,11 +28,28 @@ A drop-in, no-installer bundle. From a release zip, copy into your `ELDEN RING/G
 - `start_protected_game.exe` — our launcher, which **replaces** the game's EasyAntiCheat
   bootstrapper of the same name. Steam's "Play" then starts the game outside EAC with the mod
   loaded. (Same install on Windows, Linux/Proton, and Steam Deck.)
-- `mods/` — the (optional) folder other DLL mods go in (it ships in the bundle). The mod writes its
-  config + logs to a `unseamless-coop/` folder next to the game. Note: a broken or incompatible DLL
-  in `mods/` can prevent the game from launching — if that happens, remove it.
+- `mods/` — the (optional) folder other DLL mods go in (it ships in the bundle). Note: a broken or
+  incompatible DLL in `mods/` can prevent the game from launching — if that happens, remove it.
 
 Then just press **Play** in Steam.
+
+### Configuring
+
+The mod runs with sensible defaults, so it's playable with no setup. On its **first launch** it
+creates a config file and a logs folder next to the game:
+
+```
+ELDEN RING/Game/unseamless-coop/unseamless_coop.toml   <- your settings
+ELDEN RING/Game/unseamless-coop/logs/                  <- per-run logs
+```
+
+Edit that `.toml` to change settings — co-op password, per-extra-player enemy/boss scaling, allowed
+summons/invaders, the `[loader]` order for other mods, and so on. Changes take effect on the next
+launch. To set something **before your first session** (e.g. a host password), launch once, quit at
+the title screen, then edit the file and relaunch.
+
+The config isn't part of the install bundle, so re-copying the mod after a game update never
+overwrites your settings.
 
 ### Uninstalling / playing vanilla online
 
