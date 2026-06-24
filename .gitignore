@@ -1,0 +1,7 @@
+/target
+*.log
+.DS_Store
+
+# Reference download of the upstream Seamless Co-op mod, kept locally for
+# reverse-engineering. Not redistributable — never commit the binaries.
+/reference
