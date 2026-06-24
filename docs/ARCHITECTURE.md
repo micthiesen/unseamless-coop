@@ -25,7 +25,7 @@ correctness still needs the rig; the core's doesn't.
 
 `DllMain` (attach only) → init thread → `app::install`:
 1. `CSTaskImp::wait_for_instance` (off the main thread).
-2. Load `Config` from `SeamlessCoop/unseamless_coop.ini` (writes defaults if absent).
+2. Load `Config` from `unseamless-coop/unseamless_coop.toml` (writes defaults if absent).
 3. Build the `Vec<Box<dyn Feature>>` and register each as a recurring task in its `phase()`.
 
 A [`Feature`] is one unit of behavior with a `name`, a `phase` (`CSTaskGroupIndex`), and
@@ -119,6 +119,16 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 4. **Networking: drive the game's own session layer; add a small private side-channel.** No
    bespoke transport, and **no interop with vanilla-ERSC's** side-channel packet format (see the
    "Key decision" section above).
+5. **We own the whole install — no Elden Mod Loader, no ERSC launcher.** The cdylib ships as the
+   game's `dinput8.dll` (a search-order proxy the game auto-loads; `coop/proxy.rs` forwards the real
+   exports), which makes this mod the **parent loader**: it also `LoadLibrary`s other DLL mods from
+   `mods/` in a host-tested order (`unseamless-core/loader.rs` + `coop/mods.rs`). Our `launcher`
+   crate ships as `start_protected_game.exe`, starting the game directly (outside EAC) with a
+   `UNSEAMLESS_LAUNCH` marker; the DLL **aborts** if that marker is absent (`coop/guard.rs`), so a
+   game update that reverts the launcher can't run the mod under anti-cheat. Config/logs live in our
+   own `unseamless-coop/` folder, not ERSC's `SeamlessCoop/`. The no-installer install (overwrite
+   `start_protected_game.exe`, restore via Steam "verify integrity") is the deliberate UX choice;
+   don't reintroduce a separate loader dependency.
 
 ## Module map (current + planned)
 
@@ -132,7 +142,12 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/protocol.rs` (side-channel, wire v2: generation/seq identity) | 2 | done, tested (wiring is rig-gated) |
 | `unseamless-core/transport.rs` (`Transport` seam + `Loopback` + `FaultModel`) | 2 | done, tested |
 | `unseamless-core/peer.rs` (`Peer`/`Session`: handshake/config-sync/actions/log-forward/liveness, self-healing) | 2 | done, tested |
+| `unseamless-core/loader.rs` (mod-load ordering policy) | 1 | done, tested |
 | `harness` bin (in-memory + lossy + two-process TCP loops, no game) | — | done — see the `/test-loop` skill |
+| `coop/proxy.rs` (dinput8 export forwarding) | — | done (export-table verified; live forward rig-gated) |
+| `coop/guard.rs` (EAC launch-marker abort) | — | done (logic; abort behavior rig-gated) |
+| `coop/mods.rs` (load `mods/` DLLs in order) | — | done (FS+LoadLibrary glue; rig-gated) |
+| `launcher` bin (`start_protected_game.exe`) | — | done (rig-gated) |
 | `unseamless-core/` player/world sync model | 2 | planned (the game's job; rig-gated) |
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |

@@ -187,6 +187,13 @@ These are loaded only when relevant (not in this always-on file):
 
 ## Safety / legitimacy
 
-unseamless-coop loads **outside EAC** (the non-EAC path Seamless Co-op uses), so it's for co-op
-only. Never take a modded session onto the official servers. The mod must not touch
-`regulation.bin` (so it can't block players from connecting).
+unseamless-coop loads **outside EAC**, so it's for co-op only. Never take a modded session onto the
+official servers. The mod must not touch `regulation.bin` (so it can't block players from
+connecting).
+
+We own the whole install — no Elden Mod Loader, no ERSC launcher: the cdylib ships as the game's
+`dinput8.dll` proxy (auto-loaded; also the parent loader for `mods/`), and our `launcher` crate
+ships as `start_protected_game.exe`, which starts the game directly (outside EAC) with the
+`UNSEAMLESS_LAUNCH` marker. The DLL **aborts** if that marker is absent (`coop/guard.rs`), so a
+game update that reverts the launcher can't run the mod under anti-cheat. Config and logs live in
+our own `unseamless-coop/` folder, never ERSC's `SeamlessCoop/`.

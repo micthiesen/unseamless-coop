@@ -1,6 +1,6 @@
 //! File logging, built for an agent to read after a session (see `unseamless-core::diagnostics`).
 //!
-//! Each run writes a timestamped, self-describing file under `SeamlessCoop/logs/`: a [`RunInfo`]
+//! Each run writes a timestamped, self-describing file under `unseamless-coop/logs/`: a [`RunInfo`]
 //! header (mod version, build profile, platform, config) then the log. Old runs are kept (last
 //! [`KEEP_LOGS`]) rather than truncated, so "the one from when it broke" survives. Verbosity
 //! comes from `[debug]` config — off by default, so normal play only writes milestone lines.
@@ -16,7 +16,7 @@ use unseamless_core::diagnostics::RunInfo;
 
 /// Where logs go, relative to the game's working directory — next to the config, easy to zip
 /// and share.
-const LOG_DIR: &str = "SeamlessCoop/logs";
+const LOG_DIR: &str = "unseamless-coop/logs";
 /// How many past run logs to keep.
 const KEEP_LOGS: usize = 5;
 

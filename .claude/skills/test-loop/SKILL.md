@@ -109,16 +109,16 @@ does a `SessionAction` trigger the real game call) — without a second game and
 
 This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md`, on a Steam Deck.
 
-**One-time setup (you):** ER installed; Deck in dev mode with SSH enabled; the ERSC exe-swap
-launcher configured (we reuse it during development); note the SSH host, the game path, and the
-`mods/` path.
+**One-time setup (you):** ER installed; Deck in dev mode with SSH enabled; note the SSH host and
+the game path. No third-party loader/launcher — we install our own `dinput8.dll` proxy + our
+`start_protected_game.exe` launcher (see `scripts/deploy.sh` and RIG-RUNBOOK).
 
 **Scripts to write (`scripts/deck-*.sh`, assistant-driveable over SSH):**
-- `deck-deploy` — `cargo build --release` on the Mac, then `rsync` the DLL to `…/ELDEN RING/Game/mods/`.
-- `deck-launch` — `ssh deck 'steam -applaunch 1245620'` (with the exe-swap so the mod loads).
-- `deck-log` — `ssh deck 'cat …/SeamlessCoop/logs/<latest>'` to fetch the run log for analysis.
+- `deck-deploy` — `cargo build --release` on the Mac, then `rsync` `dinput8.dll` + our launcher into `…/ELDEN RING/Game/` (back up the original `start_protected_game.exe` first); essentially `deploy.sh` over SSH.
+- `deck-launch` — `ssh deck 'steam -applaunch 1245620'` (runs our launcher → the game with the `UNSEAMLESS_LAUNCH` marker, so the EAC guard passes).
+- `deck-log` — `ssh deck 'cat …/unseamless-coop/logs/<latest>'` to fetch the run log for analysis.
 - `deck-kill` — `ssh deck "pkill -f '[e]ldenring.exe'"` (bracket trick; plain `pkill` matches itself).
-- `deck-cycle` — rm old log, deploy, launch, wait for the install/heartbeat lines, fetch log, kill.
+- `deck-cycle` — deploy, launch, wait for the install/heartbeat lines, fetch log, kill.
 
 **Solo-verifiable here (assistant drives end to end):** the DLL loads, registers its feature task,
 fires per frame (the `FrameBegin` heartbeat ticks even at the title screen), writes + reads config,
@@ -129,7 +129,7 @@ save / co-op session — those need layer 5. Handoff is the log file.
 
 Two or more real players. Can't be automated. To make it useful to the assistant afterward: set
 `[debug] enabled = true` and (on clients) `forward_to_host = true`, so the host machine aggregates
-everyone's logs into one `LogBundle`; then hand over the host's `SeamlessCoop/logs/` folder. The
+everyone's logs into one `LogBundle`; then hand over the host's `unseamless-coop/logs/` folder. The
 self-describing `RunInfo` header (version, role, session id, config) lets the assistant reconstruct
 the session without context. This is the acceptance loop and the only one that proves real co-op.
 

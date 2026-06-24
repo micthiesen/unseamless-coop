@@ -118,7 +118,7 @@ the pattern), then map the located region/offset/bit to a typed SDK field.
 
 File logger via `simplelog`/`log`, set up by `logger::init` on the init thread. The DLL runs
 inside the game's (Proton) working directory (normally `ELDEN RING/Game/`), so the run log lands
-under `SeamlessCoop/logs/`; the startup line records the actual cwd (Proton's can differ) and a
+under `unseamless-coop/logs/`; the startup line records the actual cwd (Proton's can differ) and a
 panic hook records panics (with `panic = "abort"` the process still exits, but the trace and a
 backtrace survive). The self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
 Verbosity is `[debug]` config, **off by default** — hot-path logs must use `log::debug!`/`trace!`.
@@ -129,21 +129,24 @@ Verbosity is `[debug]` config, **off by default** — hot-path logs must use `lo
 > **canonical in [RIG-RUNBOOK.md](RIG-RUNBOOK.md)** and wrapped by the `/test-loop` skill. This
 > section is the general dev quick-reference for the same rig.
 
-Single `.dll` dropped in `ELDEN RING/Game/mods/`, loaded by **Elden Mod Loader**
-(`DINPUT8.dll`) via the non-EAC exe-swap launch (the loading path Seamless Co-op uses; during
-development we reuse its launcher — unseamless-coop replaces ERSC rather than running alongside
-it). `scripts/deploy.sh` copies the built DLL there. Driving launch/observe/kill from the shell:
+We are our **own** loader and launcher — no Elden Mod Loader, no ERSC launcher. The cdylib ships as
+the game's `dinput8.dll` (a proxy the game auto-loads via DLL search order; `src/proxy.rs`), which
+on load also acts as the parent loader for other DLL mods in `mods/` (`src/mods.rs`). Our launcher
+(`crates/launcher`, shipped as `start_protected_game.exe`) starts `eldenring.exe` directly — outside
+EAC — with `UNSEAMLESS_LAUNCH=1` set; the DLL aborts if that marker is absent (`src/guard.rs`), so
+a game update that reverts the launcher can't run the mod under anti-cheat. `scripts/deploy.sh`
+installs both. Driving launch/observe/kill from the shell:
 
 ```bash
-steam -applaunch 1245620                 # launches with the ersc exe-swap so the mod loads
-# watch ELDEN RING/Game/unseamless_coop.log for: "hook installed" -> "frame task live"
+steam -applaunch 1245620                 # runs our start_protected_game.exe -> eldenring.exe (no EAC)
+# watch ELDEN RING/Game/unseamless-coop/logs/*.log for the install + frame-task lines
 pkill -f '[e]ldenring.exe'               # bracket trick avoids matching the pkill itself
 ```
 
 Gotchas (from the er-crit-coop rig):
 
-- The log is truncated on DLL load (`File::create`); `rm` it before relaunch so a match means a
-  fresh load.
+- Each run writes a fresh timestamped log under `unseamless-coop/logs/` (old runs are kept, not
+  truncated), so "the one from when it broke" survives; no need to `rm` before relaunch.
 - `FrameBegin` ticks in menus/title; world-phase tasks (e.g. `WorldChrMan_PostPhysics`) don't
   tick until a save is loaded.
 - Solo-verifiable from the title screen: registration, per-frame firing, stability. Anything

@@ -12,7 +12,7 @@ use log::Level;
 use unseamless_core::config::Config;
 
 /// Config path relative to the game's working directory (normally `ELDEN RING/Game/`).
-const CONFIG_REL: &str = "SeamlessCoop/unseamless_coop.toml";
+const CONFIG_REL: &str = "unseamless-coop/unseamless_coop.toml";
 
 /// A deferred log line: `(level, message)`, replayed after the logger initializes.
 pub type Note = (Level, String);

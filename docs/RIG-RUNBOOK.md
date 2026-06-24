@@ -8,24 +8,40 @@ co-op work — it's to **observe the session state machine** so Layer 2 (see
 ## Deploy
 
 ```bash
-cargo build --release                 # on the Mac -> unseamless_coop.dll
-# copy the DLL to the rig, then on the rig:
-./scripts/deploy.sh                   # into ELDEN RING/Game/mods/  (Elden Mod Loader)
-rm -f "ELDEN RING/Game/unseamless_coop.log"   # so a fresh load is unambiguous
+cargo build --release                 # on the Mac -> unseamless_coop.dll + start_protected_game.exe
+# copy the build outputs to the rig, then on the rig:
+./scripts/deploy.sh                   # dinput8.dll + our launcher into ELDEN RING/Game/
+rm -f "ELDEN RING/Game/unseamless-coop/logs/"*.log   # so a fresh load is unambiguous
 ```
 
-Launch via the ERSC exe-swap path (so the mod loads outside EAC). The mod writes
-`unseamless_coop.log` and a default `SeamlessCoop/unseamless_coop.ini` on first run.
+`deploy.sh` installs the cdylib as the game's `dinput8.dll` proxy (auto-loaded, no separate mod
+loader) and our launcher as `start_protected_game.exe` (backing up the original to
+`start_protected_game_eac.exe`). **Launch via Steam "Play"** — it runs our launcher, which starts
+`eldenring.exe` directly (outside EAC) with `UNSEAMLESS_LAUNCH=1` set. The mod **requires** that
+marker: launched any other way it aborts the process (the EAC guard), so always launch via Steam
+after deploying. On first run it writes a default `unseamless-coop/unseamless_coop.toml` and a run log
+under `unseamless-coop/logs/`.
 
-## What to confirm first (harness sanity)
+## What to confirm first (harness sanity + the new install layer)
 
-From the **title screen**, the log should show, in order:
-1. `unseamless-coop loaded` + `cwd = …`
-2. `registered feature 'session-observer' in FrameBegin`
-3. `observer live; no CSSessionManager yet` heartbeats (every ~30s)
+The install layer (proxy / launcher / EAC guard / mod loader) is built and export-verified on the
+Mac, but its live behavior is **only confirmable here**. First-rig checklist:
+
+1. **Game launches via Steam "Play"** and reaches the title screen (proves our launcher started
+   `eldenring.exe` directly and the `dinput8.dll` proxy forwarded DirectInput without breaking input).
+2. **EAC guard:** rename/remove our launcher and launch the original `start_protected_game_eac.exe`
+   instead — the game must show the abort message box and close (no marker → no run). Then restore
+   our launcher.
+3. **Mod loader:** drop a known-good simple DLL mod in `mods/` and confirm a `loaded mod: …` line.
+
+Then the framework sanity, from the **title screen** — the log should show, in order:
+1. `loaded config from …` (or `wrote default config …`)
+2. mod-loader lines (`no extra mods …` or `loaded mod: …`)
+3. `registered feature 'session-observer' in FrameBegin`
+4. `observer live; no CSSessionManager yet` heartbeats (every ~30s)
 
 If those appear, the framework works end to end. (`FrameBegin` ticks in menus, so this needs no
-save — same trick as er-crit-coop.)
+save — same trick as er-crit-coop.) Logs are under `unseamless-coop/logs/`.
 
 ## The observation run (the actual deliverable)
 

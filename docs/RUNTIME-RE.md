@@ -26,7 +26,7 @@ game function ERSC hooks that the SDK doesn't already name. That's **M2/M3** ter
 
 ### Option A — our own diagnostic DLL (default, recommended)
 
-We already build and load DLLs into the game reliably (Elden Mod Loader + the task-hook
+We already build and load DLLs into the game reliably (our own `dinput8.dll` proxy + the task-hook
 harness). The cheapest, most clean-room-friendly observer is a Rust **diagnostic build of our
 own mod** that logs what we want, exactly like er-crit-coop's `src/diagnostic.rs` (snapshot
 state, log rising-edge bit flips, dump SpEffects). For protocol work, the same DLL can detour
@@ -51,8 +51,8 @@ Setup on the rig (one time):
 
 1. **Install the host CLI** (Linux): `pipx install frida-tools` (gives `frida`, `frida-trace`).
 2. **Get the gadget** matching the game arch: download `frida-gadget-<ver>-windows-x86_64.dll`
-   from the Frida releases, rename to something like `frida-gadget.dll`, place it next to a
-   small loader or have Elden Mod Loader load it (it loads DLL mods from `mods/`).
+   from the Frida releases, rename to something like `frida-gadget.dll`, and drop it in `mods/` —
+   our own `dinput8.dll` proxy loads DLL mods from there.
 3. **Configure it** with a sibling `frida-gadget.config` (same basename), listen mode:
    ```json
    { "interaction": { "type": "listen", "address": "127.0.0.1", "port": 27042,

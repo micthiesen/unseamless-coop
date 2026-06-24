@@ -28,15 +28,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
+        # Builds the whole workspace: the cdylib (unseamless_coop.dll) and the launcher
+        # (start_protected_game.exe).
         run: cargo build --release --target x86_64-pc-windows-gnu
 
       - name: Package
+        # Assemble the drop-in install bundle: the cdylib renamed to dinput8.dll (the proxy name
+        # the game auto-loads), our launcher, the README, and an empty mods/ for additional DLL mods.
         run: |
-          dll=target/x86_64-pc-windows-gnu/release/unseamless_coop.dll
+          out=target/x86_64-pc-windows-gnu/release
           zip="unseamless-coop-${GITHUB_REF_NAME}.zip"
-          mkdir -p dist && cp "$dll" README.md dist/
-          (cd dist && zip "../$zip" unseamless_coop.dll README.md)
-          echo "DLL=$dll" >> "$GITHUB_ENV"
+          mkdir -p dist/mods
+          cp "$out/unseamless_coop.dll" dist/dinput8.dll
+          cp "$out/start_protected_game.exe" dist/start_protected_game.exe
+          cp README.md dist/
+          cat > dist/mods/README.txt <<'TXT'
+          Drop additional simple DLL mods here; unseamless-coop (dinput8.dll) loads them on launch.
+          Control load order with the [loader] order list in unseamless-coop/unseamless_coop.toml.
+          TXT
+          (cd dist && zip -r "../$zip" dinput8.dll start_protected_game.exe README.md mods)
           echo "ZIP=$zip" >> "$GITHUB_ENV"
 
       - name: Publish release
@@ -47,4 +57,4 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-from-tag \
             --verify-tag \
-            "$ZIP" "$DLL"
+            "$ZIP"
