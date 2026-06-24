@@ -33,20 +33,31 @@ pub const VERSION: u8 = 1;
 pub const MAX_LOG_MSG: usize = 2048;
 
 /// A message exchanged between modded clients over the side-channel.
+///
+/// The side-channel rides the game's P2P broadcast, whose delivery guarantees we don't yet know
+/// (Steam P2P can be unreliable and unordered). So stateful/event messages carry their **own
+/// identity** — a config `generation`, an action `seq`, a log `seq`, a ping `frame` — letting the
+/// receiver ([`crate::peer::Peer`]) ignore stale/duplicate frames and converge regardless of
+/// drops, duplicates, or reordering. Idempotent messages (`Hello`) need none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModMessage {
     /// Sent on connect to advertise the sender's mod version (pack a [`crate::util::Version`] via
-    /// `to_u32`). Intended so clients can warn on a version mismatch; the compatibility check
-    /// itself is not yet wired (rig-gated), so today this only carries the value.
+    /// `to_u32`). Idempotent: re-handling it just re-records the sender's version, so it needs no
+    /// sequence of its own.
     Hello { mod_version: u32 },
-    /// The host's authoritative shared settings, pushed to clients so everyone agrees on rules.
-    ConfigSync(SharedSettings),
-    /// A session action the host (or a permitted client) is performing.
-    SessionAction(SessionAction),
-    /// Liveness ping carrying the sender's frame counter (cheap clock/heartbeat).
+    /// The host's authoritative shared settings, tagged with a monotonic `generation` so a client
+    /// applies only newer settings (a reordered/duplicated sync is ignored) and the host can safely
+    /// **re-assert** the same generation to heal drops.
+    ConfigSync { generation: u32, settings: SharedSettings },
+    /// A session action the host (or a permitted client) is performing, tagged with the sender's
+    /// monotonic `seq` so a receiver applies each action exactly once (a duplicated frame is a
+    /// no-op).
+    SessionAction { seq: u32, action: SessionAction },
+    /// Liveness ping carrying the sender's frame counter (cheap clock/heartbeat). Naturally
+    /// idempotent — the receiver just records "seen now".
     Ping { frame: u64 },
-    /// A forwarded debug log line (sent to the host when `forward_to_host` is on). See
-    /// [`crate::diagnostics`].
+    /// A forwarded debug log line (sent to the host when `forward_to_host` is on). Its
+    /// [`LogRecord::seq`] dedups duplicates at the host. See [`crate::diagnostics`].
     Log(LogRecord),
 }
 
@@ -155,8 +166,9 @@ impl ModMessage {
                 w.push(tag::HELLO);
                 w.extend_from_slice(&mod_version.to_be_bytes());
             }
-            ModMessage::ConfigSync(s) => {
+            ModMessage::ConfigSync { generation, settings: s } => {
                 w.push(tag::CONFIG_SYNC);
+                w.extend_from_slice(&generation.to_be_bytes());
                 for v in [
                     s.scaling.enemy_health,
                     s.scaling.enemy_damage,
@@ -169,9 +181,10 @@ impl ModMessage {
                 }
                 w.push(pack_bools([s.allow_invaders, s.death_debuffs, s.allow_summons]));
             }
-            ModMessage::SessionAction(a) => {
+            ModMessage::SessionAction { seq, action } => {
                 w.push(tag::SESSION_ACTION);
-                w.push(u8::from(*a));
+                w.extend_from_slice(&seq.to_be_bytes());
+                w.push(u8::from(*action));
             }
             ModMessage::Ping { frame } => {
                 w.push(tag::PING);
@@ -203,6 +216,7 @@ impl ModMessage {
         let msg = match tag {
             tag::HELLO => ModMessage::Hello { mod_version: r.u32()? },
             tag::CONFIG_SYNC => {
+                let generation = r.u32()?;
                 let mut scaling = Scaling {
                     enemy_health: r.u32()?,
                     enemy_damage: r.u32()?,
@@ -215,17 +229,15 @@ impl ModMessage {
                 // malicious host can't push an out-of-range multiplier the user never consented to.
                 scaling.clamp_percentages();
                 let [allow_invaders, death_debuffs, allow_summons] = unpack_bools(r.u8()?);
-                ModMessage::ConfigSync(SharedSettings {
-                    scaling,
-                    allow_invaders,
-                    death_debuffs,
-                    allow_summons,
-                })
+                ModMessage::ConfigSync {
+                    generation,
+                    settings: SharedSettings { scaling, allow_invaders, death_debuffs, allow_summons },
+                }
             }
             tag::SESSION_ACTION => {
-                ModMessage::SessionAction(
-                    SessionAction::try_from(r.u8()?).map_err(|_| DecodeError::BadValue)?,
-                )
+                let seq = r.u32()?;
+                let action = SessionAction::try_from(r.u8()?).map_err(|_| DecodeError::BadValue)?;
+                ModMessage::SessionAction { seq, action }
             }
             tag::PING => ModMessage::Ping { frame: r.u64()? },
             tag::LOG => {
@@ -329,9 +341,9 @@ mod tests {
     fn samples() -> Vec<ModMessage> {
         vec![
             ModMessage::Hello { mod_version: 0x0001_0203 },
-            ModMessage::ConfigSync(shared()),
-            ModMessage::SessionAction(SessionAction::LockWorld),
-            ModMessage::SessionAction(SessionAction::GiveEmber),
+            ModMessage::ConfigSync { generation: 7, settings: shared() },
+            ModMessage::SessionAction { seq: 1, action: SessionAction::LockWorld },
+            ModMessage::SessionAction { seq: u32::MAX, action: SessionAction::GiveEmber },
             ModMessage::Ping { frame: u64::MAX },
             ModMessage::Log(LogRecord {
                 seq: 42,
@@ -364,10 +376,8 @@ mod tests {
         assert!(!shared.death_debuffs);
         assert!(!shared.allow_summons);
         assert_eq!(shared.scaling.boss_health, 200);
-        assert_eq!(
-            ModMessage::decode(&ModMessage::ConfigSync(shared).encode()),
-            Ok(ModMessage::ConfigSync(shared)),
-        );
+        let msg = ModMessage::ConfigSync { generation: 3, settings: shared };
+        assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg));
     }
 
     #[test]
@@ -393,9 +403,9 @@ mod tests {
         let mut evil = shared();
         evil.scaling.enemy_health = u32::MAX;
         evil.scaling.boss_health = 9999;
-        match ModMessage::decode(&ModMessage::ConfigSync(evil).encode()).unwrap() {
-            ModMessage::Log(_) => unreachable!(),
-            ModMessage::ConfigSync(s) => {
+        let frame = ModMessage::ConfigSync { generation: 1, settings: evil }.encode();
+        match ModMessage::decode(&frame).unwrap() {
+            ModMessage::ConfigSync { settings: s, .. } => {
                 assert_eq!(s.scaling.enemy_health, crate::config::MAX_SCALING_PERCENT);
                 assert_eq!(s.scaling.boss_health, crate::config::MAX_SCALING_PERCENT);
                 assert_eq!(s.scaling.enemy_posture, shared().scaling.enemy_posture); // in-range kept
@@ -406,9 +416,12 @@ mod tests {
 
     #[test]
     fn config_sync_preserves_all_fields() {
-        let msg = ModMessage::ConfigSync(shared());
+        let msg = ModMessage::ConfigSync { generation: 9, settings: shared() };
         match ModMessage::decode(&msg.encode()).unwrap() {
-            ModMessage::ConfigSync(s) => assert_eq!(s, shared()),
+            ModMessage::ConfigSync { generation, settings } => {
+                assert_eq!(generation, 9);
+                assert_eq!(settings, shared());
+            }
             other => panic!("decoded wrong variant: {other:?}"),
         }
     }
@@ -422,8 +435,8 @@ mod tests {
             s.allow_invaders = bits & 1 != 0;
             s.death_debuffs = bits & 2 != 0;
             s.allow_summons = bits & 4 != 0;
-            let decoded = ModMessage::decode(&ModMessage::ConfigSync(s).encode()).unwrap();
-            assert_eq!(decoded, ModMessage::ConfigSync(s), "combo {bits:03b} corrupted");
+            let msg = ModMessage::ConfigSync { generation: 1, settings: s };
+            assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:03b} corrupted");
         }
     }
 
@@ -455,14 +468,15 @@ mod tests {
 
     #[test]
     fn rejects_trailing_bytes() {
-        let mut bytes = ModMessage::SessionAction(SessionAction::OpenWorld).encode();
+        let mut bytes = ModMessage::SessionAction { seq: 1, action: SessionAction::OpenWorld }.encode();
         bytes.push(0xff);
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::TrailingBytes));
     }
 
     #[test]
     fn rejects_undefined_session_action() {
-        let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::SESSION_ACTION, 250];
+        // magic, version, SESSION_ACTION tag, seq=1, action=250 (undefined).
+        let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::SESSION_ACTION, 0, 0, 0, 1, 250];
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::BadValue));
     }
 

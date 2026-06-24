@@ -113,6 +113,46 @@ impl Edge {
     }
 }
 
+/// A token-bucket rate limiter: allow a burst of up to `capacity`, then one event per refilled
+/// token. Time-agnostic — the caller [`refill`](RateLimiter::refill)s on whatever cadence it has
+/// (frames, seconds, maintenance ticks), so this stays pure and host-testable. Used to cap
+/// client→host log forwarding so a misbehaving client can't flood the side-channel.
+#[derive(Debug, Clone)]
+pub struct RateLimiter {
+    tokens: f64,
+    capacity: f64,
+}
+
+impl RateLimiter {
+    /// A bucket that starts **full** (one immediate burst of `capacity` is allowed).
+    pub fn new(capacity: u32) -> Self {
+        let capacity = capacity as f64;
+        Self { tokens: capacity, capacity }
+    }
+
+    /// Add `tokens` (clamped at the capacity; negative/non-finite amounts add nothing).
+    pub fn refill(&mut self, tokens: f64) {
+        if tokens.is_finite() && tokens > 0.0 {
+            self.tokens = (self.tokens + tokens).min(self.capacity);
+        }
+    }
+
+    /// Consume one token; returns `true` if one was available (the event is allowed).
+    pub fn try_take(&mut self) -> bool {
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whole tokens currently available.
+    pub fn available(&self) -> u32 {
+        self.tokens as u32
+    }
+}
+
 /// A `major.minor.patch` version, for the side-channel handshake (warn on mismatch).
 ///
 /// Field widths (`u8`/`u8`/`u16`) match the wire layout exactly, so [`to_u32`](Version::to_u32)
@@ -223,6 +263,28 @@ mod tests {
         assert!(!e.just_pressed(true)); // held, not a new press
         assert!(!e.just_pressed(false));
         assert!(e.just_pressed(true)); // pressed again
+    }
+
+    #[test]
+    fn rate_limiter_allows_a_burst_then_throttles_until_refilled() {
+        let mut rl = RateLimiter::new(3);
+        assert!(rl.try_take() && rl.try_take() && rl.try_take(), "full burst of capacity");
+        assert!(!rl.try_take(), "bucket empty");
+        rl.refill(2.0);
+        assert_eq!(rl.available(), 2);
+        assert!(rl.try_take() && rl.try_take());
+        assert!(!rl.try_take(), "drained again");
+    }
+
+    #[test]
+    fn rate_limiter_caps_at_capacity_and_ignores_bad_refills() {
+        let mut rl = RateLimiter::new(2);
+        rl.refill(100.0); // can't exceed capacity
+        assert_eq!(rl.available(), 2);
+        rl.try_take();
+        rl.refill(-5.0); // negative is a no-op
+        rl.refill(f64::NAN); // non-finite is a no-op
+        assert_eq!(rl.available(), 1);
     }
 
     #[test]
