@@ -136,6 +136,14 @@ pub fn install() {
         std::mem::forget(handle);
         log::info!("registered feature '{name}' in {phase:?}");
     }
+
+    // In-game overlay (hudhook DX12 present-hook). Compiled in only with the `overlay` feature and
+    // installed only when the runtime kill-switch is on, so a Proton/vkd3d render problem can be
+    // disabled by editing the config (no rebuild). Reads shared app state; never mutates game state.
+    #[cfg(feature = "overlay")]
+    if config.debug.overlay {
+        crate::overlay::install(module);
+    }
 }
 
 /// Wait for the game's task system (`CSTaskImp`), tolerating our early DLL load.

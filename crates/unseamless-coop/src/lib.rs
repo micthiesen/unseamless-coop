@@ -28,6 +28,8 @@ mod features;
 mod guard;
 mod logger;
 mod mods;
+#[cfg(feature = "overlay")]
+mod overlay;
 mod proxy;
 mod sdk;
 mod state;
