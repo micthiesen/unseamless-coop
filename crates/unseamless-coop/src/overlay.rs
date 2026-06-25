@@ -222,7 +222,10 @@ impl Overlay {
                     pos[0].clamp(0.0, (disp[0] - size[0]).max(0.0)),
                     pos[1].clamp(0.0, (disp[1] - size[1]).max(0.0)),
                 ];
-                if clamped != pos {
+                // Only snap back when the mouse isn't held — clamping mid-drag fights the drag and the
+                // window jitters at the edge. So it moves freely while dragging and locks in on release
+                // (and immediately if it's out of bounds for another reason, e.g. the viewport shrank).
+                if clamped != pos && !ui.io().mouse_down[0] {
                     self.clamp_pos = Some(clamped);
                 }
                 // Push our crisp font for the whole window (incl. the log child); toasts keep the
