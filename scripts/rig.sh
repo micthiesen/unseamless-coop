@@ -25,6 +25,22 @@ BACKUP_DIR="${BACKUP_DIR:-$HOME/.local/share/unseamless-coop/rig-backup}"
 APPID="${APPID:-1245620}"
 TRIPLE="x86_64-pc-windows-gnu"
 SEED_CONFIG="$ROOT/scripts/rig/seed-config.toml"
+# Where/how big the game runs during a rig launch. The point: keep your Steam launch options set to
+# your *gaming* config and still rig in a small, low-res window. Two cooperating pieces:
+#   - render resolution: scripts/rig/gamescope-wrapper.sh (set as your launch options) reads RIG_GS_FLAG
+#     at launch and runs gamescope at the rig size via -w/-h (a real lower render res). cmd_launch
+#     writes that flag; the wrapper consumes + deletes it, so manual launches stay fullscreen.
+#   - window placement: reposition_window then nudges that window to the top-left.
+# 1720x720 keeps the 3440x1440 (21:9) aspect. Override any of these via env.
+WINDOW_MARGIN="${WINDOW_MARGIN:-24}"
+RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-1720}"
+RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-720}"
+# One-shot flag handed to gamescope-wrapper.sh. MUST match the wrapper's FLAG (same env, same default).
+RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
+# Minimize the game window the moment it appears and keep it hidden until reposition_window places it,
+# so you don't see the centered/loading window before it snaps to the corner. Set 0 to disable (e.g.
+# if a minimized window ever throttles the load). The reveal always runs, so this can't strand it.
+RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
 
 # Files in the game folder our apply overwrites — i.e. the surface that must be snapshotted to
 # restore the original stack. SeamlessCoop/ is deliberately NOT here: apply never touches it (ERSC
@@ -241,13 +257,95 @@ cmd_launch() {
   need_game_dir
   applied || warn "our mod isn't applied (no marker) — launching whatever is currently installed."
   local before; before="$(latest_log || true)"  # capture BEFORE launch so --wait spots the new run
-  say "Launching ELDEN RING via Steam (appid $APPID; uses your gamescope launch options)"
+  # Tell gamescope-wrapper.sh (if it's your launch options) to render at the rig size this launch. The
+  # wrapper consumes + deletes the flag; if you haven't switched to the wrapper yet it's just ignored.
+  printf '%s %s\n' "$RIG_WINDOW_WIDTH" "$RIG_WINDOW_HEIGHT" > "$RIG_GS_FLAG"
+  # Hide the window as it appears so the centered/loading window isn't seen before we place it. Only
+  # when --wait (reposition below reveals it); reveal always runs, so it can't get stranded minimized.
+  [[ $do_wait -eq 1 && "$RIG_HIDE_UNTIL_PLACED" == 1 ]] && hide_window_until_placed
+  say "Launching ELDEN RING via Steam (appid $APPID; rig render size ${RIG_WINDOW_WIDTH}x${RIG_WINDOW_HEIGHT} via wrapper)"
   steam -applaunch "$APPID" >/dev/null 2>&1 &
   ok "handed off to Steam. Our launcher sets UNSEAMLESS_LAUNCH and starts the game outside EAC."
-  [[ $do_wait -eq 1 ]] && wait_for_framework 150 "$before"
+  if [[ $do_wait -eq 1 ]]; then
+    wait_for_framework 150 "$before" || true  # reveal/place regardless, so the window is never stuck hidden
+    rm -f "$RIG_GS_FLAG"                       # no-op if the wrapper already consumed it
+    sleep 1                                    # let gamescope finish mapping its window
+    reposition_window                          # reveal (unminimize) + move to top-left
+  fi
 }
 
 latest_log() { ls -1t "$LOG_DIR"/unseamless_coop-*.log 2>/dev/null | head -1; }
+
+# ---- window placement (KDE Plasma Wayland) ------------------------------------------------------
+# KWin has no CLI to move/minimize windows; you load a tiny JS snippet over D-Bus and it runs inside
+# the compositor. kwin_run loads + starts a script file (leaves it loaded); kwin_unload tears it down
+# (also dropping any signal it connected). Best-effort — a no-op off KDE so the rig still runs elsewhere.
+kwin_available() { command -v gdbus >/dev/null 2>&1; }
+kwin_run() {  # $1 = .js file, $2 = plugin name
+  kwin_available || return 1
+  gdbus call --session --dest org.kde.KWin --object-path /Scripting \
+    --method org.kde.kwin.Scripting.loadScript "$1" "$2" >/dev/null 2>&1 || true
+  gdbus call --session --dest org.kde.KWin --object-path /Scripting \
+    --method org.kde.kwin.Scripting.start >/dev/null 2>&1 || true
+}
+kwin_unload() {  # $1 = plugin name
+  kwin_available || return 0
+  gdbus call --session --dest org.kde.KWin --object-path /Scripting \
+    --method org.kde.kwin.Scripting.unloadScript "$1" >/dev/null 2>&1 || true
+}
+
+# Plugin name of the hide watcher, so launch can load it and reposition_window can tear it down.
+HIDE_PLUGIN="unseamless-rig-hide"
+
+# Minimize the game window the instant it appears (and any already up), and keep watching so it stays
+# hidden until reposition_window reveals + places it — no centered/loading window flashing first.
+# Leaves the watcher loaded (it holds the windowAdded connection); reposition_window unloads it.
+hide_window_until_placed() {
+  kwin_available || return 0
+  local js; js="$(mktemp /tmp/er-win-hide.XXXXXX.js)"
+  cat > "$js" <<'EOF'
+function hide(w) { if (w && w.resourceClass == "gamescope" && !w.minimized) w.minimized = true; }
+const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
+for (const w of ws) hide(w);
+workspace.windowAdded.connect(hide);
+EOF
+  kwin_run "$js" "$HIDE_PLUGIN"
+  rm -f "$js"
+}
+
+# Move the game window to the top-left and reveal it (if hide_window_until_placed minimized it). We
+# only MOVE, never resize: gamescope already renders at the right size (gamescope-wrapper.sh sets it),
+# and forcing a KWin resize makes gamescope scale its buffer into the new frame -> blurry text. gamescope
+# centers its window and has no position flag / honors no KWin rule, so we set the position directly.
+# Best-effort: a no-op note if gdbus/KWin aren't around. KDE Plasma 6 (Wayland).
+reposition_window() {
+  kwin_available || { warn "gdbus not found — skipping window reposition"; return 0; }
+  local plugin="er-reposition-$$-$SECONDS" js stamp
+  js="$(mktemp /tmp/er-win-move.XXXXXX.js)"
+  cat > "$js" <<EOF
+const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
+for (const w of ws) {
+  if (w.resourceClass == "gamescope") {
+    const g = w.frameGeometry;
+    w.minimized = false;  // reveal if the hide watcher had it minimized
+    w.frameGeometry = { x: ${WINDOW_MARGIN}, y: ${WINDOW_MARGIN}, width: g.width, height: g.height };  // move only — keep gamescope's native size (no scaling/blur)
+    print("ERMOVE | gamescope " + g.x + "," + g.y + " -> ${WINDOW_MARGIN},${WINDOW_MARGIN} (" + g.width + "x" + g.height + ")");
+  }
+}
+EOF
+  stamp="$(date '+%Y-%m-%d %H:%M:%S')"
+  kwin_run "$js" "$plugin"
+  sleep 0.6
+  kwin_unload "$plugin"
+  kwin_unload "$HIDE_PLUGIN"  # stop holding the window minimized now that it's placed + revealed
+  rm -f "$js"
+  # KWin script print() lands in the journal; use it to report whether a gamescope window was found.
+  if journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "ERMOVE"; then
+    ok "window placed top-left (margin ${WINDOW_MARGIN}px)"
+  else
+    warn "no gamescope window found yet (give it a moment, then: rig.sh reposition)"
+  fi
+}
 
 cmd_log() {
   local follow=0; [[ "${1:-}" == "-f" ]] && follow=1
@@ -261,6 +359,7 @@ cmd_kill() {
   # The game + our launcher run under Wine/Proton, where SIGTERM is routinely ignored — so escalate
   # to SIGKILL and verify, instead of leaving stragglers that the next launch trips over. Kills both
   # the game and the launcher. Bracket trick so pkill doesn't match its own command line.
+  rm -f "$RIG_GS_FLAG"  # clear any stale rig-size flag so the next manual launch is fullscreen
   local procs=('[e]ldenring.exe' '[s]tart_protected_game')
   if ! pgrep -f '[e]ldenring.exe' >/dev/null && ! pgrep -f '[s]tart_protected_game' >/dev/null; then
     warn "game not running"
@@ -325,13 +424,18 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
         --keep-config      Don't overwrite an existing on-disk config (default: write the seed).
   restore                EXPLICIT rollback to the original stack. The only thing that un-applies.
   status                 Show snapshot state, what's installed, and the latest run log.
-  launch [--wait]        steam -applaunch (uses your gamescope launch options). --wait blocks until
-                         the framework comes up and prints the install lines.
+  launch [--wait]        steam -applaunch (uses your gamescope launch options). Renders at the rig
+                         size if you've set launch options to scripts/rig/gamescope-wrapper.sh.
+                         --wait blocks until the framework comes up and prints the install lines.
   log [-f]               Print (or -f follow) the latest run log.
   kill                   Stop the game (pkill eldenring.exe).
+  reposition             Move the running game window to the top-left (and reveal it if hidden). Only
+                         moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
+                         blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
 
-Env overrides: GAME_DIR, BACKUP_DIR, APPID.
+Env overrides: GAME_DIR, BACKUP_DIR, APPID, WINDOW_MARGIN,
+               RIG_WINDOW_WIDTH, RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED.
 EOF
 }
 
@@ -344,6 +448,7 @@ case "$cmd" in
   launch)  cmd_launch "$@" ;;
   log)     cmd_log "$@" ;;
   kill)    cmd_kill "$@" ;;
+  reposition) reposition_window ;;
   cycle)   cmd_cycle "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd' (try: rig.sh help)" ;;

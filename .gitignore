@@ -2,9 +2,121 @@
 *.log
 .DS_Store
 
-# Reference download of the upstream Seamless Co-op mod, kept locally for
-# reverse-engineering. Not redistributable — never commit the binaries.
-/reference
+# =============================================================================
+# Clean-room safety net  (see CLAUDE.md > "Clean-room hygiene")
+#
+# This is an independent reimplementation. We must NEVER commit:
+#   (a) original bytes from ELDEN RING or Seamless Co-op — binaries, assets, config; or
+#   (b) decompiler / disassembler output or projects (Ghidra / IDA / Binary Ninja / rizin / …).
+#
+# Studying these locally is fine; committing them is not. The patterns below are a defensive
+# backstop, not permission. The project itself is pure Rust plus a few shell/Python tools, so
+# none of these match anything we legitimately commit (the only tracked binary is the menu .otf,
+# and our own built .dll/.exe live under /target). If a pattern ever shadows a real file, add a
+# narrow `!exception` for that file — don't weaken the rule.
+#
+# NOTE: git ignores trailing inline comments are NOT supported — every comment here is on its own
+# line, because text after a pattern on the same line becomes part of the pattern.
+# =============================================================================
 
-# Ghidra headless project cache (scripts/re/ghidra-decompile.sh)
+# --- Local reference copies of upstream / original material (any depth) -------
+/reference
+reference/
+ref-binaries/
+original/
+originals/
+upstream/
+upstream-binaries/
+SeamlessCoop/
+EldenRingSeamlessCoop*/
+ersc/
+ersc-*/
+
+# --- Compiled binaries (we never commit any; our own build output is in /target) ---
+# Covers ersc.dll, dinput8.dll, oo2core_*.dll, eldenring.exe, start_protected_game.exe, etc.
+*.dll
+*.exe
+*.so
+*.so.*
+*.dylib
+*.lib
+*.a
+*.obj
+*.o
+*.pdb
+*.winmd
+
+# --- ELDEN RING / FromSoftware asset & data formats --------------------------
+# *.bin covers regulation.bin; *.fmg is in-game text/locale; *.sl2 are saves.
+*.bin
+*.dcx
+*.bdt
+*.bhd
+*.bnd
+*.fmg
+*.msgbnd
+*.param
+*.paramdef
+*.paramdefbnd
+*.tpf
+*.flver
+*.hkx
+*.hkxpwv
+*.sl2
+*.sl2.bak
+*.entryfilelist
+*.gparam
+*.gfx
+*.mtd
+*.nfc
+
+# --- Seamless Co-op config / locale (we use our own TOML; never commit theirs) ---
+ersc_settings.ini
+SeamlessCoop*.ini
+*.ersc
+/locale/
+**/locale/*.json
+**/lang/*.json
+
+# --- Decompiler / disassembler PROJECTS & databases --------------------------
+# Ghidra (.gpr/.rep/.gzf), IDA (.idb/.i64/.id0-2/.nam/.til), Binary Ninja (.bndb),
+# rizin/Cutter (.rzdb), Hopper (.hop), JEB (.jdb2).
 /.ghidra-projects
+*.gpr
+*.rep
+*.gzf
+*.idb
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.bndb
+*.rzdb
+*.hop
+*.jdb2
+
+# --- Decompiled / disassembled OUTPUT dumps ----------------------------------
+# Pseudocode / disassembly written to files. The project is Rust-only, so C/C++ sources and the
+# dirs below never appear legitimately — this stops a saved decompilation from being committed.
+*.c
+*.cc
+*.cpp
+*.cxx
+*.h
+*.hpp
+*.hxx
+*.asm
+*.lst
+*.disasm
+*.dis
+*.decomp
+decomp/
+decompiled/
+disasm/
+disassembly/
+re-output/
+re-dumps/
+ghidra-output/
+ida-output/

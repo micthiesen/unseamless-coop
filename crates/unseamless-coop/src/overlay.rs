@@ -137,6 +137,9 @@ struct Overlay {
     /// A position to snap the window to next frame, set when it drifts out of the ER viewport so it
     /// stays "locked" inside the game window. `None` when it's in bounds (normal dragging).
     clamp_pos: Option<[f32; 2]>,
+    /// Whether the Settings tab reveals the session password (vs. masking it). Default masked so it
+    /// isn't exposed on a stream/screenshot; toggled by the Reveal/Hide button. Present-thread only.
+    password_revealed: bool,
 }
 
 impl Overlay {
@@ -151,6 +154,7 @@ impl Overlay {
             pending: Vec::new(),
             tab: 0,
             clamp_pos: None,
+            password_revealed: false,
         }
     }
 
@@ -312,7 +316,7 @@ impl Overlay {
                                 .size([avail[0], avail[1].max(60.0)])
                                 .build(|| match label {
                                     "Actions" => self.draw_actions_tab(ui, &ctx),
-                                    "Settings" => self.draw_settings_tab(ui),
+                                    "Settings" => self.draw_settings_tab(ui),  // &mut self: reveal toggle
                                     "Log" => draw_log_tab(ui),
                                     _ => {}
                                 });
@@ -364,7 +368,9 @@ impl Overlay {
 
     /// Read-only view of every setting and its current value, coloured by whether the host syncs it
     /// across the party (shared) or it's local to this machine. Editing happens in the config file.
-    fn draw_settings_tab(&self, ui: &Ui) {
+    fn draw_settings_tab(&mut self, ui: &Ui) {
+        self.draw_password_row(ui);
+        ui.separator();
         ui.text_disabled("Read-only. Edit in unseamless_coop.toml, then relaunch.");
         ui.text_colored(rgba(BLUE, 1.0), "synced");
         ui.same_line();
@@ -380,6 +386,27 @@ impl Overlay {
             ui.same_line();
             ui.text_disabled(format!("= {}", s.display_value(&self.config)));
         }
+    }
+
+    /// The session password at the top of the Settings tab — the matchmaking key everyone in the
+    /// party must match. Shown so it can be read off-screen without opening the config file, but
+    /// masked behind a Reveal/Hide toggle so it isn't leaked on a stream or screenshot by default.
+    /// Amber so it stands out from the synced/local palette below it. The mask uses ASCII `*` (the
+    /// menu font is a printable-ASCII subset, so a Unicode bullet would render as a missing glyph).
+    fn draw_password_row(&mut self, ui: &Ui) {
+        let pw = &self.config.session.password;
+        ui.text_colored(rgba(AMBER, 1.0), "Session password:");
+        ui.same_line();
+        if self.password_revealed {
+            ui.text_colored(rgba(AMBER, 1.0), pw);
+        } else {
+            ui.text_colored(rgba(AMBER, 1.0), "*".repeat(pw.chars().count()));
+        }
+        ui.same_line();
+        if ui.small_button(if self.password_revealed { "Hide" } else { "Reveal" }) {
+            self.password_revealed = !self.password_revealed;
+        }
+        ui.text_disabled("Everyone in your party must match this.");
     }
 
     /// Hand an activated action to the game thread (via [`crate::actionq`]), retrying any the queue
