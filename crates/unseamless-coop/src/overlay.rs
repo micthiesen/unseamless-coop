@@ -59,6 +59,8 @@ const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
 // own cursor when both show, and reads as a position dot when ours is the only one). Three concentric
 // discs — faint outer glow, dark contrast ring, bright core — so it stands out on any background.
 // Cyan-ish to complement ER's gold cursor. Tweak freely.
+/// Nudge the orb slightly off the exact hotspot so it sits beside ER's cursor tip, not under it.
+const CURSOR_OFFSET_X: f32 = 2.0;
 const CURSOR_GLOW_R: f32 = 7.0;
 const CURSOR_RING_R: f32 = 4.0;
 const CURSOR_CORE_R: f32 = 2.5;
@@ -108,6 +110,9 @@ struct Overlay {
     /// Index of the active tab (into [`TABS`]). Tracks the visible tab (incl. mouse clicks) and is
     /// moved by Left/Right; we force-select the tab matching it the frame an arrow is pressed.
     tab: usize,
+    /// A position to snap the window to next frame, set when it drifts out of the ER viewport so it
+    /// stays "locked" inside the game window. `None` when it's in bounds (normal dragging).
+    clamp_pos: Option<[f32; 2]>,
 }
 
 impl Overlay {
@@ -121,6 +126,7 @@ impl Overlay {
             config: Config::default(),
             pending: Vec::new(),
             tab: 0,
+            clamp_pos: None,
         }
     }
 
@@ -191,7 +197,11 @@ impl Overlay {
             self.tab = (self.tab + TABS.len() - 1) % TABS.len();
             force_tab = Some(self.tab);
         }
-        ui.window(WINDOW_TITLE)
+        // If the window drifted out of the ER viewport last frame, snap it back this frame ("lock" it
+        // to the game window). Taken into a local first so the build closure can re-borrow `self`.
+        let clamp = self.clamp_pos.take();
+        let mut win = ui
+            .window(WINDOW_TITLE)
             .size([624.0, 380.0], Condition::FirstUseEver)
             // Floor the size so it can't be dragged down to a uselessly tiny box (max unbounded).
             .size_constraints([360.0, 240.0], [f32::MAX, f32::MAX])
@@ -199,8 +209,22 @@ impl Overlay {
             // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
             // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
             // window flag is the only reliable way to stop it double-handling arrows. Clicks still work.
-            .flags(WindowFlags::NO_SAVED_SETTINGS | WindowFlags::NO_COLLAPSE | WindowFlags::NO_NAV)
-            .build(|| {
+            .flags(WindowFlags::NO_SAVED_SETTINGS | WindowFlags::NO_COLLAPSE | WindowFlags::NO_NAV);
+        if let Some(p) = clamp {
+            win = win.position(p, Condition::Always);
+        }
+        win.build(|| {
+                // Keep the window fully inside the ER viewport: if it's out of bounds, queue a snap-back
+                // for next frame (this frame already drew at the dragged spot). Lets normal dragging
+                // work while preventing it from leaving the game window.
+                let (pos, size, disp) = (ui.window_pos(), ui.window_size(), ui.io().display_size);
+                let clamped = [
+                    pos[0].clamp(0.0, (disp[0] - size[0]).max(0.0)),
+                    pos[1].clamp(0.0, (disp[1] - size[1]).max(0.0)),
+                ];
+                if clamped != pos {
+                    self.clamp_pos = Some(clamped);
+                }
                 // Push our crisp font for the whole window (incl. the log child); toasts keep the
                 // compact default. Token held to closure end, then popped.
                 let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
@@ -376,6 +400,7 @@ fn draw_cursor_marker(ui: &Ui) {
     if !p[0].is_finite() || !p[1].is_finite() || p[0] < -1.0e4 || p[1] < -1.0e4 {
         return;
     }
+    let p = [p[0] + CURSOR_OFFSET_X, p[1]];
     let dl = ui.get_foreground_draw_list();
     dl.add_circle(p, CURSOR_GLOW_R, CURSOR_GLOW).filled(true).build();
     dl.add_circle(p, CURSOR_RING_R, CURSOR_RING).filled(true).build();
