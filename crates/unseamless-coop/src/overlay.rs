@@ -54,6 +54,9 @@ const MENU_FONT: &[u8] = include_bytes!("../assets/menu-font.otf");
 const MENU_FONT_SIZE: f32 = 16.0;
 /// The utility window's tabs, in order. Left/Right arrows cycle through them.
 const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
+/// Cursor speed multiplier in the "special state" (overlay open, in-game, no ER menu). The OS cursor
+/// moves at the slow desktop pointer speed there, so we amplify imgui's own cursor to compensate.
+const CURSOR_GAIN: f32 = 1.35;
 
 // One palette, referenced everywhere, so the severity / log-level / provenance colours can't silently
 // drift apart (they're the same swatches used in different contexts, on purpose).
@@ -97,6 +100,15 @@ struct Overlay {
     /// Index of the active tab (into [`TABS`]). Tracks the visible tab (incl. mouse clicks) and is
     /// moved by Left/Right; we force-select the tab matching it the frame an arrow is pressed.
     tab: usize,
+    /// "Special state": overlay open AND the game is pinning the cursor (in-game, no ER menu). Computed
+    /// each frame in `before_render`; the only state where the cursor is ours to draw + speed up.
+    special: bool,
+    /// `special` last frame, to detect entry (so the amplified cursor starts at the real position
+    /// instead of jumping).
+    was_special: bool,
+    /// Last raw OS cursor position seen, and our amplified position — for the special-state speed boost.
+    last_mouse: [f32; 2],
+    amp_mouse: [f32; 2],
 }
 
 impl Overlay {
@@ -110,7 +122,39 @@ impl Overlay {
             config: Config::default(),
             pending: Vec::new(),
             tab: 0,
+            special: false,
+            was_special: false,
+            last_mouse: [0.0, 0.0],
+            amp_mouse: [0.0, 0.0],
         }
+    }
+
+    /// Speed up imgui's cursor in the special state by accumulating an amplified delta of the (slow) OS
+    /// cursor. Outside the special state we leave `io.mouse_pos` alone (so it tracks ER's cursor 1:1).
+    fn boost_cursor(&mut self, io: &mut Io) {
+        let raw = io.mouse_pos;
+        if !self.special {
+            self.last_mouse = raw;
+            self.was_special = false;
+            return;
+        }
+        if !self.was_special {
+            // Entering: snap to the real cursor so there's no jump.
+            self.amp_mouse = raw;
+            self.last_mouse = raw;
+        } else if raw != self.amp_mouse {
+            // hudhook only refreshes `mouse_pos` on a WM_MOUSEMOVE, and we overwrite it below, so a
+            // value differing from what we wrote means a real move happened — accumulate the amplified
+            // delta from the last real OS position. (Equal ⇒ no move this frame ⇒ hold, no drift.)
+            let disp = io.display_size;
+            self.amp_mouse = [
+                (self.amp_mouse[0] + (raw[0] - self.last_mouse[0]) * CURSOR_GAIN).clamp(0.0, disp[0].max(0.0)),
+                (self.amp_mouse[1] + (raw[1] - self.last_mouse[1]) * CURSOR_GAIN).clamp(0.0, disp[1].max(0.0)),
+            ];
+            self.last_mouse = raw;
+        }
+        io.mouse_pos = self.amp_mouse;
+        self.was_special = true;
     }
 
     /// The actual per-frame work, run inside `render`'s panic firewall.
@@ -310,10 +354,16 @@ impl ImguiRenderLoop for Overlay {
     }
 
     fn before_render<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
-        // Draw imgui's own cursor while the window is open — during gameplay the OS cursor is hidden,
-        // so otherwise the mouse is invisible. (Whether the cursor can actually *move* during gameplay
-        // is a separate, game-side capture problem — see `message_filter`; keyboard nav doesn't need it.)
-        ctx.io_mut().mouse_draw_cursor = self.open;
+        // "Special state" = overlay open AND the game is still pinning the cursor (consume_pin must be
+        // called exactly once per frame, which this is). That's the only state where the cursor is ours:
+        // ER hides its own, so we draw the software cursor and speed it up. In an ER menu the game stops
+        // pinning, so we hide ours and defer to ER's cursor (no double cursor). `self.open` is last
+        // frame's value (render runs after this), a negligible one-frame lag.
+        let pinning = crate::input::consume_pin();
+        self.special = !self.disabled && self.open && pinning;
+        let io = ctx.io_mut();
+        io.mouse_draw_cursor = self.special;
+        self.boost_cursor(io);
     }
 
     fn message_filter(&self, _io: &Io) -> MessageFilter {
