@@ -205,6 +205,11 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
         // our pinned game version: it matches the *runtime* image (the on-disk exe is Arxan/Steam-
         // encrypted), which is what `Program::current()` scans. A miss/ambiguous/drifted match fails
         // safe — the logos just play, logged. See docs/SKIP-INTROS.md and docs/CODE-PATCHING.md.
+        //
+        // Re-derive after a game update: grab the current AOB from techiew/SkipTheIntro's DllMain.cpp
+        // (the `c6 ? ? ? ? ? 01 ? 03 ...` landmark + `offset 60` to the `74` jump), translate to a
+        // pelite pattern (one `?` = one wildcard byte), and confirm the log shows the `patched
+        // 'skip_splash_screens'` line and the logos skip.
         const BOOT_LOGO_LANDMARK: &[pelite::pattern::Atom] =
             pelite::pattern!("C6 ? ? ? ? ? 01 ? 03 00 00 00 ? 8B ? E8 ? ? ? ? E9 ? ? ? ? ? 8D");
         crate::patch::nop_landmark("skip_splash_screens", BOOT_LOGO_LANDMARK, -60, 0x74, 2);

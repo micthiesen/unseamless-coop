@@ -148,6 +148,16 @@ macOS).
 Building works on this Mac; running the game does not (see "Where things run"). The run/verify
 loop on the Linux + Proton rig is the **`/test-loop`** skill.
 
+## Document how to re-derive RE results (AOBs, addresses, debug methods)
+
+Game updates shift addresses and can break AOB patterns. Whenever a patch, hook, or debug/RE
+method **works**, leave a concise comment next to it on **how the address/pattern/result was found**,
+so a future session can re-derive it fast after an update instead of rediscovering it from scratch.
+Aim for "enough that you'd know what to do," not a tutorial — but include exact values (FMG ids,
+offsets, AOB bytes, which `diag` probe was used and what it showed, why a landmark is unique) when
+having them on hand speeds up the re-find. This applies to the `coop/patch.rs` patches, the
+`coop/diag.rs` probes, and any hooked function we located by RE.
+
 ## The SDK (the "pointer mappings" library)
 
 Built on `fromsoftware-rs` (`eldenring` + `fromsoftware-shared`), **pinned by exact git commit**

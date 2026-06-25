@@ -70,39 +70,26 @@ pub unsafe fn apply(addr: *mut u8, bytes: &[u8]) -> Result<Vec<u8>, windows::cor
     Ok(original)
 }
 
-/// Locate a patch site *relative to a stable landmark* and NOP it: scan for `landmark`, step
-/// `offset` bytes from the match to the patch site, verify the byte there equals `expect` (so AOB
-/// drift landing on the wrong instruction is caught instead of corrupting code), then overwrite
-/// `count` bytes with `0x90`. Returns whether the patch was applied.
-///
-/// This is the standard shape when the bytes to patch are too generic to AOB directly (e.g. a bare
-/// `74` short jump) but sit a fixed distance from a distinctive nearby sequence — as the MIT
-/// skip-intro reference does (scan a landmark, step a fixed offset to the gate). Every failure path
-/// (no/ambiguous match, out-of-range site, wrong opcode, write error) leaves the game unmodded and
-/// logs why: degrade, never abort.
-///
-/// Safe to call from anywhere it's sound to patch (init thread at install, before the patched path
-/// runs): the site is resolved through `rva_to_va` (bounds-checked against the mapped image) and the
-/// `expect` byte is verified before any write, so a missed/ambiguous/drifted match degrades rather
-/// than corrupting or faulting.
-pub fn nop_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8, count: usize) -> bool {
+/// Resolve a patch site *relative to a stable landmark*: scan for the unique `landmark`, step
+/// `offset` bytes to the site (in RVA space, so `rva_to_va` bounds-checks it against the mapped image
+/// — we never form a wild pointer), and verify the byte there equals `expect`. Returns the live site
+/// pointer, or `None` (logged) on any failure: no/ambiguous match, out-of-range site, or wrong
+/// opcode. Shared by [`overwrite_landmark`] / [`nop_landmark`].
+fn resolve_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8) -> Option<*mut u8> {
     let program = Program::current();
     let mut save = [0u32; 1]; // pelite writes the unique match-start RVA into the implicit Save(0)
     if !program.scanner().finds_code(landmark, &mut save) {
         // finds_code is false on zero OR multiple matches, so a too-loose landmark fails safe here.
         log::warn!("patch '{name}': landmark not found or not unique; feature disabled this session");
-        return false;
+        return None;
     }
-    // Step to the patch site in RVA space, then resolve it through `rva_to_va` so the site is
-    // bounds-checked against the mapped image: an offset that strays outside it yields `None` and we
-    // skip — we never form or dereference a wild pointer.
     let Ok(site_rva) = u32::try_from(i64::from(save[0]) + offset as i64) else {
         log::warn!("patch '{name}': patch site (match {:#X} {offset:+}) out of range; skipping", save[0]);
-        return false;
+        return None;
     };
     let Some(site) = program.rva_to_va(site_rva).ok().map(|va| va as usize as *mut u8) else {
         log::warn!("patch '{name}': patch site RVA {site_rva:#X} not in the loaded image; skipping");
-        return false;
+        return None;
     };
     // Guard against AOB drift landing on the wrong instruction: the byte must be what we expect.
     let actual = unsafe { *site };
@@ -110,12 +97,31 @@ pub fn nop_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8, co
         log::warn!(
             "patch '{name}': site byte {actual:#04X} != expected {expect:#04X} (AOB drift?); skipping"
         );
-        return false;
+        return None;
     }
-    let nops = vec![0x90u8; count];
-    match unsafe { apply(site, &nops) } {
+    Some(site)
+}
+
+/// Locate a patch site relative to a unique `landmark` (see [`resolve_landmark`]) and overwrite
+/// `replacement.len()` bytes there — the general code-patch primitive (e.g. write a `0xC3` `ret` at a
+/// function entry to neuter it). Returns whether it applied. Every failure path leaves the game
+/// unmodded and logs why: degrade, never abort.
+///
+/// Safe to call where it's sound to patch (init thread at install, before the patched path runs): the
+/// site is bounds-checked and the `expect` byte verified before any write.
+pub fn overwrite_landmark(
+    name: &str,
+    landmark: &[Atom],
+    offset: isize,
+    expect: u8,
+    replacement: &[u8],
+) -> bool {
+    let Some(site) = resolve_landmark(name, landmark, offset, expect) else {
+        return false;
+    };
+    match unsafe { apply(site, replacement) } {
         Ok(orig) => {
-            log::info!("patched '{name}': {orig:02X?} -> NOP×{count}");
+            log::info!("patched '{name}': {orig:02X?} -> {replacement:02X?}");
             true
         }
         Err(e) => {
@@ -123,4 +129,11 @@ pub fn nop_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8, co
             false
         }
     }
+}
+
+/// Overwrite `count` bytes at a landmark-relative site with `0x90` (NOP) — the common case for
+/// neutering a short conditional jump (e.g. the skip-intros boot-logo gate). Thin wrapper over
+/// [`overwrite_landmark`].
+pub fn nop_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8, count: usize) -> bool {
+    overwrite_landmark(name, landmark, offset, expect, &vec![0x90u8; count])
 }

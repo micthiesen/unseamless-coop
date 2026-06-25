@@ -19,58 +19,66 @@ Themida-packed — there's nothing to copy here even if we wanted to).
 > hides them and brands the corner so the user sees a clean co-op title screen instead of three
 > error boxes. Same goal here.
 
-## Decision & plan (autonomous research pass, 2026-06)
+## RE outcome (2026-06): located the path, but it's Arxan-hardened — PARKED
 
-A focused pass to actually *suppress* these landed on a clear, somewhat sobering picture. Recording
-it so the next attempt starts from reality, not hope.
+A live rig RE loop found exactly where the offline-mode popup comes from, but suppressing it is
+blocked by Arxan. Recording the addresses + method so a future attempt starts here, not from scratch.
 
-**The three popups a user reported, mapped to the classes below:**
-- *"…Quit Game or Return to Desktop might not have been selected… loss of progress."* — the
-  **unsafe-quit / dirty-shutdown warning**, a *separate* trigger from the network ones (gated by a
-  "did the last session exit cleanly" flag). On our rig it shows every launch because we `pkill` the
-  game; a normal user only sees it after a crash/force-quit. Lowest priority.
-- *"A connection error occurred. Unable to start in online mode."* and *"Starting in offline mode…"*
-  — the **(b)** network/login modals (≈ 401170 et al.). These are the real per-launch annoyance for
-  offline play.
+**The popups, mapped:**
+- *"…Quit Game / Return to Desktop… loss of progress."* — the **unsafe-quit / dirty-shutdown
+  warning**, a *separate* trigger. It shows because we `pkill` the game on the rig; a clean exit (quit
+  via the menu) avoids it entirely, so it's a non-issue for real play. Not pursued.
+- *"A connection error occurred…"* (#2) and *"Starting in offline mode…"* (#3) — the network/login
+  modals, both re-triggerable on demand by selecting **LOG IN** at the title.
 
-**Findings:**
-- **ERSC itself does not suppress these.** Seamless Co-op's own docs/community confirm the
-  "starting in offline mode / inappropriate activity" message is *intentional, expected* behaviour
-  there — it just lives with it. So suppressing it is **novel RE beyond the mod we reimplement**, with
-  **no public AOB or community patch** to adapt (unlike skip-intros, which had the MIT techiew signature).
-- **No charted SDK lever.** At our pin `CSNetMan` exposes only the *runtime-banner* bools
-  (`server_connection_lost`, `low_fps_penalty`, `freeze_game`) — those gate the **(c)** banners, not
-  the **(b)** startup modals. There is no charted online-init/login-skip field and no charted
-  modal-dialog renderer. So there is **no zero-RE field write** that removes the user's popups.
-- **The on-disk exe is Arxan/Steam-encrypted**, so the trigger can't be found by static disassembly;
-  it has to be located in the *runtime* image (our `Program::current()` scanner, Frida-gadget, or a
-  diagnostic build).
+**What we found (addresses are for our pinned game version; re-derive after an update via the method below):**
+- **#3 "Starting in offline mode" = FMG message id 401170** (`0x61F12`). Its one and only *code
+  immediate* reference is at rva **`0x830040`** (`mov edx, 0x61F12`), inside the function at entry rva
+  **`0x82FD94`**, which state-checks and builds the offline/network status message (variants 401170 /
+  401171 / 401172).
+- **`get_message` (FMG text lookup) = rva `0x762D50`**, called as `(rcx = msg-repo/category, edx =
+  id) -> rax` (wide string). This is the uncharted GetMessage the watermark FMG-route would also need.
+- **`0x82FD94` is confirmed on the modal path:** at Log-In time, `get_message(401170)` is called from
+  rva **`0x83004D`** (the return address of the `call` at `0x830048`, inside `0x82FD94`).
 
-**Why no blind patch was shipped.** A speculative `.text` patch on the title-screen flow, applied
-without locating the real trigger and *visually* confirming the popups are gone, is exactly the
-"silent and dangerous" failure mode [`CODE-PATCHING.md`](CODE-PATCHING.md) warns against. Autonomous
-verification is also unproven here: the game runs under **gamescope**, so a host-side `spectacle`
-capture of the title screen may not work. This wants a live RE loop with eyes on the title screen.
+**The Arxan wall (why it's parked):**
+- Writing a `ret` (`0xC3`) at `0x82FD94`'s entry *applies* but is **reverted by Arxan (guardIT)
+  code-restoration**: the function keeps running (the `get_message` hook keeps firing from `0x83004D`
+  after the patch).
+- The SDK's `fromsoftware_shared::arxan::disable_code_restoration` neutered **181** restoration
+  routines but **not** the one guarding this region — same count whether run at early install or 8s
+  later, so it's not a timing issue; this region has extra/non-standard protection the SDK's AOB
+  scanner doesn't catch.
+- The one **Arxan-immune** lever is hooking `get_message` (it's at `0x762D50`, an unprotected region —
+  an `ilhook` JmpBack hook there fired reliably every time). But that only controls the *text*, not
+  the *modal-show*, so at best it blanks the dialog (a worse UX), not removes it.
+- **ERSC itself never suppresses these** (the community treats "starting in offline mode" as
+  expected). So this is novel RE with no public precedent, for a cosmetic title-screen popup. Not
+  worth deeper Arxan RE right now.
 
-**Recommended approach, prioritized:**
-1. **Hook the modal-dialog display function and drop by FMG id** (suppresses all **(b)** at once,
-   cleanly reversible-by-not-calling). Needs the renderer's address — locate it via runtime RE:
-   Frida-gadget tracing the title→login flow (RUNTIME-RE.md Option B), or a diagnostic build of our
-   DLL that scans/hooks (Option A).
-2. **Lead to try first (cheap, log-only):** a diagnostic AOB-scan of the runtime image for the
-   offline-popup FMG id as an immediate — 401170 = `0x61F1A` → bytes `1A 1F 06 00`. If it appears as a
-   direct operand near a call, that call is the trigger and `patch::nop_landmark` can NOP it. Caveat:
-   FMG ids are often **table-indirected**, so the immediate may not be in `.text` at all — the scan is
-   a probe to confirm/deny, not a guaranteed hit. Verify the real id on the rig first (401170 is datamined).
-3. **(c) runtime banners only** (not the user's popups): clamping the `CSNetMan` bools each frame is
-   the one genuinely cheap, no-RE experiment, if those banners ever bother us.
-4. **Unsafe-quit warning:** separate trigger; for the rig, exiting the game cleanly (not `pkill`)
-   avoids it. Suppressing it for real is its own flag-RE; low priority.
+**Method to re-derive (the diag probes used, since removed from the tree — recreate as a
+`debug_assertions`-gated module called from `app::install`):**
+1. AOB-scan the runtime image (`Program::current().scanner().matches_code`) for a 32-bit FMG id as a
+   little-endian immediate (`[Save(0), Byte, Byte, Byte, Byte]`), logging each hit + surrounding bytes.
+   401170 shows the single code site `0x830040`.
+2. Dump a code region (`rva_to_va` + read bytes) and disassemble offline with **capstone** (base =
+   region rva) to read the function and find the `call get_message` sites + the builder entry.
+3. Find a function's callers by sweeping the mapped image (`PeObject::image()`) for `E8 rel32` where
+   `i + 5 + rel32 == target` (note: `0x82FD94` had *no* direct callers — it's virtually dispatched).
+4. Hook `get_message` with `ilhook::x64::hook_closure_jmp_back` and log the caller (`*(rsp)` = return
+   address, minus the module base) for the offending ids — this confirmed `0x82FD94` is on the path
+   and that the `ret` patch was being reverted.
 
-**Verification requirement:** any of the above needs the game launched and the title screen
-*observed* (a screenshot or a person), iterating until the popups are gone and the title flow is
-intact. That's the gating step, and it's why this is best done as a live loop rather than a blind
-autonomous patch.
+**If ever revisited:** (a) find the modal-*display* function and hook/patch it (likely also Arxan-
+protected); (b) RE and neuter the specific non-standard Arxan protection on `0x82FD94`'s region; or
+(c) accept the `get_message`-blank route. All are significant effort.
+
+> **Arxan is not a blocker for the rest of the mod.** Arxan restores **code**, not runtime
+> data/state. The mod is built on SDK typed-field reads/writes + the task runtime (`run_recurring`),
+> which Arxan never touches — `session_player_limit_override` already writes-and-sticks on the rig.
+> Code-patching is the rare exception (skip-intros works; it's an early-boot one-shot before Arxan
+> re-checks), and the co-op core needs none. Hooks at unprotected regions (DirectInput input capture,
+> the hudhook overlay, `get_message`) survive Arxan. This popup was just an unlucky head-on target.
 
 ## A. The offline popups
 
