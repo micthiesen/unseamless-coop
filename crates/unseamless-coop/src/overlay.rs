@@ -81,6 +81,15 @@ const DIM_GREY: [f32; 3] = [0.55, 0.55, 0.55];
 /// can't drift apart.
 const PASSIVE_BG_ALPHA: f32 = 0.35;
 
+/// One inset, in pixels, from the viewport edge, shared by every overlay surface: the top-left
+/// notifications (left + top), the top-right watermark (right + top), and the utility window's
+/// default top edge. Tweak here to move them all together.
+const OVERLAY_MARGIN: f32 = 24.0;
+
+/// The utility window's default size. Also drives its default horizontal centering (so it opens
+/// centered along the top), so it's a constant rather than an inline literal.
+const WINDOW_DEFAULT_SIZE: [f32; 2] = [624.0, 380.0];
+
 /// Window flags shared by the passive corner surfaces: borderless, auto-sized to content,
 /// input-transparent, not persisted, and never stealing focus on appear. A function (not a `const`)
 /// to avoid depending on `WindowFlags`' const bitops across imgui versions.
@@ -191,7 +200,7 @@ impl Overlay {
         };
         // Top-left, the opposite corner from the watermark (top-right) and Steam's toasts (bottom-right).
         ui.window("##unseamless-notifications")
-            .position([24.0, 24.0], Condition::Always)
+            .position([OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
@@ -211,7 +220,7 @@ impl Overlay {
         // Anchor by the window's own top-right corner (pivot 1,0) at a fixed inset from the viewport's
         // top-right, so it stays put regardless of the auto-sized text width.
         ui.window("##unseamless-watermark")
-            .position([disp[0] - 20.0, 20.0], Condition::Always)
+            .position([disp[0] - OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
             .position_pivot([1.0, 0.0])
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
@@ -257,12 +266,17 @@ impl Overlay {
         // If the window drifted out of the ER viewport last frame, snap it back this frame ("lock" it
         // to the game window). Taken into a local first so the build closure can re-borrow `self`.
         let clamp = self.clamp_pos.take();
+        // Default placement (first open only): horizontally centered, a top-margin down from the top.
+        // `.max(0.0)` only matters for a viewport narrower than the window. The clamp/drag logic owns
+        // every later position; this is just where it first appears.
+        let disp = ui.io().display_size;
+        let default_pos = [((disp[0] - WINDOW_DEFAULT_SIZE[0]) / 2.0).max(0.0), OVERLAY_MARGIN];
         let mut win = ui
             .window(WINDOW_TITLE)
-            .size([624.0, 380.0], Condition::FirstUseEver)
+            .size(WINDOW_DEFAULT_SIZE, Condition::FirstUseEver)
             // Floor the size so it can't be dragged down to a uselessly tiny box (max unbounded).
             .size_constraints([360.0, 240.0], [f32::MAX, f32::MAX])
-            .position([80.0, 80.0], Condition::FirstUseEver)
+            .position(default_pos, Condition::FirstUseEver)
             // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
             // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
             // window flag is the only reliable way to stop it double-handling arrows. Clicks still work.
