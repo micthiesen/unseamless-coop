@@ -86,6 +86,9 @@ pub struct Debug {
     /// Proton update could black-screen it), so set this `false` and relaunch to run without the
     /// overlay rather than being stuck.
     pub overlay: bool,
+    /// On-demand diagnostic probes (`[debug.probes]`). All off by default — these are the levers we
+    /// ask a tester to flip when chasing a specific issue ("set this, reproduce, send the log").
+    pub probes: DebugProbes,
 }
 
 impl Default for Debug {
@@ -96,9 +99,31 @@ impl Default for Debug {
             forward_to_host: false,
             bridge_port: 0,
             overlay: true,
+            probes: DebugProbes::default(),
         }
     }
 }
+
+/// Requestable diagnostic probes. Each is inert unless explicitly enabled, so they can ship in any
+/// build and be turned on per-tester on demand. The probes themselves live in the cdylib (`coop/diag`);
+/// this is just the switchboard. See [`Config::validate`] for the bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugProbes {
+    /// Log a full [`DiagnosticReport`](crate::diagnostics::DiagnosticReport) snapshot every N seconds
+    /// (0 = off; the boot + feature-panic snapshots still fire). For watching state evolve on request.
+    pub snapshot_secs: u32,
+    /// Scan `event_flag_scan_count` event flags starting at this id, logging each that flips — for
+    /// locating the flag behind an in-game action (e.g. resting at a grace). `count = 0` = off.
+    pub event_flag_scan_start: u32,
+    /// How many flags to scan from `event_flag_scan_start`. Clamped to [`MAX_FLAG_SCAN`] (a huge range
+    /// scanned per frame is wasteful and pointless). `0` = scanner off.
+    pub event_flag_scan_count: u32,
+}
+
+/// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
+/// few frames buys nothing and costs time. (ER event-flag ids are sparse; a targeted window finds it.)
+pub const MAX_FLAG_SCAN: u32 = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -353,6 +378,14 @@ impl Config {
 
         for (field, message) in self.death_debuffs.clamp() {
             warnings.push(ConfigWarning { field: field.into(), message });
+        }
+
+        if self.debug.probes.event_flag_scan_count > MAX_FLAG_SCAN {
+            warnings.push(ConfigWarning {
+                field: "debug.probes.event_flag_scan_count".into(),
+                message: format!("{} exceeds {MAX_FLAG_SCAN}; clamped", self.debug.probes.event_flag_scan_count),
+            });
+            self.debug.probes.event_flag_scan_count = MAX_FLAG_SCAN;
         }
 
         warnings

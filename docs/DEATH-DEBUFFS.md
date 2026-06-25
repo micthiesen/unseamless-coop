@@ -244,8 +244,10 @@ main player by ID" call into a small shared helper (e.g. on the sdk module) that
       config; inert + silent until the two rig blanks below are filled (no bogus SpEffect ids sent).
 - [ ] **Rig (solo):** confirm the death edge corresponds to a real death/respawn and debounce
       scripted HP dips (the feature `debug!`-logs each detected death for this).
-- [ ] **Rig (solo):** find the "rested at grace" event flag (ER Debug Tool grace/flag tabs); set
-      `GRACE_REST_FLAG` in `features/death_debuffs.rs`.
+- [ ] **Rig (solo):** find the "rested at grace" event flag and set `GRACE_REST_FLAG` in
+      `features/death_debuffs.rs`. Use the **event-flag scanner** (`[debug.probes]
+      event_flag_scan_start/count` → `coop/diag.rs`): set a window over a plausible flag range, rest at
+      a grace, and the log prints which flag flipped. (Or the ER Debug Tool grace/flag tabs.)
 - [x] **Effect-value model** (`core::death_debuffs::DebuffTier::rates(intensity)` → `SpEffectRates`):
       the concrete `SP_EFFECT_PARAM_ST` rate-field values each tier writes, scaled by intensity,
       host-tested. So the rig no longer has to *design* the values — only confirm row ids + insertion

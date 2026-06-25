@@ -237,6 +237,107 @@ impl LogBundle {
     }
 }
 
+/// A structured, self-describing **runtime snapshot**, rendered as a delimited, greppable block in
+/// the log. Where [`RunInfo`] is the boot-time header (version/build/config), a report captures the
+/// *live* state at a moment — session FSM, roster, feature health — so a shared log answers "what
+/// was actually happening when X went wrong" without the user/agent having to ask. Built on demand
+/// (boot, a session change, a periodic probe tick, a feature panic) by the cdylib, which fills the
+/// sections from live game state; this is the pure model + renderer, host-tested.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiagnosticReport {
+    title: String,
+    sections: Vec<ReportSection>,
+}
+
+/// One section of a [`DiagnosticReport`] — a titled, ordered list of `key = value` lines. Returned by
+/// [`DiagnosticReport::section`] for chained [`field`](ReportSection::field) calls; fields are private
+/// so it's append-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportSection {
+    title: String,
+    fields: Vec<(String, String)>,
+}
+
+impl DiagnosticReport {
+    pub fn new(title: impl Into<String>) -> Self {
+        Self { title: title.into(), sections: Vec::new() }
+    }
+
+    /// Start a new section and return it for chained [`field`](ReportSection::field) calls.
+    pub fn section(&mut self, title: impl Into<String>) -> &mut ReportSection {
+        self.sections.push(ReportSection { title: title.into(), fields: Vec::new() });
+        self.sections.last_mut().expect("just pushed")
+    }
+
+    /// Render the delimited block. Keys are column-aligned within each section for scanability, and
+    /// the markers (`==== … diagnostic`, `---- section ----`, `==== end …`) match [`RunInfo`]'s style
+    /// so the same greps find both.
+    pub fn render(&self) -> String {
+        let mut out = format!("==== unseamless-coop diagnostic: {} ====\n", self.title);
+        for section in &self.sections {
+            out.push_str(&format!("---- {} ----\n", section.title));
+            let width = section.fields.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+            for (k, v) in &section.fields {
+                // Indent continuation lines of a multi-line value so they stay under their key.
+                let v = v.replace('\n', "\n  ");
+                out.push_str(&format!("{k:<width$} = {v}\n"));
+            }
+        }
+        out.push_str("==== end diagnostic ====\n");
+        out
+    }
+}
+
+impl ReportSection {
+    /// Add a `key = value` line (any `Display` value). Returns `&mut self` for chaining.
+    pub fn field(&mut self, key: impl Into<String>, value: impl std::fmt::Display) -> &mut Self {
+        self.fields.push((key.into(), value.to_string()));
+        self
+    }
+}
+
+/// Tracks a contiguous range of boolean signals (event flags) and reports the ones that **changed**
+/// between successive snapshots — the reusable "which flag flips when I do X in-game" finder (e.g.
+/// resting at a Site of Grace, to locate the death-debuff cure flag). Pure: the cdylib reads the
+/// flags from `CSEventFlagMan` and feeds them here; this owns the prior-state diff and noise control.
+#[derive(Debug, Clone)]
+pub struct FlagScanner {
+    start: u32,
+    prev: Vec<bool>,
+}
+
+impl FlagScanner {
+    /// Watch `count` flags starting at flag id `start`, all assumed initially `false`.
+    pub fn new(start: u32, count: usize) -> Self {
+        Self { start, prev: vec![false; count] }
+    }
+
+    /// Number of flags watched.
+    pub fn len(&self) -> usize {
+        self.prev.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.prev.is_empty()
+    }
+
+    /// Feed the current state of the watched flags, in id order from `start`. Returns `(flag_id,
+    /// now_on)` for each flag whose value differs from the previous call, and records the new state.
+    /// A `current` shorter or longer than the watched range only compares the overlapping prefix
+    /// (defensive — never panics on a length mismatch).
+    pub fn changes(&mut self, current: &[bool]) -> Vec<(u32, bool)> {
+        let mut out = Vec::new();
+        // `zip` stops at the shorter of the two, so a length mismatch only compares the overlap.
+        for (i, (&cur, prev)) in current.iter().zip(self.prev.iter_mut()).enumerate() {
+            if cur != *prev {
+                *prev = cur;
+                out.push((self.start + i as u32, cur));
+            }
+        }
+        out
+    }
+}
+
 /// A short, stable, non-reversible tag for a peer's Steam ID, for use in **shareable** logs.
 ///
 /// A raw 64-bit SteamID resolves directly to a person's Steam profile, so writing other players'
@@ -402,6 +503,49 @@ mod tests {
         }
         assert!(LogLevel::try_from(99u8).is_err());
         assert!(LogLevel::Error < LogLevel::Trace);
+    }
+
+    #[test]
+    fn report_renders_aligned_self_describing_sections() {
+        let mut r = DiagnosticReport::new("snapshot");
+        r.section("session").field("lobby", "Ingame").field("players", 2);
+        r.section("features").field("death-debuffs", "ok");
+        let out = r.render();
+        assert!(out.starts_with("==== unseamless-coop diagnostic: snapshot ====\n"));
+        assert!(out.contains("---- session ----"));
+        // Keys column-aligned to the widest in the section ("players" = 7), so "lobby" is padded.
+        assert!(out.contains("lobby   = Ingame"), "aligned key:\n{out}");
+        assert!(out.contains("players = 2"));
+        assert!(out.contains("---- features ----"));
+        assert!(out.trim_end().ends_with("==== end diagnostic ===="));
+    }
+
+    #[test]
+    fn report_indents_multiline_values_under_their_key() {
+        let mut r = DiagnosticReport::new("t");
+        r.section("s").field("trace", "line1\nline2");
+        assert!(r.render().contains("trace = line1\n  line2"), "{}", r.render());
+    }
+
+    #[test]
+    fn flag_scanner_reports_only_changes_with_ids() {
+        let mut s = FlagScanner::new(1000, 4);
+        assert_eq!(s.len(), 4);
+        // First snapshot: flags 1001 and 1003 are on -> two rising edges at their real ids.
+        assert_eq!(s.changes(&[false, true, false, true]), [(1001, true), (1003, true)]);
+        // No change -> nothing.
+        assert_eq!(s.changes(&[false, true, false, true]), []);
+        // 1001 clears, 1000 sets -> a falling and a rising edge.
+        assert_eq!(s.changes(&[true, false, false, true]), [(1000, true), (1001, false)]);
+    }
+
+    #[test]
+    fn flag_scanner_tolerates_length_mismatch() {
+        let mut s = FlagScanner::new(0, 3);
+        // Shorter input only compares the overlap; never panics.
+        assert_eq!(s.changes(&[true]), [(0, true)]);
+        // Longer input ignores the tail beyond the watched range.
+        assert_eq!(s.changes(&[true, true, false, true]), [(1, true)]);
     }
 
     #[test]

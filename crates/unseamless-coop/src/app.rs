@@ -150,6 +150,9 @@ pub fn install() {
         // Stacking death penalty (reads HP after PostPhysics). Reads live config; no-op when off.
         Box::new(DeathDebuffsFeature::new()),
     ];
+    // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
+    let mut features = features;
+    features.extend(crate::diag::probe_features(&config));
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];
 
@@ -178,6 +181,10 @@ pub fn install() {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data))).is_err()
                 {
                     disable_feature(index);
+                    // Capture the live state around the panic into the (shared) log. Called here, not
+                    // inside disable_feature, so the tick's APP lock has already unwound/released —
+                    // diag::feature_status re-locks, which would deadlock if we still held it.
+                    crate::diag::dump("feature-panic");
                 }
             },
             phase,
@@ -185,6 +192,11 @@ pub fn install() {
         std::mem::forget(handle);
         log::info!("registered feature '{name}' in {phase:?}");
     }
+
+    // Boot snapshot: a full diagnostic report once everything's registered, so every shared log opens
+    // with the live state at startup (most singletons are still pre-init here — that's expected and
+    // itself informative). Periodic/panic snapshots add the evolving picture.
+    crate::diag::dump("boot");
 
     // In-game overlay (hudhook DX12 present-hook). Installed unless the runtime kill-switch is off,
     // so a Proton/vkd3d render problem can be disabled by editing the config (no rebuild). Reads
@@ -295,6 +307,16 @@ fn tick(index: usize, data: &FD4TaskData) {
     if let Some(feature) = app.features.get_mut(index) {
         feature.on_frame(tick);
     }
+}
+
+/// Snapshot of each registered feature's name and whether it's been disabled (panicked), for the
+/// diagnostic report. Takes the lock fresh and releases it before returning — never call it while
+/// already holding the `APP` lock (e.g. from inside a feature tick), which would deadlock; the
+/// on-panic dump calls it from the tick wrapper *after* the lock is released.
+pub fn feature_status() -> Vec<(&'static str, bool)> {
+    let Some(app) = APP.get() else { return Vec::new() };
+    let app = app.lock().unwrap_or_else(|poison| poison.into_inner());
+    app.features.iter().zip(&app.disabled).map(|(f, &d)| (f.name(), d)).collect()
 }
 
 /// Mark a feature as permanently disabled after its `on_frame` panicked (the panic hook already

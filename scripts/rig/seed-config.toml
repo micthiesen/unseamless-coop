@@ -60,6 +60,15 @@ bridge_port = 47700
 # the DX12 present-hook ever misbehaves under Proton/vkd3d.
 overlay = true
 
+# Requestable diagnostic probes — all off by default. Flip on demand when chasing a specific issue
+# (yourself on the rig, or ask a friend tester to set one, reproduce, and send the log). A full
+# snapshot already logs at boot + on any feature panic regardless of these.
+[debug.probes]
+snapshot_secs = 0          # >0: also log a full diagnostic snapshot every N seconds
+event_flag_scan_start = 0  # event-flag scanner window start...
+event_flag_scan_count = 0  # ...and how many flags to watch (0 = off). Finds the flag behind an action
+                           # (e.g. set a window, rest at a grace, see which flag flips = the cure flag).
+
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
 # max_intensity_percent. These are the defaults, here for visibility while we RE the death/grace signals.
