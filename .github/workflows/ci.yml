@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install mingw-w64
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+        # g++ (not just gcc) is required: hudhook's imgui-sys is C++ and is always compiled, and the
+        # mingw C++ package also provides the static libstdc++.a/libgcc*.a the cdylib links (build.rs).
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
       - name: Set up Rust toolchain
         # rust-toolchain.toml pins the channel; ensure the cross target + clippy are present.
