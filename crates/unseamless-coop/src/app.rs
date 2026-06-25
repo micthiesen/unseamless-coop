@@ -13,6 +13,7 @@ use eldenring::fd4::FD4TaskData;
 use fromsoftware_shared::SharedTaskImpExt;
 
 use crate::feature::{Feature, Tick};
+use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::session_limit::SessionLimit;
 
@@ -47,9 +48,27 @@ pub fn install() {
     // Config before logging: the logger picks its level and writes its header from the config.
     let (config, notes) = crate::config::load(&base);
     crate::logger::init(&config, &base);
+    crate::notify::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
+        // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
+        // the info-level "loaded config" chatter stays log-only so it doesn't toast on every launch.
+        if level <= log::Level::Warn {
+            let severity = unseamless_core::notifications::Severity::from(level);
+            crate::notify::with_mut(|n| {
+                n.toast(severity, message, unseamless_core::notifications::DEFAULT_TOAST_SECS * 2.0)
+            });
+        }
     }
+    // A persistent "mod active" banner / version watermark: always visible while the overlay is up,
+    // and an end-to-end confirmation that the notification pipeline works.
+    crate::notify::with_mut(|n| {
+        n.set_banner(
+            "mod-active",
+            unseamless_core::notifications::Severity::Info,
+            format!("unseamless-coop v{}", env!("CARGO_PKG_VERSION")),
+        )
+    });
     if base == std::path::Path::new(".") {
         log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
@@ -98,6 +117,7 @@ pub fn install() {
     // wrote, same frame. It's only a logging nicety: were that order to change, the observer would
     // log the override one frame late, not wrong. Both read the live config (`crate::state`).
     let features: Vec<Box<dyn Feature>> = vec![
+        Box::new(NotificationsTick::new()), // ages toasts once per frame, before producers push
         Box::new(SessionLimit::new()),
         Box::new(SessionObserver::new()),
     ];

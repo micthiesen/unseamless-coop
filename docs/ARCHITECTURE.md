@@ -139,7 +139,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/settings.rs` (registry) | 1 | done, tested |
 | `unseamless-core/scaling.rs` | 1 | done, tested |
 | `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
-| `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested (renderer rig-gated) |
+| `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested; **wired** to the overlay renderer (`coop/notify.rs` + `coop/features/notifications.rs`) |
 | `unseamless-core/protocol.rs` (side-channel, wire v2: generation/seq identity) | 2 | done, tested (wiring is rig-gated) |
 | `unseamless-core/transport.rs` (`Transport` seam + `Loopback` + `FaultModel`) | 2 | done, tested |
 | `unseamless-core/framing.rs` (length-prefixed wire codec, shared by `TcpTransport` + the bridge) | 2 | done, tested |
@@ -157,7 +157,8 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/state.rs` (process-global live `Config`; features read each frame, bridge/menu write) | — | done |
 | `coop/features/session_limit.rs` (write `session_player_limit_override` from live config) | 2 | done; apply rig-confirmed (incl. via a synced `ConfigSync`), >4-player effect needs a party |
 | `coop/bridge.rs` (dev debug bridge: live `Session` over loopback, applies received config) | — | done; apply rig-confirmed (`bridge` feature, off in release) |
-| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | milestone 1 done: a box renders under Proton/vkd3d (rig-confirmed); `menu.rs`/`notifications.rs` wiring next. `overlay` feature, see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
+| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | renders notifications (banners + toasts) under Proton/vkd3d, rig-confirmed; `menu.rs` wiring next. `overlay` feature, see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
+| `coop/notify.rs` (process-global `Mutex<Notifications>`; features push, overlay reads non-blocking) | — | done |
 | `coop/features/scaling.rs` (apply) | 1/2 | mechanism decided (SpEffect rate rows behind `MultiPlayCorrectionParam` — see [SCALING.md](SCALING.md)); row/ID map rig-gated |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |
 

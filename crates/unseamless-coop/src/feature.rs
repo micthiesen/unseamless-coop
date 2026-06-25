@@ -13,9 +13,8 @@ use eldenring::cs::CSTaskGroupIndex;
 #[derive(Debug, Clone, Copy)]
 pub struct Tick {
     pub frame: u64,
-    // Consumed by time-based features via `unseamless_core::util::Timer`; the first such feature
-    // is still ahead, so it's plumbed through but not yet read.
-    #[allow(dead_code)]
+    /// This frame's `FD4TaskData::delta_time` in seconds. Read by `features::notifications` to age
+    /// toasts once per frame (and by future time-based features via `unseamless_core::util::Timer`).
     pub delta: f32,
 }
 

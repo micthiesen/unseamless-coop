@@ -60,6 +60,12 @@ impl Feature for SessionLimit {
                 log::debug!("re-applied session player limit override = {desired}");
             } else {
                 log::info!("session player limit override set to {desired}");
+                // Toast only a genuine *change* the user might care about — not the startup baseline
+                // (`last_logged == None`, every launch) nor the self-heal re-asserts. So a config sync
+                // changing the cap toasts; the boot-time apply just logs.
+                if self.last_logged.is_some() {
+                    crate::notify::with_mut(|n| n.info(format!("Session player cap set to {desired}")));
+                }
                 self.last_logged = Some(desired);
             }
         }
