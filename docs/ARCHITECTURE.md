@@ -75,6 +75,38 @@ We follow the same model. (Full per-subsystem inventory: [SDK-COVERAGE.md](SDK-C
 This shrinks the hard RE surface from "an entire netcode" to "how the game's session FSM
 behaves and where ERSC relaxes/persists it" — observable on the rig.
 
+### Keeping it seamless: hold state invariants, don't patch call sites
+
+ERSC byte-patches the many call sites that normally end a co-op session (boss death, fog gate, host
+death, walking out of the host's area). We deliberately **don't** copy that. Two reasons it's the
+wrong shape for us: every byte-patch is a potential **Arxan** landmine (Arxan restores `.text`, so a
+patch can be reverted under us — that's why the offline-popup work is parked, see
+[OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md)), and we have a lever ERSC (a C++ DLL) leaned on
+less: **typed SDK field writes from a per-frame task**.
+
+So we model "stay connected" as a small set of **invariants re-asserted every frame**, not code we
+carve out. Approaches, best to worst:
+
+1. **Hold the state the teardown reads.** Arxan restores code, *not* runtime data, so a held field is
+   immune. Existence proof: [`session_limit`](../crates/unseamless-coop/src/features/session_limit.rs)
+   raises the player cap by writing one `u32` every frame and it sticks. The SDK already charts the
+   prime levers for the roam/area half: `CSStayInMultiplayAreaWarpData::disable_multiplay_restriction`
+   (documented "set true to go anywhere on the map") and `multiplay_start_area_id` ("set 0 to disable"
+   the boss-area-mismatch warp).
+2. **Hook the chokepoint and *decide*** (ilhook redirect, like `input.rs`, which sticks) — read the
+   teardown *reason* and suppress only the unwanted ones, so a real quit-to-menu still works. Likely
+   2-3 chokepoints (low-level net disconnect vs. high-level "area co-op ended"), not ERSC's dozen.
+3. **Let teardown happen, reconnect** — safety net for genuinely unpreventable resets (a full area
+   reload nuking the session object); has a blip + matchmaking latency.
+
+Which lever each event needs is **empirical**, decided by a rig run, not from the armchair. The
+[observer](../crates/unseamless-coop/src/features/observer.rs) is the probe: in a 2-player session,
+trigger each event and read the log — it marks the roster shrink (`TEARDOWN`) loudly, frame-tags every
+transition so the order of flips is recoverable, and watches the tether fields so a candidate state
+lever shows itself. A field that flips *before* the roster drop is a lever (hold it); a drop with no
+observable lead-up is atomic and needs a hook. We treat the ERSC trigger list as the *catalog of
+events to test* (recovered behaviorally), never as the strategy to copy.
+
 ### The side-channel is self-healing (robust to an unknown delivery model)
 
 We don't yet know whether `broadcast_packet` is reliable/ordered or best-effort — Steam P2P can be
