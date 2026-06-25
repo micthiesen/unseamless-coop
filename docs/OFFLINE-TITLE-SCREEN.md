@@ -19,6 +19,59 @@ Themida-packed — there's nothing to copy here even if we wanted to).
 > hides them and brands the corner so the user sees a clean co-op title screen instead of three
 > error boxes. Same goal here.
 
+## Decision & plan (autonomous research pass, 2026-06)
+
+A focused pass to actually *suppress* these landed on a clear, somewhat sobering picture. Recording
+it so the next attempt starts from reality, not hope.
+
+**The three popups a user reported, mapped to the classes below:**
+- *"…Quit Game or Return to Desktop might not have been selected… loss of progress."* — the
+  **unsafe-quit / dirty-shutdown warning**, a *separate* trigger from the network ones (gated by a
+  "did the last session exit cleanly" flag). On our rig it shows every launch because we `pkill` the
+  game; a normal user only sees it after a crash/force-quit. Lowest priority.
+- *"A connection error occurred. Unable to start in online mode."* and *"Starting in offline mode…"*
+  — the **(b)** network/login modals (≈ 401170 et al.). These are the real per-launch annoyance for
+  offline play.
+
+**Findings:**
+- **ERSC itself does not suppress these.** Seamless Co-op's own docs/community confirm the
+  "starting in offline mode / inappropriate activity" message is *intentional, expected* behaviour
+  there — it just lives with it. So suppressing it is **novel RE beyond the mod we reimplement**, with
+  **no public AOB or community patch** to adapt (unlike skip-intros, which had the MIT techiew signature).
+- **No charted SDK lever.** At our pin `CSNetMan` exposes only the *runtime-banner* bools
+  (`server_connection_lost`, `low_fps_penalty`, `freeze_game`) — those gate the **(c)** banners, not
+  the **(b)** startup modals. There is no charted online-init/login-skip field and no charted
+  modal-dialog renderer. So there is **no zero-RE field write** that removes the user's popups.
+- **The on-disk exe is Arxan/Steam-encrypted**, so the trigger can't be found by static disassembly;
+  it has to be located in the *runtime* image (our `Program::current()` scanner, Frida-gadget, or a
+  diagnostic build).
+
+**Why no blind patch was shipped.** A speculative `.text` patch on the title-screen flow, applied
+without locating the real trigger and *visually* confirming the popups are gone, is exactly the
+"silent and dangerous" failure mode [`CODE-PATCHING.md`](CODE-PATCHING.md) warns against. Autonomous
+verification is also unproven here: the game runs under **gamescope**, so a host-side `spectacle`
+capture of the title screen may not work. This wants a live RE loop with eyes on the title screen.
+
+**Recommended approach, prioritized:**
+1. **Hook the modal-dialog display function and drop by FMG id** (suppresses all **(b)** at once,
+   cleanly reversible-by-not-calling). Needs the renderer's address — locate it via runtime RE:
+   Frida-gadget tracing the title→login flow (RUNTIME-RE.md Option B), or a diagnostic build of our
+   DLL that scans/hooks (Option A).
+2. **Lead to try first (cheap, log-only):** a diagnostic AOB-scan of the runtime image for the
+   offline-popup FMG id as an immediate — 401170 = `0x61F1A` → bytes `1A 1F 06 00`. If it appears as a
+   direct operand near a call, that call is the trigger and `patch::nop_landmark` can NOP it. Caveat:
+   FMG ids are often **table-indirected**, so the immediate may not be in `.text` at all — the scan is
+   a probe to confirm/deny, not a guaranteed hit. Verify the real id on the rig first (401170 is datamined).
+3. **(c) runtime banners only** (not the user's popups): clamping the `CSNetMan` bools each frame is
+   the one genuinely cheap, no-RE experiment, if those banners ever bother us.
+4. **Unsafe-quit warning:** separate trigger; for the rig, exiting the game cleanly (not `pkill`)
+   avoids it. Suppressing it for real is its own flag-RE; low priority.
+
+**Verification requirement:** any of the above needs the game launched and the title screen
+*observed* (a screenshot or a person), iterating until the popups are gone and the title flow is
+intact. That's the gating step, and it's why this is best done as a live loop rather than a blind
+autonomous patch.
+
 ## A. The offline popups
 
 ### What actually appears
