@@ -209,7 +209,13 @@ impl Overlay {
             // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
             // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
             // window flag is the only reliable way to stop it double-handling arrows. Clicks still work.
-            .flags(WindowFlags::NO_SAVED_SETTINGS | WindowFlags::NO_COLLAPSE | WindowFlags::NO_NAV);
+            // NO_SCROLLBAR: the tab bar stays fixed; each tab's content scrolls in its own child below.
+            .flags(
+                WindowFlags::NO_SAVED_SETTINGS
+                    | WindowFlags::NO_COLLAPSE
+                    | WindowFlags::NO_NAV
+                    | WindowFlags::NO_SCROLLBAR,
+            );
         if let Some(p) = clamp {
             win = win.position(p, Condition::Always);
         }
@@ -240,12 +246,18 @@ impl Overlay {
                         };
                         if let Some(_tab) = ui.tab_item_with_flags(label, None, flags) {
                             self.tab = i; // track the visible tab (incl. mouse clicks)
-                            match label {
-                                "Actions" => self.draw_actions_tab(ui, &ctx),
-                                "Settings" => self.draw_settings_tab(ui),
-                                "Log" => draw_log_tab(ui),
-                                _ => {}
-                            }
+                            // Each tab's content lives in its own scrollable child (per-label id, so
+                            // scroll state is independent), filling the space under the tab bar — so
+                            // overflow scrolls the content, not the whole window / tab bar.
+                            let avail = ui.content_region_avail();
+                            ui.child_window(format!("##content-{label}"))
+                                .size([avail[0], avail[1].max(60.0)])
+                                .build(|| match label {
+                                    "Actions" => self.draw_actions_tab(ui, &ctx),
+                                    "Settings" => self.draw_settings_tab(ui),
+                                    "Log" => draw_log_tab(ui),
+                                    _ => {}
+                                });
                         }
                     }
                 }
@@ -436,17 +448,13 @@ fn draw_log_tab(ui: &Ui) {
     let Some(lines) = crate::logbuf::try_read(|lines| lines.iter().cloned().collect::<Vec<_>>()) else {
         return; // contended this frame; skip drawing the log
     };
-    let avail = ui.content_region_avail();
-    ui.child_window("##log").size([avail[0], avail[1].max(60.0)]).build(|| {
-        // Wrap long lines at the child's right edge instead of overflowing horizontally.
-        let _wrap = ui.push_text_wrap_pos();
-        // Newest first: the ring buffer is oldest→newest, so render it reversed. The view sits at the
-        // top by default, so the latest line is always in sight without scrolling — and it's live, since
-        // the buffer is re-read every frame.
-        for line in lines.iter().rev() {
-            ui.text_colored(rgba(level_color(line.level), 1.0), &line.text);
-        }
-    });
+    // The scrollable box is the per-tab child the caller created. Wrap long lines at its right edge.
+    let _wrap = ui.push_text_wrap_pos();
+    // Newest first: the ring buffer is oldest→newest, so render it reversed. The view sits at the top by
+    // default, so the latest line is always in sight — and it's live, since the buffer is re-read each frame.
+    for line in lines.iter().rev() {
+        ui.text_colored(rgba(level_color(line.level), 1.0), &line.text);
+    }
 }
 
 /// Pack an RGB swatch with an alpha into the RGBA imgui wants.
