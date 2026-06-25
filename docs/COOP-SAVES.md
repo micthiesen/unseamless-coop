@@ -87,16 +87,14 @@ Why this point and not the alternatives:
   it doesn't keep the two saves isolated *during play*. We want the in-process redirect so the running
   game writes to `.co2` and never opens `.sl2` at all.
 
-The `CreateFileW` hook is **substrate we don't have yet.** `alt-saves` uses the `retour` crate's
-`static_detour!` to build an inline trampoline detour. `er-crit-coop`'s `patch.rs` only does SDK-field
-writes per frame, so this is a new capability for our toolchain (a function detour, distinct from the
-AOB+NOP patcher [SKIP-INTROS.md](SKIP-INTROS.md) also wants — both are "we need a patch/hook utility"
-gaps). `retour` is the obvious choice and is already battle-tested for exactly this hook.
-
-**Cross-compile: validated (spike).** `retour` 0.3.1 (`features = ["static-detour"]`) compiles
-cleanly to `x86_64-pc-windows-gnu` via mingw in both dev and shipping profiles (confirmed alongside
-the hudhook spike on the rig). Note the stable line is **0.3.x** — `0.4` is alpha-only on crates.io,
-so pin `retour = "0.3"`.
+The `CreateFileW` hook reuses the detour substrate we **already** ship: `ilhook` (already a dep,
+already used by [`input.rs`](../crates/unseamless-coop/src/input.rs) for the dinput8/user32 hooks). No
+new crate. `alt-saves` uses `retour`'s `static_detour!`; we don't need it. We install a **jmp-back**
+hook (`hook_closure_jmp_back`): the callback runs at `CreateFileW` entry, edits the saved `rcx`
+(`lpFileName`, win64 first arg) to point at a rewritten path, and the original then continues with it.
+Editing one register sidesteps forwarding `CreateFileW`'s 7 args (3 on the stack) and the inline-detour
+recursion trap (we never call `CreateFileW` ourselves). The rewritten path lives in a thread-local
+buffer that outlives the synchronous open. See [`coop/saves.rs`](../crates/unseamless-coop/src/saves.rs).
 
 ## How ERSC Does It (Behaviorally)
 
@@ -154,10 +152,16 @@ writing to your vanilla save file first."* That is precisely the corruption we c
   `"co2"`, validated to 1..=120 alphanumerics by `Config::validate`). Build `.<ext>` and `.<ext>.bak`
   from it. An empty/invalid value is already clamped to `co2` before we'd see it.
 - **Redirect both `.sl2` and `.sl2.bak`.** Non-negotiable (see ERSC `.bak` note above).
-- **Match conservatively.** Only rewrite paths whose final component is `ER0000.sl2` / `ER0000.sl2.bak`
-  (or, defensively, any path ending exactly in those extensions *under the EldenRing save dir*). A loose
-  "contains .sl2" match could catch unrelated files; an ends-with on the known stem+extension is the safe
-  shape. Confirm the exact path the game passes on the rig before finalizing the predicate.
+- **Match on the extension suffix, not the `ER0000` stem (deliberate).** What shipped rewrites any path
+  ending exactly in `.sl2` / `.sl2.bak` (an ends-with, never a "contains", so a mid-path `a.sl2\b.txt`
+  is not caught). We considered anchoring on the `ER0000` stem and chose not to: for a *safety-critical*
+  feature the failure to avoid above all is **missing** a real save (→ co-op writes the vanilla file),
+  and every extra match condition (a required stem) can only *increase* miss risk if FromSoft ever
+  changes the filename. The game opens only `ER0000.sl2` in that directory anyway, so the broad suffix
+  match and a stem-anchored one behave identically in practice while the broad one fails safer. The
+  suffix set is single-sourced in `core::saves::VANILLA_SUFFIXES` and the cdylib's hot-path pre-filter
+  consumes it (`wide_has_vanilla_suffix`), so the two can't drift. Re-verify the exact path the game
+  passes on the rig after each game update (per CLAUDE.md's re-derivation rule).
 
 ### Failure Modes That Could Corrupt the Vanilla Save
 
@@ -197,20 +201,23 @@ All of this is **rig-only** (Linux + Proton; see [RIG-RUNBOOK.md](RIG-RUNBOOK.md
 
 - [x] Config surface exists: `save.file_extension` (default `co2`, validated) in
       `unseamless-core/config.rs`. No config work needed.
-- [ ] Add a **function-detour utility** (`retour`-based) to the cdylib's toolchain — new capability,
-      shared with any future hook-based feature.
-- [ ] Implement the **`CreateFileW` hook**: rewrite `ER0000.sl2`/`.sl2.bak` → `.<ext>`/`.<ext>.bak` from
-      `save.file_extension`, installed **before** `wait_for_task_system()` in `app::install`
-      (not a `Feature` task).
-- [ ] Decide fatal-vs-toast if the hook **fails to install** (leaning `guard::fatal`, like the EAC guard,
-      given the corruption risk). Implement accordingly.
-- [ ] Rig: run the verification plan above; the load-bearing assertion is **vanilla `.sl2` byte-identical
-      before/after**.
-- [ ] Rig: confirm the exact save path string the game passes to `CreateFileW` under Proton (validate the
-      predicate, and that `CreateFileW` — not some other API — is the open path).
-- [ ] Rig: confirm Steam Cloud behavior for `.co2` (expected: not synced).
-- [ ] README: user warning — never rename a `.co2` back to `.sl2` and play online; back up the `.co2`
-      folder manually (no cloud backup).
+- [x] Function-detour substrate: no new utility needed — reused `ilhook` (already a dep, already used by
+      `input.rs`) via `hook_closure_jmp_back`.
+- [x] Implemented the **`CreateFileW` hook**: rewrite `ER0000.sl2`/`.sl2.bak` → `.<ext>`/`.<ext>.bak`
+      from `save.file_extension`, installed early in `app::install` (before the title-screen save read),
+      not a `Feature` task. Logic in host-tested `core::saves`; binding in `coop/saves.rs`.
+- [x] Fatal-vs-toast on install failure: **fatal** (`guard::fatal`) when isolation is wanted — refuse to
+      risk the vanilla save (matches CLAUDE.md's "can't install → close loudly").
+- [x] Rig: ran the verification plan — hook installs, read/backup/write all redirect to `.<ext>`, and the
+      vanilla `ER0000.sl2` (and the rig's real ERSC `.co2`) were left untouched.
+- [x] Rig: confirmed the path the game passes — `C:\users\steamuser\AppData\Roaming\EldenRing\<id>\ER0000.sl2`
+      (and `.sl2.bak`), via `CreateFileW`, redirected as expected.
+- [ ] Rig: confirm Steam Cloud behavior for the co-op extension (expected: not synced).
+- [ ] README: user warning — never rename a co-op save back to `.sl2` and play online; back up the co-op
+      save folder manually (no cloud backup).
+- [ ] Product decision: keep the shipped default extension at `co2` (shares the save with vanilla ERSC —
+      continuity) vs. a distinct extension (full isolation, fresh co-op character). Rig testing already
+      uses a distinct `uco` to protect the machine's real ERSC `.co2` during development.
 
 ## Sources
 

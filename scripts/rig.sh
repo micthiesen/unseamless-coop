@@ -363,25 +363,38 @@ EOF
 # whichever a given dialog wants.
 ydo() { YDOTOOL_SOCKET="$RIG_YDOTOOL_SOCKET" ydotool "$@"; }
 
-# Raise + focus the gamescope window so injected keys land in the game, not the terminal. Best-effort
-# (no-op off KDE), same KWin-over-D-Bus mechanism as reposition_window.
+# Raise + focus the gamescope window so injected keys land in the game, not the terminal. Returns 0
+# if a gamescope window was found and activated, 1 if not — so the caller can refuse to inject keys
+# into whatever else has focus. Off KDE (no gdbus) we can't enumerate windows, so return 0 and let the
+# caller proceed (best-effort, same posture as reposition_window). Same KWin-over-D-Bus mechanism, and
+# we detect the match via the script's print() landing in the journal (like reposition_window).
 focus_game_window() {
   kwin_available || return 0
-  local js plugin="er-focus-$$-$SECONDS"
+  local js plugin="er-focus-$$-$SECONDS" stamp
   js="$(mktemp /tmp/er-win-focus.XXXXXX.js)"
   cat > "$js" <<'EOF'
 const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
-for (const w of ws) if (w.resourceClass == "gamescope") { w.minimized = false; workspace.activeWindow = w; }
+for (const w of ws) if (w.resourceClass == "gamescope") { w.minimized = false; workspace.activeWindow = w; print("ERFOCUS | gamescope"); }
 EOF
-  kwin_run "$js" "$plugin"; sleep 0.4; kwin_unload "$plugin"; rm -f "$js"
+  stamp="$(date '+%Y-%m-%d %H:%M:%S')"
+  kwin_run "$js" "$plugin"; sleep 0.5; kwin_unload "$plugin"; rm -f "$js"
+  journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "ERFOCUS"
 }
 
 cmd_dismiss() {
   local presses="${1:-$RIG_DISMISS_PRESSES}"
-  command -v ydotool >/dev/null 2>&1 || die "ydotool not installed (pacman -S ydotool; enable ydotoold)"
+  # Degrade (warn + return), never `die`: cmd_cycle calls us with `|| warn` to keep going, and `die`
+  # exits the whole script (can't be trapped by `||`), which would abort cycle after the game launched.
+  command -v ydotool >/dev/null 2>&1 || { warn "ydotool not installed (pacman -S ydotool; enable ydotoold) — skipping auto-dismiss"; return 1; }
+  [[ "$presses" =~ ^[0-9]+$ ]] || { warn "dismiss: press count must be a number, got '$presses'"; return 1; }
   [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
   pgrep -f '[e]ldenring.exe' >/dev/null || warn "eldenring.exe doesn't look like it's running yet"
-  focus_game_window
+  # Only inject if we actually focused the game window — otherwise the keypresses would land in the
+  # terminal or whatever else has focus (e.g. if the launch never came up).
+  if ! focus_game_window; then
+    warn "no gamescope window found to focus — skipping injection so keys don't go to the wrong window"
+    return 1
+  fi
   say "Dismissing startup popups: $presses confirm presses (Enter) into the game window…"
   local i
   for ((i = 0; i < presses; i++)); do

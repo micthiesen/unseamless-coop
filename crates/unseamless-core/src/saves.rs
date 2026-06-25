@@ -14,12 +14,33 @@
 const VANILLA_SUFFIXES: [&str; 2] = [".sl2.bak", ".sl2"];
 
 /// Whether co-op save isolation is active for the configured extension `ext`. False when isolation
-/// would be a no-op or wrong: an empty extension, or `sl2` itself (case-insensitive, leading dots
-/// ignored) — i.e. the user opted back into sharing the vanilla save. The cdylib skips installing
-/// the `CreateFileW` hook entirely when this is false, so vanilla saves are untouched.
+/// would be a no-op or wrong: an empty extension, or `sl2` itself (case-insensitive; surrounding
+/// whitespace and dots ignored) — i.e. the user opted back into sharing the vanilla save. The cdylib
+/// skips installing the `CreateFileW` hook entirely when this is false, so vanilla saves are untouched.
 pub fn isolates_saves(ext: &str) -> bool {
     let ext = ext.trim().trim_matches('.');
     !ext.is_empty() && !ext.eq_ignore_ascii_case("sl2")
+}
+
+/// Allocation-free pre-filter for the cdylib's `CreateFileW` hot path: does the (NUL-less) wide path
+/// `wide` end with a vanilla save suffix (ASCII, case-insensitive)? This single-sources the suffix set
+/// with [`coop_save_path`] through [`VANILLA_SUFFIXES`], so the binding's fast-reject provably can't be
+/// narrower than what the rewrite matches — a drift that would silently leak a real save to the vanilla
+/// file. The cdylib only converts to a `String` and calls [`coop_save_path`] when this returns true.
+pub fn wide_has_vanilla_suffix(wide: &[u16]) -> bool {
+    VANILLA_SUFFIXES.iter().any(|suffix| wide_ends_with_ci(wide, suffix))
+}
+
+/// [`str::ends_with`] for a UTF-16 slice against an ASCII `suffix`, case-insensitive. A wide unit is
+/// compared as a byte only when it's ASCII (`< 0x80`), so a non-ASCII unit can never truncate into a
+/// false match. `suffix` must be ASCII (all our save suffixes are).
+fn wide_ends_with_ci(wide: &[u16], suffix: &str) -> bool {
+    debug_assert!(suffix.is_ascii(), "wide_ends_with_ci requires an ASCII suffix");
+    let s = suffix.as_bytes();
+    let Some(start) = wide.len().checked_sub(s.len()) else {
+        return false;
+    };
+    wide[start..].iter().zip(s).all(|(&w, &b)| w < 0x80 && (w as u8).eq_ignore_ascii_case(&b))
 }
 
 /// If `path` names a vanilla save file (`*.sl2` or `*.sl2.bak`, case-insensitive), return the co-op
@@ -72,9 +93,58 @@ mod tests {
 
     #[test]
     fn proton_prefix_path_is_rewritten() {
-        // The rig path: the same tail inside the Wine prefix.
-        let p = "/home/u/.steam/.../compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing/7656/ER0000.sl2";
-        assert_eq!(coop_save_path(p, "co2").unwrap(), p.replace(".sl2", ".co2"));
+        // The rig path: the same tail inside the Wine prefix. Literal oracle (not a `.replace`), so a
+        // bug that wrongly rewrote a mid-path `.sl2` would be caught rather than mirrored.
+        let dir = "/home/u/.steam/x/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing/7656/";
+        assert_eq!(
+            coop_save_path(&format!("{dir}ER0000.sl2"), "co2"),
+            Some(format!("{dir}ER0000.co2"))
+        );
+    }
+
+    #[test]
+    fn handles_extended_length_and_bare_suffix_paths() {
+        // A \\?\ extended-length path still rewrites (suffix-only match, prefix preserved verbatim).
+        assert_eq!(
+            coop_save_path(r"\\?\C:\EldenRing\7656\ER0000.sl2", "co2"),
+            Some(r"\\?\C:\EldenRing\7656\ER0000.co2".into())
+        );
+        // A path that IS exactly the suffix (split lands at index 0).
+        assert_eq!(coop_save_path(".sl2", "co2"), Some(".co2".into()));
+        assert_eq!(coop_save_path(".sl2.bak", "co2"), Some(".co2.bak".into()));
+    }
+
+    #[test]
+    fn custom_extension_composes_with_the_backup_tail() {
+        assert_eq!(coop_save_path(r"X\ER0000.sl2.bak", "coop"), Some(r"X\ER0000.coop.bak".into()));
+    }
+
+    #[test]
+    fn trailing_separator_is_not_a_save() {
+        // A directory-looking path ending in a separator must not match (it's not a file open).
+        assert_eq!(coop_save_path(r"X\ER0000.sl2\", "co2"), None);
+        assert_eq!(coop_save_path("X/ER0000.sl2/", "co2"), None);
+    }
+
+    #[test]
+    fn wide_pre_filter_matches_vanilla_suffixes_case_insensitively() {
+        let w = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
+        assert!(wide_has_vanilla_suffix(&w(r"X\ER0000.sl2")));
+        assert!(wide_has_vanilla_suffix(&w(r"X\ER0000.SL2")));
+        assert!(wide_has_vanilla_suffix(&w(r"X\ER0000.sl2.bak")));
+        assert!(wide_has_vanilla_suffix(&w(r"X\ER0000.Sl2.Bak")));
+        assert!(!wide_has_vanilla_suffix(&w(r"X\foo.txt")));
+        assert!(!wide_has_vanilla_suffix(&w("ab"))); // shorter than any suffix
+    }
+
+    #[test]
+    fn wide_pre_filter_rejects_non_ascii_unit_that_byte_truncates_to_a_match() {
+        // 0x0132 is >= 0x80 but its low byte is 0x32 == '2'. A truncating compare would wrongly match
+        // ".sl2"; the `w < 0x80` guard must reject it. This pins that guard (the prior ASCII-only
+        // tests pass even if the guard is deleted).
+        let mut wide: Vec<u16> = "X.sl".encode_utf16().collect();
+        wide.push(0x0132);
+        assert!(!wide_has_vanilla_suffix(&wide));
     }
 
     #[test]
@@ -116,5 +186,6 @@ mod tests {
         assert!(!isolates_saves("sl2"));
         assert!(!isolates_saves("SL2"));
         assert!(!isolates_saves(".sl2"));
+        assert!(!isolates_saves(".SL2")); // dot-trim and case-fold both apply
     }
 }
