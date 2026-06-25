@@ -20,6 +20,11 @@ fn main() {
         "-l:libgcc.a",
         "-l:libgcc_eh.a",
         "-l:libwinpthread.a",
+        // mingw runtime: defines `__mingwthr_key_dtor` (the TLS-key destructor), which libgcc's
+        // *win32*-threads `gthr-win32.o` references. Local (posix-threads) mingw never pulls it, but
+        // CI/Debian default to win32 threads — without this the static link fails there. Inside the
+        // group because libgcc ↔ libmingw32 reference each other. Harmless under posix threads.
+        "-lmingw32",
         "-Wl,--end-group",
         // System import libs the static C++/pthread runtime pulls (the CRT for sprintf et al., which
         // mingw maps onto the UCRT `api-ms-win-crt-*`; kernel32 for the semaphores/critical sections
