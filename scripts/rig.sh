@@ -215,7 +215,10 @@ cmd_apply() {
 # the install/heartbeat lines. Returns 0 on success. Used by `launch --wait` and `cycle`, so the poll
 # loop lives in one place instead of being hand-rolled each time.
 wait_for_framework() {
-  local timeout="$1" before="${2:-}" deadline=$((SECONDS + timeout)) log=""
+  # Separate declarations: in a single `local`, $((SECONDS + timeout)) is expanded before the
+  # `timeout=` assignment takes effect, so under `set -u` it would read timeout as unbound.
+  local timeout="$1" before="${2:-}" log=""
+  local deadline=$((SECONDS + timeout))
   say "Waiting up to ${timeout}s for the framework to come up (title screen is enough)…"
   while (( SECONDS < deadline )); do
     log="$(latest_log || true)"
