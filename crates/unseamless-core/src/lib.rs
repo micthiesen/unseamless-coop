@@ -16,6 +16,7 @@
 pub const LAUNCH_MARKER: &str = "UNSEAMLESS_LAUNCH";
 
 pub mod config;
+pub mod death_debuffs;
 pub mod diagnostics;
 pub mod framing;
 pub mod loader;
