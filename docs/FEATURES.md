@@ -54,7 +54,7 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 | Death debuffs (Rot Essence SpEffects, cured at grace) | `death_debuffs` | M |
 | Spirit summons allowed in MP | `allow_summons` | E |
 | Give ember | (action) | M |
-| Skip splash screens | `skip_splash_screens` | E |
+| Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
 | Spectate-on-death system | `always_spectate_on_death` | M |
 | Boot master volume | `default_boot_master_volume` | E |
 | Overhead player display (ping / soul level / death count / Steam ID) | `overhead_player_display`, `append_steam_id_to_players` | M |
@@ -74,6 +74,15 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
 - Custom locale system (`mod_language_override`, the `english.json` FMG/menu text injection)
 - Overhead display rendering, on-screen status/notification text (`YKNX3_*`, `FE_*`)
+
+## Title screen / offline presentation (M)
+
+ERSC hides the vanilla "you're offline" network-error popups at boot and rebrands the bottom-right
+version/`OFFLINE` watermark as `Seamless Co-op X.Y.Z`. We want the same (popups suppressed; corner
+shows `unseamless-coop <version>`). Both ride the FMG/`MsgRepository` text system and the
+online-state (`CSNetMan`/`CSSessionManager`) trigger; the modal-dialog renderer and the FMG
+read/write API are **not charted at our SDK pin** (rig RE / SDK-pin bump needed). Full research,
+message IDs, and the suppression mechanisms in [`OFFLINE-TITLE-SCREEN.md`](OFFLINE-TITLE-SCREEN.md).
 
 ## Suggested milestone ordering
 
