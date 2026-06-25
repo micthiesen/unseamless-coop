@@ -60,7 +60,7 @@ const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
 // discs — faint outer glow, dark contrast ring, bright core — so it stands out on any background.
 // Cyan-ish to complement ER's gold cursor. Tweak freely.
 /// Nudge the orb slightly right of the hotspot so it sits just under the tip of ER's cursor.
-const CURSOR_OFFSET_X: f32 = 0.75;
+const CURSOR_OFFSET_X: f32 = 1.0;
 const CURSOR_GLOW_R: f32 = 7.0;
 const CURSOR_RING_R: f32 = 4.0;
 const CURSOR_CORE_R: f32 = 2.5;
