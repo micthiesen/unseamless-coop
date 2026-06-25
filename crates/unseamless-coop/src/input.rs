@@ -16,7 +16,7 @@
 //! and never removed (process-lifetime, like our task handles — unhooking a live input path is a
 //! use-after-free risk).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ilhook::x64::{CallbackOption, ClosureHookPoint, HookFlags, Registers, hook_closure_retn};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -34,33 +34,6 @@ pub fn set_blocked(blocked: bool) {
 
 fn is_blocked() -> bool {
     BLOCKED.load(Ordering::Relaxed)
-}
-
-/// Frames of grace after the game's last cursor-pin attempt during which we still consider it "pinning"
-/// — debounces a game that pins less than once per frame, and bridges the gap as gameplay resumes.
-const PIN_GRACE: u32 = 6;
-/// Countdown since the game last tried to pin the cursor (`SetCursorPos`/`ClipCursor`). The detours
-/// refresh it; [`consume_pin`] decays it. The game only pins during active gameplay (in an ER menu it
-/// stops), so this distinguishes "in-game, no ER menu" from "an ER menu is up".
-static PIN: AtomicU32 = AtomicU32::new(0);
-
-/// Record that the game just tried to pin the cursor (called from the detours, even when blocked — the
-/// game keeps pinning while our overlay is open, which is exactly the signal we want).
-fn note_pin() {
-    PIN.store(PIN_GRACE, Ordering::Relaxed);
-}
-
-/// Has the game pinned the cursor within the last [`PIN_GRACE`] frames? Call **once per frame** (it
-/// decays the counter). True ⇒ active gameplay (ER hides its cursor); false ⇒ an ER menu is showing
-/// its own cursor.
-pub fn consume_pin() -> bool {
-    let v = PIN.load(Ordering::Relaxed);
-    if v > 0 {
-        PIN.store(v - 1, Ordering::Relaxed);
-        true
-    } else {
-        false
-    }
 }
 
 const DIRECTINPUT_VERSION: u32 = 0x0800;
@@ -108,7 +81,6 @@ fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
 /// `SetCursorPos(X = rcx, Y = rdx) -> BOOL`. While blocked, skip the recenter (return TRUE) so the
 /// cursor stays where the user moved it.
 fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
-    note_pin();
     if is_blocked() {
         return 1; // TRUE — claim success without moving the cursor
     }
@@ -119,7 +91,6 @@ fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
 /// `ClipCursor(lpRect = rcx) -> BOOL`. While blocked, release the cursor (call with NULL) instead of
 /// confining it to the game's rect.
 fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
-    note_pin();
     let lp_rect = if is_blocked() { 0 } else { unsafe { (*regs).rcx } };
     let original: unsafe extern "system" fn(u64) -> usize = unsafe { std::mem::transmute(original) };
     unsafe { original(lp_rect) }
