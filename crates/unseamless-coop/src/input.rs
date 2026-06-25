@@ -1,12 +1,16 @@
 //! Suppressing the **game's own input** while the overlay is open.
 //!
-//! Elden Ring reads keyboard/mouse through **DirectInput8** (`IDirectInputDevice8::GetDeviceState`),
-//! which is polled straight off the HID stack and never goes through the window message queue — so
-//! hudhook's WndProc-level `message_filter` can't stop it, and WASD / clicks reach the game even with
-//! the overlay focused. We detour `GetDeviceState` and, while the overlay is open, zero the state it
-//! returns, so the game sees no input. imgui still receives input via hudhook's WndProc hook, so the
-//! menu stays usable. (`message_filter` still covers the WndProc/raw-input path; the two together cover
-//! both ways the game can read input.)
+//! Elden Ring reads keyboard/mouse through **DirectInput8** (`IDirectInputDevice8::GetDeviceState`,
+//! *immediate* mode — confirmed on the rig), which is polled straight off the HID stack and never goes
+//! through the window message queue, so hudhook's WndProc-level `message_filter` can't stop it and
+//! WASD / clicks reach the game even with the overlay focused. We detour `GetDeviceState` and, while
+//! the overlay is open, zero the state it returns, so the game sees no input. imgui still receives
+//! input via hudhook's WndProc hook, so the menu stays usable. (`message_filter` covers the
+//! WndProc/raw-input path; if ER ever read *buffered* DI via `GetDeviceData`, that path would need its
+//! own hook.)
+//!
+//! It also detours user32 `SetCursorPos`/`ClipCursor` to release the game's cursor center-pin while
+//! the overlay is open, so the mouse can move over the menu.
 //!
 //! Technique mirrors the `fromsoftware-rs` SDK's `debug` crate (public SDK — our reference per
 //! CLAUDE.md > "Lean on the SDK"), reduced to a single "overlay open?" flag.
@@ -18,7 +22,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ilhook::x64::{CallbackOption, ClosureHookPoint, HookFlags, Registers, hook_closure_retn};
+use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_retn};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::core::{GUID, PCSTR, s};
 
@@ -67,8 +71,11 @@ fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
     let original: unsafe extern "system" fn(u64, u64, u64) -> usize =
         unsafe { std::mem::transmute(original) };
     let hr = unsafe { original(this, size, data as u64) };
-    // Only blank a successful read (hr == 0 == DI_OK); leave error states alone.
-    if hr == 0 && is_blocked() {
+    // Only blank a successful read (hr == 0 == DI_OK), which guarantees the device wrote `cbData` bytes
+    // at `lpvData` — so zeroing `size` bytes targets exactly that buffer. Guard the null edge anyway
+    // (a misbehaving in-process DI consumer could return DI_OK with a null buffer) so the unsafe write
+    // can never hit a null page.
+    if hr == 0 && is_blocked() && !data.is_null() {
         unsafe { std::ptr::write_bytes(data, 0, size as usize) };
     }
     hr
@@ -96,14 +103,19 @@ fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
     unsafe { original(lp_rect) }
 }
 
-/// Install one function-replacement detour. `detour` runs the original (via the passed pointer) and may
-/// alter the result. Never unhooked — resident for the process lifetime.
-unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<ClosureHookPoint<'static>, String>
+/// Install one function-replacement detour and **forget it immediately**, so it's resident for the
+/// process lifetime — never unhooked. Forgetting per-hook (rather than collecting handles and forgetting
+/// at the end) means a *later* hook failing can't drop — and thus unpatch live code / free a closure a
+/// concurrent call points into (UAF) — an already-installed detour. `detour` runs the original (via the
+/// passed pointer) and may alter the result.
+unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<(), String>
 where
     T: Fn(*mut Registers, usize) -> usize + Send + Sync + 'static,
 {
-    unsafe { hook_closure_retn(addr, detour, CallbackOption::None, HookFlags::empty()) }
-        .map_err(|e| format!("hooking {what}: {e:?}"))
+    let hook = unsafe { hook_closure_retn(addr, detour, CallbackOption::None, HookFlags::empty()) }
+        .map_err(|e| format!("hooking {what}: {e:?}"))?;
+    std::mem::forget(hook);
+    Ok(())
 }
 
 /// Create a throwaway DirectInput device for `guid` and read its `GetDeviceState` vtable address (the
@@ -156,10 +168,10 @@ pub unsafe fn install() -> Result<(), String> {
     let ms = unsafe { probe_get_device_state(di8_create, hinstance, &GUID_SYS_MOUSE)? };
 
     // Keyboard and mouse devices often share one GetDeviceState implementation; hook each distinct
-    // address once.
-    let mut hooks = vec![unsafe { install_hook(kb, get_state_detour, "keyboard GetDeviceState")? }];
+    // address once. (`install_hook` forgets each detour as it installs it — see its doc.)
+    unsafe { install_hook(kb, get_state_detour, "keyboard GetDeviceState")? };
     if ms != kb {
-        hooks.push(unsafe { install_hook(ms, get_state_detour, "mouse GetDeviceState")? });
+        unsafe { install_hook(ms, get_state_detour, "mouse GetDeviceState")? };
     }
 
     // Cursor-unlock detours (user32), so the mouse can move over the menu while the overlay is open.
@@ -168,10 +180,7 @@ pub unsafe fn install() -> Result<(), String> {
     let addr = |name: PCSTR, what: &str| -> Result<usize, String> {
         unsafe { GetProcAddress(user32, name) }.map(|p| p as usize).ok_or_else(|| format!("{what} not found"))
     };
-    hooks.push(unsafe { install_hook(addr(s!("SetCursorPos"), "SetCursorPos")?, set_cursor_pos_detour, "SetCursorPos")? });
-    hooks.push(unsafe { install_hook(addr(s!("ClipCursor"), "ClipCursor")?, clip_cursor_detour, "ClipCursor")? });
-
-    // Never unhooked — resident for the process lifetime, like our task handles.
-    std::mem::forget(hooks);
+    unsafe { install_hook(addr(s!("SetCursorPos"), "SetCursorPos")?, set_cursor_pos_detour, "SetCursorPos")? };
+    unsafe { install_hook(addr(s!("ClipCursor"), "ClipCursor")?, clip_cursor_detour, "ClipCursor")? };
     Ok(())
 }

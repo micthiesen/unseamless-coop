@@ -139,9 +139,9 @@ impl Overlay {
                 self.menu.home(&session_context());
             }
         }
-        // Suppress the game's DirectInput while the window is open (keyboard/mouse don't reach the
-        // game, but imgui still gets them via hudhook's WndProc hook). Driven every frame so closing
-        // the window restores game input immediately.
+        // Mirror the open-state into the input suppressor every frame: while open the game doesn't see
+        // keyboard/mouse (but imgui still gets them via hudhook's WndProc hook), and closing the window
+        // restores game input immediately.
         crate::input::set_blocked(self.open);
         // Refresh the config snapshot non-blocking; keep the last good one on contention.
         if let Some(cfg) = crate::state::try_snapshot() {
@@ -159,14 +159,15 @@ impl Overlay {
     /// Draw the passive notifications (banners then fading toasts), coloured by severity, in a
     /// borderless, input-transparent, auto-sized corner window. Reads [`crate::notify`] non-blocking.
     fn draw_notifications(&self, ui: &Ui) {
-        let Some((banners, toasts)) =
-            crate::notify::try_read(|n| (n.banners().to_vec(), n.toasts().to_vec()))
-        else {
+        // Copy out under the (non-blocking) lock, but skip the clone on the common idle frame — return
+        // None from inside the closure when there's nothing to show, so we don't allocate two Vecs every
+        // frame just to find them empty.
+        let Some(Some((banners, toasts))) = crate::notify::try_read(|n| {
+            (!n.banners().is_empty() || !n.toasts().is_empty())
+                .then(|| (n.banners().to_vec(), n.toasts().to_vec()))
+        }) else {
             return;
         };
-        if banners.is_empty() && toasts.is_empty() {
-            return; // nothing to show — overlay invisible when idle
-        }
         let flags = WindowFlags::NO_DECORATION
             | WindowFlags::ALWAYS_AUTO_RESIZE
             | WindowFlags::NO_INPUTS
@@ -180,6 +181,23 @@ impl Overlay {
                 draw_banners(ui, &banners);
                 draw_toasts(ui, &toasts);
             });
+    }
+
+    /// Keep the window fully inside the ER viewport ("lock it to the game window"). Reads the current
+    /// geometry (valid inside the build closure) and, when out of bounds and not being dragged, queues a
+    /// snap-back for next frame (applied via `position(Always)` before `build`). Only snapping on release
+    /// avoids fighting an active drag (which jitters the window at the edge); an out-of-bounds window for
+    /// another reason (e.g. the viewport shrank) snaps immediately. The frame already drew at the dragged
+    /// spot, so there's one frame of overshoot, then it locks in.
+    fn clamp_into_viewport(&mut self, ui: &Ui) {
+        let (pos, size, disp) = (ui.window_pos(), ui.window_size(), ui.io().display_size);
+        let clamped = [
+            pos[0].clamp(0.0, (disp[0] - size[0]).max(0.0)),
+            pos[1].clamp(0.0, (disp[1] - size[1]).max(0.0)),
+        ];
+        if clamped != pos && !ui.io().mouse_down[0] {
+            self.clamp_pos = Some(clamped);
+        }
     }
 
     /// Draw the toggleable utility window with its tabs.
@@ -220,20 +238,7 @@ impl Overlay {
             win = win.position(p, Condition::Always);
         }
         win.build(|| {
-                // Keep the window fully inside the ER viewport: if it's out of bounds, queue a snap-back
-                // for next frame (this frame already drew at the dragged spot). Lets normal dragging
-                // work while preventing it from leaving the game window.
-                let (pos, size, disp) = (ui.window_pos(), ui.window_size(), ui.io().display_size);
-                let clamped = [
-                    pos[0].clamp(0.0, (disp[0] - size[0]).max(0.0)),
-                    pos[1].clamp(0.0, (disp[1] - size[1]).max(0.0)),
-                ];
-                // Only snap back when the mouse isn't held — clamping mid-drag fights the drag and the
-                // window jitters at the edge. So it moves freely while dragging and locks in on release
-                // (and immediately if it's out of bounds for another reason, e.g. the viewport shrank).
-                if clamped != pos && !ui.io().mouse_down[0] {
-                    self.clamp_pos = Some(clamped);
-                }
+                self.clamp_into_viewport(ui);
                 // Push our crisp font for the whole window (incl. the log child); toasts keep the
                 // compact default. Token held to closure end, then popped.
                 let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
@@ -361,6 +366,9 @@ impl ImguiRenderLoop for Overlay {
     }
 
     fn before_render<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
+        if self.disabled {
+            return; // a disabled overlay is fully inert (mirrors `render`'s guard)
+        }
         // Keep imgui's own arrow cursor off — we draw our own marker (`draw_cursor_marker`) at the mouse
         // hotspot instead, which complements ER's cursor rather than clashing with a second arrow.
         ctx.io_mut().mouse_draw_cursor = false;
@@ -393,7 +401,10 @@ impl ImguiRenderLoop for Overlay {
         let ui: &Ui = ui;
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_inner(ui))).is_err() {
             self.disabled = true;
-            // Don't leave the game's input suppressed if we died mid-frame while open.
+            // Release both input-suppression paths if we died mid-frame while open: the DirectInput
+            // block (set_blocked) AND the WndProc filter — `message_filter` reads `self.open`, so clear
+            // it too, or it would keep swallowing all window input for the rest of the session.
+            self.open = false;
             crate::input::set_blocked(false);
             log::error!("overlay: render panicked; overlay disabled for the rest of the session");
         }
@@ -416,6 +427,9 @@ fn draw_cursor_marker(ui: &Ui) {
         return;
     }
     let p = [p[0] + CURSOR_OFFSET_X, p[1]];
+    // One foreground draw list per frame: imgui-rs panics if a second instance is alive before this one
+    // drops. We bind it once, reuse it for all three circles, and it drops at function end — and this is
+    // called after the window has fully closed, so nothing else holds one. Keep it that way.
     let dl = ui.get_foreground_draw_list();
     dl.add_circle(p, CURSOR_GLOW_R, CURSOR_GLOW).filled(true).build();
     dl.add_circle(p, CURSOR_RING_R, CURSOR_RING).filled(true).build();

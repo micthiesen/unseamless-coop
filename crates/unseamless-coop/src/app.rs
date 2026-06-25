@@ -167,9 +167,20 @@ pub fn install() {
         // alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it fails.
         match unsafe { crate::input::install() } {
             Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
-            Err(e) => log::error!(
-                "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
-            ),
+            Err(e) => {
+                log::error!(
+                    "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
+                );
+                // Surface it to the player rather than failing silently (in-session problems degrade +
+                // inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
+                crate::notify::with_mut(|n| {
+                    n.set_banner(
+                        "input-degraded",
+                        unseamless_core::notifications::Severity::Warning,
+                        "Heads up: the game still reacts to input while the menu is open (input hook failed)",
+                    )
+                });
+            }
         }
     }
 }
