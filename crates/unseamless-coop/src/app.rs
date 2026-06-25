@@ -14,6 +14,7 @@ use fromsoftware_shared::SharedTaskImpExt;
 
 use crate::feature::{Feature, Tick};
 use crate::features::observer::SessionObserver;
+use crate::features::session_limit::SessionLimit;
 
 /// How long the init thread keeps trying for the task system before giving up.
 const INIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -80,7 +81,16 @@ pub fn install() {
         ),
     };
 
-    let features: Vec<Box<dyn Feature>> = vec![Box::new(SessionObserver::new(config))];
+    // SessionLimit before the observer so that — since same-phase tasks tick in registration order
+    // (the loop below registers in vec order) — the observer reads and logs the override we just
+    // wrote, same frame. It's only a logging nicety: were that order to change, the observer would
+    // log the override one frame late, not wrong. SessionLimit needs only the cap; the observer
+    // takes ownership of the rest of the config.
+    let max_players = config.session.max_players;
+    let features: Vec<Box<dyn Feature>> = vec![
+        Box::new(SessionLimit::new(max_players)),
+        Box::new(SessionObserver::new(config)),
+    ];
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];
 

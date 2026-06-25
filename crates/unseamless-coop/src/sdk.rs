@@ -19,9 +19,8 @@ where
 }
 
 /// Like [`with_instance`] but a mutable reference. Same main-thread requirement.
-// The standard accessor for mutating features (e.g. scaling via SoloParamRepository); added with
-// its read-only sibling though the first mutating feature is rig-gated.
-#[allow(dead_code)]
+// The standard accessor for mutating features (e.g. scaling via SoloParamRepository). First used by
+// `features::session_limit`, which writes `CSSessionManager::session_player_limit_override`.
 pub fn with_instance_mut<T, R>(f: impl FnOnce(&mut T) -> R) -> Option<R>
 where
     T: FromStatic + 'static,

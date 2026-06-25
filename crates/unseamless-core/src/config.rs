@@ -21,6 +21,18 @@ use crate::diagnostics::LogLevel;
 /// (`crate::settings`) so the file and the UI agree on the range.
 pub const MAX_SCALING_PERCENT: u32 = 1000;
 
+/// Bounds + default for the co-op session player cap ([`Session::max_players`]), shared by
+/// [`Config::validate`] and the settings registry. Vanilla caps a session at 4 (open world) / 6
+/// (arena); the SDK documents 6 as the engine's limit, so we don't exceed it without rig evidence
+/// that higher is stable. The mod applies this by writing the game's `session_player_limit_override`,
+/// so the default of 6 raises the open-world cap (4) to the engine max.
+///
+/// The floor is **2, not 1**: the game treats `session_player_limit_override == 1` as "use the
+/// per-context default", so a configured 1 would be a silent no-op masquerading as a setting.
+pub const MIN_SESSION_PLAYERS: u32 = 2;
+pub const MAX_SESSION_PLAYERS: u32 = 6;
+pub const DEFAULT_SESSION_PLAYERS: u32 = 6;
+
 /// Full mod configuration. Load with [`Config::from_toml_str`]; [`Config::default`] is a fresh
 /// install's settings.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -96,12 +108,22 @@ pub struct Scaling {
     pub boss_posture: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
     /// Co-op session password — the shared key that pairs you with your friends. A fresh install
     /// gets a random one (see [`generate_password`]); everyone in a party must use the *same* value.
     pub password: String,
+    /// Maximum players allowed in a co-op session. The mod relaxes the vanilla cap (4 open world /
+    /// 6 arena) by writing the game's `session_player_limit_override` to this value. Clamped to
+    /// [`MIN_SESSION_PLAYERS`]..=[`MAX_SESSION_PLAYERS`] by [`Config::validate`].
+    pub max_players: u32,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self { password: String::new(), max_players: DEFAULT_SESSION_PLAYERS }
+    }
 }
 
 /// Characters a generated password is drawn from: upper-case letters + digits, minus the
@@ -280,6 +302,20 @@ impl Config {
             self.gameplay.default_boot_master_volume = 10;
         }
 
+        if self.session.max_players < MIN_SESSION_PLAYERS
+            || self.session.max_players > MAX_SESSION_PLAYERS
+        {
+            let clamped = self.session.max_players.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
+            warnings.push(ConfigWarning {
+                field: "session.max_players".into(),
+                message: format!(
+                    "{} out of range {MIN_SESSION_PLAYERS}..={MAX_SESSION_PLAYERS}; clamped to {clamped}",
+                    self.session.max_players
+                ),
+            });
+            self.session.max_players = clamped;
+        }
+
         let ext = &self.save.file_extension;
         let valid = !ext.is_empty()
             && ext.len() <= 120
@@ -406,6 +442,44 @@ mod tests {
         assert_eq!(cfg.save.file_extension, "co2");
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].field, "save.file_extension");
+    }
+
+    #[test]
+    fn max_players_defaults_and_persists() {
+        assert_eq!(Config::default().session.max_players, super::DEFAULT_SESSION_PLAYERS);
+        let (cfg, w) = Config::from_toml_str("[session]\nmax_players = 4\n").unwrap();
+        assert_eq!(cfg.session.max_players, 4);
+        assert!(w.is_empty(), "{w:?}");
+
+        // A non-default value survives a real serialize -> parse round-trip (guards the
+        // #[serde(default)] + manual Default wiring on the new field).
+        let mut cfg = Config::default();
+        cfg.session.max_players = 3;
+        let (round, w) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
+        assert_eq!(round.session.max_players, 3);
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn max_players_clamped_with_warning() {
+        // Above the engine cap and below the floor both clamp, with a warning naming the field.
+        let max = super::MAX_SESSION_PLAYERS;
+        let min = super::MIN_SESSION_PLAYERS;
+        let (cfg, w) = Config::from_toml_str(&format!("[session]\nmax_players = {}\n", max + 10)).unwrap();
+        assert_eq!(cfg.session.max_players, max);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].field, "session.max_players");
+
+        let (cfg, w) = Config::from_toml_str("[session]\nmax_players = 0\n").unwrap();
+        assert_eq!(cfg.session.max_players, min);
+        assert_eq!(w.len(), 1);
+
+        // Both boundary values are themselves valid (no warning) — guards the `<`/`>` from
+        // drifting to `<=`/`>=` and warn-clamping a legitimate min or max.
+        let (_, w) = Config::from_toml_str(&format!("[session]\nmax_players = {max}\n")).unwrap();
+        assert!(w.is_empty(), "max boundary should not warn: {w:?}");
+        let (_, w) = Config::from_toml_str(&format!("[session]\nmax_players = {min}\n")).unwrap();
+        assert!(w.is_empty(), "min boundary should not warn: {w:?}");
     }
 
     #[test]

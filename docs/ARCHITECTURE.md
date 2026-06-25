@@ -151,7 +151,8 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/` player/world sync model | 2 | planned (the game's job; rig-gated) |
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |
-| `coop/features/observer.rs` | 2 | done (read-only) |
+| `coop/features/observer.rs` | 2 | done (read-only); logs `session_player_limit_override` |
+| `coop/features/session_limit.rs` (write `session_player_limit_override`) | 2 | done; write rig-confirmed solo, >4-player effect needs a party |
 | `coop/features/menu_overlay.rs` (DX12 hook + egui) | 2 | planned — renders `menu.rs`; rig-gated |
 | `coop/features/scaling.rs` (apply) | 1/2 | gated: application mechanism needs rig confirm |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |

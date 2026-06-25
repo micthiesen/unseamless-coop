@@ -2,3 +2,4 @@
 //! [`Feature`](crate::feature::Feature).
 
 pub mod observer;
+pub mod session_limit;

@@ -9,7 +9,9 @@
 //! [`Setting`] entry to [`registry`]. Both the config file and the menu pick it up. See
 //! `docs/ARCHITECTURE.md` > Divergences.
 
-use crate::config::{Config, MAX_SCALING_PERCENT, OverheadDisplay};
+use crate::config::{
+    Config, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS, OverheadDisplay,
+};
 
 /// Stable identifier for a setting, used to address it from the menu / over the wire. Discriminant
 /// stability matters (it can appear in saved UI state), so keep values fixed and append new ones.
@@ -30,6 +32,7 @@ pub enum SettingId {
     BossHealth = 11,
     BossDamage = 12,
     BossPosture = 13,
+    MaxPlayers = 14,
 }
 
 /// How a setting is edited in the menu, plus the get/set glue over [`Config`]. Keeping the
@@ -240,6 +243,17 @@ pub fn registry() -> Vec<Setting> {
             label: "Boss posture scaling %",
             kind: pct(|c| c.scaling.boss_posture, |c, v| c.scaling.boss_posture = v),
         },
+        Setting {
+            id: MaxPlayers,
+            label: "Max players",
+            kind: Range {
+                min: MIN_SESSION_PLAYERS,
+                max: MAX_SESSION_PLAYERS,
+                step: 1,
+                get: |c| c.session.max_players,
+                set: |c, v| c.session.max_players = v,
+            },
+        },
     ]
 }
 
@@ -256,7 +270,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 14, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 15, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -289,6 +303,18 @@ mod tests {
         cfg.gameplay.default_boot_master_volume = 0;
         vol.adjust(&mut cfg, false);
         assert_eq!(cfg.gameplay.default_boot_master_volume, 0);
+
+        // Max players is the only Range with a non-zero floor (the SDK sentinel makes 1 invalid),
+        // so it must saturate at MIN_SESSION_PLAYERS downward, not walk to 0/1.
+        let mp = reg.iter().find(|s| s.id == SettingId::MaxPlayers).unwrap();
+        for _ in 0..10 {
+            mp.adjust(&mut cfg, false);
+        }
+        assert_eq!(cfg.session.max_players, crate::config::MIN_SESSION_PLAYERS);
+        for _ in 0..10 {
+            mp.adjust(&mut cfg, true);
+        }
+        assert_eq!(cfg.session.max_players, crate::config::MAX_SESSION_PLAYERS);
     }
 
     #[test]

@@ -75,6 +75,28 @@ Drive this sequence and capture the `session change:` log lines at each step:
 
 Save the full `unseamless_coop.log` from this run — it's the spec for designing Layer 2.
 
+## Findings so far (rig)
+
+From the first solo runs on the PC rig (no second player yet):
+
+- **Binding / load timing.** As the `dinput8.dll` proxy we initialize earlier than an EML-loaded
+  mod, before the game's Dantelion2 singleton reflection registers `CSTask`. The SDK's
+  `wait_for_instance` returns `InvalidRva` immediately in that window (it only polls the hINSTANCE
+  and null-instance cases). `app::install` now retries until the registry is up; in practice it
+  binds after a single ~250 ms retry. Confirmed stable across load/combat/death/respawn.
+- **Solo session state.** In single-player offline, `CSSessionManager` reads cleanly but holds no
+  active session: `lobby=None`, `protocol=None`, `players=0`, `session_player_limit=6`. The **local
+  player is not in `players`** — that vector counts *networked* members, so it's 0 solo (we floor to
+  1 for scaling, which stays ×1.00). Loading a save / fighting / dying does **not** drive the
+  session FSM. So roster/host/local flags and the in-session limit only appear with a real party.
+- **Player-limit lever confirmed (write).** Writing `session_player_limit_override = 6` lands and
+  reads back (`session change: … override=6`). The active `session_player_limit` is read when a
+  session is *created*, so the >4-player effect itself still needs a second player to verify.
+- **SDK enum semantics** (from the SDK, to confirm live with a session): `LobbyState`
+  (`None`/`TryToCreateSession`/`Host`/`TryToJoinSession`/`Client`/…) and `ProtocolState`
+  (`None`/`JoinCheck`/`WaitInitData`/`Ingame`/`WaitReentryToMap`/…) are fully named; `WaitReentryToMap`
+  is the seamless map-transition state to watch at an area boundary.
+
 ## Follow-up experiments (once the FSM is understood)
 
 In rough order, each a small, reversible probe:

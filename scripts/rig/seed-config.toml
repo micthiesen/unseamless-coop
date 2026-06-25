@@ -29,6 +29,8 @@ boss_posture = 20
 
 [session]
 password = "coop-test"
+# Relax the session player cap (vanilla 4 open world / 6 arena) via session_player_limit_override.
+max_players = 6
 
 [save]
 file_extension = "co2"

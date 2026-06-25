@@ -31,6 +31,9 @@ struct Snapshot {
     protocol: u32,
     players: usize,
     limit: u32,
+    /// `session_player_limit_override` — `1` is vanilla ("use the per-context default"); our
+    /// session-limit feature writes our cap here, so diffing on it makes that write visible.
+    limit_override: u32,
 }
 
 impl SessionObserver {
@@ -69,6 +72,7 @@ impl SessionObserver {
             protocol: session.protocol_state as u32,
             players,
             limit: session.session_player_limit,
+            limit_override: session.session_player_limit_override,
         };
 
         if !self.state.changed(&snapshot) {
@@ -76,11 +80,12 @@ impl SessionObserver {
         }
 
         log::info!(
-            "session change: lobby={:?} protocol={:?} players={} limit={}",
+            "session change: lobby={:?} protocol={:?} players={} limit={} override={}",
             session.lobby_state,
             session.protocol_state,
             players,
             session.session_player_limit,
+            session.session_player_limit_override,
         );
         for (i, p) in session.players.iter().enumerate() {
             // Pseudonymous tag, not the raw 64-bit Steam ID: this log is shareable, and a raw
