@@ -69,9 +69,15 @@ pub fn install() {
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(&config, &base);
 
+    // No task system means the mod cannot install a single feature — there's no degraded mode to
+    // fall back to, so fail like the other startup guards: a modal box, then close the game (rather
+    // than leave it running silently unmodded). See CLAUDE.md > "Surfacing errors".
     let cs_task = match wait_for_task_system() {
         Some(task) => task,
-        None => return,
+        None => crate::guard::fatal(
+            "unseamless-coop couldn't initialize: the game's task system never came up, so the \
+             mod can't run.\n\nThis is unexpected — try launching again. Closing the game now.",
+        ),
     };
 
     let features: Vec<Box<dyn Feature>> = vec![Box::new(SessionObserver::new(config))];
@@ -137,7 +143,7 @@ fn wait_for_task_system() -> Option<&'static CSTaskImp> {
             Ok(task) => return Some(task),
             Err(e) => {
                 if Instant::now() >= deadline {
-                    log::error!("CSTaskImp unavailable after {INIT_TIMEOUT:?}; mod not installed: {e:?}");
+                    log::error!("CSTaskImp unavailable after {INIT_TIMEOUT:?}: {e:?}");
                     return None;
                 }
                 if !announced {

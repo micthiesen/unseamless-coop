@@ -180,6 +180,29 @@ is a use-after-free or a data race in someone's game.
   module pointers. A `PostPhysics`-style phase keeps the window small; the fully robust form
   iterates ChrSet entries and skips any whose status isn't `Active` before dereferencing.
 
+## Surfacing errors (fatal popup vs in-session toast/banner)
+
+One rule for how the mod tells the user something went wrong, split by *whether the mod can run at
+all*:
+
+- **Startup failure → `guard::fatal` (modal message box, then close the game).** Use the shared
+  [`guard::fatal`] util for any condition where the mod cannot install or continuing would be wrong,
+  so there's no half-working state to limp along in. Current fatal conditions, all in `coop/guard.rs`
+  / `coop/app.rs` before features register: **not launched by our launcher** (the EAC guard),
+  **co-op password too short**, and **the game's task system never coming up** (`app::install` can't
+  get `CSTaskImp`). Fail loudly and close rather than leave the game running silently unmodded.
+- **In-session problem → toast/banner (+ log), never fatal.** Once we're installed and ticking,
+  anything that goes wrong degrades gracefully and informs via the notifications model
+  (`unseamless-core/notifications.rs`): config-clamp warnings, a peer **version mismatch**, a feature
+  **panicking** (it's disabled for the session, the game keeps running), **connection lost**, etc.
+  Never kill the player's game for these. (The toast/banner *renderer* is the rig-gated overlay; the
+  model and severity mapping are host-tested today.)
+- **Rule of thumb: if we can't install, close loudly; if we're installed and something goes wrong,
+  degrade and notify.** Don't reach for `guard::fatal` from inside a feature's `on_frame` — by then
+  we're past install, so it's a toast/banner.
+
+[`guard::fatal`]: crates/unseamless-coop/src/guard.rs
+
 ## On-demand procedures live in skills
 
 These are loaded only when relevant (not in this always-on file):
