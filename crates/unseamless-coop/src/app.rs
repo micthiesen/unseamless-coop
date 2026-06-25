@@ -6,7 +6,7 @@
 //! uncontended (it just satisfies the `Fn`/`'static` bounds the scheduler requires).
 
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eldenring::cs::CSTaskImp;
 use eldenring::fd4::FD4TaskData;
@@ -15,8 +15,11 @@ use fromsoftware_shared::SharedTaskImpExt;
 use crate::feature::{Feature, Tick};
 use crate::features::observer::SessionObserver;
 
-/// How long the init thread waits for the task system before giving up.
-const INIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the init thread keeps trying for the task system before giving up.
+const INIT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Pause between retries while the game's singleton registry comes up (see
+/// [`wait_for_task_system`]).
+const TASK_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 struct App {
     features: Vec<Box<dyn Feature>>,
@@ -66,12 +69,9 @@ pub fn install() {
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(&config, &base);
 
-    let cs_task = match CSTaskImp::wait_for_instance(INIT_TIMEOUT) {
-        Ok(task) => task,
-        Err(e) => {
-            log::error!("CSTaskImp unavailable; mod not installed: {e:?}");
-            return;
-        }
+    let cs_task = match wait_for_task_system() {
+        Some(task) => task,
+        None => return,
     };
 
     let features: Vec<Box<dyn Feature>> = vec![Box::new(SessionObserver::new(config))];
@@ -109,6 +109,44 @@ pub fn install() {
         );
         std::mem::forget(handle);
         log::info!("registered feature '{name}' in {phase:?}");
+    }
+}
+
+/// Wait for the game's task system (`CSTaskImp`), tolerating our early DLL load.
+///
+/// We ship as `dinput8.dll`, so we initialize far earlier in process startup than an Elden Mod
+/// Loader mod does (EML waits seconds before loading `mods/`). In that early window the game's
+/// Dantelion2 (DLRF) singleton reflection — the registry that maps the name `"CSTask"` to the live
+/// `CSTaskImp` — isn't populated yet, so the SDK can't find the instance.
+///
+/// The SDK's [`CSTaskImp::wait_for_instance`] only *polls* two cases (the global hINSTANCE not yet
+/// set, and the instance pointer present-but-null); a singleton that isn't in the reflection
+/// registry yet comes back as `NotFound`, which it reports as `InvalidRva` and returns
+/// **immediately** rather than waiting. So we retry the whole call until the registry comes up — it
+/// does once the game finishes early init (EML-loaded mods that bind a few seconds in prove it) —
+/// bounded by [`INIT_TIMEOUT`]. This can't get stuck on a poisoned cache: `from-singleton` only
+/// caches the singleton map permanently once some singleton is non-null (i.e. init has happened),
+/// so an early miss doesn't spoil later lookups.
+fn wait_for_task_system() -> Option<&'static CSTaskImp> {
+    let deadline = Instant::now() + INIT_TIMEOUT;
+    let mut announced = false;
+    loop {
+        // Short inner timeout: this polls the hINSTANCE wait, while our outer loop handles the
+        // "registry not ready yet" (`InvalidRva`) case the SDK returns without waiting.
+        match CSTaskImp::wait_for_instance(Duration::from_secs(1)) {
+            Ok(task) => return Some(task),
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    log::error!("CSTaskImp unavailable after {INIT_TIMEOUT:?}; mod not installed: {e:?}");
+                    return None;
+                }
+                if !announced {
+                    log::debug!("task system not ready yet ({e:?}); retrying until the game finishes init");
+                    announced = true;
+                }
+                std::thread::sleep(TASK_RETRY_DELAY);
+            }
+        }
     }
 }
 
