@@ -1,6 +1,6 @@
 ---
 name: test-loop
-description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the live-mod debug bridge (harness bridge-probe), and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
+description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the live-mod debug bridge (harness bridge-host), and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
 ---
 
 # Test loops for unseamless-coop
@@ -15,7 +15,7 @@ lowest layer that can answer your question.
 | 1 | Unit tests | Mac | pure core logic | assistant | **DONE** |
 | 2 | Two-peer harness | Mac, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
 | 2b | TCP two-process harness | Mac, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
-| 3 | Debug bridge | one game + harness | the side-channel `Session` against the live mod | assistant | **DONE** (`rig.sh` + `harness bridge-probe`) |
+| 3 | Debug bridge | one game + harness | the side-channel `Session` against the live mod | assistant | **DONE** (`rig.sh` + `harness bridge-host`) |
 | 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **tooling DONE** (`scripts/rig.sh`); first run pending |
 | 5 | Real co-op | friends | actual co-op behavior | you, manual | ongoing; logs handed back |
 
@@ -92,21 +92,25 @@ no Steam. It proves the side-channel runs in-process before we bind it to the ga
 ```bash
 scripts/rig.sh apply && scripts/rig.sh launch     # diag build enables the `bridge` feature
 # once the log shows `bridge listening on 127.0.0.1:47700`:
-scripts/harness.sh bridge-probe 47700             # connects as a client, reports the round-trip
+scripts/harness.sh bridge-host 47700              # acts as host, pushes a config into the mod
 ```
-A successful probe prints `OK: side-channel round-tripped against the live mod` and shows the
-host-synced config (e.g. `allow_invaders` flipping to the mod's value), proving a real `ConfigSync`
-crossed the socket. (Wine maps the in-game listener to host loopback, so the native harness reaches it.)
+The mod runs as the **client**; `bridge-host` is the authoritative host and pushes a config (it sets
+`max_players=4`). The mod applies the received `ConfigSync` into its live config (`coop/state.rs`),
+and on the game thread `session-limit` re-applies the override — visible in the **mod's** log as
+`session player limit override set to 4` (the seed is 6, so 4 can only come from the pushed sync).
+That's a received side-channel message changing **live game state**, solo. (Wine maps the in-game
+listener to host loopback, so the native harness reaches it.)
 
 **Shape:** `coop/bridge.rs` (behind the `bridge` cargo feature + `[debug] bridge_port`) binds a
-loopback listener and runs a `Session<BridgeTransport>` host on a background thread. `BridgeTransport`
-is the socket I/O; the wire framing is the shared host-tested `unseamless_core::framing` codec (the
-same one `TcpTransport` uses). The bridge touches **no game memory** (pure core types over a config
-clone), so the background thread is safe. The `bridge` feature is `compile_error!`-guarded out of
-release builds, binds `127.0.0.1` only, and is off unless `bridge_port > 0`.
+loopback listener and runs a `Session<BridgeTransport>` as a client on a background thread, applying
+any received config into the process-global live config (`coop/state.rs`, a `Mutex<Config>`) that the
+game-thread features read. `BridgeTransport` is the socket I/O; the wire framing is the shared
+host-tested `unseamless_core::framing` codec. The only cross-thread state is that `Mutex`. The
+`bridge` feature is `compile_error!`-guarded out of release builds, binds `127.0.0.1` only, and is
+off unless `bridge_port > 0`.
 
-**Limits:** tests our side-channel protocol live; it does **not** yet exercise game *effects* (a
-synced `ConfigSync` re-scaling params, an action firing a game call) — those land as the apply-layer
+**Limits:** drives config-shaped effects (the session-limit override) but not yet richer ones (a
+synced `ConfigSync` re-scaling params, an action firing a game call) — those land as more apply
 features do — nor the game's own P2P player sync (still needs two real games, layer 5).
 
 ## Layer 4 — Local PC rig (`scripts/rig.sh`) — the game-binding loop
@@ -172,7 +176,7 @@ the session without context. This is the acceptance loop and the only one that p
   the side-channel flow.
 - Changed the side-channel coordination (handshake/sync/actions/forwarding)? → **layer 2**.
 - Need to drive the side-channel against the **live mod** (no second game)? → **layer 3**
-  (`rig.sh` + `harness bridge-probe`).
+  (`rig.sh` + `harness bridge-host`).
 - Need to know it actually affects the game (params, session state, loading)? → **layer 4**
   (`rig.sh`, this machine).
 - Co-op behavior with real partners? → **layer 5**.

@@ -21,15 +21,16 @@
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::config::{Config, Scaling};
+use crate::config::{Config, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS, Scaling};
 use crate::diagnostics::{LogLevel, LogRecord};
 
 /// Magic prefix identifying one of our side-channel frames.
 pub const MAGIC: [u8; 2] = *b"UC";
 /// Current wire version. Bump on any incompatible change; decoders reject mismatches. v2 added the
-/// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`, so a v1 peer is rejected as
-/// `UnknownVersion` rather than silently misparsing the shifted payload.
-pub const VERSION: u8 = 2;
+/// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`; v3 added `max_players` to the
+/// `ConfigSync` payload, so an older peer is rejected as `UnknownVersion` rather than silently
+/// misparsing the shifted payload.
+pub const VERSION: u8 = 3;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
@@ -77,6 +78,9 @@ pub struct SharedSettings {
     pub allow_invaders: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
+    /// The session player cap. Host-enforced: a client adopts the host's so the whole party agrees
+    /// on session size. Clamped on decode like `scaling`, since it comes from an untrusted peer.
+    pub max_players: u32,
 }
 
 /// Project a [`Config`] into the host-enforced subset broadcast over the wire. Keeps the
@@ -88,6 +92,7 @@ impl From<&Config> for SharedSettings {
             allow_invaders: c.gameplay.allow_invaders,
             death_debuffs: c.gameplay.death_debuffs,
             allow_summons: c.gameplay.allow_summons,
+            max_players: c.session.max_players,
         }
     }
 }
@@ -101,6 +106,7 @@ impl SharedSettings {
         cfg.gameplay.allow_invaders = self.allow_invaders;
         cfg.gameplay.death_debuffs = self.death_debuffs;
         cfg.gameplay.allow_summons = self.allow_summons;
+        cfg.session.max_players = self.max_players;
     }
 }
 
@@ -187,6 +193,7 @@ impl ModMessage {
                 ] {
                     w.extend_from_slice(&v.to_be_bytes());
                 }
+                w.extend_from_slice(&s.max_players.to_be_bytes());
                 w.push(pack_bools([s.allow_invaders, s.death_debuffs, s.allow_summons]));
             }
             ModMessage::SessionAction { seq, action } => {
@@ -236,10 +243,18 @@ impl ModMessage {
                 // Untrusted peer: hold wire scaling to the same bound as a local config file, so a
                 // malicious host can't push an out-of-range multiplier the user never consented to.
                 scaling.clamp_percentages();
+                // Same reasoning for the player cap: clamp to the config's accepted range.
+                let max_players = r.u32()?.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
                 let [allow_invaders, death_debuffs, allow_summons] = unpack_bools(r.u8()?);
                 ModMessage::ConfigSync {
                     generation,
-                    settings: SharedSettings { scaling, allow_invaders, death_debuffs, allow_summons },
+                    settings: SharedSettings {
+                        scaling,
+                        allow_invaders,
+                        death_debuffs,
+                        allow_summons,
+                        max_players,
+                    },
                 }
             }
             tag::SESSION_ACTION => {
@@ -343,6 +358,7 @@ mod tests {
             allow_invaders: true,
             death_debuffs: false,
             allow_summons: true,
+            max_players: 4,
         }
     }
 
@@ -378,12 +394,14 @@ mod tests {
         cfg.gameplay.death_debuffs = false;
         cfg.gameplay.allow_summons = false;
         cfg.scaling.boss_health = 200;
+        cfg.session.max_players = 4; // non-default, host-enforced
         cfg.session.password = "secret".into(); // machine-local; SharedSettings has no such field
         let shared = SharedSettings::from(&cfg);
         assert!(!shared.allow_invaders);
         assert!(!shared.death_debuffs);
         assert!(!shared.allow_summons);
         assert_eq!(shared.scaling.boss_health, 200);
+        assert_eq!(shared.max_players, 4);
         let msg = ModMessage::ConfigSync { generation: 3, settings: shared };
         assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg));
     }
@@ -394,6 +412,7 @@ mod tests {
         host.gameplay.allow_invaders = false;
         host.gameplay.allow_summons = false;
         host.scaling.enemy_health = 80;
+        host.session.max_players = 3; // non-default + != the client's default, so apply must override
         let shared = SharedSettings::from(&host);
 
         // A client with different local settings receives and applies the host's subset.
@@ -402,7 +421,27 @@ mod tests {
         shared.apply_to(&mut client);
 
         assert_eq!(SharedSettings::from(&client), shared, "client now agrees on the shared subset");
+        assert_eq!(client.session.max_players, shared.max_players, "host's player cap adopted");
         assert_eq!(client.session.password, "client-local", "machine-local fields untouched");
+    }
+
+    #[test]
+    fn config_sync_clamps_out_of_range_max_players_from_the_wire() {
+        // Decode must bound an untrusted player cap to the config's range on both sides, and leave
+        // an in-range value untouched (so the clamp isn't accidentally `.clamp(MAX, MAX)` etc.).
+        let min = crate::config::MIN_SESSION_PLAYERS;
+        let max = crate::config::MAX_SESSION_PLAYERS;
+        for (wire, expected) in [(0u32, min), (1, min), (u32::MAX, max), (max + 1, max), (4, 4)] {
+            let mut s = shared();
+            s.max_players = wire;
+            let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+            match ModMessage::decode(&frame).unwrap() {
+                ModMessage::ConfigSync { settings, .. } => {
+                    assert_eq!(settings.max_players, expected, "wire {wire} should decode to {expected}");
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -469,6 +508,15 @@ mod tests {
         let mut bytes = ModMessage::Ping { frame: 1 }.encode();
         bytes[2] = 1;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(1)));
+    }
+
+    #[test]
+    fn rejects_superseded_v2_frame() {
+        // v3 added `max_players` to ConfigSync, so a v2 frame is shorter by 4 bytes. The whole point
+        // of the version bump is that the gate rejects it rather than misparsing the shifted payload.
+        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        bytes[2] = 2;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(2)));
     }
 
     #[test]

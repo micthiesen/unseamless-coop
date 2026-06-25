@@ -54,6 +54,10 @@ pub fn install() {
         log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
 
+    // Publish the loaded config as the process-global live config: features read it each frame, and
+    // the bridge writes it when it applies a received ConfigSync. Do this before anything reads it.
+    crate::state::init(config.clone());
+
     // Reject an empty/too-short co-op password (the session key). The generated default always
     // passes, so this only fires on a deliberately-cleared password — fail loudly, like the EAC
     // guard, since a weak key risks accidental or trivially-joinable sessions.
@@ -71,7 +75,7 @@ pub fn install() {
     // feature (rig/diag builds) and inert unless a port is configured. Runs on its own thread.
     #[cfg(feature = "bridge")]
     if config.debug.bridge_port > 0 {
-        crate::bridge::start(config.clone(), config.debug.bridge_port);
+        crate::bridge::start(config.debug.bridge_port);
     }
 
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
@@ -92,12 +96,10 @@ pub fn install() {
     // SessionLimit before the observer so that — since same-phase tasks tick in registration order
     // (the loop below registers in vec order) — the observer reads and logs the override we just
     // wrote, same frame. It's only a logging nicety: were that order to change, the observer would
-    // log the override one frame late, not wrong. SessionLimit needs only the cap; the observer
-    // takes ownership of the rest of the config.
-    let max_players = config.session.max_players;
+    // log the override one frame late, not wrong. Both read the live config (`crate::state`).
     let features: Vec<Box<dyn Feature>> = vec![
-        Box::new(SessionLimit::new(max_players)),
-        Box::new(SessionObserver::new(config)),
+        Box::new(SessionLimit::new()),
+        Box::new(SessionObserver::new()),
     ];
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];

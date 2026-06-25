@@ -11,17 +11,21 @@
 //! is the spec for the next phase.
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex};
-use unseamless_core::config::Config;
 use unseamless_core::util::{FrameThrottle, Latch};
 
 use crate::feature::{Feature, Tick};
 
 pub struct SessionObserver {
-    config: Config,
     /// Fires only when the watched session state changes, so we log transitions not every frame.
     state: Latch<Snapshot>,
     /// "Still alive, no session yet" heartbeat (~30s at 60fps) while idle at the title screen.
     heartbeat: FrameThrottle,
+}
+
+impl Default for SessionObserver {
+    fn default() -> Self {
+        Self { state: Latch::new(), heartbeat: FrameThrottle::every(1800) }
+    }
 }
 
 /// The subset of session state we diff on.
@@ -37,12 +41,8 @@ struct Snapshot {
 }
 
 impl SessionObserver {
-    pub fn new(config: Config) -> Self {
-        Self {
-            config,
-            state: Latch::new(),
-            heartbeat: FrameThrottle::every(1800),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -105,8 +105,11 @@ impl SessionObserver {
         // we can confirm it on the rig. The core's multiplier math saturates for any count, so we
         // only need to guard the usize->u32 narrowing.
         let count = u32::try_from(players).unwrap_or(u32::MAX).max(1);
-        let enemy = self.config.scaling.enemy_multipliers(count);
-        let boss = self.config.scaling.boss_multipliers(count);
+        // Reads the live config, so these multipliers reflect a config the bridge may have synced
+        // (still read-only here — the observer writes nothing).
+        let scaling = crate::state::with(|c| c.scaling);
+        let enemy = scaling.enemy_multipliers(count);
+        let boss = scaling.boss_multipliers(count);
         log::info!(
             "  scaling@{count}p: enemy(hp×{:.2} dmg×{:.2} pos×{:.2}) boss(hp×{:.2} dmg×{:.2} pos×{:.2})",
             enemy.health,

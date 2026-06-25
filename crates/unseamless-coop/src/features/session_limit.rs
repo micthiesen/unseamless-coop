@@ -6,29 +6,28 @@
 //! [`max_players`](unseamless_core::config::Session::max_players) there so a party can exceed the
 //! vanilla cap — the documented, low-risk lever (a single `u32` field), not a code hook.
 //!
-//! We write it only when it differs from our target, so it's effectively one-shot once a session
-//! manager exists, and self-heals if the game ever resets it. Writing it before a session forms is
-//! fine — it's read when the session is created. This is rig-gated for the *multi-player effect*
-//! (needs a real party), but the write itself is observable solo (the observer logs the override).
+//! It reads the **live config** each frame (`crate::state`) rather than a construction snapshot, so
+//! a config change — e.g. a `ConfigSync` the bridge applies — re-applies here without rebuilding the
+//! feature. It writes only when the game's value differs from the desired one, so it's a self-healing
+//! one-shot per value. Writing it before a session forms is fine — it's read when the session is
+//! created. The multi-player *effect* is rig-gated (needs a real party); the write itself is
+//! observable solo (the observer logs the override, and a config-driven change re-logs it here).
 
 use eldenring::cs::CSSessionManager;
 use unseamless_core::config::{MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS};
 
 use crate::feature::{Feature, Tick};
 
+#[derive(Default)]
 pub struct SessionLimit {
-    /// The override value to hold the game's `session_player_limit_override` at.
-    target: u32,
-    /// Whether we've logged the initial apply (so re-asserts log quietly at `debug`, not `info`).
-    applied: bool,
+    /// The last override value logged at `info`, so steady-state re-asserts stay at `debug` but a
+    /// genuine change (config-driven) logs loudly.
+    last_logged: Option<u32>,
 }
 
 impl SessionLimit {
-    pub fn new(max_players: u32) -> Self {
-        // Self-bound the value we write into live game memory: config validation already clamps,
-        // but this feature shouldn't trust that every future caller ran `Config::validate`.
-        let target = max_players.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
-        Self { target, applied: false }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -41,23 +40,27 @@ impl Feature for SessionLimit {
     // game state, and it must be set before a session forms — which can happen at the menu.
 
     fn on_frame(&mut self, _tick: Tick) {
-        let target = self.target;
-        // `Some(true)` = we just wrote it; `Some(false)` = already at target; `None` = no session
+        // Self-bound the value we write into live game memory: the config is clamped on load and on
+        // the wire, but this feature shouldn't trust that every path did so.
+        let desired = crate::state::with(|c| c.session.max_players)
+            .clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
+
+        // `Some(true)` = we just wrote it; `Some(false)` = already correct; `None` = no session
         // manager live yet (pre-init / between loads) — retry next frame.
         let wrote = crate::sdk::with_instance_mut::<CSSessionManager, _>(|s| {
-            if s.session_player_limit_override == target {
+            if s.session_player_limit_override == desired {
                 return false;
             }
-            s.session_player_limit_override = target;
+            s.session_player_limit_override = desired;
             true
         });
 
         if wrote == Some(true) {
-            if self.applied {
-                log::debug!("re-applied session player limit override = {target}");
+            if self.last_logged == Some(desired) {
+                log::debug!("re-applied session player limit override = {desired}");
             } else {
-                log::info!("session player limit override set to {target}");
-                self.applied = true;
+                log::info!("session player limit override set to {desired}");
+                self.last_logged = Some(desired);
             }
         }
     }
