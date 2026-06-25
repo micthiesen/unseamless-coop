@@ -22,7 +22,9 @@
 use std::ffi::c_void;
 
 use hudhook::hooks::dx12::ImguiDx12Hooks;
-use hudhook::imgui::{Condition, Context, FontConfig, FontId, FontSource, Io, Key, Ui, WindowFlags};
+use hudhook::imgui::{
+    Condition, Context, FontConfig, FontId, FontSource, Io, Key, TabItemFlags, Ui, WindowFlags,
+};
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
@@ -35,12 +37,23 @@ use windows::Win32::Foundation::HINSTANCE;
 /// Key that toggles the utility window: backtick / grave (`` ` ``). Unbound in Elden Ring and the
 /// universal "console" key. Hardcoded for now; a config-bound key can come later.
 const TOGGLE_KEY: Key = Key::GraveAccent;
-/// Window title — carries the version (the watermark will show it too). Doubles as the imgui window id.
-const WINDOW_TITLE: &str = concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION"));
-/// Menu/log text size. We bake imgui's built-in ProggyClean bitmap font at this size with
-/// oversampling off (see `initialize`) — an integer multiple of its native 13px so it pixel-doubles
-/// crisply instead of blurring like a scaled font. No external asset; ProggyClean ships with imgui.
-const MENU_FONT_SIZE: f32 = 26.0;
+/// Window title: version, then a control hint, with a stable `###` id so the visible label can change
+/// (and carry the hint) without changing the window's identity — which would reset its remembered
+/// position. ASCII only: the title bar draws in the default font, which has no arrow glyphs.
+const WINDOW_TITLE: &str = concat!(
+    "unseamless-coop  v",
+    env!("CARGO_PKG_VERSION"),
+    "    |    Up/Dn: select    L/R: tabs    Enter: use    `: close",
+    "###unseamless-coop",
+);
+/// Crisp UI font: a printable-ASCII subset of **Spleen 8x16** (BSD-2 — see
+/// `assets/menu-font.LICENSE.txt`), a pixel font with a 16px native size, baked at that size. A bitmap
+/// font is only crisp at its native size, so we source one designed larger rather than scale the
+/// 13px default (which blurs). Embedded so the DLL stays self-contained.
+const MENU_FONT: &[u8] = include_bytes!("../assets/menu-font.otf");
+const MENU_FONT_SIZE: f32 = 16.0;
+/// The utility window's tabs, in order. Left/Right arrows cycle through them.
+const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
 
 // One palette, referenced everywhere, so the severity / log-level / provenance colours can't silently
 // drift apart (they're the same swatches used in different contexts, on purpose).
@@ -81,6 +94,9 @@ struct Overlay {
     /// Actions the user requested that we couldn't enqueue yet (queue momentarily locked by the game
     /// thread); retried next frame so a keypress is never lost.
     pending: Vec<SessionAction>,
+    /// Index of the active tab (into [`TABS`]). Tracks the visible tab (incl. mouse clicks) and is
+    /// moved by Left/Right; we force-select the tab matching it the frame an arrow is pressed.
+    tab: usize,
 }
 
 impl Overlay {
@@ -93,6 +109,7 @@ impl Overlay {
             font: None,
             config: Config::default(),
             pending: Vec::new(),
+            tab: 0,
         }
     }
 
@@ -150,26 +167,45 @@ impl Overlay {
     /// Draw the toggleable utility window with its tabs.
     fn draw_utility_window(&mut self, ui: &Ui) {
         let ctx = session_context();
+        // Left/Right cycle tabs. Compute the force-select target here (before the bar) so the arrow
+        // lands on the new tab even though imgui otherwise owns tab state; the active tab writes back
+        // `self.tab` below, so mouse clicks are tracked too and the next arrow moves from the right place.
+        let mut force_tab = None;
+        if ui.is_key_pressed(Key::RightArrow) {
+            self.tab = (self.tab + 1) % TABS.len();
+            force_tab = Some(self.tab);
+        }
+        if ui.is_key_pressed(Key::LeftArrow) {
+            self.tab = (self.tab + TABS.len() - 1) % TABS.len();
+            force_tab = Some(self.tab);
+        }
         ui.window(WINDOW_TITLE)
-            .size([480.0, 380.0], Condition::FirstUseEver)
+            .size([520.0, 380.0], Condition::FirstUseEver)
             .position([80.0, 80.0], Condition::FirstUseEver)
-            // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor), so disable imgui's
-            // own keyboard nav for this window — hudhook force-enables nav each frame, so a window flag
-            // is the only reliable way to stop it double-handling arrows/Enter. Mouse clicks still work.
+            // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
+            // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
+            // window flag is the only reliable way to stop it double-handling arrows. Clicks still work.
             .flags(WindowFlags::NO_SAVED_SETTINGS | WindowFlags::NO_COLLAPSE | WindowFlags::NO_NAV)
             .build(|| {
                 // Push our crisp font for the whole window (incl. the log child); toasts keep the
                 // compact default. Token held to closure end, then popped.
                 let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
                 if let Some(_bar) = ui.tab_bar("##tabs") {
-                    if let Some(_tab) = ui.tab_item("Actions") {
-                        self.draw_actions_tab(ui, &ctx);
-                    }
-                    if let Some(_tab) = ui.tab_item("Settings") {
-                        self.draw_settings_tab(ui);
-                    }
-                    if let Some(_tab) = ui.tab_item("Log") {
-                        draw_log_tab(ui);
+                    for (i, &label) in TABS.iter().enumerate() {
+                        let flags = if force_tab == Some(i) {
+                            TabItemFlags::SET_SELECTED
+                        } else {
+                            TabItemFlags::empty()
+                        };
+                        if let Some(_tab) = ui.tab_item_with_flags(label, None, flags) {
+                            self.tab = i; // track the visible tab (incl. mouse clicks)
+                            match label {
+                                "Actions" => self.draw_actions_tab(ui, &ctx),
+                                "Settings" => self.draw_settings_tab(ui),
+                                "Log" => draw_log_tab(ui),
+                                _ => {}
+                            }
+                        }
                     }
                 }
             });
@@ -255,13 +291,13 @@ impl ImguiRenderLoop for Overlay {
         let fonts = ctx.fonts();
         // Keep the compact default (ProggyClean) as the atlas default so the passive toasts stay small;
         // our crisp subset is an extra font pushed only for the utility window.
-        // Index 0 stays the compact 13px default for the passive toasts. The menu font is the SAME
-        // ProggyClean bitmap baked larger with oversampling off + pixel snap, so it stays crisp (a
-        // scaled bitmap is what looked blurry).
+        // Index 0 stays the compact 13px default for the passive toasts. The menu font is Spleen 8x16
+        // baked at its native 16px with oversampling off + pixel snap, so it stays crisp.
         fonts.add_font(&[FontSource::DefaultFontData { config: None }]);
-        let id = fonts.add_font(&[FontSource::DefaultFontData {
+        let id = fonts.add_font(&[FontSource::TtfData {
+            data: MENU_FONT,
+            size_pixels: MENU_FONT_SIZE,
             config: Some(FontConfig {
-                size_pixels: MENU_FONT_SIZE,
                 oversample_h: 1,
                 oversample_v: 1,
                 pixel_snap_h: true,

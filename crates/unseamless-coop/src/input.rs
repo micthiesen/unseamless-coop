@@ -18,8 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ilhook::HookError;
-use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_retn};
+use ilhook::x64::{CallbackOption, ClosureHookPoint, HookFlags, Registers, hook_closure_retn};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::core::{GUID, PCSTR, s};
 
@@ -75,6 +74,38 @@ fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
     hr
 }
 
+// The game pins the OS cursor to the screen centre during gameplay (so the hidden cursor can't drift
+// off-window while it reads relative mouse-look). The next two detours release that pin while the
+// overlay is open, so the mouse can move over the menu. Both no-op when the overlay is closed.
+
+/// `SetCursorPos(X = rcx, Y = rdx) -> BOOL`. While blocked, skip the recenter (return TRUE) so the
+/// cursor stays where the user moved it.
+fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
+    if is_blocked() {
+        return 1; // TRUE — claim success without moving the cursor
+    }
+    let original: unsafe extern "system" fn(u64, u64) -> usize = unsafe { std::mem::transmute(original) };
+    unsafe { original((*regs).rcx, (*regs).rdx) }
+}
+
+/// `ClipCursor(lpRect = rcx) -> BOOL`. While blocked, release the cursor (call with NULL) instead of
+/// confining it to the game's rect.
+fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
+    let lp_rect = if is_blocked() { 0 } else { unsafe { (*regs).rcx } };
+    let original: unsafe extern "system" fn(u64) -> usize = unsafe { std::mem::transmute(original) };
+    unsafe { original(lp_rect) }
+}
+
+/// Install one function-replacement detour. `detour` runs the original (via the passed pointer) and may
+/// alter the result. Never unhooked — resident for the process lifetime.
+unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<ClosureHookPoint<'static>, String>
+where
+    T: Fn(*mut Registers, usize) -> usize + Send + Sync + 'static,
+{
+    unsafe { hook_closure_retn(addr, detour, CallbackOption::None, HookFlags::empty()) }
+        .map_err(|e| format!("hooking {what}: {e:?}"))
+}
+
 /// Create a throwaway DirectInput device for `guid` and read its `GetDeviceState` vtable address (the
 /// real dinput8 implementation, shared by the game's own devices), then release the probe objects.
 unsafe fn probe_get_device_state(
@@ -124,17 +155,22 @@ pub unsafe fn install() -> Result<(), String> {
     let kb = unsafe { probe_get_device_state(di8_create, hinstance, &GUID_SYS_KEYBOARD)? };
     let ms = unsafe { probe_get_device_state(di8_create, hinstance, &GUID_SYS_MOUSE)? };
 
-    let hook = |addr: usize, what: &str| -> Result<_, String> {
-        unsafe { hook_closure_retn(addr, get_state_detour, CallbackOption::None, HookFlags::empty()) }
-            .map_err(|e: HookError| format!("hooking {what} GetDeviceState: {e:?}"))
-    };
-
     // Keyboard and mouse devices often share one GetDeviceState implementation; hook each distinct
     // address once.
-    let mut hooks = vec![hook(kb, "keyboard")?];
+    let mut hooks = vec![unsafe { install_hook(kb, get_state_detour, "keyboard GetDeviceState")? }];
     if ms != kb {
-        hooks.push(hook(ms, "mouse")?);
+        hooks.push(unsafe { install_hook(ms, get_state_detour, "mouse GetDeviceState")? });
     }
+
+    // Cursor-unlock detours (user32), so the mouse can move over the menu while the overlay is open.
+    let user32 =
+        unsafe { GetModuleHandleA(s!("user32.dll")) }.map_err(|e| format!("user32.dll not loaded: {e}"))?;
+    let addr = |name: PCSTR, what: &str| -> Result<usize, String> {
+        unsafe { GetProcAddress(user32, name) }.map(|p| p as usize).ok_or_else(|| format!("{what} not found"))
+    };
+    hooks.push(unsafe { install_hook(addr(s!("SetCursorPos"), "SetCursorPos")?, set_cursor_pos_detour, "SetCursorPos")? });
+    hooks.push(unsafe { install_hook(addr(s!("ClipCursor"), "ClipCursor")?, clip_cursor_detour, "ClipCursor")? });
+
     // Never unhooked — resident for the process lifetime, like our task handles.
     std::mem::forget(hooks);
     Ok(())
