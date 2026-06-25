@@ -331,7 +331,8 @@ impl FlagScanner {
         for (i, (&cur, prev)) in current.iter().zip(self.prev.iter_mut()).enumerate() {
             if cur != *prev {
                 *prev = cur;
-                out.push((self.start + i as u32, cur));
+                // saturating: `start` is unbounded config; a near-u32::MAX start must not overflow.
+                out.push((self.start.saturating_add(i as u32), cur));
             }
         }
         out
@@ -521,10 +522,39 @@ mod tests {
     }
 
     #[test]
-    fn report_indents_multiline_values_under_their_key() {
+    fn report_sections_render_in_insertion_order() {
+        let mut r = DiagnosticReport::new("t");
+        r.section("first").field("a", 1);
+        r.section("second").field("b", 2);
+        let out = r.render();
+        assert!(out.find("---- first ----").unwrap() < out.find("---- second ----").unwrap());
+    }
+
+    #[test]
+    fn empty_report_and_empty_section_render_safely() {
+        // No sections: just the title + end marker (no panic from an empty sections loop).
+        let bare = DiagnosticReport::new("bare").render();
+        assert_eq!(bare, "==== unseamless-coop diagnostic: bare ====\n==== end diagnostic ====\n");
+        // A section with no fields: the `unwrap_or(0)` width branch — header present, no field lines.
+        let mut r = DiagnosticReport::new("t");
+        r.section("empty");
+        let out = r.render();
+        assert!(out.contains("---- empty ----\n==== end diagnostic ===="), "{out}");
+    }
+
+    #[test]
+    fn report_uses_a_fixed_two_space_continuation_indent() {
+        // Continuation lines get a constant 2-space indent (not column alignment under the value).
         let mut r = DiagnosticReport::new("t");
         r.section("s").field("trace", "line1\nline2");
         assert!(r.render().contains("trace = line1\n  line2"), "{}", r.render());
+    }
+
+    #[test]
+    fn flag_scanner_count_zero_is_empty_and_never_reports() {
+        let mut s = FlagScanner::new(5, 0);
+        assert!(s.is_empty());
+        assert_eq!(s.changes(&[true, true]), []); // nothing watched -> nothing reported
     }
 
     #[test]

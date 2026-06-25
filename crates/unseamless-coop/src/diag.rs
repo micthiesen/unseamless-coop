@@ -5,12 +5,12 @@
 //! game state and wires the probes.
 //!
 //! ## Two surfaces, sized for remote testers (who can't be driven interactively)
-//! - **Always-on snapshots** ([`dump`]): a full report at boot, on a feature panic, and (optionally)
-//!   on a timer. With logging on (friend/diag builds), these land in the shared log automatically — no
-//!   action needed — so "what was the live state when it broke" is already captured.
+//! - **Always-on snapshots** ([`dump`]): a full report at boot and on a feature panic — unconditional
+//!   `dump` calls. With logging on (friend/diag builds), these land in the shared log automatically —
+//!   no action needed — so "what was the live state when it broke" is already captured.
 //! - **Requestable probes** ([`probe_features`], gated by `[debug.probes]`): the levers we ask a
-//!   specific tester to flip ("set this, reproduce, send the log"). Today: a periodic snapshot and an
-//!   **event-flag scanner** — the reusable "which flag flips when I do X in-game" finder (e.g. the
+//!   specific tester to flip ("set this, reproduce, send the log"). Today: a **periodic snapshot** and
+//!   an **event-flag scanner** — the reusable "which flag flips when I do X in-game" finder (e.g. the
 //!   death-debuff cure flag, by resting at a grace).
 
 use eldenring::cs::{CSEventFlagMan, CSSessionManager};
@@ -31,7 +31,11 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         players: s.players.len(),
         limit: s.session_player_limit,
         limit_override: s.session_player_limit_override,
-        roam_unrestricted: s.stay_in_multiplay_area_warp_data.disable_multiplay_restriction,
+        // Null-guard the warp-data OwnedPtr deref (same as `seamless.rs`): a live CSSessionManager
+        // doesn't guarantee the warp data is wired, and this report runs on the feature-panic dump —
+        // a torn-state moment — so degrade rather than risk a null deref turning a disable into a crash.
+        roam_unrestricted: (!s.stay_in_multiplay_area_warp_data.as_ptr().is_null())
+            .then(|| s.stay_in_multiplay_area_warp_data.disable_multiplay_restriction),
     });
     let in_gameplay = crate::playstate::in_gameplay();
     let features = crate::app::feature_status();
@@ -49,7 +53,10 @@ pub fn build_report(title: &str) -> DiagnosticReport {
                 .field("players", s.players)
                 .field("player_limit", s.limit)
                 .field("limit_override", s.limit_override)
-                .field("roam_unrestricted", s.roam_unrestricted);
+                .field(
+                    "roam_unrestricted",
+                    s.roam_unrestricted.map_or_else(|| "(warp data not initialized)".to_string(), |b| b.to_string()),
+                );
         }
         None => {
             sec.field("status", "no CSSessionManager yet (pre-init / title screen)");
@@ -58,11 +65,19 @@ pub fn build_report(title: &str) -> DiagnosticReport {
 
     let feat = r.section("features");
     feat.field("in_gameplay", in_gameplay);
-    if features.is_empty() {
-        feat.field("status", "not registered yet");
-    }
-    for (name, disabled) in features {
-        feat.field(name, if disabled { "DISABLED (panicked)" } else { "ok" });
+    match features {
+        // Re-entrant call (a dump from inside a tick) couldn't read the list — note it, don't fake it.
+        None => {
+            feat.field("status", "unavailable (snapshot taken mid-tick; APP lock held)");
+        }
+        Some(list) if list.is_empty() => {
+            feat.field("status", "not registered yet");
+        }
+        Some(list) => {
+            for (name, disabled) in list {
+                feat.field(name, if disabled { "DISABLED (panicked)" } else { "ok" });
+            }
+        }
     }
     r
 }
@@ -79,7 +94,8 @@ struct SessionSnap {
     players: usize,
     limit: u32,
     limit_override: u32,
-    roam_unrestricted: bool,
+    /// `None` = the warp-data pointer wasn't initialized (guarded deref).
+    roam_unrestricted: Option<bool>,
 }
 
 /// The requestable probe features enabled by `[debug.probes]`, to append to the feature set. Empty
@@ -157,15 +173,22 @@ impl Feature for FlagScanProbe {
         }
         let (start, count) = (self.start, self.scanner.len());
         let flags = crate::sdk::with_instance::<CSEventFlagMan, _>(|m| {
-            (0..count).map(|i| m.virtual_memory_flag.get_flag(start + i as u32)).collect::<Vec<bool>>()
+            // saturating: `event_flag_scan_start` is unbounded config, so a near-u32::MAX start must
+            // not overflow (wraps to a low id in release, panics under diag).
+            (0..count).map(|i| m.virtual_memory_flag.get_flag(start.saturating_add(i as u32))).collect::<Vec<bool>>()
         });
         let Some(flags) = flags else { return }; // event-flag manager not live yet
+
+        // First live scan establishes the baseline: record it (so later diffs are relative to it) but
+        // don't report every already-on flag as a spurious "edge" — only post-baseline flips matter.
+        let changes = self.scanner.changes(&flags);
         if !self.announced {
             let on = flags.iter().filter(|&&b| b).count();
             log::info!("diag-flag-scan: watching {count} flags from {start} ({on} on at baseline)");
             self.announced = true;
+            return;
         }
-        for (id, now) in self.scanner.changes(&flags) {
+        for (id, now) in changes {
             log::info!("diag-flag-scan: flag {id} -> {}", if now { "ON" } else { "off" });
         }
     }

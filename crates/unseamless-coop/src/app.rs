@@ -137,7 +137,7 @@ pub fn install() {
     // (the loop below registers in vec order) — the observer reads and logs the override we just
     // wrote, same frame. It's only a logging nicety: were that order to change, the observer would
     // log the override one frame late, not wrong. Both read the live config (`crate::state`).
-    let features: Vec<Box<dyn Feature>> = vec![
+    let mut features: Vec<Box<dyn Feature>> = vec![
         Box::new(NotificationsTick::new()), // ages toasts once per frame, before producers push
         Box::new(SessionLimit::new()),
         // Hold the area-restriction lever so the party can roam the whole map (reads live config).
@@ -151,7 +151,6 @@ pub fn install() {
         Box::new(DeathDebuffsFeature::new()),
     ];
     // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
-    let mut features = features;
     features.extend(crate::diag::probe_features(&config));
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];
@@ -310,13 +309,18 @@ fn tick(index: usize, data: &FD4TaskData) {
 }
 
 /// Snapshot of each registered feature's name and whether it's been disabled (panicked), for the
-/// diagnostic report. Takes the lock fresh and releases it before returning — never call it while
-/// already holding the `APP` lock (e.g. from inside a feature tick), which would deadlock; the
-/// on-panic dump calls it from the tick wrapper *after* the lock is released.
-pub fn feature_status() -> Vec<(&'static str, bool)> {
-    let Some(app) = APP.get() else { return Vec::new() };
-    let app = app.lock().unwrap_or_else(|poison| poison.into_inner());
-    app.features.iter().zip(&app.disabled).map(|(f, &d)| (f.name(), d)).collect()
+/// diagnostic report. `None` if the app isn't up yet, or if the `APP` lock is already held — which
+/// happens when a dump runs *inside* a feature tick (the periodic snapshot probe). We `try_lock`
+/// rather than block precisely so that re-entrant case degrades to "unavailable" instead of
+/// deadlocking the non-reentrant mutex on the game thread.
+pub fn feature_status() -> Option<Vec<(&'static str, bool)>> {
+    let app = APP.get()?;
+    let app = match app.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None, // re-entrant: called from within a tick
+    };
+    Some(app.features.iter().zip(&app.disabled).map(|(f, &d)| (f.name(), d)).collect())
 }
 
 /// Mark a feature as permanently disabled after its `on_frame` panicked (the panic hook already
