@@ -5,10 +5,13 @@ feature ([FEATURES.md](FEATURES.md)). This is well-trodden ground in ER modding:
 runtime method is a **one-branch, two-byte patch** to the boot/title flow, with the exact technique
 in MIT-licensed open source. No movie files, no Bink hooking.
 
-Research note, not implemented. Game-internal claims are grounded in the pinned `fromsoftware-rs`
-SDK source (cited) or are behavioral observations to confirm on the rig. Clean-room posture per
-[CLAUDE.md](../CLAUDE.md): reimplement from the mechanism, not from copied bytes (the reference is
-MIT so reading it is fine, but the patch pattern is version-specific anyway — re-derive ours).
+**Status: implemented and rig-confirmed.** A one-shot code patch (`coop/patch.rs` `nop_landmark`,
+wired in `app::install` behind `skip_splash_screens`, default on) NOPs the boot-logo gate; on the rig
+the logos skip straight to the title screen. Game-internal claims are grounded in the pinned
+`fromsoftware-rs` SDK source (cited) or are behavioral observations confirmed on the rig. Clean-room
+posture per [CLAUDE.md](../CLAUDE.md): reimplemented from the mechanism, not copied bytes (the
+reference is MIT so reading it is fine, but the patch pattern is version-specific anyway — ours was
+re-derived and verified live).
 
 ## The boot sequence
 
@@ -106,14 +109,13 @@ doesn't have yet:
 
 ## Open questions / next steps
 
-- [ ] On the rig: launch unmodified (outside EAC) and record the exact boot sequence we get — which
-      logos actually play, and whether the EAC splash is already gone. This sets the real target.
-- [ ] Derive our own AOB (or version-gated VA) for the boot-flow gate against the rig's game
-      version; confirm the 2-byte NOP skips logos and lands cleanly on the title screen.
-- [ ] Implement the shared AOB-scan + patch utility per [CODE-PATCHING.md](CODE-PATCHING.md)
-      (pelite `finds_code` over `code_range()` + `VirtualProtect`), then NOP the boot-flow gate
-      through it.
-- [ ] Decide whether to also ship the white-screen black-overlay sub-feature.
+- [x] Implemented the shared AOB-scan + patch utility ([CODE-PATCHING.md](CODE-PATCHING.md):
+      `coop/patch.rs` `nop_landmark`, pelite `finds_code` + `VirtualProtect`) and wired the one-shot
+      NOP behind `skip_splash_screens`.
+- [x] Derived the boot-flow gate AOB against our game version and confirmed on the rig: the 2-byte
+      NOP skips the logos and lands on the title screen.
+- [ ] Decide whether to also ship the white-screen black-overlay sub-feature (the engine-rendered
+      init flash the logo patch doesn't cover).
 
 ## Sources
 

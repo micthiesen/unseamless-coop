@@ -3,5 +3,6 @@
 
 pub mod notifications;
 pub mod observer;
+pub mod playstate;
 pub mod session_actions;
 pub mod session_limit;

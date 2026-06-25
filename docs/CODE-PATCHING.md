@@ -284,19 +284,27 @@ pub fn nop_at(name: &str, pattern: &[Atom], count: usize) -> bool {
 skip-intros is **not a `Feature`/task** — it's a one-shot in `install`, gated on its setting:
 
 ```rust
-// in app::install, after config load, before/around feature registration
+// in app::install, after config load + the password guard, before the task-system wait
 if config.gameplay.skip_splash_screens {
-    // Pattern + NOP width re-derived on the rig against our game version; '
-    // (Save 0) marks the conditional-jump byte to NOP. Placeholder shown.
-    const SKIP_INTRO_GATE: &[Atom] = pelite::pattern!("?? ?? ' 74 ?? ?? ??");
-    crate::patch::nop_at("skip_splash_screens", SKIP_INTRO_GATE, 2);
+    // Scan a distinctive landmark; the logo gate is a `74` (JZ) a fixed 60 bytes before it. NOP the
+    // 2-byte jump. Adapted from the MIT techiew/SkipTheIntro signature, rig-confirmed on our pin.
+    const BOOT_LOGO_LANDMARK: &[Atom] =
+        pelite::pattern!("C6 ? ? ? ? ? 01 ? 03 00 00 00 ? 8B ? E8 ? ? ? ? E9 ? ? ? ? ? 8D");
+    crate::patch::nop_landmark("skip_splash_screens", BOOT_LOGO_LANDMARK, -60, 0x74, 2);
 }
 ```
 
 That's the whole integration: a `skip_splash_screens` bool in the settings registry
-([settings.rs](../crates/unseamless-core/src/settings.rs)) drives one `nop_at` call. No new
-feature-trait plumbing, no task phase, no teardown. Future code-patch features (offline-popup
-suppression, etc.) reuse `scan`/`apply` the same way.
+([settings.rs](../crates/unseamless-core/src/settings.rs)) drives one `nop_landmark` call. No new
+feature-trait plumbing, no task phase, no teardown.
+
+> **Shipped API note.** The implementation replaced the proposed `scan` + `nop_at` with a single
+> `nop_landmark(name, landmark, offset, expect, count)`: it scans a *unique* landmark (pelite's
+> `finds_code` fails on zero *or* multiple matches), steps `offset` bytes to the patch site **in RVA
+> space** (so `rva_to_va` bounds-checks the site against the mapped image rather than offsetting a raw
+> pointer), verifies the byte equals `expect` (drift guard), then NOPs `count` bytes — exactly the
+> techiew "landmark minus a fixed offset" shape. `apply` is unchanged. Future code-patch features
+> (offline-popup suppression) reuse `nop_landmark` / `apply`.
 
 ### Cargo wiring (one small change)
 
@@ -321,17 +329,15 @@ dep is the clean way to write patterns. Keep it pinned to the same `0.10` the SD
 
 ## Status / Next Steps
 
-- [ ] Land `crates/unseamless-coop/src/patch.rs` with `scan` / `apply` / `nop_at` (host-compiles on
-      the Mac; the scan/patch can't be *exercised* without the game, but the binding compiles).
-- [ ] Add the `pelite` direct dep + the two `windows` features to the coop crate's `Cargo.toml`.
-- [ ] Wire the one-shot `nop_at` call into `app::install` behind the existing
-      `gameplay.skip_splash_screens` setting (already in `config.rs` / `settings.rs`).
-- [ ] **Rig:** derive the real boot-flow AOB + NOP width against our game version (the placeholder
-      pattern above is illustrative). Confirm the patch lands on the title screen with logos skipped.
-- [ ] **Rig:** confirm the patch *sticks* — i.e. Arxan code-restoration doesn't revert it. If it
-      does, wire `fromsoftware_shared::arxan` (neuter the relevant restoration routine) and re-test.
-- [ ] **Rig:** confirm `VirtualProtect`/`FlushInstructionCache` behave under our Proton build (they
-      should; this is a sanity check, not expected to fail).
+- [x] Land `crates/unseamless-coop/src/patch.rs` with `apply` / `nop_landmark` (host-compiles).
+- [x] Add the `pelite` direct dep + the two `windows` features to the coop crate's `Cargo.toml`.
+- [x] Wire the one-shot `nop_landmark` call into `app::install` behind the existing
+      `gameplay.skip_splash_screens` setting (default flipped to on).
+- [x] **Rig:** real boot-flow AOB confirmed against our game version; logos skip to the title screen.
+- [x] **Rig:** the patch *sticks* through the logo sequence (Arxan did not revert it before the gate
+      fires; the early one-shot lands first). The `fromsoftware_shared::arxan` neuter stays unused.
+- [x] **Rig:** `VirtualProtect`/`FlushInstructionCache` behave under our Proton build (implicit — the
+      patch applied and took effect).
 - [ ] Decide per future feature (offline-popup suppression) whether it's a code patch via this util
       or a session-FSM/field write — see [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md).
 

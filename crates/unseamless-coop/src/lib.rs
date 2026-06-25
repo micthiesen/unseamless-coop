@@ -33,6 +33,8 @@ mod logger;
 mod mods;
 mod notify;
 mod overlay;
+mod patch;
+mod playstate;
 mod proxy;
 mod sdk;
 mod state;

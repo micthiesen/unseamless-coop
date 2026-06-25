@@ -15,6 +15,7 @@ use fromsoftware_shared::SharedTaskImpExt;
 use crate::feature::{Feature, Tick};
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
+use crate::features::playstate::PlayStateProbe;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
 
@@ -65,8 +66,8 @@ pub fn install() {
             });
         }
     }
-    // The version is shown in the overlay window's title (and later the watermark), so no persistent
-    // banner — keep the notification surface for transient, actionable messages only.
+    // The version is shown in the overlay window's title and the off-playfield watermark, so no
+    // persistent banner — keep the notification surface for transient, actionable messages only.
     if base == std::path::Path::new(".") {
         log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
@@ -86,6 +87,12 @@ pub fn install() {
             unseamless_core::config::MIN_PASSWORD_LEN
         ));
     }
+
+    // Skip the boot logo videos, if enabled. A one-shot code patch (not a Feature/task), applied
+    // early — before we block on the task system — so it lands before the logo gate fires. After the
+    // password guard above so a fatal config never patches game memory then immediately aborts.
+    // Fail-safe: a missed/ambiguous/drifted AOB just leaves the logos playing (logged), never aborts.
+    apply_boot_patches(&config);
 
     // Dev side-channel bridge: a loopback listener running a live `Session` so the harness can drive
     // the mod over a socket (the /test-loop skill's layer 3). Compiled in only with the `bridge`
@@ -120,6 +127,8 @@ pub fn install() {
         Box::new(SessionObserver::new()),
         // Drains overlay-requested session actions (a producer; after the ager above).
         Box::new(SessionActionsTick::new()),
+        // Publishes the in-gameplay flag so the overlay shows its watermark only off the playfield.
+        Box::new(PlayStateProbe::new()),
     ];
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];
@@ -182,6 +191,23 @@ pub fn install() {
                 });
             }
         }
+    }
+}
+
+/// Apply one-shot boot-flow code patches gated by config. Currently just skip-intros: NOP the
+/// conditional branch that gates the logo/splash video sequence so the game falls straight through
+/// to the title screen. See `coop/patch.rs` and `docs/{SKIP-INTROS,CODE-PATCHING}.md`.
+fn apply_boot_patches(config: &unseamless_core::config::Config) {
+    if config.gameplay.skip_splash_screens {
+        // Scan a distinctive sequence in the boot/title flow; the logo gate is a `74` (JZ rel8) a
+        // fixed 60 bytes before it. NOP the 2-byte jump so the game falls through to the title.
+        // Pattern adapted from the MIT techiew/SkipTheIntro signature and confirmed on the rig against
+        // our pinned game version: it matches the *runtime* image (the on-disk exe is Arxan/Steam-
+        // encrypted), which is what `Program::current()` scans. A miss/ambiguous/drifted match fails
+        // safe — the logos just play, logged. See docs/SKIP-INTROS.md and docs/CODE-PATCHING.md.
+        const BOOT_LOGO_LANDMARK: &[pelite::pattern::Atom] =
+            pelite::pattern!("C6 ? ? ? ? ? 01 ? 03 00 00 00 ? 8B ? E8 ? ? ? ? E9 ? ? ? ? ? 8D");
+        crate::patch::nop_landmark("skip_splash_screens", BOOT_LOGO_LANDMARK, -60, 0x74, 2);
     }
 }
 

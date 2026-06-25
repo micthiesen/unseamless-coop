@@ -795,6 +795,7 @@ dependencies = [
  "hudhook",
  "ilhook",
  "log",
+ "pelite",
  "simplelog",
  "unseamless-core",
  "windows 0.62.2",

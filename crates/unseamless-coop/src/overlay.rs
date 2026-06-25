@@ -77,6 +77,21 @@ const GREY: [f32; 3] = [0.80, 0.80, 0.80];
 const TEAL: [f32; 3] = [0.55, 0.75, 0.85];
 const DIM_GREY: [f32; 3] = [0.55, 0.55, 0.55];
 
+/// Background alpha shared by the passive corner surfaces (notifications, watermark), so the two
+/// can't drift apart.
+const PASSIVE_BG_ALPHA: f32 = 0.35;
+
+/// Window flags shared by the passive corner surfaces: borderless, auto-sized to content,
+/// input-transparent, not persisted, and never stealing focus on appear. A function (not a `const`)
+/// to avoid depending on `WindowFlags`' const bitops across imgui versions.
+fn passive_window_flags() -> WindowFlags {
+    WindowFlags::NO_DECORATION
+        | WindowFlags::ALWAYS_AUTO_RESIZE
+        | WindowFlags::NO_INPUTS
+        | WindowFlags::NO_SAVED_SETTINGS
+        | WindowFlags::NO_FOCUS_ON_APPEARING
+}
+
 /// Makes the atlas [`FontId`] (a raw pointer into the process-lifetime font atlas) shareable. hudhook
 /// requires the render loop be `Send + Sync`; this id is only ever dereferenced on the Present thread
 /// (in `render` via `push_font`) and the atlas lives for the whole process, so sharing it is sound.
@@ -148,6 +163,12 @@ impl Overlay {
             self.config = cfg;
         }
         self.draw_notifications(ui);
+        // Branded corner stamp — only off the playfield (title/main menu, character select, loading),
+        // never a persistent in-play banner. The game-thread probe (`crate::features::playstate`)
+        // publishes the flag; we read it non-blocking here.
+        if !crate::playstate::in_gameplay() {
+            self.draw_watermark(ui);
+        }
         if self.open {
             self.draw_utility_window(ui);
             draw_cursor_marker(ui);
@@ -168,18 +189,36 @@ impl Overlay {
         }) else {
             return;
         };
-        let flags = WindowFlags::NO_DECORATION
-            | WindowFlags::ALWAYS_AUTO_RESIZE
-            | WindowFlags::NO_INPUTS
-            | WindowFlags::NO_SAVED_SETTINGS
-            | WindowFlags::NO_FOCUS_ON_APPEARING;
+        // Top-left, the opposite corner from the watermark (top-right) and Steam's toasts (bottom-right).
         ui.window("##unseamless-notifications")
             .position([24.0, 24.0], Condition::Always)
-            .bg_alpha(0.35)
-            .flags(flags)
+            .bg_alpha(PASSIVE_BG_ALPHA)
+            .flags(passive_window_flags())
             .build(|| {
                 draw_banners(ui, &banners);
                 draw_toasts(ui, &toasts);
+            });
+    }
+
+    /// Draw the branded corner stamp — mod name + version + the backtick hint — anchored to the
+    /// top-right. Stands in for the vanilla "App Ver. / OFFLINE" version block (which we can't edit:
+    /// its text is FMG, uncharted by the SDK at our pin), but sits top-right rather than the vanilla
+    /// bottom-right so it doesn't overlap Steam's own bottom-right notifications. Gated by the caller
+    /// to off-the-playfield only. Borderless and input-transparent like the notifications surface;
+    /// uses our crisp menu font.
+    fn draw_watermark(&self, ui: &Ui) {
+        let disp = ui.io().display_size;
+        // Anchor by the window's own top-right corner (pivot 1,0) at a fixed inset from the viewport's
+        // top-right, so it stays put regardless of the auto-sized text width.
+        ui.window("##unseamless-watermark")
+            .position([disp[0] - 20.0, 20.0], Condition::Always)
+            .position_pivot([1.0, 0.0])
+            .bg_alpha(PASSIVE_BG_ALPHA)
+            .flags(passive_window_flags())
+            .build(|| {
+                let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
+                ui.text_colored(rgba(BLUE, 1.0), concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION")));
+                ui.text_disabled("Press ` to open the menu");
             });
     }
 

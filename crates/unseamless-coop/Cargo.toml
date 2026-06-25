@@ -29,10 +29,16 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_LibraryLoader",       # proxy: load the real dinput8 + our mods
     "Win32_System_SystemInformation",   # proxy: locate the system dinput8.dll
-    "Win32_System_Threading",           # EAC guard: TerminateProcess
+    "Win32_System_Threading",           # EAC guard: TerminateProcess; patch: GetCurrentProcess
     "Win32_UI_WindowsAndMessaging",     # EAC guard: MessageBox
     "Win32_Security_Cryptography",      # CSPRNG for the generated default password
+    "Win32_System_Memory",              # patch: VirtualProtect / PAGE_PROTECTION_FLAGS
+    "Win32_System_Diagnostics_Debug",   # patch: FlushInstructionCache
 ] }
+# AOB scan over the live game image (skip-intros and other code patches). The SDK already pulls
+# pelite in for its RVA work; name it directly so we can write `pelite::pattern!`. Pin to the same
+# 0.10 the SDK resolves to (see Cargo.lock) — a mismatch would split the `Atom`/`Pe` types.
+pelite = "0.10"
 log = { workspace = true }
 simplelog = { version = "0.12", default-features = false }
 
