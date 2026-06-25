@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock, TryLockError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use simplelog::{Config as SlConfig, SharedLogger};
@@ -42,14 +43,24 @@ pub fn try_read<R>(f: impl FnOnce(&VecDeque<Line>) -> R) -> Option<R> {
 }
 
 /// Append a line, evicting the oldest when full. Called from arbitrary threads (any thread that
-/// logs); the lock is held only for the push.
+/// logs); the lock is held only for the push. Prefixes a fixed-width `HH:MM:SS` so order is obvious in
+/// the viewer (the file log keeps its own full RFC3339 timestamp).
 fn push(level: Level, text: String) {
     let Some(m) = BUFFER.get() else { return };
+    let line = format!("{} {}", short_time(), text);
     let mut b = m.lock().unwrap_or_else(|p| p.into_inner());
     if b.len() == CAP {
         b.pop_front();
     }
-    b.push_back(Line { level, text });
+    b.push_back(Line { level, text: line });
+}
+
+/// Wall-clock time-of-day as fixed-width `HH:MM:SS` (UTC, matching the file log's RFC3339), so log
+/// lines stay aligned. Computed without a date library — order is what matters here, not the date.
+fn short_time() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let tod = secs % 86_400;
+    format!("{:02}:{:02}:{:02}", tod / 3600, (tod % 3600) / 60, tod % 60)
 }
 
 /// A `simplelog::SharedLogger` that mirrors records into the in-memory ring buffer at `level`.
