@@ -1,6 +1,6 @@
 ---
 name: test-loop
-description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the planned debug bridge, and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
+description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the live-mod debug bridge (harness bridge-probe), and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
 ---
 
 # Test loops for unseamless-coop
@@ -15,7 +15,7 @@ lowest layer that can answer your question.
 | 1 | Unit tests | Mac | pure core logic | assistant | **DONE** |
 | 2 | Two-peer harness | Mac, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
 | 2b | TCP two-process harness | Mac, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
-| 3 | Debug bridge | one game + harness | side-channel against real game effects | assistant | **TODO** (L2b is the host half) |
+| 3 | Debug bridge | one game + harness | the side-channel `Session` against the live mod | assistant | **DONE** (`rig.sh` + `harness bridge-probe`) |
 | 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **tooling DONE** (`scripts/rig.sh`); first run pending |
 | 5 | Real co-op | friends | actual co-op behavior | you, manual | ongoing; logs handed back |
 
@@ -82,28 +82,32 @@ a debug listener inside the live mod and the same scenarios drive a real game (s
 
 ---
 
-## Layer 3 — Debug bridge (TODO)
+## Layer 3 — Debug bridge (DONE) — the side-channel against the live mod
 
-**Goal:** let the assistant's harness act as a second mod-peer to **one** running game, exercising
-the side-channel against *real game effects* (does a received `ConfigSync` actually re-scale params,
-does a `SessionAction` trigger the real game call) — without a second game and without Steam.
+Lets the harness act as a second mod-peer to **one** running game, exercising the real `Session`
+side-channel (handshake, `ConfigSync`, actions, log-forward) against the live mod — no second game,
+no Steam. It proves the side-channel runs in-process before we bind it to the game's P2P.
 
-**Design:**
-- In the cdylib, behind a `[debug]` config key (e.g. `debug.bridge_port`, off by default, ideally
-  also gated behind a `bridge` cargo feature so it can't ship in release), open a **localhost-only**
-  (`127.0.0.1`) TCP listener.
-- Implement `Transport` for a `BridgeTransport` that reads length-prefixed `ModMessage` frames off
-  the socket as inbound (from a synthetic peer id) and writes the mod's outbound side-channel
-  frames to it. Drive a `Session<BridgeTransport>` from the same task loop as the real session.
-- The harness already has the client end: `TcpTransport` (layer 2b) is exactly the "TCP client"
-  here. The remaining work is the **mod-side listener** in the cdylib; then the existing `Peer`
-  scenarios run against the live mod instead of a `Loopback`. Over SSH port-forward, the assistant
-  can drive this against the Deck.
-- **Safety:** bind loopback only, require the debug flag, prefer a build feature so release builds
-  don't even contain the listener. It is a remote-input surface — the `ModMessage` decoder is
-  already hardened, but keep it debug-only.
-- **Limits:** tests our side-channel + the mod's effect on game state; does NOT test the game's P2P
-  player sync (still needs two real games).
+**How to drive it:**
+```bash
+scripts/rig.sh apply && scripts/rig.sh launch     # diag build enables the `bridge` feature
+# once the log shows `bridge listening on 127.0.0.1:47700`:
+scripts/harness.sh bridge-probe 47700             # connects as a client, reports the round-trip
+```
+A successful probe prints `OK: side-channel round-tripped against the live mod` and shows the
+host-synced config (e.g. `allow_invaders` flipping to the mod's value), proving a real `ConfigSync`
+crossed the socket. (Wine maps the in-game listener to host loopback, so the native harness reaches it.)
+
+**Shape:** `coop/bridge.rs` (behind the `bridge` cargo feature + `[debug] bridge_port`) binds a
+loopback listener and runs a `Session<BridgeTransport>` host on a background thread. `BridgeTransport`
+is the socket I/O; the wire framing is the shared host-tested `unseamless_core::framing` codec (the
+same one `TcpTransport` uses). The bridge touches **no game memory** (pure core types over a config
+clone), so the background thread is safe. The `bridge` feature is `compile_error!`-guarded out of
+release builds, binds `127.0.0.1` only, and is off unless `bridge_port > 0`.
+
+**Limits:** tests our side-channel protocol live; it does **not** yet exercise game *effects* (a
+synced `ConfigSync` re-scaling params, an action firing a game call) — those land as the apply-layer
+features do — nor the game's own P2P player sync (still needs two real games, layer 5).
 
 ## Layer 4 — Local PC rig (`scripts/rig.sh`) — the game-binding loop
 
@@ -167,11 +171,13 @@ the session without context. This is the acceptance loop and the only one that p
 - Changed pure logic (config/scaling/protocol/peer)? → **layer 1**, then **layer 2** if it touches
   the side-channel flow.
 - Changed the side-channel coordination (handshake/sync/actions/forwarding)? → **layer 2**.
+- Need to drive the side-channel against the **live mod** (no second game)? → **layer 3**
+  (`rig.sh` + `harness bridge-probe`).
 - Need to know it actually affects the game (params, session state, loading)? → **layer 4**
-  (`rig.sh`, this machine) (or **3** once built).
+  (`rig.sh`, this machine).
 - Co-op behavior with real partners? → **layer 5**.
 
-Next build-out: layer 3 (debug bridge) — whose host half (`TcpTransport`, layer 2b) is already
-built — if the pure harness leaves you wanting to test the side-channel against real game effects
-(a `[debug] bridge_port` listener in the cdylib) before committing to full co-op runs. Layer 4's
-tooling (`rig.sh`) is in place; what remains there is *running* it (the RIG-RUNBOOK observation run).
+What's left: the side-channel now runs live (layer 3 done), but it doesn't yet drive game *effects*
+— wiring a received `ConfigSync`/`SessionAction` to real game calls is the apply-layer, and binding
+the side-channel to the game's own P2P (the `GameTransport` over `broadcast_packet`/`receive_packet`)
+is the step that replaces the bridge for real multiplayer. Both are the next build-outs.

@@ -7,27 +7,20 @@
 //! planned layer-3 "debug bridge" (see the `/test-loop` skill): swap this `TcpTransport` for one
 //! that speaks to a debug listener inside the live mod and the same scenarios drive a real game.
 //!
-//! Wire framing (its own, distinct from the `ModMessage` frame it carries): `[u32 len][u64
-//! sender][payload]`, big-endian. `len` covers only `payload` (one encoded `ModMessage`); `sender`
-//! conveys the peer id that the in-memory bus otherwise tracks out of band.
+//! The wire framing is the shared [`unseamless_core::framing`] codec (`[u32 len][u64 sender]
+//! [payload]`); this file is just the socket I/O around it.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
+use unseamless_core::framing::{FrameDecoder, encode_frame};
 use unseamless_core::transport::{PeerId, Transport};
-
-const HEADER_LEN: usize = 4 + 8; // u32 len + u64 sender
-/// Reject a frame claiming more than this payload — a desynced or hostile peer otherwise grows
-/// `inbuf` without bound while we wait for a frame that never completes. Side-channel `ModMessage`s
-/// are tiny (a forwarded log caps at ~2 KiB), so 64 KiB is generous. This matters most when this
-/// framing graduates to the layer-3 debug bridge, whose peer is the live mod.
-const MAX_FRAME: usize = 64 * 1024;
 
 pub struct TcpTransport {
     local_id: PeerId,
     stream: TcpStream,
-    /// Bytes received but not yet parsed into whole frames.
-    inbuf: Vec<u8>,
+    /// Reassembles received bytes into whole frames.
+    decoder: FrameDecoder,
 }
 
 impl TcpTransport {
@@ -40,7 +33,7 @@ impl TcpTransport {
                 Ok(stream) => {
                     stream.set_nodelay(true).ok();
                     stream.set_nonblocking(true)?;
-                    return Ok(Self { local_id, stream, inbuf: Vec::new() });
+                    return Ok(Self { local_id, stream, decoder: FrameDecoder::new() });
                 }
                 Err(e) => {
                     last_err = Some(e);
@@ -56,7 +49,7 @@ impl TcpTransport {
         let (stream, _peer) = listener.accept()?;
         stream.set_nodelay(true).ok();
         stream.set_nonblocking(true)?;
-        Ok(Self { local_id, stream, inbuf: Vec::new() })
+        Ok(Self { local_id, stream, decoder: FrameDecoder::new() })
     }
 
     /// Write the whole buffer, handling partial writes / `WouldBlock` so framing can't corrupt.
@@ -79,49 +72,30 @@ impl TcpTransport {
 
 impl Transport for TcpTransport {
     fn send(&mut self, bytes: &[u8]) {
-        let mut frame = Vec::with_capacity(HEADER_LEN + bytes.len());
-        frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&self.local_id.to_be_bytes());
-        frame.extend_from_slice(bytes);
-        self.write_all_blocking(&frame);
+        self.write_all_blocking(&encode_frame(self.local_id, bytes));
     }
 
     fn poll(&mut self) -> Vec<(PeerId, Vec<u8>)> {
-        // Drain whatever the socket has buffered.
+        // Drain whatever the socket has buffered into the decoder.
         let mut tmp = [0u8; 8192];
         loop {
             match self.stream.read(&mut tmp) {
                 Ok(0) => break, // closed
-                Ok(n) => self.inbuf.extend_from_slice(&tmp[..n]),
+                Ok(n) => self.decoder.push(&tmp[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(_) => break,
             }
         }
-
-        // Parse as many complete `[len][sender][payload]` frames as are present.
-        let mut out = Vec::new();
-        let mut pos = 0;
-        while self.inbuf.len() - pos >= HEADER_LEN {
-            let len = u32::from_be_bytes(self.inbuf[pos..pos + 4].try_into().unwrap()) as usize;
-            if len > MAX_FRAME {
-                // Framing desync or a hostile peer — don't buffer unboundedly. Drop everything
-                // buffered and resync from the next read; over a trusted localhost link this
-                // shouldn't happen, so make it loud.
-                eprintln!("[tcp] frame len {len} exceeds MAX_FRAME {MAX_FRAME}; dropping buffer");
-                self.inbuf.clear();
-                return out;
+        match self.decoder.drain() {
+            Ok(frames) => frames,
+            // Over a trusted localhost link a desync shouldn't happen; the decoder already cleared
+            // its buffer to resync, so just surface it loudly and yield nothing this poll.
+            Err(e) => {
+                eprintln!("[tcp] {e:?}; dropped framing buffer");
+                Vec::new()
             }
-            if self.inbuf.len() - pos < HEADER_LEN + len {
-                break; // header says more payload than we've received yet
-            }
-            let sender = u64::from_be_bytes(self.inbuf[pos + 4..pos + 12].try_into().unwrap());
-            let payload = self.inbuf[pos + HEADER_LEN..pos + HEADER_LEN + len].to_vec();
-            out.push((sender, payload));
-            pos += HEADER_LEN + len;
         }
-        self.inbuf.drain(..pos);
-        out
     }
 
     fn local_id(&self) -> PeerId {

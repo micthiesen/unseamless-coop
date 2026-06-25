@@ -33,19 +33,22 @@ use crate::tcp::TcpTransport;
 
 const HOST: PeerId = 1;
 const CLIENT: PeerId = 2;
-const V: Version = Version::new(0, 1, 0);
+/// The mod wire version both peers run — the canonical one, so the harness and the live mod's bridge
+/// can't drift apart and spuriously fail the handshake's version-compat check.
+const V: Version = unseamless_core::protocol::PROTOCOL_VERSION;
 
 fn main() {
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".into());
 
-    // TCP modes take a port and run as one end of a two-process exchange.
-    if which == "tcp-listen" || which == "tcp-connect" {
+    // TCP modes take a port and run as one end of a two-process exchange. `bridge-probe` is the
+    // same client, but pointed at a live mod's debug bridge (layer 3) rather than another harness.
+    if which == "tcp-listen" || which == "tcp-connect" || which == "bridge-probe" {
         let port = std::env::args().nth(2).unwrap_or_else(|| "47620".into());
         let addr = format!("127.0.0.1:{port}");
-        if which == "tcp-listen" {
-            run_tcp_host(&addr);
-        } else {
-            run_tcp_client(&addr);
+        match which.as_str() {
+            "tcp-listen" => run_tcp_host(&addr),
+            "tcp-connect" => run_tcp_client(&addr),
+            _ => run_bridge_probe(&addr),
         }
         return;
     }
@@ -70,7 +73,7 @@ fn main() {
         Some((_, run)) => run(),
         None => {
             eprintln!(
-                "unknown scenario '{which}'. options: {}, all, tcp-listen, tcp-connect",
+                "unknown scenario '{which}'. options: {}, all, tcp-listen, tcp-connect, bridge-probe",
                 scenarios.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
             );
             std::process::exit(2);
@@ -286,6 +289,40 @@ fn run_tcp_host(addr: &str) {
     drive_tcp(&mut host, 40);
     println!("[host] final known peers: {:?}", host.peer().known_peers());
     println!("[host] done");
+}
+
+/// Connect to a **live mod's** debug bridge as a client and report what the host (the running game)
+/// syncs to us. Unlike `tcp-connect` it asserts nothing about specific values — it just proves the
+/// side-channel round-trips against the real mod process: the handshake completes (we hear the mod's
+/// `Hello`) and the host's `ConfigSync` lands. Gate is "did the mod talk to us at all".
+fn run_bridge_probe(addr: &str) {
+    let transport = match TcpTransport::connect(addr, CLIENT) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[probe] could not connect to bridge at {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("[probe] connected to mod bridge at {addr}");
+    let mut client = Session::new(Peer::new(CLIENT, HOST, V, Config::default()), transport);
+    let before = client.peer().config().scaling.boss_health;
+    client.connect();
+    drive_tcp(&mut client, 60);
+
+    let cfg = client.peer().config().clone();
+    println!("[probe] handshake known_peers = {:?}", client.peer().known_peers());
+    println!(
+        "[probe] host-synced config: max_players={} boss_health={} (was {before}) allow_invaders={}",
+        cfg.session.max_players, cfg.scaling.boss_health, cfg.gameplay.allow_invaders
+    );
+    for b in client.peer().notifications().banners() {
+        println!("[probe] banner: {}", b.message);
+    }
+    if client.peer().known_peers().is_empty() {
+        eprintln!("[probe] FAILED: no handshake from the mod (bridge unreachable / not running?)");
+        std::process::exit(1);
+    }
+    println!("[probe] OK: side-channel round-tripped against the live mod");
 }
 
 fn run_tcp_client(addr: &str) {

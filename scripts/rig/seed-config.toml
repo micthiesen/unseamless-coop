@@ -48,3 +48,6 @@ order = []
 enabled = true
 level = "debug"
 forward_to_host = false
+# Dev side-channel bridge on loopback (diag/rig builds only). Drive it from the host with:
+#   scripts/harness.sh bridge-probe 47700
+bridge_port = 47700

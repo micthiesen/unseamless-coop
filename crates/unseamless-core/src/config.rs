@@ -74,11 +74,16 @@ pub struct Debug {
     pub enabled: bool,
     pub level: LogLevel,
     pub forward_to_host: bool,
+    /// Loopback TCP port for the dev side-channel **bridge** (0 = off). Lets the harness drive the
+    /// live mod's `Session` over a socket — no second game/Steam (the `/test-loop` skill's layer 3).
+    /// Only honored in builds compiled with the cdylib's `bridge` cargo feature (rig/diag builds),
+    /// never in release. A remote-input surface, so it binds `127.0.0.1` only and stays off by default.
+    pub bridge_port: u16,
 }
 
 impl Default for Debug {
     fn default() -> Self {
-        Self { enabled: false, level: LogLevel::Info, forward_to_host: false }
+        Self { enabled: false, level: LogLevel::Info, forward_to_host: false, bridge_port: 0 }
     }
 }
 

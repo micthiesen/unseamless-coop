@@ -9,6 +9,12 @@ license.workspace = true
 name = "unseamless_coop"
 crate-type = ["cdylib"]
 
+[features]
+# Dev-only side-channel bridge: a loopback TCP listener running a live `Session` so the harness can
+# drive the mod over a socket (the /test-loop skill's layer 3). Enabled for rig/diag builds, NEVER
+# release — a network listener has no place in a shipped DLL. `scripts/rig.sh` turns it on for diag.
+bridge = []
+
 [dependencies]
 unseamless-core = { path = "../unseamless-core" }
 

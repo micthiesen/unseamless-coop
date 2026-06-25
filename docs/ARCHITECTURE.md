@@ -141,6 +141,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested (renderer rig-gated) |
 | `unseamless-core/protocol.rs` (side-channel, wire v2: generation/seq identity) | 2 | done, tested (wiring is rig-gated) |
 | `unseamless-core/transport.rs` (`Transport` seam + `Loopback` + `FaultModel`) | 2 | done, tested |
+| `unseamless-core/framing.rs` (length-prefixed wire codec, shared by `TcpTransport` + the bridge) | 2 | done, tested |
 | `unseamless-core/peer.rs` (`Peer`/`Session`: handshake/config-sync/actions/log-forward/liveness, self-healing) | 2 | done, tested |
 | `unseamless-core/loader.rs` (mod-load ordering policy) | 1 | done, tested |
 | `harness` bin (in-memory + lossy + two-process TCP loops, no game) | — | done — see the `/test-loop` skill |
@@ -153,6 +154,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/config.rs` (disk load) | 1 | done |
 | `coop/features/observer.rs` | 2 | done (read-only); logs `session_player_limit_override` |
 | `coop/features/session_limit.rs` (write `session_player_limit_override`) | 2 | done; write rig-confirmed solo, >4-player effect needs a party |
+| `coop/bridge.rs` (dev debug bridge: live `Session` over loopback) | — | done; rig-confirmed (`bridge` feature, off in release) |
 | `coop/features/menu_overlay.rs` (DX12 hook + egui) | 2 | planned — renders `menu.rs`; rig-gated |
 | `coop/features/scaling.rs` (apply) | 1/2 | gated: application mechanism needs rig confirm |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |

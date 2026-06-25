@@ -34,6 +34,12 @@ pub const VERSION: u8 = 2;
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
 
+/// The mod's semantic version exchanged in the `Hello` handshake. The single source of truth for
+/// every peer the mod stands up (the cdylib bridge and the harness both reference this), so the two
+/// can't drift and spuriously report a "version mismatch". Distinct from [`VERSION`] (the on-wire
+/// frame format): this is the human/compatibility version, that is the byte layout.
+pub const PROTOCOL_VERSION: crate::util::Version = crate::util::Version::new(0, 1, 0);
+
 /// A message exchanged between modded clients over the side-channel.
 ///
 /// The side-channel rides the game's P2P broadcast, whose delivery guarantees we don't yet know

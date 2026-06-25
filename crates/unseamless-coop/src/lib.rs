@@ -15,6 +15,13 @@ use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::BOOL;
 
 mod app;
+#[cfg(feature = "bridge")]
+mod bridge;
+// The bridge is a loopback TCP listener; it must never ship. The rig builds it under the `diag`
+// profile (debug-assertions ON); a release build has debug-assertions OFF, so enabling the feature
+// there fails the build loudly instead of silently embedding a listener in the shipped DLL.
+#[cfg(all(feature = "bridge", not(debug_assertions)))]
+compile_error!("the `bridge` feature must not be enabled in a release build (use the `diag` profile)");
 mod config;
 mod feature;
 mod features;

@@ -124,7 +124,8 @@ build() {
   if [[ "$profile" == release ]]; then
     ( cd "$ROOT" && cargo build --release )
   else
-    ( cd "$ROOT" && cargo build --profile "$profile" )
+    # diag is the rig build: include the dev side-channel bridge (release never gets it).
+    ( cd "$ROOT" && cargo build --profile "$profile" --features unseamless-coop/bridge )
   fi
 }
 

@@ -66,6 +66,14 @@ pub fn install() {
         ));
     }
 
+    // Dev side-channel bridge: a loopback listener running a live `Session` so the harness can drive
+    // the mod over a socket (the /test-loop skill's layer 3). Compiled in only with the `bridge`
+    // feature (rig/diag builds) and inert unless a port is configured. Runs on its own thread.
+    #[cfg(feature = "bridge")]
+    if config.debug.bridge_port > 0 {
+        crate::bridge::start(config.clone(), config.debug.bridge_port);
+    }
+
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(&config, &base);
