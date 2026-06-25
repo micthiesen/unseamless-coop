@@ -384,12 +384,11 @@ fn draw_log_tab(ui: &Ui) {
     ui.child_window("##log").size([avail[0], avail[1].max(60.0)]).build(|| {
         // Wrap long lines at the child's right edge instead of overflowing horizontally.
         let _wrap = ui.push_text_wrap_pos();
-        for line in &lines {
+        // Newest first: the ring buffer is oldest→newest, so render it reversed. The view sits at the
+        // top by default, so the latest line is always in sight without scrolling — and it's live, since
+        // the buffer is re-read every frame.
+        for line in lines.iter().rev() {
             ui.text_colored(rgba(level_color(line.level), 1.0), &line.text);
-        }
-        // Auto-scroll to the bottom only when already at the bottom, so scrolling up to read stays put.
-        if ui.scroll_y() >= ui.scroll_max_y() - 1.0 {
-            ui.set_scroll_here_y_with_ratio(1.0);
         }
     });
 }
