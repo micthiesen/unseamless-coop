@@ -41,6 +41,13 @@ RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamles
 # so you don't see the centered/loading window before it snaps to the corner. Set 0 to disable (e.g.
 # if a minimized window ever throttles the load). The reveal always runs, so this can't strand it.
 RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
+# Auto-dismiss the startup popups (the offline-mode / connection-error dialogs we can't suppress in
+# code — they're Arxan-hardened, see docs/OFFLINE-TITLE-SCREEN.md) by injecting key presses via
+# ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
+# with `cycle --no-dismiss`, or trigger it yourself with `rig.sh dismiss`.
+RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
+# How many confirm presses `dismiss` sends (one per popup + 'press any button' + a little slack).
+RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-6}"
 
 # Files in the game folder our apply overwrites — i.e. the surface that must be snapshotted to
 # restore the original stack. SeamlessCoop/ is deliberately NOT here: apply never touches it (ERSC
@@ -347,6 +354,44 @@ EOF
   fi
 }
 
+# ---- startup-popup auto-dismiss (ydotool) -------------------------------------------------------
+# The offline-mode + connection-error popups can't be killed in code (Arxan-hardened path, parked —
+# docs/OFFLINE-TITLE-SCREEN.md), so for unattended solo runs we just click through them: inject the
+# menu-confirm key into the focused game window. ydotool injects at the uinput level (a virtual
+# input device), so the gamescope window must be focused — focus_game_window handles that. Linux
+# input event codes: Enter = 28, E = 18 (ER's keyboard menu-accept), so we send both to cover
+# whichever a given dialog wants.
+ydo() { YDOTOOL_SOCKET="$RIG_YDOTOOL_SOCKET" ydotool "$@"; }
+
+# Raise + focus the gamescope window so injected keys land in the game, not the terminal. Best-effort
+# (no-op off KDE), same KWin-over-D-Bus mechanism as reposition_window.
+focus_game_window() {
+  kwin_available || return 0
+  local js plugin="er-focus-$$-$SECONDS"
+  js="$(mktemp /tmp/er-win-focus.XXXXXX.js)"
+  cat > "$js" <<'EOF'
+const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
+for (const w of ws) if (w.resourceClass == "gamescope") { w.minimized = false; workspace.activeWindow = w; }
+EOF
+  kwin_run "$js" "$plugin"; sleep 0.4; kwin_unload "$plugin"; rm -f "$js"
+}
+
+cmd_dismiss() {
+  local presses="${1:-$RIG_DISMISS_PRESSES}"
+  command -v ydotool >/dev/null 2>&1 || die "ydotool not installed (pacman -S ydotool; enable ydotoold)"
+  [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
+  pgrep -f '[e]ldenring.exe' >/dev/null || warn "eldenring.exe doesn't look like it's running yet"
+  focus_game_window
+  say "Dismissing startup popups: $presses confirm presses (Enter) into the game window…"
+  local i
+  for ((i = 0; i < presses; i++)); do
+    ydo key 28:1 28:0 || { warn "ydotool failed — is ydotoold running and YDOTOOL_SOCKET correct?"; return 1; }
+    sleep 1.2
+  done
+  ydo key 18:1 18:0 || true   # one E too, in case a dialog wants the menu-accept key over Enter
+  ok "sent. If a popup is still up, run: scripts/rig.sh dismiss"
+}
+
 cmd_log() {
   local follow=0; [[ "${1:-}" == "-f" ]] && follow=1
   local log; log="$(latest_log || true)"
@@ -403,9 +448,23 @@ cmd_status() {
 # save (FrameBegin ticks at the title screen). Leaves the game running so you can drive an
 # observation run; 'rig.sh kill' when done.
 cmd_cycle() {
-  cmd_apply "$@"
-  cmd_launch --wait \
-    && say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
+  # Pull our own flags out of the arg list before forwarding the rest to apply (which would `die` on
+  # an unknown option). `--no-dismiss` leaves the startup popups for you to clear manually.
+  local dismiss=1 args=()
+  for a in "$@"; do
+    case "$a" in
+      --no-dismiss) dismiss=0 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  cmd_apply ${args[@]+"${args[@]}"}
+  if cmd_launch --wait; then
+    if [[ $dismiss -eq 1 ]]; then
+      sleep 2          # give the offline/connection popups a moment to appear after the title
+      cmd_dismiss || warn "auto-dismiss failed; clear the popups manually or: scripts/rig.sh dismiss"
+    fi
+    say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
+  fi
 }
 
 # ---- dispatch ------------------------------------------------------------------------------------
@@ -432,10 +491,14 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   reposition             Move the running game window to the top-left (and reveal it if hidden). Only
                          moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
                          blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
+  dismiss [N]            Click through the startup popups (offline-mode / connection-error) by
+                         injecting N confirm presses (default 6) into the focused game window via
+                         ydotool. Run if a popup is still up after launch.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
+                         Auto-dismisses the startup popups; pass --no-dismiss to skip that.
 
-Env overrides: GAME_DIR, BACKUP_DIR, APPID, WINDOW_MARGIN,
-               RIG_WINDOW_WIDTH, RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED.
+Env overrides: GAME_DIR, BACKUP_DIR, APPID, WINDOW_MARGIN, RIG_WINDOW_WIDTH, RIG_WINDOW_HEIGHT,
+               RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES.
 EOF
 }
 
@@ -449,6 +512,7 @@ case "$cmd" in
   log)     cmd_log "$@" ;;
   kill)    cmd_kill "$@" ;;
   reposition) reposition_window ;;
+  dismiss) cmd_dismiss "$@" ;;
   cycle)   cmd_cycle "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd' (try: rig.sh help)" ;;

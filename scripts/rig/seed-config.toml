@@ -33,7 +33,11 @@ password = "coop-test"
 max_players = 6
 
 [save]
-file_extension = "co2"
+# Rig testing uses a DISTINCT extension on purpose: this machine's real ERSC co-op character lives in
+# ER0000.co2 (ERSC's default, which is also our shipped default), and we don't want an in-development
+# build reading/writing that 28MB save. ER0000.uco isolates every rig run from it. The shipped default
+# stays "co2"; only this rig seed diverges.
+file_extension = "uco"
 
 [language]
 override = ""
