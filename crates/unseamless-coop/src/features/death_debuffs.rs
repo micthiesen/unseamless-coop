@@ -126,10 +126,12 @@ impl DeathDebuffsFeature {
     /// [`DebuffTier::rates`](unseamless_core::death_debuffs::DebuffTier::rates), scaled by the current
     /// intensity, so deaths past the tier cap keep biting.
     ///
-    /// RIG-TODO: write `rates` onto each tier's row via `SoloParamRepository` before applying it (the
-    /// rows + their ids are the rig blank). Until then this logs the intended values so a rig run can
-    /// see exactly what each tier would write.
-    fn reconcile(&mut self) {
+    /// RIG-TODO (do these together — they're coupled): write `rates` onto each tier's row via
+    /// `SoloParamRepository` *and* set `TIER_ROW_IDS`. `rows_defined()` flips the feature "live" on
+    /// `TIER_ROW_IDS` alone, so wiring the ids without also writing `rates` onto the rows would apply
+    /// flat vanilla-default SpEffects with no potency/intensity. Until both land, this logs the
+    /// intended values so a rig run can see exactly what each tier would write.
+    fn reconcile(&self) {
         let intensity = self.stack.intensity();
         for tier in self.stack.active_tiers() {
             let rates = tier.rates(intensity);

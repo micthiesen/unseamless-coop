@@ -73,36 +73,45 @@ impl DebuffTier {
     /// the tier cap). Each tier touches only its own fields; the rest stay neutral
     /// ([`SpEffectRates::NEUTRAL`]). The cdylib writes these onto the tier's SpEffectParam row.
     ///
-    /// Base magnitudes are reasonable starting points to **confirm/tune on the rig** (the exact feel,
-    /// and the `stamina_recover_change_speed` units, are gameplay choices); the *shape* — which fields,
-    /// scaled how — is what's pinned and host-tested here. Penalty = `BASE * intensity`, with
-    /// multiplicative rates floored so a high configured intensity can't invert a stat.
+    /// Base magnitudes are reasonable starting points to **tune on the rig (edit-and-redeploy, not a
+    /// runtime knob)** — the exact feel, and the `stamina_recover_change_speed` units, are gameplay
+    /// choices. The *shape* — which fields, scaled how — is what's pinned and host-tested here.
+    /// Penalty = `BASE * intensity`; both the multiplicative rates and the additive delta are floored
+    /// so any input intensity (incl. non-finite) yields a bounded, non-inverting value.
     pub fn rates(self, intensity: f32) -> SpEffectRates {
-        // Per-tier base penalties at intensity 1.0 (rig-tunable). Multiplicative ones are expressed as
+        // Per-tier base penalties at intensity 1.0 (edit-and-redeploy to tune). Multiplicative ones are
         // the fraction subtracted from 1.0; the stamina one is the game's additive recovery delta.
-        const HP_DROP: f32 = 0.10; // Hopelessness: -10% max HP/FP/stamina
+        const MAX_STAT_DROP: f32 = 0.10; // Hopelessness: -10% max HP/FP/stamina
         const STAMINA_RECOVER_DELTA: f32 = -30.0; // Emaciation: slower stamina regen (units: rig-confirm)
         const GAIN_DROP: f32 = 0.10; // Decay: -10% rune gain + item discovery
         const DEFENCE_DROP: f32 = 0.10; // Vulnerability: -10% defence (take more damage)
         const ATTACK_DROP: f32 = 0.10; // Despair: -10% outgoing damage
+        // Floors keep every field bounded for any intensity (incl. inf): a multiplicative rate can't
+        // drop to 0/negative (invert a stat), and the additive recovery delta can't run away.
+        const RATE_FLOOR: f32 = 0.1;
+        const STAMINA_DELTA_FLOOR: f32 = -300.0;
 
-        let i = intensity.max(0.0);
-        // A multiplicative rate of `1.0 - base*i`, floored so it can't reach 0/negative at high intensity.
-        let down = |base: f32| (1.0 - base * i).max(0.1);
+        let i = intensity.max(0.0); // also kills NaN (f32::max returns the non-NaN operand)
+        let down = |base: f32| (1.0 - base * i).max(RATE_FLOOR);
 
         let mut r = SpEffectRates::NEUTRAL;
         match self {
-            Self::Emaciation => r.stamina_recover_change_speed = STAMINA_RECOVER_DELTA * i,
+            // additive delta (game field is i32 — the binding rounds); floored so a huge/inf intensity
+            // can't produce a degenerate value.
+            Self::Emaciation => r.stamina_recover_change_speed = (STAMINA_RECOVER_DELTA * i).max(STAMINA_DELTA_FLOOR),
             Self::Hopelessness => {
-                r.max_hp_rate = down(HP_DROP);
-                r.max_fp_rate = down(HP_DROP);
-                r.max_stamina_rate = down(HP_DROP);
+                r.max_hp_rate = down(MAX_STAT_DROP);
+                r.max_fp_rate = down(MAX_STAT_DROP); // binding target: SDK `max_mp_rate` (FP == MP in FromSoft naming)
+                r.max_stamina_rate = down(MAX_STAT_DROP);
             }
             Self::Decay => {
                 r.have_soul_rate = down(GAIN_DROP);
+                // NB: item_drop_rate is inert unless the row also sets `state_info = 66` (DEATH-DEBUFFS.md §B).
                 r.item_drop_rate = down(GAIN_DROP);
             }
             Self::Vulnerability => r.defence_rate = down(DEFENCE_DROP),
+            // RIG-CONFIRM: which family multiplies *player outgoing* damage — `*_attack_rate` (this
+            // model, per DEATH-DEBUFFS.md §B) vs `*_attack_power_rate` (SCALING.md's enemy-damage knob).
             Self::Despair => r.attack_rate = down(ATTACK_DROP),
         }
         r
@@ -372,37 +381,76 @@ mod tests {
         assert!(DeathDebuffTuning::default().clamp().is_empty());
     }
 
-    #[test]
-    fn each_tier_touches_only_its_own_fields_at_base_intensity() {
+    /// Names of the fields that differ from [`SpEffectRates::NEUTRAL`] — so a test can assert a tier
+    /// changes *exactly* its own fields (catches a tier wrongly moving a sibling, or dropping one).
+    fn changed_fields(r: &SpEffectRates) -> Vec<&'static str> {
         let n = SpEffectRates::NEUTRAL;
-        // Hopelessness moves the three max-stat rates and nothing else.
-        let h = DebuffTier::Hopelessness.rates(1.0);
-        assert_eq!(h.max_hp_rate, 0.9);
-        assert_eq!(h.max_fp_rate, 0.9);
-        assert_eq!(h.max_stamina_rate, 0.9);
-        assert_eq!(h.attack_rate, n.attack_rate, "must not touch attack");
-        assert_eq!(h.have_soul_rate, n.have_soul_rate, "must not touch rune gain");
+        let mut v = Vec::new();
+        let mut push = |cond: bool, name| {
+            if cond {
+                v.push(name)
+            }
+        };
+        push(r.max_hp_rate != n.max_hp_rate, "max_hp_rate");
+        push(r.max_fp_rate != n.max_fp_rate, "max_fp_rate");
+        push(r.max_stamina_rate != n.max_stamina_rate, "max_stamina_rate");
+        push(r.stamina_recover_change_speed != n.stamina_recover_change_speed, "stamina_recover_change_speed");
+        push(r.have_soul_rate != n.have_soul_rate, "have_soul_rate");
+        push(r.item_drop_rate != n.item_drop_rate, "item_drop_rate");
+        push(r.defence_rate != n.defence_rate, "defence_rate");
+        push(r.attack_rate != n.attack_rate, "attack_rate");
+        v
+    }
 
-        // Each other tier moves its field(s) and leaves max_hp_rate neutral.
-        assert_eq!(DebuffTier::Despair.rates(1.0).attack_rate, 0.9);
-        assert_eq!(DebuffTier::Vulnerability.rates(1.0).defence_rate, 0.9);
-        assert_eq!(DebuffTier::Decay.rates(1.0).item_drop_rate, 0.9);
-        assert!(DebuffTier::Emaciation.rates(1.0).stamina_recover_change_speed < 0.0);
-        for t in [DebuffTier::Despair, DebuffTier::Vulnerability, DebuffTier::Decay, DebuffTier::Emaciation] {
-            assert_eq!(t.rates(1.0).max_hp_rate, n.max_hp_rate, "{t:?} must not touch max HP");
+    #[test]
+    fn neutral_constant_is_truly_neutral() {
+        // The baseline the whole isolation argument rests on — pin it literally, don't assume it.
+        let n = SpEffectRates::NEUTRAL;
+        for rate in [n.max_hp_rate, n.max_fp_rate, n.max_stamina_rate, n.have_soul_rate, n.item_drop_rate, n.defence_rate, n.attack_rate] {
+            assert_eq!(rate, 1.0, "multiplicative rates neutral at 1.0");
+        }
+        assert_eq!(n.stamina_recover_change_speed, 0.0, "additive delta neutral at 0.0");
+    }
+
+    #[test]
+    fn each_tier_changes_exactly_its_own_fields() {
+        let only = |t: DebuffTier| changed_fields(&t.rates(1.0));
+        assert_eq!(only(DebuffTier::Emaciation), ["stamina_recover_change_speed"]);
+        assert_eq!(only(DebuffTier::Hopelessness), ["max_hp_rate", "max_fp_rate", "max_stamina_rate"]);
+        assert_eq!(only(DebuffTier::Decay), ["have_soul_rate", "item_drop_rate"]); // both, not just one
+        assert_eq!(only(DebuffTier::Vulnerability), ["defence_rate"]);
+        assert_eq!(only(DebuffTier::Despair), ["attack_rate"]);
+    }
+
+    #[test]
+    fn zero_negative_and_nan_intensity_are_neutral() {
+        // The `intensity.max(0.0)` guard (and f32::max's non-NaN-operand rule) collapse all of these
+        // to no-op. Load-bearing and subtle — pin it so a refactor to `if < 0` can't silently regress.
+        for t in DebuffTier::ALL {
+            assert_eq!(t.rates(0.0), SpEffectRates::NEUTRAL, "{t:?} @ 0");
+            assert_eq!(t.rates(-5.0), SpEffectRates::NEUTRAL, "{t:?} @ negative");
+            assert_eq!(t.rates(f32::NAN), SpEffectRates::NEUTRAL, "{t:?} @ NaN");
         }
     }
 
     #[test]
-    fn intensity_deepens_the_penalty_and_floors_multiplicative_rates() {
-        // At 2x intensity the −10% HP penalty doubles to −20%.
+    fn intensity_deepens_then_floors_every_field_including_infinity() {
+        // −10% HP at 1x deepens to −20% at 2x.
+        assert!((DebuffTier::Hopelessness.rates(1.0).max_hp_rate - 0.9).abs() < 1e-6);
         assert!((DebuffTier::Hopelessness.rates(2.0).max_hp_rate - 0.8).abs() < 1e-6);
-        // The additive stamina penalty scales linearly and stays negative.
+        // Additive stamina penalty scales linearly and stays negative (don't over-pin the magnitude).
         let e1 = DebuffTier::Emaciation.rates(1.0).stamina_recover_change_speed;
         let e2 = DebuffTier::Emaciation.rates(2.0).stamina_recover_change_speed;
-        assert!((e2 - 2.0 * e1).abs() < 1e-3);
-        // A wild intensity can't invert a stat — multiplicative rates floor at 0.1.
-        assert_eq!(DebuffTier::Hopelessness.rates(100.0).max_hp_rate, 0.1);
-        assert_eq!(DebuffTier::Despair.rates(100.0).attack_rate, 0.1);
+        assert!(e1 < 0.0 && (e2 - 2.0 * e1).abs() < 1e-3);
+        // No intensity — including +inf — yields a degenerate value: every multiplicative rate floors
+        // at 0.1, the additive delta at its own floor.
+        for i in [100.0, f32::INFINITY] {
+            let r = DebuffTier::Hopelessness.rates(i);
+            assert_eq!([r.max_hp_rate, r.max_fp_rate, r.max_stamina_rate], [0.1, 0.1, 0.1]);
+            assert_eq!(DebuffTier::Despair.rates(i).attack_rate, 0.1);
+            assert_eq!(DebuffTier::Vulnerability.rates(i).defence_rate, 0.1);
+            assert_eq!(DebuffTier::Decay.rates(i).have_soul_rate, 0.1);
+            assert_eq!(DebuffTier::Emaciation.rates(i).stamina_recover_change_speed, -300.0);
+        }
     }
 }
