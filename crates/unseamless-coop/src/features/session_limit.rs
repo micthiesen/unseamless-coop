@@ -57,18 +57,16 @@ impl Feature for SessionLimit {
         });
 
         if wrote == Some(true) {
-            // Toast only a genuine change (a config sync), not the startup baseline or the self-heal
-            // re-asserts — the policy lives in `ApplyLatch`.
-            match self.latch.classify(&desired) {
-                Applied::Reasserted => log::debug!("re-applied session player limit override = {desired}"),
-                // First and Changed both log info; only Changed toasts. Explicit arms (not a wildcard)
-                // so a new Applied variant would fail to compile here rather than silently misclassify.
-                applied @ (Applied::First | Applied::Changed) => {
-                    log::info!("session player limit override set to {desired}");
-                    if applied == Applied::Changed {
-                        crate::notify::with_mut(|n| n.info(format!("Session player cap set to {desired}")));
-                    }
-                }
+            // Shared announce policy (info on First/Changed, toast only on Changed); we add the
+            // self-heal debug line locally since that fires only on an actual write here.
+            let applied = crate::features::announce_held(
+                &mut self.latch,
+                desired,
+                || format!("session player limit override set to {desired}"),
+                || format!("Session player cap set to {desired}"),
+            );
+            if applied == Applied::Reasserted {
+                log::debug!("re-applied session player limit override = {desired}");
             }
         }
     }

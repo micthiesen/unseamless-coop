@@ -20,6 +20,7 @@ use crate::features::playstate::PlayStateProbe;
 use crate::features::seamless::SeamlessRoam;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
+use crate::features::world_time::WorldTimeLock;
 
 /// How long the init thread keeps trying for the task system before giving up.
 const INIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -149,6 +150,8 @@ pub fn install() {
         Box::new(PlayStateProbe::new()),
         // Stacking death penalty (reads HP after PostPhysics). Reads live config; no-op when off.
         Box::new(DeathDebuffsFeature::new()),
+        // Holds the time of day when locked (reads live config; no-op when off).
+        Box::new(WorldTimeLock::new()),
     ];
     // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
     features.extend(crate::diag::probe_features(&config));

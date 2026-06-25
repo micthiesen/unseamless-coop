@@ -47,6 +47,28 @@ pub struct Config {
     pub debug: Debug,
     /// Tuning for the death-debuff stacking (the on/off toggle is `gameplay.death_debuffs`).
     pub death_debuffs: crate::death_debuffs::DeathDebuffTuning,
+    pub world_time: WorldTime,
+}
+
+/// Lock the in-game time of day. Local for now (each player sets their own); host-enforced sync is a
+/// follow-up, since time-of-day desync between co-op players is a known annoyance worth syncing later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldTime {
+    /// Hold the time of day at `hour`:`minute` (a permanent day/night setting) instead of letting it
+    /// progress. Off by default = vanilla. The mod re-asserts the game's time *target* each frame,
+    /// intended to pin the clock there (the exact engine behavior is rig-confirmed in the feature).
+    pub lock: bool,
+    /// Hour to hold, `0..=23` (clamped by [`Config::validate`]).
+    pub hour: u32,
+    /// Minute to hold, `0..=59` (clamped by [`Config::validate`]).
+    pub minute: u32,
+}
+
+impl Default for WorldTime {
+    fn default() -> Self {
+        Self { lock: false, hour: 12, minute: 0 }
+    }
 }
 
 /// External DLL-mod loading. Our shipped `dinput8.dll` is the game's proxy, so this mod is the
@@ -388,6 +410,21 @@ impl Config {
             self.debug.probes.event_flag_scan_count = MAX_FLAG_SCAN;
         }
 
+        if self.world_time.hour > 23 {
+            warnings.push(ConfigWarning {
+                field: "world_time.hour".into(),
+                message: format!("{} out of range 0..=23; clamped to 23", self.world_time.hour),
+            });
+            self.world_time.hour = 23;
+        }
+        if self.world_time.minute > 59 {
+            warnings.push(ConfigWarning {
+                field: "world_time.minute".into(),
+                message: format!("{} out of range 0..=59; clamped to 59", self.world_time.minute),
+            });
+            self.world_time.minute = 59;
+        }
+
         warnings
     }
 }
@@ -456,6 +493,29 @@ mod tests {
         assert_eq!(round.language.override_locale, "french");
         // TOML key is `override`, not the Rust field name.
         assert!(cfg.to_toml_string().contains("override = \"french\""));
+    }
+
+    #[test]
+    fn world_time_out_of_range_is_clamped_with_warnings() {
+        let (cfg, warnings) =
+            Config::from_toml_str("[world_time]\nlock = true\nhour = 30\nminute = 90\n").unwrap();
+        assert_eq!(cfg.world_time.hour, 23);
+        assert_eq!(cfg.world_time.minute, 59);
+        assert!(cfg.world_time.lock);
+        // Exactly the two world_time warnings, with the user-facing clamp target in the message.
+        let wt: Vec<&ConfigWarning> = warnings.iter().filter(|w| w.field.starts_with("world_time.")).collect();
+        assert_eq!(wt.len(), 2, "{warnings:?}");
+        assert!(wt.iter().any(|w| w.field == "world_time.hour" && w.message.contains("clamped to 23")));
+        assert!(wt.iter().any(|w| w.field == "world_time.minute" && w.message.contains("clamped to 59")));
+    }
+
+    #[test]
+    fn world_time_in_range_is_accepted_without_warning() {
+        // The boundary values must be valid (the clamp uses `>`, not `>=`) and silent.
+        let (cfg, warnings) =
+            Config::from_toml_str("[world_time]\nlock = true\nhour = 23\nminute = 59\n").unwrap();
+        assert_eq!((cfg.world_time.hour, cfg.world_time.minute), (23, 59));
+        assert!(!warnings.iter().any(|w| w.field.starts_with("world_time.")), "{warnings:?}");
     }
 
     #[test]

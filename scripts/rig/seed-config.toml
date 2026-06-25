@@ -77,3 +77,10 @@ max_tiers = 5
 intensify_past_cap = true
 intensity_step_percent = 50
 max_intensity_percent = 300
+
+# Lock the in-game time of day (a permanent day/night setting). Off by default; flip `lock` and pick
+# hour/minute (also adjustable live in the overlay menu). Handy for solo testing.
+[world_time]
+lock = false
+hour = 12
+minute = 0

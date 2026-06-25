@@ -34,6 +34,9 @@ pub enum SettingId {
     BossPosture = 13,
     MaxPlayers = 14,
     RoamAnywhere = 15,
+    WorldTimeLock = 16,
+    WorldTimeHour = 17,
+    WorldTimeMinute = 18,
 }
 
 impl SettingId {
@@ -288,6 +291,36 @@ pub fn registry() -> Vec<Setting> {
                 set: |c, v| c.session.max_players = v,
             },
         },
+        Setting {
+            id: WorldTimeLock,
+            label: "Lock time of day",
+            kind: Toggle {
+                get: |c| c.world_time.lock,
+                set: |c, v| c.world_time.lock = v,
+            },
+        },
+        Setting {
+            id: WorldTimeHour,
+            label: "Time of day: hour",
+            kind: Range {
+                min: 0,
+                max: 23,
+                step: 1,
+                get: |c| c.world_time.hour,
+                set: |c, v| c.world_time.hour = v.min(23),
+            },
+        },
+        Setting {
+            id: WorldTimeMinute,
+            label: "Time of day: minute",
+            kind: Range {
+                min: 0,
+                max: 59,
+                step: 5,
+                get: |c| c.world_time.minute,
+                set: |c, v| c.world_time.minute = v.min(59),
+            },
+        },
     ]
 }
 
@@ -304,7 +337,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 16, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 19, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -356,6 +389,37 @@ mod tests {
         assert!(!cfg.gameplay.roam_anywhere, "must write gameplay.roam_anywhere");
         assert!(!cfg.gameplay.allow_summons, "must not touch a neighbouring field");
         assert_eq!(s.display_value(&cfg), "Off");
+    }
+
+    #[test]
+    fn world_time_settings_bind_to_their_own_config_fields() {
+        // Guard the 3 new settings' get/set against a copy-paste pointing at a sibling field — the
+        // count bump alone wouldn't catch a hour/minute/lock mix-up.
+        let reg = registry();
+        let mut cfg = Config::default();
+
+        let lock = reg.iter().find(|s| s.id == SettingId::WorldTimeLock).unwrap();
+        cfg.world_time.lock = false;
+        cfg.world_time.hour = 7; // neighbour sentinel
+        lock.adjust(&mut cfg, true);
+        assert!(cfg.world_time.lock, "lock toggle must write world_time.lock");
+        assert_eq!(cfg.world_time.hour, 7, "lock must not touch hour");
+
+        let hour = reg.iter().find(|s| s.id == SettingId::WorldTimeHour).unwrap();
+        cfg.world_time.hour = 22;
+        cfg.world_time.minute = 30; // neighbour sentinel
+        hour.adjust(&mut cfg, true); // +1 -> 23
+        assert_eq!(cfg.world_time.hour, 23, "hour must write world_time.hour");
+        assert_eq!(cfg.world_time.minute, 30, "hour must not touch minute");
+        hour.adjust(&mut cfg, true); // saturates at max 23
+        assert_eq!(cfg.world_time.hour, 23, "hour saturates at 23");
+
+        let minute = reg.iter().find(|s| s.id == SettingId::WorldTimeMinute).unwrap();
+        cfg.world_time.minute = 50;
+        cfg.world_time.hour = 9; // neighbour sentinel
+        minute.adjust(&mut cfg, true); // +5 -> 55
+        assert_eq!(cfg.world_time.minute, 55, "minute must write world_time.minute");
+        assert_eq!(cfg.world_time.hour, 9, "minute must not touch hour");
     }
 
     #[test]

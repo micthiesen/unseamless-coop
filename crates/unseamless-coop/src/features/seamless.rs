@@ -61,19 +61,18 @@ impl Feature for SeamlessRoam {
         });
 
         if wrote == Some(true) {
-            // Toast only a genuine change (e.g. a host ConfigSync), not the startup baseline or the
-            // per-session self-heal re-asserts — the policy lives in `ApplyLatch`.
-            match self.latch.classify(&desired) {
-                Applied::Reasserted => log::debug!("re-applied roam_anywhere = {desired}"),
-                // First and Changed both log info; only Changed toasts. Explicit arms (not a wildcard)
-                // so a new Applied variant would fail to compile here rather than silently misclassify.
-                applied @ (Applied::First | Applied::Changed) => {
-                    log::info!("seamless roam set to {desired} (disable_multiplay_restriction)");
-                    if applied == Applied::Changed {
-                        let msg = if desired { "Roaming enabled" } else { "Roaming disabled (vanilla area tether)" };
-                        crate::notify::with_mut(|n| n.info(msg));
-                    }
-                }
+            // Shared announce policy (info on First/Changed, toast only on Changed); the self-heal
+            // debug line is local since it fires only on an actual write here.
+            let applied = crate::features::announce_held(
+                &mut self.latch,
+                desired,
+                || format!("seamless roam set to {desired} (disable_multiplay_restriction)"),
+                || {
+                    if desired { "Roaming enabled" } else { "Roaming disabled (vanilla area tether)" }.to_string()
+                },
+            );
+            if applied == Applied::Reasserted {
+                log::debug!("re-applied roam_anywhere = {desired}");
             }
         }
     }
