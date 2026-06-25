@@ -180,7 +180,7 @@ impl Overlay {
             force_tab = Some(self.tab);
         }
         ui.window(WINDOW_TITLE)
-            .size([520.0, 380.0], Condition::FirstUseEver)
+            .size([624.0, 380.0], Condition::FirstUseEver)
             .position([80.0, 80.0], Condition::FirstUseEver)
             // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
             // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
