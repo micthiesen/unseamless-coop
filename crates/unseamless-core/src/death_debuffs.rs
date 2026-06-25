@@ -67,6 +67,78 @@ impl DebuffTier {
             Self::Despair => "Despair",
         }
     }
+
+    /// The concrete `SpEffectParam` rate-field values this tier writes, scaled by `intensity`
+    /// (`1.0` = base potency; the death-stack's [`intensity`](DeathDebuffs::intensity) grows it past
+    /// the tier cap). Each tier touches only its own fields; the rest stay neutral
+    /// ([`SpEffectRates::NEUTRAL`]). The cdylib writes these onto the tier's SpEffectParam row.
+    ///
+    /// Base magnitudes are reasonable starting points to **confirm/tune on the rig** (the exact feel,
+    /// and the `stamina_recover_change_speed` units, are gameplay choices); the *shape* — which fields,
+    /// scaled how — is what's pinned and host-tested here. Penalty = `BASE * intensity`, with
+    /// multiplicative rates floored so a high configured intensity can't invert a stat.
+    pub fn rates(self, intensity: f32) -> SpEffectRates {
+        // Per-tier base penalties at intensity 1.0 (rig-tunable). Multiplicative ones are expressed as
+        // the fraction subtracted from 1.0; the stamina one is the game's additive recovery delta.
+        const HP_DROP: f32 = 0.10; // Hopelessness: -10% max HP/FP/stamina
+        const STAMINA_RECOVER_DELTA: f32 = -30.0; // Emaciation: slower stamina regen (units: rig-confirm)
+        const GAIN_DROP: f32 = 0.10; // Decay: -10% rune gain + item discovery
+        const DEFENCE_DROP: f32 = 0.10; // Vulnerability: -10% defence (take more damage)
+        const ATTACK_DROP: f32 = 0.10; // Despair: -10% outgoing damage
+
+        let i = intensity.max(0.0);
+        // A multiplicative rate of `1.0 - base*i`, floored so it can't reach 0/negative at high intensity.
+        let down = |base: f32| (1.0 - base * i).max(0.1);
+
+        let mut r = SpEffectRates::NEUTRAL;
+        match self {
+            Self::Emaciation => r.stamina_recover_change_speed = STAMINA_RECOVER_DELTA * i,
+            Self::Hopelessness => {
+                r.max_hp_rate = down(HP_DROP);
+                r.max_fp_rate = down(HP_DROP);
+                r.max_stamina_rate = down(HP_DROP);
+            }
+            Self::Decay => {
+                r.have_soul_rate = down(GAIN_DROP);
+                r.item_drop_rate = down(GAIN_DROP);
+            }
+            Self::Vulnerability => r.defence_rate = down(DEFENCE_DROP),
+            Self::Despair => r.attack_rate = down(ATTACK_DROP),
+        }
+        r
+    }
+}
+
+/// The subset of `SP_EFFECT_PARAM_ST` rate fields the death debuffs use, as a host-tested plain value
+/// the cdylib writes onto a tier's SpEffectParam row (fields grounded in DEATH-DEBUFFS.md §B and the
+/// rate-field briefs in SCALING.md). Multiplicative rates default to `1.0` (no change);
+/// `stamina_recover_change_speed` is an additive delta defaulting to `0.0`. `defence_rate`/`attack_rate`
+/// are single knobs the binding fans out across the per-element `*_diffence_rate` / `*_attack_rate`
+/// families (which the death tiers move together).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpEffectRates {
+    pub max_hp_rate: f32,
+    pub max_fp_rate: f32,
+    pub max_stamina_rate: f32,
+    pub stamina_recover_change_speed: f32,
+    pub have_soul_rate: f32,
+    pub item_drop_rate: f32,
+    pub defence_rate: f32,
+    pub attack_rate: f32,
+}
+
+impl SpEffectRates {
+    /// All fields at their no-op values: every multiplicative rate `1.0`, the additive recovery `0.0`.
+    pub const NEUTRAL: SpEffectRates = SpEffectRates {
+        max_hp_rate: 1.0,
+        max_fp_rate: 1.0,
+        max_stamina_rate: 1.0,
+        stamina_recover_change_speed: 0.0,
+        have_soul_rate: 1.0,
+        item_drop_rate: 1.0,
+        defence_rate: 1.0,
+        attack_rate: 1.0,
+    };
 }
 
 /// The absolute number of distinct tiers (the cap on [`DeathDebuffTuning::max_tiers`]).
@@ -298,5 +370,39 @@ mod tests {
     #[test]
     fn clamp_accepts_defaults_without_warnings() {
         assert!(DeathDebuffTuning::default().clamp().is_empty());
+    }
+
+    #[test]
+    fn each_tier_touches_only_its_own_fields_at_base_intensity() {
+        let n = SpEffectRates::NEUTRAL;
+        // Hopelessness moves the three max-stat rates and nothing else.
+        let h = DebuffTier::Hopelessness.rates(1.0);
+        assert_eq!(h.max_hp_rate, 0.9);
+        assert_eq!(h.max_fp_rate, 0.9);
+        assert_eq!(h.max_stamina_rate, 0.9);
+        assert_eq!(h.attack_rate, n.attack_rate, "must not touch attack");
+        assert_eq!(h.have_soul_rate, n.have_soul_rate, "must not touch rune gain");
+
+        // Each other tier moves its field(s) and leaves max_hp_rate neutral.
+        assert_eq!(DebuffTier::Despair.rates(1.0).attack_rate, 0.9);
+        assert_eq!(DebuffTier::Vulnerability.rates(1.0).defence_rate, 0.9);
+        assert_eq!(DebuffTier::Decay.rates(1.0).item_drop_rate, 0.9);
+        assert!(DebuffTier::Emaciation.rates(1.0).stamina_recover_change_speed < 0.0);
+        for t in [DebuffTier::Despair, DebuffTier::Vulnerability, DebuffTier::Decay, DebuffTier::Emaciation] {
+            assert_eq!(t.rates(1.0).max_hp_rate, n.max_hp_rate, "{t:?} must not touch max HP");
+        }
+    }
+
+    #[test]
+    fn intensity_deepens_the_penalty_and_floors_multiplicative_rates() {
+        // At 2x intensity the −10% HP penalty doubles to −20%.
+        assert!((DebuffTier::Hopelessness.rates(2.0).max_hp_rate - 0.8).abs() < 1e-6);
+        // The additive stamina penalty scales linearly and stays negative.
+        let e1 = DebuffTier::Emaciation.rates(1.0).stamina_recover_change_speed;
+        let e2 = DebuffTier::Emaciation.rates(2.0).stamina_recover_change_speed;
+        assert!((e2 - 2.0 * e1).abs() < 1e-3);
+        // A wild intensity can't invert a stat — multiplicative rates floor at 0.1.
+        assert_eq!(DebuffTier::Hopelessness.rates(100.0).max_hp_rate, 0.1);
+        assert_eq!(DebuffTier::Despair.rates(100.0).attack_rate, 0.1);
     }
 }

@@ -246,10 +246,14 @@ main player by ID" call into a small shared helper (e.g. on the sdk module) that
       scripted HP dips (the feature `debug!`-logs each detected death for this).
 - [ ] **Rig (solo):** find the "rested at grace" event flag (ER Debug Tool grace/flag tabs); set
       `GRACE_REST_FLAG` in `features/death_debuffs.rs`.
+- [x] **Effect-value model** (`core::death_debuffs::DebuffTier::rates(intensity)` → `SpEffectRates`):
+      the concrete `SP_EFFECT_PARAM_ST` rate-field values each tier writes, scaled by intensity,
+      host-tested. So the rig no longer has to *design* the values — only confirm row ids + insertion
+      and write these onto the rows. `reconcile()` already computes + `debug!`-logs them per death.
 - [ ] **Rig (solo):** confirm `SoloParamRepository` can *insert* new SpEffectParam rows at runtime
-      (vs. only mutating); pick a verified-free ID block; write the rows and set `TIER_ROW_IDS`.
-      Then scale row magnitudes by `DeathDebuffs::intensity()` in `reconcile()`. Fallback: overwrite
-      high unused rows.
+      (vs. only mutating); pick a verified-free ID block; write each tier's `rates(...)` onto its row
+      and set `TIER_ROW_IDS`. Fallback: overwrite high unused rows. Tune the base magnitudes (and
+      confirm the `stamina_recover_change_speed` units + the poise/posture field) to taste on the rig.
 - [ ] Confirm `dont_sync = true` is right (per-player debuff) and partners each carry their own stack.
 - [ ] Update [SDK-COVERAGE.md](SDK-COVERAGE.md): SpEffect **apply/remove is CHARTED**, not PARTIAL.
 

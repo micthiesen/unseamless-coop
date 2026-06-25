@@ -88,6 +88,11 @@ pub struct RunInfo {
     /// Build profile string, e.g. `"release (stripped)"` or `"diag (symbols)"` — tells the
     /// reader whether panic backtraces in this log will have symbols.
     pub build_profile: String,
+    /// Short build id (`<short-sha>` or `<short-sha>-dirty`), baked at compile time by the cdylib's
+    /// build script. The version is the *release* identity; this is the *exact source* identity, so
+    /// two friends on the same version but different builds are distinguishable, and a `-dirty` log
+    /// is immediately flagged as an uncommitted build.
+    pub build_id: String,
     /// e.g. `"windows-x86_64 (proton)"`.
     pub platform: String,
     /// Human/sortable start time supplied by the cdylib (core has no clock).
@@ -110,6 +115,7 @@ impl RunInfo {
         run_id: String,
         mod_version: String,
         build_profile: String,
+        build_id: String,
         platform: String,
         started_at: String,
     ) -> Self {
@@ -117,6 +123,7 @@ impl RunInfo {
             run_id,
             mod_version,
             build_profile,
+            build_id,
             platform,
             started_at,
             role: SessionRole::Unknown,
@@ -133,6 +140,7 @@ impl RunInfo {
              run_id      = {}\n\
              mod_version = {}\n\
              build       = {}\n\
+             build_id    = {}\n\
              platform    = {}\n\
              started_at  = {}\n\
              role        = {}\n\
@@ -143,6 +151,7 @@ impl RunInfo {
             self.run_id,
             self.mod_version,
             self.build_profile,
+            self.build_id,
             self.platform,
             self.started_at,
             self.role.as_str(),
@@ -266,6 +275,7 @@ mod tests {
             run_id: "20260624-100000-1234".into(),
             mod_version: "0.1.0".into(),
             build_profile: "diag".into(),
+            build_id: "a1b2c3d-dirty".into(),
             platform: "windows-x86_64 (proton)".into(),
             started_at: "2026-06-24T10:00:00Z".into(),
             role: SessionRole::Host,
@@ -277,6 +287,7 @@ mod tests {
             "run_id      = 20260624-100000-1234",
             "mod_version = 0.1.0",
             "build       = diag",
+            "build_id    = a1b2c3d-dirty",
             "role        = host",
             "session_id  = abc123",
             "enemy_health = 35",
@@ -292,6 +303,7 @@ mod tests {
             run_id: "r".into(),
             mod_version: "0.1.0".into(),
             build_profile: "release".into(),
+            build_id: "nogit".into(),
             platform: "p".into(),
             started_at: "t".into(),
             role: SessionRole::Unknown,
@@ -320,6 +332,7 @@ mod tests {
             "rid".into(),
             "0.1.0".into(),
             "release (stripped)".into(),
+            "nogit".into(),
             "p".into(),
             "t".into(),
         );

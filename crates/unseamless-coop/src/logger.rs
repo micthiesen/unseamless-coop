@@ -47,6 +47,8 @@ pub fn init(config: &Config, base: &Path) {
         run_id.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         PROFILE.to_string(),
+        // Baked by build.rs (see UNSEAMLESS_BUILD_ID there): the exact-source id, in every header.
+        env!("UNSEAMLESS_BUILD_ID").to_string(),
         platform(),
         run_id.clone(),
     );

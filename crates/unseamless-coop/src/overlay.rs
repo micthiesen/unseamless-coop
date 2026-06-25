@@ -40,12 +40,27 @@ const TOGGLE_KEY: Key = Key::GraveAccent;
 /// Window title: version, then a control hint, with a stable `###` id so the visible label can change
 /// (and carry the hint) without changing the window's identity — which would reset its remembered
 /// position. ASCII only: the title bar draws in the default font, which has no arrow glyphs.
-const WINDOW_TITLE: &str = concat!(
-    "unseamless-coop  v",
-    env!("CARGO_PKG_VERSION"),
-    "    |    Up/Dn: select    L/R: tabs    Enter: use    `: close",
-    "###unseamless-coop",
-);
+///
+/// Debug builds splice the baked `UNSEAMLESS_BUILD_ID` in as its own ` | build <id>` section, so a
+/// screenshot of a friend's window self-identifies the exact build under test. Release titles omit
+/// it (it's still in the log header). Built once into a `'static` via `OnceLock` rather than a
+/// `concat!` const because the hint string would otherwise have to be duplicated across the two
+/// branches; the `###unseamless-coop` id is identical in both, so window identity/position is stable
+/// across profiles.
+fn window_title() -> &'static str {
+    use std::sync::OnceLock;
+    static TITLE: OnceLock<String> = OnceLock::new();
+    TITLE.get_or_init(|| {
+        let base = concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION"));
+        let hint = "    |    Up/Dn: select    L/R: tabs    Enter: use    `: close";
+        let id = "###unseamless-coop";
+        if cfg!(debug_assertions) {
+            format!("{base}    |    build {}{hint}{id}", env!("UNSEAMLESS_BUILD_ID"))
+        } else {
+            format!("{base}{hint}{id}")
+        }
+    })
+}
 /// Crisp UI font: a printable-ASCII subset of **Spleen 8x16** (BSD-2 — see
 /// `assets/menu-font.LICENSE.txt`), a pixel font with a 16px native size, baked at that size. A bitmap
 /// font is only crisp at its native size, so we source one designed larger rather than scale the
@@ -231,6 +246,11 @@ impl Overlay {
             .build(|| {
                 let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
                 ui.text_colored(rgba(BLUE, 1.0), concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION")));
+                // Debug builds show the baked build id here too, so the off-playfield watermark
+                // self-identifies the build even when the menu is closed. Quiet on release.
+                if cfg!(debug_assertions) {
+                    ui.text_disabled(concat!("build ", env!("UNSEAMLESS_BUILD_ID")));
+                }
                 ui.text_disabled("Press ` to open the menu");
             });
     }
@@ -276,7 +296,7 @@ impl Overlay {
         let disp = ui.io().display_size;
         let default_pos = [((disp[0] - WINDOW_DEFAULT_SIZE[0]) / 2.0).max(0.0), OVERLAY_MARGIN];
         let mut win = ui
-            .window(WINDOW_TITLE)
+            .window(window_title())
             .size(WINDOW_DEFAULT_SIZE, Condition::FirstUseEver)
             // Floor the size so it can't be dragged down to a uselessly tiny box (max unbounded).
             .size_constraints([360.0, 240.0], [f32::MAX, f32::MAX])

@@ -122,11 +122,19 @@ impl DeathDebuffsFeature {
 
     /// Ensure every active tier's row is on the player. Idempotent — re-applying is how we self-heal
     /// after a load drops an effect (the live SpEffect list is the source of truth; our counter is a
-    /// cache). RIG-TODO: scale each row's magnitude by `self.stack.intensity()` via
-    /// `SoloParamRepository` so deaths past the tier cap keep biting (see DEATH-DEBUFFS.md).
+    /// cache). The per-tier `SpEffectParam` rate values come from the host-tested
+    /// [`DebuffTier::rates`](unseamless_core::death_debuffs::DebuffTier::rates), scaled by the current
+    /// intensity, so deaths past the tier cap keep biting.
+    ///
+    /// RIG-TODO: write `rates` onto each tier's row via `SoloParamRepository` before applying it (the
+    /// rows + their ids are the rig blank). Until then this logs the intended values so a rig run can
+    /// see exactly what each tier would write.
     fn reconcile(&mut self) {
+        let intensity = self.stack.intensity();
         for tier in self.stack.active_tiers() {
+            let rates = tier.rates(intensity);
             let id = TIER_ROW_IDS[usize::from(tier.level() - 1)];
+            log::debug!("death debuffs: tier {} @intensity {intensity:.2} -> {rates:?} (row {id})", tier.label());
             if id != 0 {
                 crate::sdk::apply_speffect_to_main_player(id, true);
             }
