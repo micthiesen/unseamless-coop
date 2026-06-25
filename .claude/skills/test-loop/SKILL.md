@@ -1,6 +1,6 @@
 ---
 name: test-loop
-description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the planned debug bridge and Steam Deck rig, and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "set up the rig/deck".
+description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the planned debug bridge, and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
 ---
 
 # Test loops for unseamless-coop
@@ -16,7 +16,7 @@ lowest layer that can answer your question.
 | 2 | Two-peer harness | Mac, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
 | 2b | TCP two-process harness | Mac, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
 | 3 | Debug bridge | one game + harness | side-channel against real game effects | assistant | **TODO** (L2b is the host half) |
-| 4 | Steam Deck rig | Deck, SSH | game binding (load/register/observe/stability) | assistant (solo subset) | **TODO** (design below) |
+| 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **tooling DONE** (`scripts/rig.sh`); first run pending |
 | 5 | Real co-op | friends | actual co-op behavior | you, manual | ongoing; logs handed back |
 
 **The hard limit:** no harness can join the *real game's* Steam P2P session without reimplementing
@@ -105,25 +105,52 @@ does a `SessionAction` trigger the real game call) — without a second game and
 - **Limits:** tests our side-channel + the mod's effect on game state; does NOT test the game's P2P
   player sync (still needs two real games).
 
-## Layer 4 — Steam Deck rig (TODO) — the game-binding loop
+## Layer 4 — Local PC rig (`scripts/rig.sh`) — the game-binding loop
 
-This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md`, on a Steam Deck.
+This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md`, and it's now **this
+gaming PC** (which both builds and runs the game — the Mac/PC split collapses when you're working
+here). `scripts/rig.sh` is the driver; it builds, installs, launches, and reads logs, and — the
+load-bearing part — does it **without destroying the machine's real ERSC + Elden Mod Loader + own-mods
+setup**.
 
-**One-time setup (you):** ER installed; Deck in dev mode with SSH enabled; note the SSH host and
-the game path. No third-party loader/launcher — we install our own `dinput8.dll` proxy + our
-`start_protected_game.exe` launcher (see `scripts/deploy.sh` and RIG-RUNBOOK).
+**The safety model.** The game folder normally runs the *real* mod stack (Seamless Co-op's
+`ersc.dll` via an ersc-launcher copy at `start_protected_game.exe`, Elden Mod Loader as `dinput8.dll`,
+the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in for all of that, so:
 
-**Scripts to write (`scripts/deck-*.sh`, assistant-driveable over SSH):**
-- `deck-deploy` — `cargo build --release` on the Mac, then `rsync` `dinput8.dll` + our launcher into `…/ELDEN RING/Game/` (back up the original `start_protected_game.exe` first); essentially `deploy.sh` over SSH.
-- `deck-launch` — `ssh deck 'steam -applaunch 1245620'` (runs our launcher → the game with the `UNSEAMLESS_LAUNCH` marker, so the EAC guard passes).
-- `deck-log` — `ssh deck 'cat …/unseamless-coop/logs/<latest>'` to fetch the run log for analysis.
-- `deck-kill` — `ssh deck "pkill -f '[e]ldenring.exe'"` (bracket trick; plain `pkill` matches itself).
-- `deck-cycle` — deploy, launch, wait for the install/heartbeat lines, fetch log, kill.
+- **`backup`** snapshots that original stack **once**, to `~/.local/share/unseamless-coop/rig-backup/`
+  (outside the game folder, safe from Steam "verify integrity" and game updates). It's idempotent and
+  guarded: it refuses to re-snapshot over an existing one, and refuses to snapshot at all if our mod
+  is already installed (detected via the install marker) so it can never record *our* DLL as "the
+  original".
+- **`apply`** installs our `dinput8.dll` + `start_protected_game.exe` + a seed config over the stack.
+  **Safe to run as often as you like; it never restores.** Auto-snapshots first if needed.
+- **`restore`** is **explicit only** — the one command that puts the original stack back. Nothing
+  auto-reverts. (This is the user's rule: apply freely, restore only when told.)
+
+**Commands** (env overrides: `GAME_DIR`, `BACKUP_DIR`, `APPID`):
+- `rig.sh status` — snapshot state, what's installed (ours vs original), latest log.
+- `rig.sh apply [--release] [--no-build] [--with-mods a,b] [--keep-config]` — build (default
+  **`diag`**: symbols + debug-assertions for readable panic backtraces) and install. `--with-mods`
+  pulls named mods out of the snapshot to test the parent-loader; default leaves `mods/` empty so the
+  observer log is unambiguous (`no extra mods …`).
+- `rig.sh launch` — `steam -applaunch 1245620` (uses the configured gamescope launch options; our
+  launcher sets `UNSEAMLESS_LAUNCH`, so the EAC guard passes and the game starts outside EAC).
+- `rig.sh log [-f]` — print/follow the latest `unseamless-coop/logs/unseamless_coop-*.log`.
+- `rig.sh kill` — `pkill -f '[e]ldenring.exe'` (bracket trick; plain `pkill` matches itself).
+- `rig.sh cycle [apply-opts]` — apply → launch → wait for the install/heartbeat lines. The solo
+  smoke test in one shot.
+- `rig.sh restore` — roll back to the original stack (explicit).
+
+The seed config (`scripts/rig/seed-config.toml`) sets `[debug] enabled = true` so the run captures
+verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts/deploy.sh` is the
+bare install primitive `rig.sh apply` is built on — kept for the Mac-builds-elsewhere handoff in
+RIG-RUNBOOK; on this machine prefer `rig.sh`.)
 
 **Solo-verifiable here (assistant drives end to end):** the DLL loads, registers its feature task,
 fires per frame (the `FrameBegin` heartbeat ticks even at the title screen), writes + reads config,
-runs the session observer, and stays stable. **Not** solo-verifiable: anything needing a loaded
-save / co-op session — those need layer 5. Handoff is the log file.
+runs the session observer, and stays stable — i.e. the RIG-RUNBOOK "first rig" checklist. **Not**
+solo-verifiable: anything needing a loaded save / co-op session — those need layer 5. Handoff is the
+log file.
 
 ## Layer 5 — Real co-op (ongoing, manual)
 
@@ -140,11 +167,11 @@ the session without context. This is the acceptance loop and the only one that p
 - Changed pure logic (config/scaling/protocol/peer)? → **layer 1**, then **layer 2** if it touches
   the side-channel flow.
 - Changed the side-channel coordination (handshake/sync/actions/forwarding)? → **layer 2**.
-- Need to know it actually affects the game (params, session state, loading)? → **layer 4** (or
-  **3** once built).
+- Need to know it actually affects the game (params, session state, loading)? → **layer 4**
+  (`rig.sh`, this machine) (or **3** once built).
 - Co-op behavior with real partners? → **layer 5**.
 
-Build order for the TODO loops: layer 4 (Deck) first when the hardware exists (it unblocks the most
-and is the least code), then layer 3 (bridge) — whose host half (`TcpTransport`, layer 2b) is
-already built — if the pure harness leaves you wanting to test against real game effects before
-committing to full co-op runs.
+Next build-out: layer 3 (debug bridge) — whose host half (`TcpTransport`, layer 2b) is already
+built — if the pure harness leaves you wanting to test the side-channel against real game effects
+(a `[debug] bridge_port` listener in the cdylib) before committing to full co-op runs. Layer 4's
+tooling (`rig.sh`) is in place; what remains there is *running* it (the RIG-RUNBOOK observation run).

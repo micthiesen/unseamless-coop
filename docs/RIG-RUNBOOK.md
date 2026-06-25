@@ -7,6 +7,18 @@ co-op work — it's to **observe the session state machine** so Layer 2 (see
 
 ## Deploy
 
+**On a machine that both builds and runs the game** (the gaming PC), use `scripts/rig.sh` — it wraps
+the deploy with a one-time backup of the machine's existing ERSC + Elden Mod Loader stack, a seed
+config, and launch/log/restore helpers (see the `/test-loop` skill, Layer 4):
+
+```bash
+scripts/rig.sh cycle                  # backup (once) + build (diag) + apply + launch + wait for heartbeat
+scripts/rig.sh log -f                 # follow the run log
+scripts/rig.sh restore                # explicit: put the original ERSC stack back
+```
+
+**When building elsewhere** (the Mac) and copying to a separate rig, the bare primitive is:
+
 ```bash
 cargo build --release                 # on the Mac -> unseamless_coop.dll + start_protected_game.exe
 # copy the build outputs to the rig, then on the rig:

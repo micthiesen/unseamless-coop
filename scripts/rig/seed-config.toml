@@ -1,0 +1,48 @@
+# unseamless-coop — rig test seed config.
+#
+# `scripts/rig.sh apply` copies this to <Game>/unseamless-coop/unseamless_coop.toml so rig runs
+# start from a known, reproducible config instead of the random-password default the mod writes on
+# first launch. Edit freely; `apply --keep-config` leaves an existing on-disk config untouched.
+#
+# The one load-bearing choice here is [debug].enabled = true: it drops logging to `level` so a rig
+# run captures the verbose lines (CLAUDE.md's logging rule keeps these silent by default). The
+# password is a throwaway test value — co-op isn't wired up yet, but the mod rejects a password
+# shorter than 5 chars at startup, so it must be set to *something* valid.
+
+[gameplay]
+allow_invaders = false
+death_debuffs = true
+allow_summons = true
+overhead_display = "normal"
+skip_splash_screens = false
+append_steam_id = false
+always_spectate_on_death = false
+default_boot_master_volume = 5
+
+[scaling]
+enemy_health = 35
+enemy_damage = 0
+enemy_posture = 15
+boss_health = 100
+boss_damage = 0
+boss_posture = 20
+
+[session]
+password = "coop-test"
+
+[save]
+file_extension = "co2"
+
+[language]
+override = ""
+
+[loader]
+# Our dinput8.dll is the parent loader; it loads DLLs from mods/ (which `apply` controls via
+# --with-mods). Default apply leaves mods/ empty, so this logs "no extra mods" — clean observation.
+enabled = true
+order = []
+
+[debug]
+enabled = true
+level = "debug"
+forward_to_host = false

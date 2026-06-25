@@ -300,6 +300,18 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// The rig test seed config (`scripts/rig/seed-config.toml`, installed by `scripts/rig.sh
+    /// apply`) must parse cleanly against the current schema — a broken seed silently wastes a rig
+    /// launch. Pin it: parses with no clamp warnings, debug logging on, password valid.
+    #[test]
+    fn rig_seed_config_is_valid() {
+        let seed = include_str!("../../../scripts/rig/seed-config.toml");
+        let (cfg, warnings) = Config::from_toml_str(seed).expect("seed config must be valid TOML");
+        assert!(warnings.is_empty(), "seed config should not warn: {warnings:?}");
+        assert!(cfg.debug.enabled, "seed enables debug logging so rig runs capture verbose lines");
+        assert!(cfg.password_is_valid(), "seed password must clear MIN_PASSWORD_LEN");
+    }
+
     #[test]
     fn default_round_trips_through_toml() {
         let cfg = Config::default();
