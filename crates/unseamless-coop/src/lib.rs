@@ -14,6 +14,7 @@ use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
 use windows::core::BOOL;
 
+mod actionq;
 mod app;
 #[cfg(feature = "bridge")]
 mod bridge;
@@ -26,6 +27,7 @@ mod config;
 mod feature;
 mod features;
 mod guard;
+mod logbuf;
 mod logger;
 mod mods;
 mod notify;

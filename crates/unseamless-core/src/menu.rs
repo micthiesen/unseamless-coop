@@ -1,7 +1,8 @@
 //! The in-game menu model: a flat list of rows (session actions + tunable settings), a cursor,
 //! and the navigation/edit logic. **Pure** — it owns no rendering and no game state, so it's
-//! fully host-tested here. The cdylib's overlay just draws [`Menu::rows`] and forwards key
-//! presses to [`Menu::select_next`]/`select_prev`/`activate`/`adjust`.
+//! fully host-tested here. The cdylib's overlay draws [`Menu::rows`] and forwards key presses to
+//! [`Menu::select_next`]/`select_prev`/`activate` (it uses the actions-only [`Menu::actions_only`]
+//! and renders settings read-only, so `adjust`/setting-edit stay reserved for a future editable menu).
 //!
 //! ## Divergence from ERSC (intentional)
 //! ERSC drives session actions (host/join/leave/…) through **in-game items** and fixed hotkeys.
@@ -22,14 +23,41 @@ pub struct SessionContext {
 
 /// One row in the menu.
 pub enum MenuItem {
-    /// A session verb (host/join/leave/…). `enabled` gates it on the session context.
+    /// A session verb (host/join/leave/…). `enabled` gates it on the session context; the label
+    /// comes from [`SessionAction::label`] (one source of UI copy).
     Action {
         action: SessionAction,
-        label: &'static str,
         enabled: fn(&SessionContext) -> bool,
     },
     /// A tunable setting, addressed into [`crate::settings::registry`].
     Setting(SettingId),
+}
+
+/// The session-action rows, in display order, with their context gating. Shared by [`Menu::new`]
+/// (actions + settings) and [`Menu::actions_only`].
+fn action_items() -> Vec<MenuItem> {
+    use SessionAction::*;
+
+    // Sensible default gating. These are first-pass rules; the rig run may refine exactly when each
+    // action is legal (see RIG-RUNBOOK.md), but the shape is right.
+    let not_in_session = |c: &SessionContext| !c.in_session;
+    let in_session = |c: &SessionContext| c.in_session;
+    let host_in_session = |c: &SessionContext| c.in_session && c.is_host;
+
+    let action = |action, enabled: fn(&SessionContext) -> bool| MenuItem::Action { action, enabled };
+    vec![
+        action(OpenWorld, not_in_session),
+        action(JoinWorld, not_in_session),
+        action(BreakInWorld, not_in_session),
+        action(LeaveWorld, in_session),
+        action(LockWorld, host_in_session),
+        action(UnlockWorld, host_in_session),
+        action(TogglePvp, host_in_session),
+        action(TogglePvpTeams, host_in_session),
+        action(ToggleFriendlyFire, host_in_session),
+        action(ToggleDriedFinger, host_in_session),
+        action(GiveEmber, in_session),
+    ]
 }
 
 /// A row prepared for display.
@@ -66,43 +94,34 @@ impl Default for Menu {
 }
 
 impl Menu {
-    /// Build the default layout: session actions first, then every registered setting.
+    /// Build the default layout: session actions first, then every registered setting. The
+    /// settings rows make the registry drive both the config file and the menu (ARCHITECTURE.md >
+    /// Divergences); the cdylib currently uses [`actions_only`](Menu::actions_only) and shows
+    /// settings read-only, but this full layout stays host-tested and ready for an editable menu.
     pub fn new() -> Self {
-        use SessionAction::*;
-
-        // Sensible default gating. These are first-pass rules; the rig run may refine exactly
-        // when each action is legal (see RIG-RUNBOOK.md), but the shape is right.
-        let not_in_session = |c: &SessionContext| !c.in_session;
-        let in_session = |c: &SessionContext| c.in_session;
-        let host_in_session = |c: &SessionContext| c.in_session && c.is_host;
-
-        let action = |action, label, enabled: fn(&SessionContext) -> bool| MenuItem::Action {
-            action,
-            label,
-            enabled,
-        };
-
         let settings = registry();
-        let mut items = vec![
-            action(OpenWorld, "Host / open world", not_in_session),
-            action(JoinWorld, "Join world", not_in_session),
-            action(BreakInWorld, "Break into world", not_in_session),
-            action(LeaveWorld, "Leave world", in_session),
-            action(LockWorld, "Lock world", host_in_session),
-            action(UnlockWorld, "Unlock world", host_in_session),
-            action(TogglePvp, "Toggle PvP", host_in_session),
-            action(TogglePvpTeams, "Toggle PvP teams", host_in_session),
-            action(ToggleFriendlyFire, "Toggle friendly fire", host_in_session),
-            action(ToggleDriedFinger, "Toggle dried finger", host_in_session),
-            action(GiveEmber, "Give ember", in_session),
-        ];
+        let mut items = action_items();
         items.extend(settings.iter().map(|s| MenuItem::Setting(s.id)));
-
         Menu { items, settings, selected: 0 }
+    }
+
+    /// Build an **actions-only** menu (no settings rows) — the interactive surface the overlay
+    /// drives. Settings are presented read-only elsewhere, so editing them mid-session (with its
+    /// boot-vs-live and host-enforcement questions) is deliberately out of this menu for now.
+    pub fn actions_only() -> Self {
+        Menu { items: action_items(), settings: Vec::new(), selected: 0 }
     }
 
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// Point the cursor at `index` (used by the overlay when a row is clicked). Ignored if out of
+    /// range; callers only target an enabled row.
+    pub fn select_index(&mut self, index: usize) {
+        if index < self.items.len() {
+            self.selected = index;
+        }
     }
 
     fn setting(&self, id: SettingId) -> &Setting {
@@ -165,7 +184,7 @@ impl Menu {
     /// nothing on activate (use [`adjust`](Menu::adjust) with left/right).
     pub fn activate(&mut self, cfg: &mut Config, ctx: &SessionContext) -> MenuOutcome {
         match &self.items[self.selected] {
-            MenuItem::Action { action, enabled, .. } => {
+            MenuItem::Action { action, enabled } => {
                 if enabled(ctx) {
                     MenuOutcome::Action(*action)
                 } else {
@@ -204,8 +223,8 @@ impl Menu {
             .iter()
             .enumerate()
             .map(|(i, item)| match item {
-                MenuItem::Action { label, enabled, .. } => MenuRow {
-                    label: (*label).to_string(),
+                MenuItem::Action { action, enabled } => MenuRow {
+                    label: action.label().to_string(),
                     value: None,
                     enabled: enabled(ctx),
                     selected: i == self.selected,
@@ -237,6 +256,44 @@ mod tests {
         // Action rows have no value; setting rows do.
         assert!(rows[0].value.is_none());
         assert!(rows.iter().filter(|r| r.value.is_some()).count() == 15);
+    }
+
+    #[test]
+    fn actions_only_has_no_setting_rows() {
+        let menu = Menu::actions_only();
+        let rows = menu.rows(&Config::default(), &SessionContext::default());
+        assert_eq!(rows.len(), 11, "actions-only menu shows just the 11 session actions");
+        assert!(rows.iter().all(|r| r.value.is_none()), "no setting rows (those carry a value)");
+
+        // Navigation + activation still work; the homed cursor (out of session) lands on OpenWorld.
+        let mut menu = Menu::actions_only();
+        let mut cfg = Config::default();
+        let ctx = SessionContext::default();
+        menu.home(&ctx);
+        assert_eq!(menu.activate(&mut cfg, &ctx), MenuOutcome::Action(SessionAction::OpenWorld));
+    }
+
+    #[test]
+    fn select_index_points_the_cursor_and_ignores_out_of_range() {
+        let mut menu = Menu::actions_only(); // 11 items, valid indices 0..=10
+        menu.select_index(3);
+        assert_eq!(menu.selected(), 3);
+        menu.select_index(11); // == len: out of range, ignored (guards the `<` vs `<=` boundary)
+        assert_eq!(menu.selected(), 3);
+        menu.select_index(999);
+        assert_eq!(menu.selected(), 3);
+        // It does NOT respect the enabled predicate — callers target an enabled row, but the cursor
+        // must be settable to any index (the overlay relies on this). LockWorld is disabled out of
+        // session, yet select_index still moves there.
+        let ctx = SessionContext::default();
+        let lock = menu
+            .items
+            .iter()
+            .position(|i| matches!(i, MenuItem::Action { action: SessionAction::LockWorld, .. }))
+            .unwrap();
+        assert!(!menu.rows(&Config::default(), &ctx)[lock].enabled);
+        menu.select_index(lock);
+        assert_eq!(menu.selected(), lock, "select_index sets the cursor regardless of enabled state");
     }
 
     #[test]

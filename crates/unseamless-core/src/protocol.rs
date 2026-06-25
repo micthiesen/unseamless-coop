@@ -131,6 +131,34 @@ pub enum SessionAction {
 }
 
 impl SessionAction {
+    /// Every variant, for enumerating the action set (menu build, tests) without re-typing the list.
+    pub const ALL: [SessionAction; 11] = {
+        use SessionAction::*;
+        [
+            OpenWorld, JoinWorld, BreakInWorld, LeaveWorld, LockWorld, UnlockWorld, TogglePvp,
+            TogglePvpTeams, ToggleFriendlyFire, ToggleDriedFinger, GiveEmber,
+        ]
+    };
+
+    /// Human label for this action, shared by the in-game menu and any feedback toast so the two
+    /// can't drift. UI copy lives here (one source) rather than being re-typed per call site.
+    pub fn label(self) -> &'static str {
+        use SessionAction::*;
+        match self {
+            OpenWorld => "Host / open world",
+            JoinWorld => "Join world",
+            BreakInWorld => "Break into world",
+            LeaveWorld => "Leave world",
+            LockWorld => "Lock world",
+            UnlockWorld => "Unlock world",
+            TogglePvp => "Toggle PvP",
+            TogglePvpTeams => "Toggle PvP teams",
+            ToggleFriendlyFire => "Toggle friendly fire",
+            ToggleDriedFinger => "Toggle dried finger",
+            GiveEmber => "Give ember",
+        }
+    }
+
     /// Whether only the host may perform this action (lock/unlock and the PvP/dried-finger
     /// toggles). The apply layer authorizes an inbound action by the **sender's** role using this,
     /// since the menu's local-UI gating doesn't constrain a packet from a peer.
@@ -485,6 +513,16 @@ mod tests {
             let msg = ModMessage::ConfigSync { generation: 1, settings: s };
             assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:03b} corrupted");
         }
+    }
+
+    #[test]
+    fn session_action_labels_are_unique_and_nonempty() {
+        let mut labels: Vec<&str> = SessionAction::ALL.iter().map(|a| a.label()).collect();
+        assert!(labels.iter().all(|l| !l.is_empty()), "every action needs a label");
+        labels.sort_unstable();
+        let n = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "action labels must be unique");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! `Mutex` guards it — contention is negligible (the main thread reads a field briefly each frame;
 //! the bridge writes only when it receives a sync).
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 
 use unseamless_core::config::Config;
 
@@ -41,6 +41,21 @@ pub fn with<R>(f: impl FnOnce(&Config) -> R) -> R {
 #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
 pub fn snapshot() -> Config {
     with(Clone::clone)
+}
+
+/// A **non-blocking** clone of the live config, for the overlay's Present thread (which must never
+/// block on the game thread). `None` if uninitialized or momentarily contended — the caller keeps
+/// its last snapshot and redraws from that, so a contended frame doesn't flicker.
+pub fn try_snapshot() -> Option<Config> {
+    let m = LIVE_CONFIG.get()?;
+    match m.try_lock() {
+        Ok(c) => Some(c.clone()),
+        // Poisoned: recover (a `Config` is a plain value, structurally intact) rather than never
+        // drawing the live values again.
+        Err(TryLockError::Poisoned(p)) => Some(p.into_inner().clone()),
+        // Contended: the game thread holds it briefly — keep the last snapshot this frame.
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 /// Replace the **whole** live config — e.g. after the bridge applies a received `ConfigSync`. No-op

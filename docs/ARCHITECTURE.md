@@ -109,10 +109,14 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
    runs our mod. Don't reintroduce a hand-written INI parser.
 2. **Settings live in one declarative registry** (`unseamless-core/settings.rs`). Each option is
    described once (label, kind, get/set) and that single declaration powers *both* the config
-   file and the in-game menu. Don't hand-wire per-option UI.
+   file and the in-game settings view. Don't hand-wire per-option UI. The in-game surface currently
+   shows settings **read-only** (coloured synced-vs-local via `SettingId::is_shared`), edited in the
+   TOML file; live editing from the UI is deliberately deferred (boot-vs-live + host-enforcement
+   questions), so the registry still drives the *display*, just not an editable menu yet.
 3. **Session actions are a menu, not items/hotkeys.** ERSC triggers host/join/leave via custom
    in-game **goods** (the `MODGOODS_*` items) and fixed hotkeys. We drive them through a menu
-   model (`unseamless-core/menu.rs`) rendered as an **ImGui overlay** (via hudhook; see
+   model (`unseamless-core/menu.rs`, the actions-only `Menu::actions_only`) rendered as an **ImGui
+   overlay** toggled by a hotkey (backtick) (via hudhook; see
    [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). We are **not** reproducing
    the custom goods, and we are **not** injecting a native pause-menu entry — the SDK exposes no
    API for that and it's heavy UI RE (an overlay is simpler and fully ours). If you see the
@@ -157,7 +161,9 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/state.rs` (process-global live `Config`; features read each frame, bridge/menu write) | — | done |
 | `coop/features/session_limit.rs` (write `session_player_limit_override` from live config) | 2 | done; apply rig-confirmed (incl. via a synced `ConfigSync`), >4-player effect needs a party |
 | `coop/bridge.rs` (dev debug bridge: live `Session` over loopback, applies received config) | — | done; apply rig-confirmed (`bridge` feature, off in release) |
-| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | **ships**: renders notifications under Proton/vkd3d (rig-confirmed); self-contained DLL (static C++ runtime); `menu.rs` wiring next. See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
+| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | **ships**: notifications (rig-confirmed) + a backtick-toggled utility window — interactive actions menu, read-only settings (synced/local), live log tail; deterministic input capture via hudhook `message_filter`. Self-contained DLL (static C++ runtime). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
+| `coop/logbuf.rs` (in-memory log ring buffer; `SharedLogger` teed via `CombinedLogger`) | — | done; overlay Log tab reads it non-blocking |
+| `coop/actionq.rs` (overlay→game-thread queue of requested `SessionAction`s) | — | done; drained by `features/session_actions` (logs + toasts; execution rig-gated) |
 | `coop/notify.rs` (process-global `Mutex<Notifications>`; features push, overlay reads non-blocking) | — | done |
 | `coop/features/scaling.rs` (apply) | 1/2 | mechanism decided (SpEffect rate rows behind `MultiPlayCorrectionParam` — see [SCALING.md](SCALING.md)); row/ID map rig-gated |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |

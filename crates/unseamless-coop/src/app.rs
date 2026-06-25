@@ -15,6 +15,7 @@ use fromsoftware_shared::SharedTaskImpExt;
 use crate::feature::{Feature, Tick};
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
+use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
 
 /// How long the init thread keeps trying for the task system before giving up.
@@ -47,8 +48,12 @@ pub fn install() {
 
     // Config before logging: the logger picks its level and writes its header from the config.
     let (config, notes) = crate::config::load(&base);
+    // The in-memory log ring buffer (overlay Log tab) must exist before the logger tees into it.
+    crate::logbuf::init();
     crate::logger::init(&config, &base);
     crate::notify::init();
+    // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
+    crate::actionq::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
         // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
@@ -60,15 +65,8 @@ pub fn install() {
             });
         }
     }
-    // A persistent "mod active" banner / version watermark: always visible while the overlay is up,
-    // and an end-to-end confirmation that the notification pipeline works.
-    crate::notify::with_mut(|n| {
-        n.set_banner(
-            "mod-active",
-            unseamless_core::notifications::Severity::Info,
-            format!("unseamless-coop v{}", env!("CARGO_PKG_VERSION")),
-        )
-    });
+    // The version is shown in the overlay window's title (and later the watermark), so no persistent
+    // banner — keep the notification surface for transient, actionable messages only.
     if base == std::path::Path::new(".") {
         log::warn!("could not locate our own module dir; using the process cwd for config/logs/mods");
     }
@@ -120,6 +118,8 @@ pub fn install() {
         Box::new(NotificationsTick::new()), // ages toasts once per frame, before producers push
         Box::new(SessionLimit::new()),
         Box::new(SessionObserver::new()),
+        // Drains overlay-requested session actions (a producer; after the ager above).
+        Box::new(SessionActionsTick::new()),
     ];
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];

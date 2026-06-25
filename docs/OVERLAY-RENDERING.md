@@ -250,12 +250,16 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
       the running game. Confirm it renders under the rig's Proton/vkd3d (the make-or-break test).
 - [ ] Capture the working Proton + vkd3d + game version in RIG-RUNBOOK.md; record any
       `VKD3D_DISABLE_EXTENSIONS` / swapchain-extension workaround needed.
-- [ ] Verify input capture: overlay open ⇒ game ignores movement/attack; overlay closed ⇒ normal. Watch
-      the keyboard-leak gotcha specifically.
+- [x] **Input capture solved deterministically** via hudhook's `message_filter`: while the utility
+      window is open we return `MessageFilter::InputAll` (game ignores movement/attack); closed, we
+      return `empty()`. hudhook always feeds imgui *before* consulting the filter, so backtick-to-close
+      still registers — the keyboard-leak gotcha doesn't apply. Rig-verify the actual in-game feel.
 - [ ] Ship `CSMenuManImp::display_status_message` for plain notifications *first* (works with zero
       overlay), as both an early win and the degraded fallback.
-- [ ] Wire `notifications.rs` into the render loop (shared state via `try_lock`; `tick` on a frame task).
-- [ ] Wire `menu.rs` into the render loop + input (nav/activate/adjust → `MenuOutcome`).
+- [x] Wire `notifications.rs` into the render loop (shared state via `try_lock`; `tick` on a frame task).
+- [x] Wire `menu.rs` (actions) into the render loop + input (nav/activate → `MenuOutcome` → `actionq` →
+      game thread). Settings are shown read-only (synced/local); live editing deferred. Plus a live Log
+      tab (`logbuf`). **Backtick** toggles the window; text enlarged via `set_window_font_scale`.
 - [ ] Decide egui vs imgui formally: recommend **imgui via hudhook**; update ARCHITECTURE.md wording.
 - [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.
 

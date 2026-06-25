@@ -3,4 +3,5 @@
 
 pub mod notifications;
 pub mod observer;
+pub mod session_actions;
 pub mod session_limit;

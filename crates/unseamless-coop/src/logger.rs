@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use simplelog::{ConfigBuilder, WriteLogger};
+use simplelog::{CombinedLogger, ConfigBuilder, SharedLogger, WriteLogger};
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::RunInfo;
 
@@ -72,7 +72,11 @@ pub fn init(config: &Config, base: &Path) {
     let _ = file.write_all(info.header_block().as_bytes());
 
     let log_config = ConfigBuilder::new().set_time_format_rfc3339().build();
-    let _ = WriteLogger::init(level, log_config, file);
+    // Tee into two sinks: the shareable run file, and an in-memory ring buffer the overlay's Log tab
+    // reads live (`crate::logbuf`). Same level for both, so the in-game log matches the file.
+    let loggers: Vec<Box<dyn SharedLogger>> =
+        vec![WriteLogger::new(level, log_config, file), crate::logbuf::ring_logger(level)];
+    let _ = CombinedLogger::init(loggers);
 
     log::info!("logging at {level} -> {}", path.display());
     if !config.debug.enabled {

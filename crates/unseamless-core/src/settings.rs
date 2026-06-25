@@ -35,6 +35,30 @@ pub enum SettingId {
     MaxPlayers = 14,
 }
 
+impl SettingId {
+    /// Whether this setting is part of the host-enforced **shared** subset — the fields the host
+    /// syncs across the whole party in co-op (mirrored in [`crate::protocol::SharedSettings`]) — as
+    /// opposed to a machine-local preference. The overlay uses this to colour "synced vs local". The
+    /// actual projection lives in `SharedSettings::from`; a test pins the two in agreement, so adding
+    /// a field there without updating this is caught.
+    pub fn is_shared(self) -> bool {
+        use SettingId::*;
+        matches!(
+            self,
+            EnemyHealth
+                | EnemyDamage
+                | EnemyPosture
+                | BossHealth
+                | BossDamage
+                | BossPosture
+                | AllowInvaders
+                | DeathDebuffs
+                | AllowSummons
+                | MaxPlayers
+        )
+    }
+}
+
 /// How a setting is edited in the menu, plus the get/set glue over [`Config`]. Keeping the
 /// accessors as function pointers means a [`Setting`] is plain data — trivially testable and
 /// `const`-friendly — while still reading/writing real config fields.
@@ -271,6 +295,31 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
         assert_eq!(n, 15, "registry size changed — update this if you added a setting");
+    }
+
+    #[test]
+    fn shared_settings_match_the_wire_subset() {
+        use SettingId::*;
+        // Exhaustively destructure SharedSettings (no `..`): ADDING a field there is a compile error
+        // here until this test and `SettingId::is_shared` are updated — that's what actually ties
+        // `is_shared` to the wire subset rather than to a parallel literal.
+        let crate::protocol::SharedSettings {
+            scaling: _, // expands to the 6 percent settings (enemy/boss × health/damage/posture)
+            allow_invaders: _,
+            death_debuffs: _,
+            allow_summons: _,
+            max_players: _,
+        } = crate::protocol::SharedSettings::from(&Config::default());
+
+        let expected = [
+            EnemyHealth, EnemyDamage, EnemyPosture, BossHealth, BossDamage, BossPosture,
+            AllowInvaders, DeathDebuffs, AllowSummons, MaxPlayers,
+        ];
+        let shared: Vec<SettingId> = registry().iter().map(|s| s.id).filter(|id| id.is_shared()).collect();
+        assert_eq!(shared.len(), expected.len(), "shared-setting count drifted from SharedSettings");
+        for s in registry() {
+            assert_eq!(s.id.is_shared(), expected.contains(&s.id), "{:?} shared flag wrong", s.id);
+        }
     }
 
     #[test]

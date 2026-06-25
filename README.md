@@ -3,9 +3,9 @@
 A from-scratch **Rust rewrite of the Elden Ring [Seamless Co-op](https://github.com/LukeYui/EldenRingSeamlessCoopRelease)
 mod** (ERSC), built on the [`fromsoftware-rs`](https://github.com/vswarte/fromsoftware-rs) SDK.
 
-The point of the rewrite is to turn ERSC's behavior into something you can read, extend, and
-build on in Rust, rather than a single opaque C++ DLL. It reuses the toolchain and runtime
-patterns proven in the sibling project [`er-crit-coop`](https://github.com/micthiesen/er-crit-coop).
+The point of the rewrite is to turn Seamless Co-op's behavior into something you can read,
+extend, and build on in Rust. It reuses the toolchain and runtime patterns proven in the sibling
+project [`er-crit-coop`](https://github.com/micthiesen/er-crit-coop).
 
 > Status: **framework in place, co-op core pending a play session.** A Cargo workspace with a
 > host-tested `unseamless-core` (config parsing + scaling math + the mod side-channel protocol,
@@ -117,6 +117,11 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`CLAUDE.m
 for the SDK, safety invariants, and the build-here / verify-in-game-elsewhere split.
 
 ## Independent Reimplementation
+
+Seamless Co-op by [LukeYui](https://github.com/LukeYui/EldenRingSeamlessCoopRelease) is the
+original that made co-op ELDEN RING what it is, and the inspiration for this project. This is an
+independent, from-scratch reimplementation built to hack on that behavior in Rust; full credit to
+the original authors for the design it learns from.
 
 This is a clean reimplementation written against the public `fromsoftware-rs` SDK. It is **not
 affiliated with, endorsed by, or derived from the source code of** the original Seamless Co-op
