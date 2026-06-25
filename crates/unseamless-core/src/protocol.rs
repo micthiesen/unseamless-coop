@@ -27,10 +27,18 @@ use crate::diagnostics::{LogLevel, LogRecord};
 /// Magic prefix identifying one of our side-channel frames.
 pub const MAGIC: [u8; 2] = *b"UC";
 /// Current wire version. Bump on any incompatible change; decoders reject mismatches. v2 added the
-/// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`; v3 added `max_players` to the
-/// `ConfigSync` payload; v4 added the `roam_anywhere` bool to the `ConfigSync` settings byte — so an
-/// older peer is rejected as `UnknownVersion` rather than silently misparsing the shifted payload.
+/// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`; v3 added `max_players`, which
+/// *shifted* the `ConfigSync` payload (an older decoder would misparse). v4 added `roam_anywhere` as a
+/// 4th bit in the existing settings byte — the wire length is unchanged, so an un-bumped older decoder
+/// would parse fine but silently *drop the new flag* and diverge on roam; the bump turns that silent
+/// setting-divergence into a clean `UnknownVersion` rejection instead.
 pub const VERSION: u8 = 4;
+
+/// Number of bools packed into the `ConfigSync` settings byte (`allow_invaders`, `death_debuffs`,
+/// `allow_summons`, `roam_anywhere`). Single-sources the count so the encode (`pack_bools`) and decode
+/// (`unpack_bools`) can't drift to different `N` and silently cross-map bits — a count change here is a
+/// compile error at both call sites until their arrays/destructures match.
+const SETTINGS_BOOL_COUNT: usize = 4;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
@@ -225,7 +233,12 @@ impl ModMessage {
                     w.extend_from_slice(&v.to_be_bytes());
                 }
                 w.extend_from_slice(&s.max_players.to_be_bytes());
-                w.push(pack_bools([s.allow_invaders, s.death_debuffs, s.allow_summons, s.roam_anywhere]));
+                w.push(pack_bools::<SETTINGS_BOOL_COUNT>([
+                    s.allow_invaders,
+                    s.death_debuffs,
+                    s.allow_summons,
+                    s.roam_anywhere,
+                ]));
             }
             ModMessage::SessionAction { seq, action } => {
                 w.push(tag::SESSION_ACTION);
@@ -276,7 +289,8 @@ impl ModMessage {
                 scaling.clamp_percentages();
                 // Same reasoning for the player cap: clamp to the config's accepted range.
                 let max_players = r.u32()?.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
-                let [allow_invaders, death_debuffs, allow_summons, roam_anywhere] = unpack_bools(r.u8()?);
+                let [allow_invaders, death_debuffs, allow_summons, roam_anywhere] =
+                    unpack_bools::<SETTINGS_BOOL_COUNT>(r.u8()?);
                 ModMessage::ConfigSync {
                     generation,
                     settings: SharedSettings {
@@ -322,6 +336,7 @@ fn pack_bools<const N: usize>(bits: [bool; N]) -> u8 {
 }
 
 fn unpack_bools<const N: usize>(byte: u8) -> [bool; N] {
+    debug_assert!(N <= 8); // parity with pack_bools; a bit index >= 8 would overflow the u8 shift
     std::array::from_fn(|i| byte & (1 << i) != 0)
 }
 
@@ -443,9 +458,14 @@ mod tests {
 
     #[test]
     fn shared_settings_apply_to_is_the_inverse_of_projection() {
+        // Set EVERY shared field to a non-default value, so a forgotten `apply_to` assignment for any
+        // one of them fails this test (default==default would otherwise hide the omission). The shared
+        // bools all default to `true`/`true`/`true`/`true`, so flip each to `false`.
         let mut host = crate::config::Config::default();
         host.gameplay.allow_invaders = false;
+        host.gameplay.death_debuffs = false;
         host.gameplay.allow_summons = false;
+        host.gameplay.roam_anywhere = false;
         host.scaling.enemy_health = 80;
         host.session.max_players = 3; // non-default + != the client's default, so apply must override
         let shared = SharedSettings::from(&host);

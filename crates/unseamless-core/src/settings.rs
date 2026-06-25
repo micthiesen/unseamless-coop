@@ -345,6 +345,20 @@ mod tests {
     }
 
     #[test]
+    fn roam_anywhere_toggle_binds_to_its_own_config_field() {
+        // Guards the newly-added RoamAnywhere get/set against a copy-paste pointing at a sibling field.
+        let reg = registry();
+        let s = reg.iter().find(|s| s.id == SettingId::RoamAnywhere).unwrap();
+        let mut cfg = Config::default();
+        cfg.gameplay.roam_anywhere = true;
+        cfg.gameplay.allow_summons = false; // a neighbour, set opposite to catch a mis-wired closure
+        s.adjust(&mut cfg, true);
+        assert!(!cfg.gameplay.roam_anywhere, "must write gameplay.roam_anywhere");
+        assert!(!cfg.gameplay.allow_summons, "must not touch a neighbouring field");
+        assert_eq!(s.display_value(&cfg), "Off");
+    }
+
+    #[test]
     fn range_steps_and_saturates() {
         let reg = registry();
         let s = reg.iter().find(|s| s.id == SettingId::EnemyHealth).unwrap();

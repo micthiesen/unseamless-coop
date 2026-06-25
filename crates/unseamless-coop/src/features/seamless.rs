@@ -2,17 +2,17 @@
 //! host's multiplay area — the defining "seamless" behavior.
 //!
 //! The game keeps co-op phantoms inside the host's area via `CSStayInMultiplayAreaWarpData`, warping
-//! anyone who steps out back. That struct exposes `disable_multiplay_restriction`, documented in the
-//! SDK as "set true to completely disable multiplay area restrictions, allowing the player to go
-//! anywhere on the map". We hold it to [`roam_anywhere`](unseamless_core::config::Gameplay::roam_anywhere)
-//! each frame — a single-`bool` **state write**, Arxan-immune (Arxan restores code, not runtime data),
-//! the same low-risk lever shape as [`session_limit`](crate::features::session_limit). Write-if-different
-//! + self-healing, since the warp data re-initializes when a session forms.
+//! anyone who steps out back. That struct exposes `disable_multiplay_restriction`, which the SDK
+//! documents as completely disabling multiplay area restrictions so the player can go anywhere on the
+//! map. We hold it to [`roam_anywhere`](unseamless_core::config::Gameplay::roam_anywhere) each frame —
+//! a single-`bool` **state write**, Arxan-immune (Arxan restores code, not runtime data), the same
+//! low-risk lever shape as [`session_limit`](crate::features::session_limit). Write-if-different +
+//! self-healing, since the warp data re-initializes when a session forms.
 //!
 //! Reads the **live** config (`crate::state`) so a `ConfigSync` from the host re-applies here without
 //! rebuilding the feature. The roam *effect* needs a live multiplayer session to observe (deferred to
-//! a rig/party run); the write itself is visible solo via the session observer's teardown probe, which
-//! logs `restriction_disabled`.
+//! a rig/party run); the write itself is visible solo via the session observer's change log, which
+//! prints `restriction_disabled` whenever the session state changes.
 
 use eldenring::cs::CSSessionManager;
 
@@ -45,6 +45,14 @@ impl Feature for SeamlessRoam {
         // `Some(true)` = we just wrote it; `Some(false)` = already correct; `None` = no session
         // manager live yet (pre-init / between loads) — retry next frame.
         let wrote = crate::sdk::with_instance_mut::<CSSessionManager, _>(|s| {
+            // Defensive null check before the deref: the SDK models the warp-data pointer as non-null
+            // (`OwnedPtr`, not `Option<OwnedPtr>`), but this deref isn't rig-validated yet (it only runs
+            // once a live session exists). Reading the address is not a deref, so skipping on null
+            // degrades gracefully instead of risking a crash. The session observer shares this read and
+            // the same assumption — the upcoming session rig run validates both.
+            if s.stay_in_multiplay_area_warp_data.as_ptr().is_null() {
+                return false;
+            }
             let warp = &mut s.stay_in_multiplay_area_warp_data;
             if warp.disable_multiplay_restriction == desired {
                 return false;
