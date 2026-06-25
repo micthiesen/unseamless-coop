@@ -51,6 +51,6 @@ forward_to_host = false
 # Dev side-channel bridge on loopback (diag/rig builds only). Drive it from the host with:
 #   scripts/harness.sh bridge-host 47700
 bridge_port = 47700
-# In-game overlay (diag/rig builds with the `overlay` feature). Runtime kill-switch: set false and
-# relaunch to disable if the DX12 present-hook misbehaves under Proton/vkd3d.
+# In-game overlay (on by default). Recovery kill-switch: set false and relaunch to run without it if
+# the DX12 present-hook ever misbehaves under Proton/vkd3d.
 overlay = true

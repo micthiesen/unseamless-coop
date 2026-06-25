@@ -29,7 +29,6 @@ mod guard;
 mod logger;
 mod mods;
 mod notify;
-#[cfg(feature = "overlay")]
 mod overlay;
 mod proxy;
 mod sdk;

@@ -202,8 +202,8 @@ all*:
   anything that goes wrong degrades gracefully and informs via the notifications model
   (`unseamless-core/notifications.rs`): config-clamp warnings, a peer **version mismatch**, a feature
   **panicking** (it's disabled for the session, the game keeps running), **connection lost**, etc.
-  Never kill the player's game for these. (The toast/banner *renderer* is the rig-gated overlay; the
-  model and severity mapping are host-tested today.)
+  Never kill the player's game for these. (The toast/banner model is host-tested; the renderer is the
+  in-game overlay, `coop/overlay.rs` — hudhook DX12 + imgui, shipping.)
 - **Rule of thumb: if we can't install, close loudly; if we're installed and something goes wrong,
   degrade and notify.** Don't reach for `guard::fatal` from inside a feature's `on_frame` — by then
   we're past install, so it's a toast/banner.

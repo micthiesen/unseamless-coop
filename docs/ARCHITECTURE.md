@@ -157,7 +157,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/state.rs` (process-global live `Config`; features read each frame, bridge/menu write) | — | done |
 | `coop/features/session_limit.rs` (write `session_player_limit_override` from live config) | 2 | done; apply rig-confirmed (incl. via a synced `ConfigSync`), >4-player effect needs a party |
 | `coop/bridge.rs` (dev debug bridge: live `Session` over loopback, applies received config) | — | done; apply rig-confirmed (`bridge` feature, off in release) |
-| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | renders notifications (banners + toasts) under Proton/vkd3d, rig-confirmed; `menu.rs` wiring next. `overlay` feature, see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
+| `coop/overlay.rs` (hudhook DX12 present-hook → imgui) | — | **ships**: renders notifications under Proton/vkd3d (rig-confirmed); self-contained DLL (static C++ runtime); `menu.rs` wiring next. See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) |
 | `coop/notify.rs` (process-global `Mutex<Notifications>`; features push, overlay reads non-blocking) | — | done |
 | `coop/features/scaling.rs` (apply) | 1/2 | mechanism decided (SpEffect rate rows behind `MultiPlayCorrectionParam` — see [SCALING.md](SCALING.md)); row/ID map rig-gated |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |

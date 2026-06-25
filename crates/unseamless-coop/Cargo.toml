@@ -14,13 +14,6 @@ crate-type = ["cdylib"]
 # drive the mod over a socket (the /test-loop skill's layer 3). Enabled for rig/diag builds, NEVER
 # release — a network listener has no place in a shipped DLL. `scripts/rig.sh` turns it on for diag.
 bridge = []
-# In-game overlay (hudhook DX12 present-hook → imgui). Gated for now while we prove it renders under
-# Proton/vkd3d on the rig; once confirmed it becomes a shipping feature (it's the renderer menu.rs /
-# notifications.rs need). `scripts/rig.sh` turns it on for diag.
-# NOTE before shipping overlay in release: hudhook vendors C++ (imgui-sys) so the DLL needs the mingw
-# runtime (libstdc++-6.dll, …). `rig.sh` copies those alongside for testing, but the release bundle
-# has no equivalent — resolve by static-linking the C++ runtime or shipping the DLLs in the bundle.
-overlay = ["dep:hudhook"]
 
 [dependencies]
 unseamless-core = { path = "../unseamless-core" }
@@ -43,6 +36,7 @@ windows = { version = "0.62", features = [
 log = { workspace = true }
 simplelog = { version = "0.12", default-features = false }
 
-# In-game overlay renderer (DX12 present-hook + imgui), behind the `overlay` feature. Vendors
-# minhook (C) + imgui-sys (C++), built for the windows target via mingw — cdylib-only, never core.
-hudhook = { version = "0.9", default-features = false, features = ["dx12"], optional = true }
+# In-game overlay renderer (DX12 present-hook + imgui). Vendors minhook (C) + imgui-sys (C++), built
+# for the windows target via mingw — cdylib-only, never core. The C++ runtime is linked statically
+# (see `build.rs` + `.cargo/config.toml` CXXSTDLIB) so the shipped DLL is self-contained.
+hudhook = { version = "0.9", default-features = false, features = ["dx12"] }

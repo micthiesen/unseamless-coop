@@ -39,9 +39,6 @@ pub fn with_mut(f: impl FnOnce(&mut Notifications)) {
 /// Read the notifications **without blocking** — for the overlay's Present-thread render loop. Runs
 /// `f` and returns its result, or `None` if uninitialized or the lock is momentarily held by the
 /// game thread (the caller skips drawing this frame).
-// The overlay is the only reader today (a future native renderer would be another), so this is
-// unused without that feature — real dead code is still caught in overlay builds, where it's used.
-#[cfg_attr(not(feature = "overlay"), allow(dead_code))]
 pub fn try_read<R>(f: impl FnOnce(&Notifications) -> R) -> Option<R> {
     let m = NOTIFICATIONS.get()?;
     match m.try_lock() {

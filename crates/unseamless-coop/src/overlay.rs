@@ -4,8 +4,8 @@
 //! [`notifications.rs`](unseamless_core::notifications) have always assumed: pure models whose docs
 //! say "a renderer draws these each frame". It draws the live notifications ([`crate::notify`]) —
 //! banners + toasts — and the menu later. The DX12 present-hook is rig-confirmed to render under
-//! Proton/vkd3d. Still gated behind the `overlay` cargo feature (and a `[debug] overlay` runtime
-//! kill-switch) until it ships in release.
+//! Proton/vkd3d, and ships (always compiled; the DLL statically links the C++ runtime so it's
+//! self-contained). `[debug] overlay` (default on) is a recovery kill-switch if vkd3d ever breaks it.
 //!
 //! Threading: hudhook draws on the game's **Present** thread, a different thread than our frame
 //! tasks. The rule (per OVERLAY-RENDERING.md): the overlay only **reads** shared app state and draws;

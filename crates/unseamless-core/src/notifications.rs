@@ -2,11 +2,11 @@
 //! (stay until cleared). Pure and host-tested — a renderer draws [`Notifications::toasts`] and
 //! [`Notifications::banners`] each frame.
 //!
-//! ## Rendering is separate (and not built yet)
-//! There's no UI surface wired up yet. The planned egui overlay (rig-gated) will draw these, or
-//! we forward them to the game's own on-screen announcement system once that's reverse-engineered
-//! (ERSC's `YKNX3_*` messages). This model is agnostic to which: features push notifications, and
-//! whatever renderer exists consumes the active set.
+//! ## Rendering is separate
+//! This model stays renderer-agnostic. The cdylib's overlay (`coop/overlay.rs`, hudhook DX12 + imgui)
+//! draws these today; we could also forward them to the game's own on-screen announcement system if
+//! that's reverse-engineered (ERSC's `YKNX3_*` messages). Features push notifications, and whatever
+//! renderer exists consumes the active set.
 //!
 //! ## Ownership & cadence (decide at wiring time)
 //! A single [`Notifications`] should live in the cdylib's app state and be `tick`ed **once per

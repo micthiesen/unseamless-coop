@@ -32,12 +32,6 @@ SEED_CONFIG="$ROOT/scripts/rig/seed-config.toml"
 MANAGED_FILES=(dinput8.dll start_protected_game.exe mod_loader_config.ini)
 # mods/ is snapshotted as a whole tree (handled separately from the flat files above).
 
-# mingw C++ runtime DLLs the overlay build (hudhook/imgui-sys, C++) dynamically needs — Wine resolves
-# a DLL's deps from its own directory, so `apply` drops these next to dinput8.dll when the installed
-# DLL imports them, and `restore` removes them. (A release build doesn't import them; they're skipped.)
-MINGW_BIN="${MINGW_BIN:-/usr/x86_64-w64-mingw32/bin}"
-MINGW_RUNTIME_DLLS=(libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll)
-
 # Our install marker, written by `apply`, removed by `restore`. Its presence means "our mod is
 # currently installed" — the backup guard reads it so it never snapshots our mod as the original.
 MARKER="$GAME_DIR/unseamless-coop/.rig-applied"
@@ -115,10 +109,6 @@ cmd_restore() {
     rsync -a --delete "$BACKUP_DIR/mods/" "$GAME_DIR/mods/"
     ok "restored mods/ (exact original set)"
   fi
-  # Remove any mingw runtime DLLs the overlay build dropped (they aren't part of the original stack).
-  for d in "${MINGW_RUNTIME_DLLS[@]}"; do
-    [[ -f "$GAME_DIR/$d" ]] && rm -f "$GAME_DIR/$d" && ok "removed runtime: $d"
-  done
   rm -f "$MARKER"
   ok "removed our install marker"
   say "Original stack is back. (Our unseamless-coop/ folder with logs is left in place; harmless — "
@@ -134,8 +124,8 @@ build() {
   if [[ "$profile" == release ]]; then
     ( cd "$ROOT" && cargo build --release )
   else
-    # diag is the rig build: include the dev side-channel bridge + the (still-gated) overlay.
-    ( cd "$ROOT" && cargo build --profile "$profile" --features unseamless-coop/bridge,unseamless-coop/overlay )
+    # diag is the rig build: include the dev side-channel bridge (the overlay is always-on now).
+    ( cd "$ROOT" && cargo build --profile "$profile" --features unseamless-coop/bridge )
   fi
 }
 
@@ -186,26 +176,6 @@ cmd_apply() {
   say "Installing our mod ($profile) into the game folder"
   cp -v "$dll" "$GAME_DIR/dinput8.dll"
   cp -v "$launcher" "$GAME_DIR/start_protected_game.exe"
-
-  # The overlay build links C++ (imgui), so the DLL needs the mingw runtime. Drop it alongside so
-  # Wine can load our dinput8.dll; without it LoadLibrary fails and the mod never loads. Skipped for
-  # release builds (which don't import it).
-  if command -v x86_64-w64-mingw32-objdump >/dev/null; then
-    # Capture first, then grep a here-string: `grep -q` on a pipe would SIGPIPE objdump and trip
-    # `set -o pipefail`, making the check spuriously false.
-    local imports; imports="$(x86_64-w64-mingw32-objdump -p "$GAME_DIR/dinput8.dll" 2>/dev/null || true)"
-    if grep -qi 'libstdc++' <<<"$imports"; then
-      # The DLL genuinely needs these — a missing one means LoadLibrary fails silently in-game (no
-      # log written), the hardest failure to spot remotely. So die loudly, don't skip.
-      for d in "${MINGW_RUNTIME_DLLS[@]}"; do
-        [[ -f "$MINGW_BIN/$d" ]] || die "overlay build needs $d, not found in $MINGW_BIN (set MINGW_BIN=...)"
-        cp "$MINGW_BIN/$d" "$GAME_DIR/$d"
-        ok "runtime: $d"
-      done
-    fi
-  else
-    warn "x86_64-w64-mingw32-objdump not found; can't verify the DLL's runtime deps — an overlay build may fail to load"
-  fi
 
   # mods/: rebuild from scratch each apply so the set is exactly what we asked for. Default = empty
   # (clean observation; the loader logs "no extra mods"). --with-mods pulls named mods out of the

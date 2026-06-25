@@ -79,9 +79,10 @@ pub struct Debug {
     /// Only honored in builds compiled with the cdylib's `bridge` cargo feature (rig/diag builds),
     /// never in release. A remote-input surface, so it binds `127.0.0.1` only and stays off by default.
     pub bridge_port: u16,
-    /// Install the in-game **overlay** (hudhook DX12 → imgui). A runtime kill-switch while we prove
-    /// the present-hook renders under Proton/vkd3d: only honored in builds with the `overlay` cargo
-    /// feature, so a black-screen can be disabled by editing the config (no rebuild). Off by default.
+    /// Install the in-game **overlay** (hudhook DX12 → imgui). On by default; this is a recovery
+    /// kill-switch — the DX12-over-vkd3d present-hook is the fragile part under Proton (a driver/
+    /// Proton update could black-screen it), so set this `false` and relaunch to run without the
+    /// overlay rather than being stuck.
     pub overlay: bool,
 }
 
@@ -92,7 +93,7 @@ impl Default for Debug {
             level: LogLevel::Info,
             forward_to_host: false,
             bridge_port: 0,
-            overlay: false,
+            overlay: true,
         }
     }
 }

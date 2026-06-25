@@ -7,3 +7,13 @@
 #   cargo test -p unseamless-core --target aarch64-apple-darwin     (or: scripts/test-core.sh)
 [build]
 target = "x86_64-pc-windows-gnu"
+
+# The overlay (hudhook → imgui-sys, C++) would otherwise make the cdylib emit a *dynamic* `stdc++`
+# link, pulling a `libstdc++-6.dll` dep the game's Wine prefix lacks (LoadLibrary then fails). Empty
+# CXXSTDLIB stops imgui-sys's `cc` from emitting it; `crates/unseamless-coop/build.rs` then links the
+# C++/GCC runtime statically, so the DLL is self-contained. Harmless for builds without C++.
+# `force = true` so a stray ambient `CXXSTDLIB` can't reintroduce the dynamic dep. Deliberately global
+# (applies to every crate): safe because `unseamless-coop` is the only C++ consumer in the workspace —
+# revisit if another crate ever pulls a `cc`-built C++ dependency.
+[env]
+CXXSTDLIB = { value = "", force = true }
