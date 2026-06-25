@@ -59,8 +59,8 @@ const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
 // own cursor when both show, and reads as a position dot when ours is the only one). Three concentric
 // discs — faint outer glow, dark contrast ring, bright core — so it stands out on any background.
 // Cyan-ish to complement ER's gold cursor. Tweak freely.
-/// Nudge the orb 2px right of the hotspot so it sits right under the tip of ER's cursor.
-const CURSOR_OFFSET_X: f32 = 2.0;
+/// Nudge the orb slightly right of the hotspot so it sits just under the tip of ER's cursor.
+const CURSOR_OFFSET_X: f32 = 0.75;
 const CURSOR_GLOW_R: f32 = 7.0;
 const CURSOR_RING_R: f32 = 4.0;
 const CURSOR_CORE_R: f32 = 2.5;
