@@ -181,6 +181,8 @@ impl Overlay {
         }
         ui.window(WINDOW_TITLE)
             .size([624.0, 380.0], Condition::FirstUseEver)
+            // Floor the size so it can't be dragged down to a uselessly tiny box (max unbounded).
+            .size_constraints([360.0, 240.0], [f32::MAX, f32::MAX])
             .position([80.0, 80.0], Condition::FirstUseEver)
             // NO_NAV: we drive selection ourselves (arrow keys → the `Menu` cursor / tabs), so disable
             // imgui's own keyboard nav for this window — hudhook force-enables nav each frame, so a
