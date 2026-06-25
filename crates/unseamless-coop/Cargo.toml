@@ -40,3 +40,8 @@ simplelog = { version = "0.12", default-features = false }
 # for the windows target via mingw — cdylib-only, never core. The C++ runtime is linked statically
 # (see `build.rs` + `.cargo/config.toml` CXXSTDLIB) so the shipped DLL is self-contained.
 hudhook = { version = "0.9", default-features = false, features = ["dx12"] }
+
+# x64 inline hooking — used to detour DirectInput8 `GetDeviceState` and zero the game's input while the
+# overlay is open (the game reads keyboard/mouse via DirectInput, which the WndProc-level message
+# filter can't intercept). Same hooker the SDK's `debug` crate uses for the same purpose.
+ilhook = { version = "2.2", features = ["x64"] }

@@ -22,7 +22,7 @@
 use std::ffi::c_void;
 
 use hudhook::hooks::dx12::ImguiDx12Hooks;
-use hudhook::imgui::{Condition, Context, FontId, FontSource, Io, Key, Ui, WindowFlags};
+use hudhook::imgui::{Condition, Context, FontConfig, FontId, FontSource, Io, Key, Ui, WindowFlags};
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
@@ -37,12 +37,10 @@ use windows::Win32::Foundation::HINSTANCE;
 const TOGGLE_KEY: Key = Key::GraveAccent;
 /// Window title — carries the version (the watermark will show it too). Doubles as the imgui window id.
 const WINDOW_TITLE: &str = concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION"));
-/// Crisp UI font: a printable-ASCII subset of Open Sans (OFL — see `assets/menu-font.OFL.txt`), with
-/// the family renamed so we don't ship a modified face under its reserved name. Baked at this size
-/// (not bitmap-scaled, which is why the default font looked blurry enlarged). Embedded so the DLL stays
-/// self-contained.
-const MENU_FONT: &[u8] = include_bytes!("../assets/menu-font.ttf");
-const MENU_FONT_SIZE: f32 = 19.0;
+/// Menu/log text size. We bake imgui's built-in ProggyClean bitmap font at this size with
+/// oversampling off (see `initialize`) — an integer multiple of its native 13px so it pixel-doubles
+/// crisply instead of blurring like a scaled font. No external asset; ProggyClean ships with imgui.
+const MENU_FONT_SIZE: f32 = 26.0;
 
 // One palette, referenced everywhere, so the severity / log-level / provenance colours can't silently
 // drift apart (they're the same swatches used in different contexts, on purpose).
@@ -107,6 +105,10 @@ impl Overlay {
                 self.menu.home(&session_context());
             }
         }
+        // Suppress the game's DirectInput while the window is open (keyboard/mouse don't reach the
+        // game, but imgui still gets them via hudhook's WndProc hook). Driven every frame so closing
+        // the window restores game input immediately.
+        crate::input::set_blocked(self.open);
         // Refresh the config snapshot non-blocking; keep the last good one on contention.
         if let Some(cfg) = crate::state::try_snapshot() {
             self.config = cfg;
@@ -253,11 +255,18 @@ impl ImguiRenderLoop for Overlay {
         let fonts = ctx.fonts();
         // Keep the compact default (ProggyClean) as the atlas default so the passive toasts stay small;
         // our crisp subset is an extra font pushed only for the utility window.
+        // Index 0 stays the compact 13px default for the passive toasts. The menu font is the SAME
+        // ProggyClean bitmap baked larger with oversampling off + pixel snap, so it stays crisp (a
+        // scaled bitmap is what looked blurry).
         fonts.add_font(&[FontSource::DefaultFontData { config: None }]);
-        let id = fonts.add_font(&[FontSource::TtfData {
-            data: MENU_FONT,
-            size_pixels: MENU_FONT_SIZE,
-            config: None,
+        let id = fonts.add_font(&[FontSource::DefaultFontData {
+            config: Some(FontConfig {
+                size_pixels: MENU_FONT_SIZE,
+                oversample_h: 1,
+                oversample_v: 1,
+                pixel_snap_h: true,
+                ..FontConfig::default()
+            }),
         }]);
         self.font = Some(SyncFontId(id));
     }
@@ -296,6 +305,8 @@ impl ImguiRenderLoop for Overlay {
         let ui: &Ui = ui;
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_inner(ui))).is_err() {
             self.disabled = true;
+            // Don't leave the game's input suppressed if we died mid-frame while open.
+            crate::input::set_blocked(false);
             log::error!("overlay: render panicked; overlay disabled for the rest of the session");
         }
     }

@@ -1,5 +1,9 @@
 # unseamless-coop
 
+> ⚠️ **Not ready for use.** This is a work in progress: the framework is in place but the actual
+> co-op layer isn't wired up yet, so it does **not** connect you to friends. Don't install it
+> expecting a working Seamless Co-op replacement. See the status note below.
+
 A from-scratch **Rust rewrite of the Elden Ring [Seamless Co-op](https://github.com/LukeYui/EldenRingSeamlessCoopRelease)
 mod** (ERSC), built on the [`fromsoftware-rs`](https://github.com/vswarte/fromsoftware-rs) SDK.
 

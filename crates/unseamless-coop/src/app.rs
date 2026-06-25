@@ -162,6 +162,15 @@ pub fn install() {
     // shared app state; never mutates game state.
     if config.debug.overlay {
         crate::overlay::install(module);
+        // Suppress the game's own DirectInput reads while the overlay is open — it polls keyboard/mouse
+        // via DirectInput, which bypasses the window message queue, so the overlay's message filter
+        // alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it fails.
+        match unsafe { crate::input::install() } {
+            Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
+            Err(e) => log::error!(
+                "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
+            ),
+        }
     }
 }
 

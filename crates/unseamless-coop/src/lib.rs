@@ -27,6 +27,7 @@ mod config;
 mod feature;
 mod features;
 mod guard;
+mod input;
 mod logbuf;
 mod logger;
 mod mods;
