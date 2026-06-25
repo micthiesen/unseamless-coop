@@ -90,9 +90,8 @@ no Steam. It proves the side-channel runs in-process before we bind it to the ga
 
 **How to drive it:**
 ```bash
-scripts/rig.sh apply && scripts/rig.sh launch     # diag build enables the `bridge` feature
-# once the log shows `bridge listening on 127.0.0.1:47700`:
-scripts/harness.sh bridge-host 47700              # acts as host, pushes a config into the mod
+scripts/rig.sh apply && scripts/rig.sh launch --wait   # --wait blocks until the framework is up
+scripts/harness.sh bridge-host 47700                   # acts as host, pushes a config into the mod
 ```
 The mod runs as the **client**; `bridge-host` is the authoritative host and pushes a config (it sets
 `max_players=4`). The mod applies the received `ConfigSync` into its live config (`coop/state.rs`),
@@ -141,10 +140,13 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
   **`diag`**: symbols + debug-assertions for readable panic backtraces) and install. `--with-mods`
   pulls named mods out of the snapshot to test the parent-loader; default leaves `mods/` empty so the
   observer log is unambiguous (`no extra mods …`).
-- `rig.sh launch` — `steam -applaunch 1245620` (uses the configured gamescope launch options; our
-  launcher sets `UNSEAMLESS_LAUNCH`, so the EAC guard passes and the game starts outside EAC).
+- `rig.sh launch [--wait]` — `steam -applaunch 1245620` (uses the configured gamescope launch options;
+  our launcher sets `UNSEAMLESS_LAUNCH`, so the EAC guard passes and the game starts outside EAC).
+  **`--wait` blocks until the framework comes up and prints the install lines** — use it instead of
+  hand-rolling a log-poll loop.
 - `rig.sh log [-f]` — print/follow the latest `unseamless-coop/logs/unseamless_coop-*.log`.
-- `rig.sh kill` — `pkill -f '[e]ldenring.exe'` (bracket trick; plain `pkill` matches itself).
+- `rig.sh kill` — stops the game **and** the launcher, escalating SIGTERM→SIGKILL and verifying (Wine
+  ignores SIGTERM, so this is reliable — don't add your own `pkill -9`).
 - `rig.sh cycle [apply-opts]` — apply → launch → wait for the install/heartbeat lines. The solo
   smoke test in one shot.
 - `rig.sh restore` — roll back to the original stack (explicit).

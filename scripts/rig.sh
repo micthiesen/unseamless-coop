@@ -211,12 +211,37 @@ cmd_apply() {
 }
 
 # ---- run helpers ---------------------------------------------------------------------------------
+# Wait up to `$1` seconds for a NEW run log (newer than `$2`) whose framework has come up, then print
+# the install/heartbeat lines. Returns 0 on success. Used by `launch --wait` and `cycle`, so the poll
+# loop lives in one place instead of being hand-rolled each time.
+wait_for_framework() {
+  local timeout="$1" before="${2:-}" deadline=$((SECONDS + timeout)) log=""
+  say "Waiting up to ${timeout}s for the framework to come up (title screen is enough)…"
+  while (( SECONDS < deadline )); do
+    log="$(latest_log || true)"
+    if [[ -n "$log" && "$log" != "$before" ]] \
+       && grep -q "registered feature 'session-observer'" "$log" 2>/dev/null; then
+      ok "framework is up — $log"
+      grep -E "loaded config|wrote default config|extra mod|loaded mod|registered feature|override set|bridge listening|overlay:|observer" \
+        "$log" | sed 's/^/      /'
+      return 0
+    fi
+    sleep 3
+  done
+  warn "didn't see the framework come up within ${timeout}s."
+  [[ -n "$log" ]] && say "  latest log: $log" || say "  (no new log written — did the game launch?)"
+  return 1
+}
+
 cmd_launch() {
+  local do_wait=0; [[ "${1:-}" == "--wait" ]] && do_wait=1
   need_game_dir
   applied || warn "our mod isn't applied (no marker) — launching whatever is currently installed."
+  local before; before="$(latest_log || true)"  # capture BEFORE launch so --wait spots the new run
   say "Launching ELDEN RING via Steam (appid $APPID; uses your gamescope launch options)"
   steam -applaunch "$APPID" >/dev/null 2>&1 &
   ok "handed off to Steam. Our launcher sets UNSEAMLESS_LAUNCH and starts the game outside EAC."
+  [[ $do_wait -eq 1 ]] && wait_for_framework 150 "$before"
 }
 
 latest_log() { ls -1t "$LOG_DIR"/unseamless_coop-*.log 2>/dev/null | head -1; }
@@ -230,8 +255,23 @@ cmd_log() {
 }
 
 cmd_kill() {
-  # Bracket trick so pkill doesn't match its own command line (classic false positive).
-  if pkill -f '[e]ldenring.exe'; then ok "sent SIGTERM to eldenring.exe"; else warn "eldenring.exe not running"; fi
+  # The game + our launcher run under Wine/Proton, where SIGTERM is routinely ignored — so escalate
+  # to SIGKILL and verify, instead of leaving stragglers that the next launch trips over. Kills both
+  # the game and the launcher. Bracket trick so pkill doesn't match its own command line.
+  local procs=('[e]ldenring.exe' '[s]tart_protected_game')
+  if ! pgrep -f '[e]ldenring.exe' >/dev/null && ! pgrep -f '[s]tart_protected_game' >/dev/null; then
+    warn "game not running"
+    return 0
+  fi
+  for p in "${procs[@]}"; do pkill -f "$p" 2>/dev/null || true; done          # SIGTERM
+  for _ in 1 2 3; do pgrep -f '[e]ldenring.exe' >/dev/null || break; sleep 1; done
+  for p in "${procs[@]}"; do pkill -9 -f "$p" 2>/dev/null || true; done        # SIGKILL stragglers
+  sleep 1
+  if pgrep -f '[e]ldenring.exe' >/dev/null; then
+    warn "eldenring.exe STILL running after SIGKILL — investigate"
+  else
+    ok "game stopped"
+  fi
 }
 
 # ---- status --------------------------------------------------------------------------------------
@@ -262,22 +302,8 @@ cmd_status() {
 # observation run; 'rig.sh kill' when done.
 cmd_cycle() {
   cmd_apply "$@"
-  cmd_launch
-  say "Waiting up to 120s for the framework to come up (title screen is enough)…"
-  local deadline=$((SECONDS + 120)) log=""
-  while (( SECONDS < deadline )); do
-    log="$(latest_log || true)"
-    if [[ -n "$log" ]] && grep -q "registered feature 'session-observer'" "$log" 2>/dev/null; then
-      ok "framework is up:"
-      grep -E "loaded config|wrote default config|extra mod|loaded mod|registered feature|observer" "$log" | sed 's/^/      /'
-      say "Game is running. Drive your test, then: scripts/rig.sh log -f   /   scripts/rig.sh kill"
-      return 0
-    fi
-    sleep 3
-  done
-  warn "didn't see the framework come up within 120s. Check the log:"
-  [[ -n "$log" ]] && say "  $log" || say "  (no log written yet — did the game launch?)"
-  return 1
+  cmd_launch --wait \
+    && say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
 }
 
 # ---- dispatch ------------------------------------------------------------------------------------
@@ -296,7 +322,8 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
         --keep-config      Don't overwrite an existing on-disk config (default: write the seed).
   restore                EXPLICIT rollback to the original stack. The only thing that un-applies.
   status                 Show snapshot state, what's installed, and the latest run log.
-  launch                 steam -applaunch (uses your configured gamescope launch options).
+  launch [--wait]        steam -applaunch (uses your gamescope launch options). --wait blocks until
+                         the framework comes up and prints the install lines.
   log [-f]               Print (or -f follow) the latest run log.
   kill                   Stop the game (pkill eldenring.exe).
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
