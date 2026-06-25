@@ -55,6 +55,17 @@ const MENU_FONT_SIZE: f32 = 16.0;
 /// The utility window's tabs, in order. Left/Right arrows cycle through them.
 const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
 
+// Software-cursor marker: a small faded orb drawn at the mouse hotspot (so it sits at the tip of ER's
+// own cursor when both show, and reads as a position dot when ours is the only one). Three concentric
+// discs — faint outer glow, dark contrast ring, bright core — so it stands out on any background.
+// Cyan-ish to complement ER's gold cursor. Tweak freely.
+const CURSOR_GLOW_R: f32 = 7.0;
+const CURSOR_RING_R: f32 = 4.0;
+const CURSOR_CORE_R: f32 = 2.5;
+const CURSOR_GLOW: [f32; 4] = [0.55, 0.85, 1.0, 0.16];
+const CURSOR_RING: [f32; 4] = [0.0, 0.0, 0.0, 0.50];
+const CURSOR_CORE: [f32; 4] = [0.65, 0.90, 1.0, 0.95];
+
 // One palette, referenced everywhere, so the severity / log-level / provenance colours can't silently
 // drift apart (they're the same swatches used in different contexts, on purpose).
 const BLUE: [f32; 3] = [0.62, 0.80, 1.0];
@@ -133,6 +144,7 @@ impl Overlay {
         self.draw_notifications(ui);
         if self.open {
             self.draw_utility_window(ui);
+            draw_cursor_marker(ui);
         }
         // Retry any actions the queue refused last frame.
         self.flush_pending();
@@ -310,10 +322,9 @@ impl ImguiRenderLoop for Overlay {
     }
 
     fn before_render<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
-        // Draw imgui's own cursor while the window is open — during gameplay the OS cursor is hidden,
-        // so otherwise the mouse is invisible. (Whether the cursor can actually *move* during gameplay
-        // is a separate, game-side capture problem — see `message_filter`; keyboard nav doesn't need it.)
-        ctx.io_mut().mouse_draw_cursor = self.open;
+        // Keep imgui's own arrow cursor off — we draw our own marker (`draw_cursor_marker`) at the mouse
+        // hotspot instead, which complements ER's cursor rather than clashing with a second arrow.
+        ctx.io_mut().mouse_draw_cursor = false;
     }
 
     fn message_filter(&self, _io: &Io) -> MessageFilter {
@@ -354,6 +365,21 @@ impl ImguiRenderLoop for Overlay {
 /// have no live session, so this is the not-in-session default — only Host / Join / Break-in enabled.
 fn session_context() -> SessionContext {
     SessionContext::default()
+}
+
+/// Draw our software cursor — a small faded orb at the mouse hotspot, on the foreground draw list (over
+/// everything). At the same point as ER's cursor, so it lands at the tip of ER's arrow when both show,
+/// and reads as a position dot when ours is the only cursor.
+fn draw_cursor_marker(ui: &Ui) {
+    let p = ui.io().mouse_pos;
+    // imgui parks the mouse at a large-negative sentinel when it has no valid position; skip then.
+    if !p[0].is_finite() || !p[1].is_finite() || p[0] < -1.0e4 || p[1] < -1.0e4 {
+        return;
+    }
+    let dl = ui.get_foreground_draw_list();
+    dl.add_circle(p, CURSOR_GLOW_R, CURSOR_GLOW).filled(true).build();
+    dl.add_circle(p, CURSOR_RING_R, CURSOR_RING).filled(true).build();
+    dl.add_circle(p, CURSOR_CORE_R, CURSOR_CORE).filled(true).build();
 }
 
 /// Enter (main or keypad) pressed this frame, no key-repeat — one activation per physical press.
