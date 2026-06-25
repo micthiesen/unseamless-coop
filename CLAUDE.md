@@ -85,6 +85,13 @@ stacked branches, no PR descriptions. Keep commits small and well-described, kee
 (`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
 pass before pushing). This overrides the global draft-PR/stacking workflow.
 
+**Ultracheck after each holistic chunk.** When a meaningful, self-contained chunk of work is done
+(a feature wired end to end, a subsystem, a refactor), run `/ultracheck` on it before moving on,
+then apply the surviving findings. Do **not** carve work into smaller pieces to fit this cadence —
+larger holistic chunks review better than a trickle of fragments, so build the whole coherent thing
+first, then ultracheck the lot. (Unlike the global stacking workflow, we ship one chunk per commit
+to `main`, so the ultracheck happens per-chunk, not per-PR.)
+
 ## Docs & naming
 
 - The project name is always **`unseamless-coop`** — lowercase, hyphenated. Never title-case or
