@@ -76,6 +76,20 @@ pub fn install() {
     // the bridge writes it when it applies a received ConfigSync. Do this before anything reads it.
     crate::state::init(config.clone());
 
+    // Co-op save isolation, installed as early as possible — before the game opens its save (the
+    // title/load screen is the first read). Redirects ER0000.sl2 -> ER0000.<ext> so co-op never
+    // touches the player's single-player save. This is **safety-critical**: if the user wants
+    // isolation (the default) and we can't install the hook, refuse to run rather than risk writing
+    // co-op progress into their vanilla save. A disabled config (ext = sl2/empty) makes this a no-op.
+    if let Err(e) = unsafe { crate::saves::install(&config.save.file_extension) } {
+        log::error!("co-op saves: {e}");
+        crate::guard::fatal(&format!(
+            "unseamless-coop couldn't protect your save file ({e}).\n\n\
+             To keep co-op from overwriting your single-player save, the game will now close. \
+             Please try launching again."
+        ));
+    }
+
     // Reject an empty/too-short co-op password (the session key). The generated default always
     // passes, so this only fires on a deliberately-cleared password — fail loudly, like the EAC
     // guard, since a weak key risks accidental or trivially-joinable sessions.

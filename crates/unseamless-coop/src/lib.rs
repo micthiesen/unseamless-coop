@@ -36,6 +36,7 @@ mod overlay;
 mod patch;
 mod playstate;
 mod proxy;
+mod saves;
 mod sdk;
 mod state;
 

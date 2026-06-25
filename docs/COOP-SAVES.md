@@ -6,11 +6,20 @@ does this so a character's co-op progress and its single-player progress live in
 we want the same isolation, and for us it is **safety-critical**: the failure mode is corrupting or
 overwriting the player's vanilla save, which is the one thing this feature exists to prevent.
 
-This is a **research note**, not an implemented feature. Game-internal claims are grounded in the pinned
-`fromsoftware-rs` SDK (cited), in the **MIT-licensed `vswarte/alt-saves`** mod (the SDK author's own
-save-location changer — read for *mechanism*, re-derived here per [CLAUDE.md](../CLAUDE.md) >
-Clean-room), or are behavioral observations to confirm on the rig. ERSC itself is closed + Themida, so
-its exact code is inference; the *behavior* (separate `.co2`) is well documented by its own FAQ.
+> **Status: implemented and rig-confirmed (2026-06).** The decision/transform is the host-tested
+> [`unseamless_core::saves`](../crates/unseamless-core/src/saves.rs); the `CreateFileW` detour is
+> [`coop/saves.rs`](../crates/unseamless-coop/src/saves.rs), installed early in
+> [`app::install`](../crates/unseamless-coop/src/app.rs). A solo rig run confirmed the whole chain: the
+> hook installs, reads redirect (`ER0000.sl2 -> ER0000.<ext>`), the backup redirects
+> (`.sl2.bak -> .<ext>.bak`), a fresh `ER0000.<ext>` is **written**, and the vanilla `ER0000.sl2`
+> (and the machine's real ERSC `.co2`) are left **untouched** — exactly the isolation this exists for.
+> The rig seed config uses a distinct extension (`uco`) so testing can't write the real ERSC `.co2`.
+
+Originally a research note; the mechanism below is what shipped. Game-internal claims are grounded in the
+pinned `fromsoftware-rs` SDK (cited), in the **MIT-licensed `vswarte/alt-saves`** mod (the SDK author's
+own save-location changer — read for *mechanism*, re-derived here per [CLAUDE.md](../CLAUDE.md) >
+Clean-room), or are behavioral observations confirmed on the rig. ERSC itself is closed + Themida, so its
+exact code is inference; the *behavior* (separate `.co2`) is well documented by its own FAQ.
 
 > Hard project rule this feature must respect: the mod **must not touch `regulation.bin`**
 > ([CLAUDE.md](../CLAUDE.md) > Safety/legitimacy). `alt-saves` ships a second, unrelated patch that

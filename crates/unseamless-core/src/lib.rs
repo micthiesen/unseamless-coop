@@ -23,6 +23,7 @@ pub mod menu;
 pub mod notifications;
 pub mod peer;
 pub mod protocol;
+pub mod saves;
 pub mod scaling;
 pub mod settings;
 pub mod transport;
