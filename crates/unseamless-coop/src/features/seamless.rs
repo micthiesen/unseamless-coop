@@ -43,18 +43,16 @@ impl Feature for SeamlessRoam {
     fn on_frame(&mut self, _tick: Tick) {
         let desired = crate::state::with(|c| c.gameplay.roam_anywhere);
 
-        // `Some(true)` = we just wrote it; `Some(false)` = already correct; `None` = no session
-        // manager live yet (pre-init / between loads) — retry next frame.
+        // `Some(true)` = we just wrote it; `Some(false)` = already correct (or the warp data isn't
+        // wired yet); `None` = no session manager live yet — retry next frame either way.
         let wrote = crate::sdk::with_instance_mut::<CSSessionManager, _>(|s| {
-            // Defensive null check before the deref: the SDK models the warp-data pointer as non-null
-            // (`OwnedPtr`, not `Option<OwnedPtr>`), but this deref isn't rig-validated yet (it only runs
-            // once a live session exists). Reading the address is not a deref, so skipping on null
-            // degrades gracefully instead of risking a crash. The session observer shares this read and
-            // the same assumption — the upcoming session rig run validates both.
-            if s.stay_in_multiplay_area_warp_data.as_ptr().is_null() {
+            // `session::tether_mut` null-guards the warp-data `OwnedPtr` (it may be unwired pre-session;
+            // reading the address is not a deref) — the one place that guard lives, shared with the read
+            // side (observer + diag report). `None` -> skip this frame. (Deref soundness once non-null
+            // is rig-gated, like the read side.)
+            let Some(warp) = crate::session::tether_mut(s) else {
                 return false;
-            }
-            let warp = &mut s.stay_in_multiplay_area_warp_data;
+            };
             if warp.disable_multiplay_restriction == desired {
                 return false;
             }

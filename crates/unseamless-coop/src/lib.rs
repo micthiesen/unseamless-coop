@@ -39,6 +39,7 @@ mod playstate;
 mod proxy;
 mod saves;
 mod sdk;
+mod session;
 mod state;
 
 /// Our own module handle, captured in `DllMain`, so the init thread can find the game folder (and

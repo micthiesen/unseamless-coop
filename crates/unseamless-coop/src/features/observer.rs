@@ -33,6 +33,7 @@ use eldenring::cs::{CSSessionManager, CSTaskGroupIndex};
 use unseamless_core::util::{FrameThrottle, Latch};
 
 use crate::feature::{Feature, Tick};
+use crate::session::SessionView;
 
 pub struct SessionObserver {
     /// Fires only when the watched session state changes, so we log transitions not every frame.
@@ -67,13 +68,36 @@ struct Snapshot {
     /// mismatch warp. Watch what it is mid-session vs. when a phantom gets warped home.
     start_area_id: u32,
     /// `warp_request_delay > 0` — a tether warp is pending (player is being pulled back into the
-    /// area). The actual countdown is logged raw, not diffed (it ticks every frame).
+    /// area). The raw countdown is logged, not diffed (it's task-driven and would churn the latch).
     warp_pending: bool,
     /// `is_warp_possible` — game's gate on whether the tether warp may fire this frame.
     warp_possible: bool,
     /// `player_fade_tracker.len()` — remote players currently faded out mid-warp; a teardown-ish
     /// signal distinct from the roster count.
     fading_players: usize,
+}
+
+impl Snapshot {
+    /// Fold a [`SessionView`] into the discrete diff snapshot. When the tether isn't wired yet
+    /// (`tether == None`, pre-session) its fields read as neutral defaults — a well-defined snapshot
+    /// that never dereferences a null pointer. (The latch then fires on the first real change, e.g.
+    /// lobby/protocol advancing; the tether values folding in only fires it if they differ from the
+    /// defaults.)
+    fn from_view(v: &SessionView) -> Self {
+        let t = v.tether.as_ref();
+        Snapshot {
+            lobby: v.lobby_state as u32,
+            protocol: v.protocol_state as u32,
+            players: v.players,
+            limit: v.player_limit,
+            limit_override: v.limit_override,
+            restriction_disabled: t.is_some_and(|t| t.restriction_disabled),
+            start_area_id: t.map_or(0, |t| t.start_area_id),
+            warp_pending: t.is_some_and(|t| t.warp_pending()),
+            warp_possible: t.is_some_and(|t| t.warp_possible),
+            fading_players: t.map_or(0, |t| t.fading_players),
+        }
+    }
 }
 
 impl SessionObserver {
@@ -103,22 +127,11 @@ impl SessionObserver {
     /// Log the session state if it changed since last frame, tagging the frame so the order of
     /// transitions leading up to a teardown is recoverable from the log.
     fn observe(&mut self, session: &CSSessionManager, frame: u64) {
-        let players = session.players.len();
-        // `OwnedPtr` derefs to the warp data; this is the "stay in multiplay area" tether governance.
-        let warp = &*session.stay_in_multiplay_area_warp_data;
-        let warp_delay = warp.warp_request_delay;
-        let snapshot = Snapshot {
-            lobby: session.lobby_state as u32,
-            protocol: session.protocol_state as u32,
-            players,
-            limit: session.session_player_limit,
-            limit_override: session.session_player_limit_override,
-            restriction_disabled: warp.disable_multiplay_restriction,
-            start_area_id: warp.multiplay_start_area_id,
-            warp_pending: warp_delay > 0.0,
-            warp_possible: warp.is_warp_possible,
-            fading_players: warp.player_fade_tracker.len(),
-        };
+        // Read the session the shared way (the warp-data deref is null-guarded once, in `session`),
+        // then fold it into the discrete diff snapshot.
+        let view = crate::session::read(session);
+        let players = view.players;
+        let snapshot = Snapshot::from_view(&view);
 
         // Capture the prior roster size before the latch overwrites it, to detect a shrink below.
         let prev_players = self.state.last().map(|s| s.players);
@@ -126,6 +139,21 @@ impl SessionObserver {
         if !self.state.changed(&snapshot) {
             return;
         }
+
+        // One tether rendering for both log lines — distinguishing "not wired yet" from a wired
+        // baseline (the diag report makes the same distinction), so the rig log isn't misread.
+        let tether = match view.tether.as_ref() {
+            Some(t) => format!(
+                "restriction_disabled={} start_area_id={} warp_pending={} warp_delay={:.2} warp_possible={} fading={}",
+                t.restriction_disabled,
+                t.start_area_id,
+                t.warp_pending(),
+                t.warp_request_delay,
+                t.warp_possible,
+                t.fading_players,
+            ),
+            None => "(not initialized)".to_string(),
+        };
 
         // Loud, greppable teardown marker: the roster shrank, i.e. a phantom left. This is the
         // event the probe exists to catch, pinned to the tether state at that instant — if a tether
@@ -135,27 +163,15 @@ impl SessionObserver {
         if let Some(prev) = prev_players
             && players < prev
         {
-            log::warn!(
-                "TEARDOWN @frame {frame}: roster {prev} -> {players} | restriction_disabled={} start_area_id={} warp_pending={} warp_delay={warp_delay:.2} warp_possible={} fading={}",
-                snapshot.restriction_disabled,
-                snapshot.start_area_id,
-                snapshot.warp_pending,
-                snapshot.warp_possible,
-                snapshot.fading_players,
-            );
+            log::warn!("TEARDOWN @frame {frame}: roster {prev} -> {players} | {tether}");
         }
 
         log::info!(
-            "session change @frame {frame}: lobby={:?} protocol={:?} players={players} limit={} override={} | tether: restriction_disabled={} start_area_id={} warp_pending={} warp_delay={warp_delay:.2} warp_possible={} fading={}",
-            session.lobby_state,
-            session.protocol_state,
-            session.session_player_limit,
-            session.session_player_limit_override,
-            snapshot.restriction_disabled,
-            snapshot.start_area_id,
-            snapshot.warp_pending,
-            snapshot.warp_possible,
-            snapshot.fading_players,
+            "session change @frame {frame}: lobby={:?} protocol={:?} players={players} limit={} override={} | tether: {tether}",
+            view.lobby_state,
+            view.protocol_state,
+            view.player_limit,
+            view.limit_override,
         );
         for (i, p) in session.players.iter().enumerate() {
             // Pseudonymous tag, not the raw 64-bit Steam ID: this log is shareable, and a raw

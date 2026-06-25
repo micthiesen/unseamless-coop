@@ -24,19 +24,10 @@ use crate::feature::{Feature, Tick};
 /// is assembled — so a missing singleton (pre-init / title screen) degrades to a "not live" note
 /// rather than an empty report.
 pub fn build_report(title: &str) -> DiagnosticReport {
-    // Gather live state up front (keeps report assembly free of interleaved singleton borrows).
-    let session = crate::sdk::with_instance::<CSSessionManager, _>(|s| SessionSnap {
-        lobby: format!("{:?}", s.lobby_state),
-        protocol: format!("{:?}", s.protocol_state),
-        players: s.players.len(),
-        limit: s.session_player_limit,
-        limit_override: s.session_player_limit_override,
-        // Null-guard the warp-data OwnedPtr deref (same as `seamless.rs`): a live CSSessionManager
-        // doesn't guarantee the warp data is wired, and this report runs on the feature-panic dump —
-        // a torn-state moment — so degrade rather than risk a null deref turning a disable into a crash.
-        roam_unrestricted: (!s.stay_in_multiplay_area_warp_data.as_ptr().is_null())
-            .then(|| s.stay_in_multiplay_area_warp_data.disable_multiplay_restriction),
-    });
+    // Gather live state up front (keeps report assembly free of interleaved singleton borrows). The
+    // session read (incl. the null-guarded warp-data deref this report needs on the feature-panic
+    // dump) is shared with the observer via `crate::session`.
+    let session = crate::sdk::with_instance::<CSSessionManager, _>(crate::session::read);
     let in_gameplay = crate::playstate::in_gameplay();
     let features = crate::app::feature_status();
 
@@ -47,15 +38,18 @@ pub fn build_report(title: &str) -> DiagnosticReport {
 
     let sec = r.section("session");
     match session {
-        Some(s) => {
-            sec.field("lobby_state", s.lobby)
-                .field("protocol_state", s.protocol)
-                .field("players", s.players)
-                .field("player_limit", s.limit)
-                .field("limit_override", s.limit_override)
+        Some(v) => {
+            sec.field("lobby_state", format!("{:?}", v.lobby_state))
+                .field("protocol_state", format!("{:?}", v.protocol_state))
+                .field("players", v.players)
+                .field("player_limit", v.player_limit)
+                .field("limit_override", v.limit_override)
                 .field(
                     "roam_unrestricted",
-                    s.roam_unrestricted.map_or_else(|| "(warp data not initialized)".to_string(), |b| b.to_string()),
+                    v.tether.as_ref().map_or_else(
+                        || "(warp data not initialized)".to_string(),
+                        |t| t.restriction_disabled.to_string(),
+                    ),
                 );
         }
         None => {
@@ -86,16 +80,6 @@ pub fn build_report(title: &str) -> DiagnosticReport {
 /// panic, and from the periodic probe.
 pub fn dump(title: &str) {
     log::info!("\n{}", build_report(title).render());
-}
-
-struct SessionSnap {
-    lobby: String,
-    protocol: String,
-    players: usize,
-    limit: u32,
-    limit_override: u32,
-    /// `None` = the warp-data pointer wasn't initialized (guarded deref).
-    roam_unrestricted: Option<bool>,
 }
 
 /// The requestable probe features enabled by `[debug.probes]`, to append to the feature set. Empty
