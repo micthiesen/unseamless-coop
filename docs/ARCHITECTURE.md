@@ -112,7 +112,8 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
    file and the in-game menu. Don't hand-wire per-option UI.
 3. **Session actions are a menu, not items/hotkeys.** ERSC triggers host/join/leave via custom
    in-game **goods** (the `MODGOODS_*` items) and fixed hotkeys. We drive them through a menu
-   model (`unseamless-core/menu.rs`) rendered as an **ImGui overlay**. We are **not** reproducing
+   model (`unseamless-core/menu.rs`) rendered as an **ImGui overlay** (via hudhook; see
+   [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). We are **not** reproducing
    the custom goods, and we are **not** injecting a native pause-menu entry — the SDK exposes no
    API for that and it's heavy UI RE (an overlay is simpler and fully ours). If you see the
    `MODGOODS_*`/item machinery in FEATURES.md, it's catalogued for reference, not as a build target.
@@ -153,10 +154,11 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/app.rs`, `feature.rs` | — | done |
 | `coop/config.rs` (disk load) | 1 | done |
 | `coop/features/observer.rs` | 2 | done (read-only); logs `session_player_limit_override` |
-| `coop/features/session_limit.rs` (write `session_player_limit_override`) | 2 | done; write rig-confirmed solo, >4-player effect needs a party |
-| `coop/bridge.rs` (dev debug bridge: live `Session` over loopback) | — | done; rig-confirmed (`bridge` feature, off in release) |
-| `coop/features/menu_overlay.rs` (DX12 hook + egui) | 2 | planned — renders `menu.rs`; rig-gated |
-| `coop/features/scaling.rs` (apply) | 1/2 | gated: application mechanism needs rig confirm |
+| `coop/state.rs` (process-global live `Config`; features read each frame, bridge/menu write) | — | done |
+| `coop/features/session_limit.rs` (write `session_player_limit_override` from live config) | 2 | done; apply rig-confirmed (incl. via a synced `ConfigSync`), >4-player effect needs a party |
+| `coop/bridge.rs` (dev debug bridge: live `Session` over loopback, applies received config) | — | done; apply rig-confirmed (`bridge` feature, off in release) |
+| `coop/features/menu_overlay.rs` (DX12 hook + imgui via hudhook) | 2 | planned — renders `menu.rs`; rig-gated (see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)) |
+| `coop/features/scaling.rs` (apply) | 1/2 | mechanism decided (SpEffect rate rows behind `MultiPlayCorrectionParam` — see [SCALING.md](SCALING.md)); row/ID map rig-gated |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |
 
 ## Where Mac-side work ends

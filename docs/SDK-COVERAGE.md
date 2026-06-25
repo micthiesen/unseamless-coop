@@ -17,27 +17,37 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
 | **Characters / players** | `WorldChrMan` (`cs/world_chr_man.rs`): `player_chr_set` (phantoms) vs `open_field_chr_set` (enemies), `main_player`, `chr_ins_by_handle`. `ChrIns` modules. | **CHARTED** |
 | **Event flags** | `CSEventFlagMan` (`cs/event_flag.rs`): `get_flag`/`set_flag`. | **CHARTED** |
 | **World time** | `WorldAreaTime`: `request_time`. | **CHARTED** |
-| **SpEffects** | `SpecialEffect` (`cs/sp_effect.rs`): iterate active effects + timers. **No apply/remove** method. | **PARTIAL** (needs an internal fn RVA to apply) |
+| **SpEffects** | `SpecialEffect` (`cs/sp_effect.rs`): iterate active effects + timers. `ChrIns::apply_speffect(id, dont_sync)` / `remove_speffect(id)` (`cs/chr_ins.rs`, RVA-backed `0x3e8be0`/`0x3ee0b0`). | **CHARTED** (apply/remove callable — see [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) |
 | **Summon signs / party** | `SosSignMan`, `PartyMemberInfo`: read sign DB + phantom counts. No create/accept API. | **PARTIAL** |
 | **Player game data** | `PlayerGameData` (`cs/player_game_data.rs`): full remote-player stats, read-only. | **PARTIAL** |
 | **Menus / HUD** | `CSMenuMan`, `CSFeMan` (HUD state), status-message ID constants. | **PARTIAL** (read state; no "show message" API) |
 | **FMG / text** | `MsgRepository`: marker singleton only. | **ABSENT** (FMG override needs RE) |
-| **Save files** | `cs/file.rs`: layout. | **PARTIAL** |
+| **Save files** | `cs/file.rs` (asset loader `CSFileImp`/`CSFileRepository`), `cs/game_man.rs` (save *state*: `save_slot`/`save_requested`/`save_state`). No save-path/extension API. | **PARTIAL** (separate-saves is a `CreateFileW` hook, not an SDK field — see [COOP-SAVES.md](COOP-SAVES.md)) |
 
 ## What this means for the rewrite
 
-- **Layer 1 (buildable blind):** scaling, event flags, summons toggle, splash skip, world time —
-  all CHARTED params/flags. Write against the SDK; verify on the rig.
+- **Layer 1 (buildable blind):** scaling, event flags, summons toggle, world time — all CHARTED
+  params/flags. Write against the SDK; verify on the rig.
+- **Splash/intro skip is NOT a param** (despite the name): the SDK charts no movie-player type or
+  skip function (only the `MovieStep` task phase and a `pre_opening_movie_wait_sec` param, neither a
+  lever). It's an AOB-scan + NOP of the boot-flow logo gate — see [SKIP-INTROS.md](SKIP-INTROS.md).
+  The shared AOB-scan + memory-patch utility it needs is designed in
+  [CODE-PATCHING.md](CODE-PATCHING.md) (reuses pelite's scanner + `Program::current`, already in the
+  tree via the SDK).
 - **Layer 2 (RE-gated, the hard part):** the co-op core rides the **CHARTED** networking — drive
   `CSSessionManager`'s FSM + `NetworkSessionVmt` rather than building transport. What's left to
   *observe* on the rig is the FSM's behavior (which count is "players in my world", how sessions
   persist across map transitions) and where ERSC relaxes the limits — see [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
-- **Needs internal-function RVAs (not just struct layout):** applying SpEffects (death debuffs),
-  creating/accepting summon signs, showing native on-screen messages, overriding FMG text. These
-  are the diagnostic/RE tasks that the SDK doesn't hand us.
-- **Scaling mechanism is a known open question:** `MultiPlayCorrectionParam` / `MultiSoulBonusRateParam`
-  exist and are the *likely-correct, idempotent* lever (vs. mutating `NpcParam` HP per-frame, which
-  would compound). Confirm on the rig before wiring `features/scaling.rs`.
+- **Needs internal-function RVAs (not just struct layout):** creating/accepting summon signs,
+  showing native on-screen messages, overriding FMG text. (SpEffect apply/remove is now charted —
+  see [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md).) These are the diagnostic/RE tasks the SDK doesn't hand us.
+- **Scaling mechanism resolved (see [SCALING.md](SCALING.md)):** at our pin `MultiPlayCorrectionParam`
+  is *SpEffect indirection*, not a rate table — it holds `client1/2/3_sp_effect_id` keyed by
+  extra-player count, and the real multipliers live in the referenced `SpEffectParam` rate rows
+  (`max_hp_rate`, `*_attack_power_rate`, posture rate). The idempotent lever is **editing those
+  SpEffect rate rows once at load**, not the correction param and not per-frame `NpcParam.hp`.
+  Enemy/boss split comes from `NpcParam.multi_play_correction_param_id` (no boss flag).
+  `MultiSoulBonusRateParam` is runes-only. The concrete row/SpEffect-ID map is rig-gated.
 
 > This table reflects the pinned commit. If the `fromsoftware-rs` rev is bumped, re-verify the
 > field/method names — struct layouts are read against a specific revision.

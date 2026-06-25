@@ -20,7 +20,7 @@ Difficulty legend (rough, from our side of the rewrite):
 | Load mechanism | `ersc.dll` exports `modengine_ext_init` → it's a **ModEngine2 extension**; also ships `ersc_launcher.exe` (exe-swap). | **built, rig-gated** | We diverge: we own it. The cdylib ships as the game's `dinput8.dll` proxy (auto-loaded; also loads `mods/`), and our `start_protected_game.exe` launcher starts the game outside EAC with a marker the DLL requires. No ModEngine2/EML. Export-table verified on the Mac; live load unproven on the rig. |
 | Player state sync | Positions, animation/HP/SP, equipment, events across the session. | **H** | Implied by co-op; the second-hardest piece after transport. |
 | Session player limit | Raise the vanilla cap (4 open world / 6 arena) so more friends fit one session. | **built; write rig-confirmed** | `coop/features/session_limit.rs` writes `CSSessionManager.session_player_limit_override` from `[session] max_players` (host-tested clamp 2..=6, default 6). Solo rig run confirms the write lands (observer logs `override=6`); the **>4-player effect** still needs a real party. |
-| Separate co-op saves | Distinct save extension (`save_file_extension = co2`) so co-op doesn't touch vanilla `.sl2`. | **M** | Hook the save path; SDK/file-IO. |
+| Separate co-op saves ([COOP-SAVES.md](COOP-SAVES.md)) | Distinct save extension (`save.file_extension = co2`) so co-op never touches vanilla `.sl2`. | **M** | Hook `kernel32!CreateFileW` (à la MIT `alt-saves`), rewrite `.sl2`/`.sl2.bak` → `.co2`/`.co2.bak`. Install pre-task in early `install` (before the save is opened), not a `Feature` task. Not an SDK field. |
 | Offline / non-EAC launch | Runs outside EasyAntiCheat (why it's co-op-safe). | **built, rig-gated** | Our `start_protected_game.exe` launcher starts the game directly (no EAC); the DLL aborts if it wasn't launched that way (`coop/guard.rs`). Logic written; the EAC bypass + abort behavior are **not yet validated on the rig**. |
 
 ## Session management (menu/hotkey actions — M)
@@ -41,17 +41,22 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 - Toggle PvP, PvP teams, friendly fire
 - Dried finger toggle (more concurrent players/invaders), `allow_invaders`
 
-## Per-player scaling (E — all params)
+## Per-player scaling ([SCALING.md](SCALING.md))
 
 `[SCALING]`, applied per connected player:
 
 - Enemy health / damage / posture · Boss health / damage / posture
 
+Mechanism (resolved): edit the `SpEffectParam` rate rows referenced by `MultiPlayCorrectionParam`,
+once at load (idempotent — set absolute rates, never per-frame `NpcParam.hp`). Enemy/boss split is
+free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count from
+`CSSessionManager.players`. The concrete row/SpEffect-ID map is rig-gated. See [SCALING.md](SCALING.md).
+
 ## Gameplay modifiers (E–M)
 
 | Feature | Config | Diff |
 |---|---|---|
-| Death debuffs (Rot Essence SpEffects, cured at grace) | `death_debuffs` | M |
+| Death debuffs (Rot Essence SpEffects, cured at grace) ([DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) | `death_debuffs` | E–M |
 | Spirit summons allowed in MP | `allow_summons` | E |
 | Give ember | (action) | M |
 | Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
@@ -73,7 +78,9 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 ## UI / locale (M)
 
 - Custom locale system (`mod_language_override`, the `english.json` FMG/menu text injection)
-- Overhead display rendering, on-screen status/notification text (`YKNX3_*`, `FE_*`)
+- Overhead display rendering, on-screen status/notification text (`YKNX3_*`, `FE_*`) — renderer is
+  the hudhook DX12 overlay ([OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)); simple notifications can
+  use the native `CSMenuManImp::display_status_message` instead.
 
 ## Title screen / offline presentation (M)
 
