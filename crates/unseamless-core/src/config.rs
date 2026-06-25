@@ -45,6 +45,8 @@ pub struct Config {
     pub language: Language,
     pub loader: Loader,
     pub debug: Debug,
+    /// Tuning for the death-debuff stacking (the on/off toggle is `gameplay.death_debuffs`).
+    pub death_debuffs: crate::death_debuffs::DeathDebuffTuning,
 }
 
 /// External DLL-mod loading. Our shipped `dinput8.dll` is the game's proxy, so this mod is the
@@ -342,6 +344,10 @@ impl Config {
                 message: format!("{ext:?} is not 1..=120 alphanumerics; reset to \"co2\""),
             });
             self.save.file_extension = "co2".into();
+        }
+
+        for (field, message) in self.death_debuffs.clamp() {
+            warnings.push(ConfigWarning { field: field.into(), message });
         }
 
         warnings

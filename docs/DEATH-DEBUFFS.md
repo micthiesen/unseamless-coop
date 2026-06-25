@@ -232,18 +232,26 @@ main player by ID" call into a small shared helper (e.g. on the sdk module) that
       callable (they are — wrapper methods on `Subclass<ChrIns>`, `cs/chr_ins.rs:339-355`).
 - [x] Confirm the call signature (`apply(id: i32, dont_sync: bool)`, `remove(id: i32)`).
 - [x] Map each ERSC tier to charted `SP_EFFECT_PARAM_ST` fields.
-- [ ] **Rig:** observe the death edge — confirm main-player `hp <= 0` rising edge corresponds to a
-      real death/respawn and debounce scripted dips.
-- [ ] **Rig:** find the "rested at grace" event flag (use the ER Debug Tool grace/flag tabs); confirm
-      its rising edge fires on rest and on grace warp.
-- [ ] **Rig:** confirm `SoloParamRepository` can *insert* new SpEffectParam rows at runtime (vs. only
-      mutating existing rows); pick a verified-free ID block. Fallback: overwrite high unused rows.
-- [ ] Decide `dont_sync` value (almost certainly `true` — per-player debuff) and confirm partners
-      each carry their own stack.
-- [ ] Decide stack curve (one-tier-per-death vs. potency growth; ERSC = "double per stack").
-- [ ] Factor a shared "apply SpEffect to main player" helper for reuse by give-ember + rune-arc.
-- [ ] Update [SDK-COVERAGE.md](SDK-COVERAGE.md): SpEffect **apply/remove is CHARTED**, not PARTIAL
-      (read remains; only "no action method" was wrong) — see this doc's recommended edit.
+- [x] **Host-tested stacking model** (`core::death_debuffs`): death counter → cumulative tiers +
+      an intensity curve for deaths past the cap. Fully config-driven ([`DeathDebuffTuning`]).
+- [x] **Configurable + reasonable defaults**: `[death_debuffs]` section — `max_tiers` (5),
+      `intensify_past_cap` (true), `intensity_step_percent` (50), `max_intensity_percent` (300);
+      validated/clamped. The on/off toggle stays the synced `gameplay.death_debuffs`.
+- [x] **Shared apply/remove helper**: `sdk::apply_speffect_to_main_player` /
+      `remove_speffect_from_main_player` (active-player guarded) — reused by give-ember + rune-arc.
+- [x] **Death-edge detection + feature scaffold** (`coop/features/death_debuffs.rs`): rising edge of
+      main-player `hp<=0` (active-guarded, `WorldChrMan_PostPhysics` phase) drives the model; live
+      config; inert + silent until the two rig blanks below are filled (no bogus SpEffect ids sent).
+- [ ] **Rig (solo):** confirm the death edge corresponds to a real death/respawn and debounce
+      scripted HP dips (the feature `debug!`-logs each detected death for this).
+- [ ] **Rig (solo):** find the "rested at grace" event flag (ER Debug Tool grace/flag tabs); set
+      `GRACE_REST_FLAG` in `features/death_debuffs.rs`.
+- [ ] **Rig (solo):** confirm `SoloParamRepository` can *insert* new SpEffectParam rows at runtime
+      (vs. only mutating); pick a verified-free ID block; write the rows and set `TIER_ROW_IDS`.
+      Then scale row magnitudes by `DeathDebuffs::intensity()` in `reconcile()`. Fallback: overwrite
+      high unused rows.
+- [ ] Confirm `dont_sync = true` is right (per-player debuff) and partners each carry their own stack.
+- [ ] Update [SDK-COVERAGE.md](SDK-COVERAGE.md): SpEffect **apply/remove is CHARTED**, not PARTIAL.
 
 ## Sources
 

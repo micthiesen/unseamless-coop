@@ -58,3 +58,12 @@ bridge_port = 47700
 # In-game overlay (on by default). Recovery kill-switch: set false and relaunch to run without it if
 # the DX12 present-hook ever misbehaves under Proton/vkd3d.
 overlay = true
+
+# Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
+# tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
+# max_intensity_percent. These are the defaults, here for visibility while we RE the death/grace signals.
+[death_debuffs]
+max_tiers = 5
+intensify_past_cap = true
+intensity_step_percent = 50
+max_intensity_percent = 300

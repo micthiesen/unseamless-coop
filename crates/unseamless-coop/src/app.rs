@@ -13,6 +13,7 @@ use eldenring::fd4::FD4TaskData;
 use fromsoftware_shared::SharedTaskImpExt;
 
 use crate::feature::{Feature, Tick};
+use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
@@ -143,6 +144,8 @@ pub fn install() {
         Box::new(SessionActionsTick::new()),
         // Publishes the in-gameplay flag so the overlay shows its watermark only off the playfield.
         Box::new(PlayStateProbe::new()),
+        // Stacking death penalty (reads HP after PostPhysics). Reads live config; no-op when off.
+        Box::new(DeathDebuffsFeature::new()),
     ];
     let frames = vec![0u64; features.len()];
     let disabled = vec![false; features.len()];
