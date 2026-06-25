@@ -15,14 +15,15 @@
 
 use eldenring::cs::CSSessionManager;
 use unseamless_core::config::{MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS};
+use unseamless_core::util::{Applied, Latch};
 
 use crate::feature::{Feature, Tick};
 
 #[derive(Default)]
 pub struct SessionLimit {
-    /// The last override value logged at `info`, so steady-state re-asserts stay at `debug` but a
-    /// genuine change (config-driven) logs loudly.
-    last_logged: Option<u32>,
+    /// Classifies each apply (first / re-assert / change). The classification is the host-tested
+    /// shared bit (`Latch::classify`); the debug/info/toast mapping below stays local.
+    latch: Latch<u32>,
 }
 
 impl SessionLimit {
@@ -56,17 +57,18 @@ impl Feature for SessionLimit {
         });
 
         if wrote == Some(true) {
-            if self.last_logged == Some(desired) {
-                log::debug!("re-applied session player limit override = {desired}");
-            } else {
-                log::info!("session player limit override set to {desired}");
-                // Toast only a genuine *change* the user might care about — not the startup baseline
-                // (`last_logged == None`, every launch) nor the self-heal re-asserts. So a config sync
-                // changing the cap toasts; the boot-time apply just logs.
-                if self.last_logged.is_some() {
-                    crate::notify::with_mut(|n| n.info(format!("Session player cap set to {desired}")));
+            // Toast only a genuine change (a config sync), not the startup baseline or the self-heal
+            // re-asserts — the policy lives in `ApplyLatch`.
+            match self.latch.classify(&desired) {
+                Applied::Reasserted => log::debug!("re-applied session player limit override = {desired}"),
+                // First and Changed both log info; only Changed toasts. Explicit arms (not a wildcard)
+                // so a new Applied variant would fail to compile here rather than silently misclassify.
+                applied @ (Applied::First | Applied::Changed) => {
+                    log::info!("session player limit override set to {desired}");
+                    if applied == Applied::Changed {
+                        crate::notify::with_mut(|n| n.info(format!("Session player cap set to {desired}")));
+                    }
                 }
-                self.last_logged = Some(desired);
             }
         }
     }

@@ -15,14 +15,15 @@
 //! prints `restriction_disabled` whenever the session state changes.
 
 use eldenring::cs::CSSessionManager;
+use unseamless_core::util::{Applied, Latch};
 
 use crate::feature::{Feature, Tick};
 
 #[derive(Default)]
 pub struct SeamlessRoam {
-    /// Last value logged at `info`, so steady-state re-asserts (per-session re-init) stay at `debug`
-    /// but a genuine change (config-driven) logs loudly and toasts.
-    last_logged: Option<bool>,
+    /// Classifies each apply (first / re-assert / change). The classification is the host-tested
+    /// shared bit (`Latch::classify`); the debug/info/toast mapping below stays local.
+    latch: Latch<bool>,
 }
 
 impl SeamlessRoam {
@@ -62,17 +63,19 @@ impl Feature for SeamlessRoam {
         });
 
         if wrote == Some(true) {
-            if self.last_logged == Some(desired) {
-                log::debug!("re-applied roam_anywhere = {desired}");
-            } else {
-                log::info!("seamless roam set to {desired} (disable_multiplay_restriction)");
-                // Toast only a genuine *change* (e.g. a host ConfigSync), not the startup baseline
-                // (`last_logged == None`, every launch) nor the per-session self-heal re-asserts.
-                if self.last_logged.is_some() {
-                    let msg = if desired { "Roaming enabled" } else { "Roaming disabled (vanilla area tether)" };
-                    crate::notify::with_mut(|n| n.info(msg));
+            // Toast only a genuine change (e.g. a host ConfigSync), not the startup baseline or the
+            // per-session self-heal re-asserts — the policy lives in `ApplyLatch`.
+            match self.latch.classify(&desired) {
+                Applied::Reasserted => log::debug!("re-applied roam_anywhere = {desired}"),
+                // First and Changed both log info; only Changed toasts. Explicit arms (not a wildcard)
+                // so a new Applied variant would fail to compile here rather than silently misclassify.
+                applied @ (Applied::First | Applied::Changed) => {
+                    log::info!("seamless roam set to {desired} (disable_multiplay_restriction)");
+                    if applied == Applied::Changed {
+                        let msg = if desired { "Roaming enabled" } else { "Roaming disabled (vanilla area tether)" };
+                        crate::notify::with_mut(|n| n.info(msg));
+                    }
                 }
-                self.last_logged = Some(desired);
             }
         }
     }

@@ -51,7 +51,24 @@ impl Timer {
     }
 }
 
-/// Tracks a value and reports when it changes — replaces hand-rolled "log only on change" diffs.
+/// How a value compares to the last one a [`Latch`] saw — the three-way classification behind both
+/// "log only on change" diffs ([`Latch::changed`]) and the "hold a config value into a game field,
+/// then announce it" features ([`Latch::classify`], used by `session_limit` / `seamless`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// Same value as last time (steady state / self-heal). Features log at `debug`, don't toast.
+    Reasserted,
+    /// The first value ever seen (startup baseline). Features log at `info`, don't toast (every
+    /// launch would otherwise toast).
+    First,
+    /// A genuinely *new* value replaced a previous one (e.g. a host `ConfigSync`). Features log at
+    /// `info` **and** toast. (The debug/info/toast *mapping* is the feature's job; this only classifies.)
+    Changed,
+}
+
+/// Tracks a value and classifies each new one against the last — replacing hand-rolled "log only on
+/// change" diffs. [`changed`](Latch::changed) gives the boolean answer; [`classify`](Latch::classify)
+/// gives the three-way [`Applied`] (first / reasserted / changed) the hold-a-config-value features need.
 #[derive(Debug, Clone, Default)]
 pub struct Latch<T> {
     last: Option<T>,
@@ -62,15 +79,25 @@ impl<T: Clone + PartialEq> Latch<T> {
         Self { last: None }
     }
 
-    /// Returns `true` if `value` differs from the last seen value (or this is the first call),
-    /// and records it as the new last value.
-    pub fn changed(&mut self, value: &T) -> bool {
-        if self.last.as_ref() == Some(value) {
-            false
-        } else {
+    /// Classify `value` against the last seen one and record it (the store advances on `First`/
+    /// `Changed`; a `Reasserted` leaves it untouched, since it's already equal). This is the
+    /// host-tested *classification* — the debug/info/toast policy keyed off it lives at the call site.
+    pub fn classify(&mut self, value: &T) -> Applied {
+        let applied = match self.last {
+            Some(ref last) if last == value => Applied::Reasserted,
+            Some(_) => Applied::Changed,
+            None => Applied::First,
+        };
+        if applied != Applied::Reasserted {
             self.last = Some(value.clone());
-            true
         }
+        applied
+    }
+
+    /// Returns `true` if `value` differs from the last seen value (or this is the first call), and
+    /// records it. Thin wrapper over [`classify`](Latch::classify) — same store behavior.
+    pub fn changed(&mut self, value: &T) -> bool {
+        self.classify(value) != Applied::Reasserted
     }
 
     pub fn last(&self) -> Option<&T> {
@@ -245,6 +272,55 @@ mod tests {
         assert!(l.changed(&6)); // changed
         assert!(!l.changed(&6));
         assert_eq!(l.last(), Some(&6));
+    }
+
+    #[test]
+    fn classify_first_reassert_change_and_advances_the_store_each_change() {
+        let mut l = Latch::new();
+        assert_eq!(l.classify(&6), Applied::First, "first apply is the baseline");
+        assert_eq!(l.classify(&6), Applied::Reasserted, "same value re-applied");
+        // Back-to-back changes: the store must advance on EVERY Changed, not only after a steady state.
+        assert_eq!(l.classify(&4), Applied::Changed, "new value");
+        assert_eq!(l.classify(&7), Applied::Changed, "another new value, straight after a change");
+        assert_eq!(l.classify(&7), Applied::Reasserted, "...and the store advanced to 7");
+        assert_eq!(l.last(), Some(&7), "store reflects the last First/Changed value");
+        // Returning to an old value is a change — the latch remembers only the immediately-prior one.
+        assert_eq!(l.classify(&6), Applied::Changed, "back to an old value is still a change");
+    }
+
+    #[test]
+    fn classify_does_not_advance_the_store_on_a_reassert() {
+        let mut l = Latch::new();
+        l.classify(&6); // First -> store = 6
+        assert_eq!(l.last(), Some(&6));
+        l.classify(&6); // Reasserted -> store untouched (observable via last())
+        assert_eq!(l.last(), Some(&6));
+    }
+
+    #[test]
+    fn classify_works_for_bools_including_the_toggle_back() {
+        // The seamless-roam case: a bool held into a game field. For a 2-state type every post-first
+        // change is a return to a previously-seen value, so the toggle-back IS the characteristic case.
+        let mut l = Latch::new();
+        assert_eq!(l.classify(&true), Applied::First);
+        assert_eq!(l.classify(&true), Applied::Reasserted);
+        assert_eq!(l.classify(&false), Applied::Changed);
+        assert_eq!(l.classify(&true), Applied::Changed, "toggled back -> change, not reassert");
+    }
+
+    #[test]
+    fn classify_via_default_construction_starts_fresh() {
+        // The features build their Latch via #[derive(Default)], not new() — pin that path.
+        assert_eq!(Latch::<u32>::default().classify(&1), Applied::First);
+    }
+
+    #[test]
+    fn changed_is_classify_minus_the_reassert() {
+        // `changed` must agree with `classify`: true on First/Changed, false on Reasserted.
+        let mut l = Latch::new();
+        assert!(l.changed(&1), "First -> changed");
+        assert!(!l.changed(&1), "Reasserted -> not changed");
+        assert!(l.changed(&2), "Changed -> changed");
     }
 
     #[test]
