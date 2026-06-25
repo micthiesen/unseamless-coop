@@ -106,6 +106,10 @@ pub struct Gameplay {
     pub allow_invaders: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
+    /// Let the party roam the whole map together instead of being tethered to the host's multiplay
+    /// area (the defining "seamless" behavior). Host-enforced across the session. The mod holds the
+    /// game's `disable_multiplay_restriction` to this. Default on.
+    pub roam_anywhere: bool,
     pub overhead_display: OverheadDisplay,
     pub skip_splash_screens: bool,
     pub append_steam_id: bool,
@@ -221,6 +225,7 @@ impl Default for Gameplay {
             allow_invaders: true,
             death_debuffs: true,
             allow_summons: true,
+            roam_anywhere: true,
             overhead_display: OverheadDisplay::Normal,
             skip_splash_screens: true,
             append_steam_id: false,

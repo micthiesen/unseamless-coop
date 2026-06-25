@@ -5,5 +5,6 @@ pub mod death_debuffs;
 pub mod notifications;
 pub mod observer;
 pub mod playstate;
+pub mod seamless;
 pub mod session_actions;
 pub mod session_limit;

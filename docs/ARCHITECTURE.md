@@ -92,7 +92,10 @@ carve out. Approaches, best to worst:
    raises the player cap by writing one `u32` every frame and it sticks. The SDK already charts the
    prime levers for the roam/area half: `CSStayInMultiplayAreaWarpData::disable_multiplay_restriction`
    (documented "set true to go anywhere on the map") and `multiplay_start_area_id` ("set 0 to disable"
-   the boss-area-mismatch warp).
+   the boss-area-mismatch warp). The first is now **shipped** as
+   [`seamless-roam`](../crates/unseamless-coop/src/features/seamless.rs): it holds
+   `disable_multiplay_restriction` to the host-enforced `gameplay.roam_anywhere` each frame (the roam
+   *effect* awaits a party run; the held write is observable solo via the teardown probe).
 2. **Hook the chokepoint and *decide*** (ilhook redirect, like `input.rs`, which sticks) — read the
    teardown *reason* and suppress only the unwanted ones, so a real quit-to-menu still works. Likely
    2-3 chokepoints (low-level net disconnect vs. high-level "area co-op ended"), not ERSC's dozen.

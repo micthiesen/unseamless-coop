@@ -13,6 +13,7 @@
 allow_invaders = false
 death_debuffs = true
 allow_summons = true
+roam_anywhere = true
 overhead_display = "normal"
 skip_splash_screens = true
 append_steam_id = false

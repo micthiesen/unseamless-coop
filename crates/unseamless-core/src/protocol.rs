@@ -28,9 +28,9 @@ use crate::diagnostics::{LogLevel, LogRecord};
 pub const MAGIC: [u8; 2] = *b"UC";
 /// Current wire version. Bump on any incompatible change; decoders reject mismatches. v2 added the
 /// `generation`/`seq` identity fields to `ConfigSync`/`SessionAction`; v3 added `max_players` to the
-/// `ConfigSync` payload, so an older peer is rejected as `UnknownVersion` rather than silently
-/// misparsing the shifted payload.
-pub const VERSION: u8 = 3;
+/// `ConfigSync` payload; v4 added the `roam_anywhere` bool to the `ConfigSync` settings byte — so an
+/// older peer is rejected as `UnknownVersion` rather than silently misparsing the shifted payload.
+pub const VERSION: u8 = 4;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
@@ -78,6 +78,7 @@ pub struct SharedSettings {
     pub allow_invaders: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
+    pub roam_anywhere: bool,
     /// The session player cap. Host-enforced: a client adopts the host's so the whole party agrees
     /// on session size. Clamped on decode like `scaling`, since it comes from an untrusted peer.
     pub max_players: u32,
@@ -92,6 +93,7 @@ impl From<&Config> for SharedSettings {
             allow_invaders: c.gameplay.allow_invaders,
             death_debuffs: c.gameplay.death_debuffs,
             allow_summons: c.gameplay.allow_summons,
+            roam_anywhere: c.gameplay.roam_anywhere,
             max_players: c.session.max_players,
         }
     }
@@ -106,6 +108,7 @@ impl SharedSettings {
         cfg.gameplay.allow_invaders = self.allow_invaders;
         cfg.gameplay.death_debuffs = self.death_debuffs;
         cfg.gameplay.allow_summons = self.allow_summons;
+        cfg.gameplay.roam_anywhere = self.roam_anywhere;
         cfg.session.max_players = self.max_players;
     }
 }
@@ -222,7 +225,7 @@ impl ModMessage {
                     w.extend_from_slice(&v.to_be_bytes());
                 }
                 w.extend_from_slice(&s.max_players.to_be_bytes());
-                w.push(pack_bools([s.allow_invaders, s.death_debuffs, s.allow_summons]));
+                w.push(pack_bools([s.allow_invaders, s.death_debuffs, s.allow_summons, s.roam_anywhere]));
             }
             ModMessage::SessionAction { seq, action } => {
                 w.push(tag::SESSION_ACTION);
@@ -273,7 +276,7 @@ impl ModMessage {
                 scaling.clamp_percentages();
                 // Same reasoning for the player cap: clamp to the config's accepted range.
                 let max_players = r.u32()?.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
-                let [allow_invaders, death_debuffs, allow_summons] = unpack_bools(r.u8()?);
+                let [allow_invaders, death_debuffs, allow_summons, roam_anywhere] = unpack_bools(r.u8()?);
                 ModMessage::ConfigSync {
                     generation,
                     settings: SharedSettings {
@@ -281,6 +284,7 @@ impl ModMessage {
                         allow_invaders,
                         death_debuffs,
                         allow_summons,
+                        roam_anywhere,
                         max_players,
                     },
                 }
@@ -386,6 +390,7 @@ mod tests {
             allow_invaders: true,
             death_debuffs: false,
             allow_summons: true,
+            roam_anywhere: true,
             max_players: 4,
         }
     }
@@ -421,6 +426,7 @@ mod tests {
         cfg.gameplay.allow_invaders = false;
         cfg.gameplay.death_debuffs = false;
         cfg.gameplay.allow_summons = false;
+        cfg.gameplay.roam_anywhere = false; // non-default (default on)
         cfg.scaling.boss_health = 200;
         cfg.session.max_players = 4; // non-default, host-enforced
         cfg.session.password = "secret".into(); // machine-local; SharedSettings has no such field
@@ -428,6 +434,7 @@ mod tests {
         assert!(!shared.allow_invaders);
         assert!(!shared.death_debuffs);
         assert!(!shared.allow_summons);
+        assert!(!shared.roam_anywhere);
         assert_eq!(shared.scaling.boss_health, 200);
         assert_eq!(shared.max_players, 4);
         let msg = ModMessage::ConfigSync { generation: 3, settings: shared };
@@ -503,15 +510,16 @@ mod tests {
 
     #[test]
     fn bool_packing_is_independent_across_all_combinations() {
-        // Every one of the 2^3 flag combinations must round-trip exactly — proves no bit
+        // Every one of the 2^4 flag combinations must round-trip exactly — proves no bit
         // cross-contaminates another (a single-combo test couldn't catch an OR-ing bug).
-        for bits in 0u8..8 {
+        for bits in 0u8..16 {
             let mut s = shared();
             s.allow_invaders = bits & 1 != 0;
             s.death_debuffs = bits & 2 != 0;
             s.allow_summons = bits & 4 != 0;
+            s.roam_anywhere = bits & 8 != 0;
             let msg = ModMessage::ConfigSync { generation: 1, settings: s };
-            assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:03b} corrupted");
+            assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:04b} corrupted");
         }
     }
 

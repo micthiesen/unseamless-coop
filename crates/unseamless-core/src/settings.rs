@@ -33,6 +33,7 @@ pub enum SettingId {
     BossDamage = 12,
     BossPosture = 13,
     MaxPlayers = 14,
+    RoamAnywhere = 15,
 }
 
 impl SettingId {
@@ -54,6 +55,7 @@ impl SettingId {
                 | AllowInvaders
                 | DeathDebuffs
                 | AllowSummons
+                | RoamAnywhere
                 | MaxPlayers
         )
     }
@@ -188,6 +190,14 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
+            id: RoamAnywhere,
+            label: "Roam anywhere",
+            kind: Toggle {
+                get: |c| c.gameplay.roam_anywhere,
+                set: |c, v| c.gameplay.roam_anywhere = v,
+            },
+        },
+        Setting {
             id: SkipSplashScreens,
             label: "Skip splash screens",
             kind: Toggle {
@@ -294,7 +304,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 15, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 16, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -308,12 +318,13 @@ mod tests {
             allow_invaders: _,
             death_debuffs: _,
             allow_summons: _,
+            roam_anywhere: _,
             max_players: _,
         } = crate::protocol::SharedSettings::from(&Config::default());
 
         let expected = [
             EnemyHealth, EnemyDamage, EnemyPosture, BossHealth, BossDamage, BossPosture,
-            AllowInvaders, DeathDebuffs, AllowSummons, MaxPlayers,
+            AllowInvaders, DeathDebuffs, AllowSummons, RoamAnywhere, MaxPlayers,
         ];
         let shared: Vec<SettingId> = registry().iter().map(|s| s.id).filter(|id| id.is_shared()).collect();
         assert_eq!(shared.len(), expected.len(), "shared-setting count drifted from SharedSettings");

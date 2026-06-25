@@ -17,6 +17,7 @@ use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
+use crate::features::seamless::SeamlessRoam;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
 
@@ -139,6 +140,8 @@ pub fn install() {
     let features: Vec<Box<dyn Feature>> = vec![
         Box::new(NotificationsTick::new()), // ages toasts once per frame, before producers push
         Box::new(SessionLimit::new()),
+        // Hold the area-restriction lever so the party can roam the whole map (reads live config).
+        Box::new(SeamlessRoam::new()),
         Box::new(SessionObserver::new()),
         // Drains overlay-requested session actions (a producer; after the ager above).
         Box::new(SessionActionsTick::new()),
