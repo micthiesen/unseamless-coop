@@ -31,6 +31,11 @@ Optional argument: an explicit version (e.g. `v0.2.0`). If omitted, propose one.
 3. **Pick the version.** Use the argument if given. Otherwise infer a semver bump from the
    changes since the last tag (behavior change/new feature → minor; fixes only → patch;
    breaking install/usage change → major) and state your choice. Call it `X.Y.Z` (tag `vX.Y.Z`).
+   - **A major bump (`X` increase) requires Michael's explicit approval.** Never cut one on
+     your own inference. If the changes look major, default to a minor bump and ask first.
+   - **`1.0.0` is reserved for when the mod is actually functional** (real co-op working, not
+     just framework/scaffold). Until then stay in `0.x` even for breaking changes. (Remove this
+     note once `1.0.0` ships.)
 
 4. **Bump the version in `Cargo.toml` and commit it.** Set `version = "X.Y.Z"` in `Cargo.toml`,
    then `cargo build --release --target x86_64-pc-windows-gnu` to refresh `Cargo.lock`. Commit
