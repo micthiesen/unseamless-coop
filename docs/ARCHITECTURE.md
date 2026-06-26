@@ -84,7 +84,7 @@ the flat C API at runtime, not the crate) — is its own doc: [COOP-CONNECTION.m
 ERSC byte-patches the many call sites that normally end a co-op session (boss death, fog gate, host
 death, walking out of the host's area). We deliberately **don't** copy that. Two reasons it's the
 wrong shape for us: every byte-patch is a potential **Arxan** landmine (Arxan restores `.text`, so a
-patch can be reverted under us — that's why the offline-popup work is parked, see
+patch can be reverted under us — it's why the offline-popup work is a **won't-do**, see
 [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md)), and we have a lever ERSC (a C++ DLL) leaned on
 less: **typed SDK field writes from a per-frame task**.
 

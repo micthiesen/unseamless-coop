@@ -1,7 +1,24 @@
 # Title Screen Offline Presentation
 
-How the game presents its "you're offline" state at boot, and how we plan to replace that with
-our own. Two related targets, one shared substrate:
+> ## Status: WON'T DO (both targets dropped 2026-06)
+>
+> Neither target below will be pursued. This doc is kept as an **RE record** so the work is never
+> re-attempted from scratch — read it for what we learned, not as a roadmap.
+>
+> 1. **Network-error popup suppression — won't do.** A live rig RE pass located the exact trigger,
+>    but it sits behind a non-standard Arxan code-restoration guard the SDK's scanner doesn't catch
+>    (details below). Suppressing a cosmetic title-screen popup isn't worth deeper Arxan RE, and
+>    ERSC itself never suppresses these either.
+> 2. **Bottom-right `OFFLINE` / version watermark restyle — won't do.** Superseded by our own
+>    overlay watermark, which we already draw (`coop/overlay.rs` `draw_watermark`, top-right corner)
+>    with no FMG mutation, no SDK-pin bump, and no game-version coupling. The FMG-override route
+>    below is strictly worse, so it's abandoned.
+>
+> Consequently we will **not** bump the SDK pin for `MsgRepository::get_msg*`, RE the `get_msg` RVA,
+> or hook the modal renderer for this. Skip-intros (a separate, shipped feature) is unaffected.
+
+How the game presents its "you're offline" state at boot. Two targets were considered (both now
+**won't do** — see banner above); the substrate notes are retained only as RE record:
 
 1. **Suppress / replace the network-error popups** that fire at the title screen when the game
    can't reach FromSoft's servers (which is always, for us — we run outside EAC).
@@ -235,15 +252,18 @@ source documents for ERSC.
 
 ## Status & next actions
 
-- [ ] Rig observation: log session/net state across boot→title; record exactly which popups fire
-      under our launch and the state that precedes each.
-- [ ] Cheap experiment: clamp `CSNetMan.{server_connection_lost,low_fps_penalty}` off in a
-      `Feature` task; confirm it suppresses the (c) banners.
-- [ ] Locate the (b) startup-popup trigger / the dialog renderer (rig RE) — decide suppress-trigger
-      vs intercept-display.
-- [ ] Decide SDK-pin bump vs RVA-RE for FMG access (gates the watermark restyle and display-intercept).
-- [ ] Watermark: once FMG access exists, overwrite `GR_MenuText` 401311/version line; evaluate
-      whether the runtime version number needs a draw hook.
+**Won't do** (decided 2026-06 — see the banner at the top of this doc). Both the popup suppression
+and the watermark restyle are dropped; the items below are recorded as *what was considered*, struck
+through, so nobody re-opens them without new motivation:
+
+- ~~Rig observation: log session/net state across boot→title to name each popup's trigger.~~
+- ~~Cheap experiment: clamp `CSNetMan.{server_connection_lost,low_fps_penalty}` to suppress the (c) banners.~~
+- ~~Locate the (b) startup-popup trigger / dialog renderer — Arxan-guarded, not worth the RE (above).~~
+- ~~Decide SDK-pin bump vs RVA-RE for FMG access.~~ Not needed — we won't override any FMG.
+- ~~Watermark: overwrite `GR_MenuText` 401311/version line.~~ Superseded by `coop/overlay.rs`'s own watermark.
+
+If this is ever revisited, the addresses, the Arxan wall, and the re-derive method are all recorded
+above — start there, not from scratch.
 
 ## Sources
 

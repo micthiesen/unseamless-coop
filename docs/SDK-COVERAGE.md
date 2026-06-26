@@ -21,7 +21,7 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
 | **Summon signs / party** | `SosSignMan`, `PartyMemberInfo`: read sign DB + phantom counts. No create/accept API. | **PARTIAL** |
 | **Player game data** | `PlayerGameData` (`cs/player_game_data.rs`): full remote-player stats, read-only. | **PARTIAL** |
 | **Menus / HUD** | `CSMenuMan`, `CSFeMan` (HUD state), status-message ID constants. | **PARTIAL** (read state; no "show message" API) |
-| **FMG / text** | `MsgRepository`: marker singleton only. | **ABSENT** (FMG override needs RE) |
+| **FMG / text** | `MsgRepository`: marker singleton only. | **ABSENT** — and not needed: the only planned consumer (offline-watermark restyle) is **won't-do** (we draw our own overlay watermark instead), so no FMG override is on the roadmap. |
 | **Save files** | `cs/file.rs` (asset loader `CSFileImp`/`CSFileRepository`), `cs/game_man.rs` (save *state*: `save_slot`/`save_requested`/`save_state`). No save-path/extension API. | **PARTIAL** (separate-saves is a `CreateFileW` hook, not an SDK field — see [COOP-SAVES.md](COOP-SAVES.md)) |
 
 ## What this means for the rewrite
@@ -39,8 +39,10 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
   *observe* on the rig is the FSM's behavior (which count is "players in my world", how sessions
   persist across map transitions) and where ERSC relaxes the limits — see [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
 - **Needs internal-function RVAs (not just struct layout):** creating/accepting summon signs,
-  showing native on-screen messages, overriding FMG text. (SpEffect apply/remove is now charted —
-  see [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md).) These are the diagnostic/RE tasks the SDK doesn't hand us.
+  showing native on-screen messages. (SpEffect apply/remove is now charted — see
+  [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md). FMG text override is **won't-do**, so its RVA isn't needed —
+  see [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md).) These are the diagnostic/RE tasks the SDK
+  doesn't hand us.
 - **Scaling mechanism resolved (see [SCALING.md](SCALING.md)):** at our pin `MultiPlayCorrectionParam`
   is *SpEffect indirection*, not a rate table — it holds `client1/2/3_sp_effect_id` keyed by
   extra-player count, and the real multipliers live in the referenced `SpEffectParam` rate rows

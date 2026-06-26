@@ -83,14 +83,19 @@ free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count 
   the hudhook DX12 overlay ([OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)); simple notifications can
   use the native `CSMenuManImp::display_status_message` instead.
 
-## Title screen / offline presentation (M)
+## Title screen / offline presentation — WON'T DO
 
 ERSC hides the vanilla "you're offline" network-error popups at boot and rebrands the bottom-right
-version/`OFFLINE` watermark as `Seamless Co-op X.Y.Z`. We want the same (popups suppressed; corner
-shows `unseamless-coop <version>`). Both ride the FMG/`MsgRepository` text system and the
-online-state (`CSNetMan`/`CSSessionManager`) trigger; the modal-dialog renderer and the FMG
-read/write API are **not charted at our SDK pin** (rig RE / SDK-pin bump needed). Full research,
-message IDs, and the suppression mechanisms in [`OFFLINE-TITLE-SCREEN.md`](OFFLINE-TITLE-SCREEN.md).
+version/`OFFLINE` watermark as `Seamless Co-op X.Y.Z`. **We won't do either** (decided 2026-06):
+
+- **Popup suppression** — the trigger is behind a non-standard Arxan code-restoration guard the SDK's
+  scanner doesn't neutralize; not worth the RE for a cosmetic title-screen popup (ERSC doesn't
+  suppress it either).
+- **Watermark restyle** — superseded by our own overlay watermark (`coop/overlay.rs` `draw_watermark`),
+  which needs no FMG mutation or SDK-pin bump.
+
+Full RE record (addresses, the Arxan wall, FMG IDs) is kept in
+[`OFFLINE-TITLE-SCREEN.md`](OFFLINE-TITLE-SCREEN.md) so it's never re-derived from scratch.
 
 ## Suggested milestone ordering
 
