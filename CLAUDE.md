@@ -260,6 +260,14 @@ all*:
   degrade and notify.** Don't reach for `guard::fatal` from inside a feature's `on_frame` — by then
   we're past install, so it's a toast/banner.
 
+**Message voice: ER tone for gameplay, plain for diagnostics.** A user-facing message about an
+in-world *effect* (death debuffs, rune-arc, PvP, player join/leave) is worded in FromSoft's register —
+terse, weighty, a little archaic — and **never shows raw mechanical values** (no `(×2.0)`; convey
+intensity with a word: `Afflicted by Hopelessness`, `Your afflictions deepen`, `Afflictions cleansed`).
+A **diagnostic/technical** message (version mismatch, connection lost, a feature disabled by a panic,
+config-clamp warning) stays plain and literal — dressing those up obscures a real problem. Lore voice
+for effects, plain voice for diagnostics.
+
 [`guard::fatal`]: crates/unseamless-coop/src/guard.rs
 
 ## On-demand procedures live in skills
