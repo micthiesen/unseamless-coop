@@ -23,6 +23,16 @@ impl StatMultipliers {
     pub const IDENTITY: Self = Self { health: 1.0, damage: 1.0, posture: 1.0 };
 }
 
+/// Which enemy class a `MultiPlayCorrectionParam` row scales — the boss-vs-normal split is encoded
+/// in *which correction row* an NPC points at (see `docs/SCALING.md`), so the cdylib tags each
+/// classified row with one of these and asks for the matching knob set. Pure routing over the
+/// existing per-category multipliers, kept here so the dispatch is host-tested alongside the math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Enemy,
+    Boss,
+}
+
 /// Multiplier for one `per_player_percent` value at a given party size.
 ///
 /// `players` is the total connected count; the host alone (`<= 1`) yields `1.0`.
@@ -81,6 +91,16 @@ impl Scaling {
             health: multiplier(self.boss_health, players),
             damage: multiplier(self.boss_damage, players),
             posture: multiplier(self.boss_posture, players),
+        }
+    }
+
+    /// Multipliers for the given [`Category`] at a party size — the dispatch the scaling feature uses
+    /// per classified correction row, so "boss row ⇒ boss knobs" lives next to the math, not in the
+    /// binding layer.
+    pub fn category_multipliers(&self, category: Category, players: u32) -> StatMultipliers {
+        match category {
+            Category::Enemy => self.enemy_multipliers(players),
+            Category::Boss => self.boss_multipliers(players),
         }
     }
 
@@ -145,6 +165,21 @@ mod tests {
         assert!((scaling().enemy_multipliers(4).health - 2.05).abs() < 1e-6);
         // boss health 100%: 3 players -> 3.0
         assert_eq!(scaling().boss_multipliers(3).health, 3.0);
+    }
+
+    #[test]
+    fn category_dispatch_matches_per_category_helpers() {
+        let s = scaling();
+        // Enemy/Boss route to the matching knob set at every size (incl. the solo identity case).
+        for players in [1, 2, 3, 4, 8] {
+            assert_eq!(s.category_multipliers(Category::Enemy, players), s.enemy_multipliers(players));
+            assert_eq!(s.category_multipliers(Category::Boss, players), s.boss_multipliers(players));
+        }
+        // The two categories genuinely differ where the percentages differ (boss_health 100 vs enemy 35).
+        assert_ne!(
+            s.category_multipliers(Category::Enemy, 2).health,
+            s.category_multipliers(Category::Boss, 2).health,
+        );
     }
 
     #[test]

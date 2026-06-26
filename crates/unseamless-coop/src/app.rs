@@ -20,6 +20,7 @@ use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
+use crate::features::scaling::ScalingFeature;
 use crate::features::seamless::SeamlessRoam;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
@@ -184,6 +185,9 @@ pub fn install() {
         Box::new(CritCoop::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
+        // Writes the per-player enemy/boss scaling curve into the multiplayer SpEffect rate rows
+        // (reads live config; rig-verified, live by default) — see features::scaling.
+        Box::new(ScalingFeature::new()),
         // Sets master volume once at boot, then leaves the in-game slider free (reads live config).
         Box::new(BootVolume::new()),
         // Feeds the overlay's live debug panel (a published snapshot), but only while that panel is
