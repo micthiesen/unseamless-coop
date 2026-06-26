@@ -134,8 +134,10 @@ the game's `dinput8.dll` (a proxy the game auto-loads via DLL search order; `src
 on load also acts as the parent loader for other DLL mods in `mods/` (`src/mods.rs`). Our launcher
 (`crates/launcher`, shipped as `start_protected_game.exe`) starts `eldenring.exe` directly — outside
 EAC — with `UNSEAMLESS_LAUNCH=1` set; the DLL aborts if that marker is absent (`src/guard.rs`), so
-a game update that reverts the launcher can't run the mod under anti-cheat. `scripts/deploy.sh`
-installs both. Driving launch/observe/kill from the shell:
+a game update that reverts the launcher can't run the mod under anti-cheat. `scripts/rig.sh apply`
+installs both (and snapshots the original stack first); `scripts/deploy.sh` is the bare primitive it
+wraps, gated behind `UNSEAMLESS_DEPLOY_STANDALONE=1` so it can't clobber a real stack by accident.
+Driving launch/observe/kill from the shell:
 
 ```bash
 steam -applaunch 1245620                 # runs our start_protected_game.exe -> eldenring.exe (no EAC)

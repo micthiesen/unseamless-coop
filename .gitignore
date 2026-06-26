@@ -2,6 +2,12 @@
 *.log
 .DS_Store
 
+# Built friend-install bundles (scripts/rig.sh package) and the shared co-op password it bakes in —
+# never commit either. The installer templates under scripts/dist/ ARE committed; only the generated
+# zips and the secret are not.
+/dist
+scripts/dist/.shared-password
+
 # =============================================================================
 # Clean-room safety net  (see CLAUDE.md > "Clean-room hygiene")
 #

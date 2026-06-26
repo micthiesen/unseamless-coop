@@ -18,6 +18,11 @@
 # Everything is overridable by env: GAME_DIR, BACKUP_DIR, APPID.
 set -euo pipefail
 
+# Sentinel: marks every child process as "running under the rig orchestrator". Guarded primitives
+# (currently scripts/deploy.sh) check for this so they refuse to run standalone, where there's no
+# backup safety. Exported so it reaches anything rig.sh execs.
+export UNSEAMLESS_RIG_DRIVER=1
+
 # ---- paths -------------------------------------------------------------------------------------
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GAME_DIR="${GAME_DIR:-/mnt/games/SteamLibrary/steamapps/common/ELDEN RING/Game}"
@@ -49,6 +54,22 @@ RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.yd
 # How many confirm presses `dismiss` sends (one per popup + 'press any button' + a little slack).
 RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-6}"
 
+# ---- friend-bundle packaging (rig.sh package / share) ------------------------------------------
+# `package` builds the mod and assembles a self-contained zip a friend installs on Windows
+# (dist/unseamless-coop-<build_id>.zip): our two binaries, a shared seed config (their password + an
+# isolated save extension + debug logging), a MANIFEST with sha256s, and the PowerShell installer
+# from scripts/dist/. `share` uploads it to a GitHub prerelease. See scripts/dist/README-FRIENDS.txt.
+DIST_DIR="${DIST_DIR:-$ROOT/dist}"
+DIST_SRC="$ROOT/scripts/dist"
+# Save extension baked into the friend config. Distinct from vanilla (.sl2) AND ERSC (.co2) so a
+# tester's real saves are never touched. Matches the rig seed's isolation choice.
+FRIEND_SAVE_EXT="${FRIEND_SAVE_EXT:-uco}"
+# Where the shared co-op password comes from (precedence: --password flag, this env, then this
+# gitignored file). Must be >= 5 chars (the mod's startup guard rejects shorter).
+SHARED_PASSWORD_FILE="${SHARED_PASSWORD_FILE:-$DIST_SRC/.shared-password}"
+# GitHub prerelease tag `share` uploads to (a rolling bucket of test builds, not a version release).
+SHARE_TAG="${SHARE_TAG:-friends-test}"
+
 # Files in the game folder our apply overwrites — i.e. the surface that must be snapshotted to
 # restore the original stack. SeamlessCoop/ is deliberately NOT here: apply never touches it (ERSC
 # just stays dormant because we swap its launcher), so its ersc_settings.ini / password are safe.
@@ -66,6 +87,24 @@ say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Copy $1 to the system clipboard, best-effort. Wayland-native wl-copy first, then X fallbacks, then a
+# real pbcopy binary (macOS). Returns 1 if no tool is found. NOTE: detects real binaries — an
+# interactive `pbcopy` *alias* (e.g. xsel) isn't visible in this non-interactive script. wl-copy forks
+# to hold the selection, so the value survives after rig.sh exits.
+clip_copy() {  # $1 = text
+  local text="$1" tool
+  for tool in wl-copy xclip xsel pbcopy; do
+    command -v "$tool" >/dev/null 2>&1 || continue
+    case "$tool" in
+      wl-copy) printf '%s' "$text" | wl-copy >/dev/null 2>&1 && return 0 ;;
+      xclip)   printf '%s' "$text" | xclip -selection clipboard >/dev/null 2>&1 && return 0 ;;
+      xsel)    printf '%s' "$text" | xsel --clipboard --input >/dev/null 2>&1 && return 0 ;;
+      pbcopy)  printf '%s' "$text" | pbcopy >/dev/null 2>&1 && return 0 ;;
+    esac
+  done
+  return 1
+}
 
 need_game_dir() { [[ -d "$GAME_DIR" ]] || die "game folder not found: $GAME_DIR (set GAME_DIR=...)"; }
 backup_exists() { [[ -f "$BACKUP_DIR/MANIFEST" ]]; }
@@ -91,18 +130,22 @@ cmd_backup() {
 
   say "Snapshotting the original install -> $BACKUP_DIR"
   mkdir -p "$BACKUP_DIR"
-  : > "$BACKUP_DIR/MANIFEST"
+  # Build the MANIFEST under a .partial name and only `mv` it into place AFTER every copy succeeds.
+  # backup_exists() keys on the final name, so a mid-snapshot failure (under set -e) leaves no
+  # MANIFEST -> the next backup retries instead of treating an incomplete snapshot as complete (which
+  # would let `apply` overwrite originals we never captured). The Windows installer does the same.
+  local mani="$BACKUP_DIR/MANIFEST" partial="$BACKUP_DIR/.MANIFEST.partial"
   {
     echo "# unseamless-coop rig backup — the original ERSC + Elden Mod Loader stack."
     echo "date: $(date -Is)"
     echo "source: $GAME_DIR"
     echo "files:"
-  } >> "$BACKUP_DIR/MANIFEST"
+  } > "$partial"
 
   for f in "${MANAGED_FILES[@]}"; do
     if [[ -f "$GAME_DIR/$f" ]]; then
       cp -p "$GAME_DIR/$f" "$BACKUP_DIR/$f"
-      printf '  %s  %s\n' "$(sha256sum "$GAME_DIR/$f" | cut -d' ' -f1)" "$f" >> "$BACKUP_DIR/MANIFEST"
+      printf '  %s  %s\n' "$(sha256sum "$GAME_DIR/$f" | cut -d' ' -f1)" "$f" >> "$partial"
       ok "saved $f"
     else
       warn "no $f in game folder (skipping)"
@@ -111,9 +154,10 @@ cmd_backup() {
 
   if [[ -d "$GAME_DIR/mods" ]]; then
     rsync -a --delete "$GAME_DIR/mods/" "$BACKUP_DIR/mods/"
-    echo "  mods/ ($(find "$BACKUP_DIR/mods" -maxdepth 1 -name '*.dll' | wc -l | tr -d ' ') dll(s))" >> "$BACKUP_DIR/MANIFEST"
+    echo "  mods/ ($(find "$BACKUP_DIR/mods" -maxdepth 1 -name '*.dll' | wc -l | tr -d ' ') dll(s))" >> "$partial"
     ok "saved mods/ ($(find "$BACKUP_DIR/mods" -maxdepth 1 -name '*.dll' -printf '%f ' 2>/dev/null))"
   fi
+  mv "$partial" "$mani"   # commit the snapshot: now backup_exists() sees a complete MANIFEST
   say "Snapshot complete. This is your rollback point; 'apply' will never touch it."
 }
 
@@ -480,6 +524,161 @@ cmd_cycle() {
   fi
 }
 
+# ---- friend-bundle packaging ---------------------------------------------------------------------
+# Re-derive the same build id build.rs bakes into the DLL (short HEAD sha + `-dirty` when the tree
+# has uncommitted changes), so the zip name and MANIFEST match the binary that's in it.
+compute_build_id() {
+  local sha dirty
+  sha="$(cd "$ROOT" && git rev-parse --short=7 HEAD 2>/dev/null || echo nogit)"
+  dirty="$(cd "$ROOT" && git status --porcelain 2>/dev/null)"
+  [[ -n "$dirty" ]] && sha="${sha}-dirty"
+  printf '%s' "$sha"
+}
+
+# Workspace version (the first `version = "..."` in the root Cargo.toml — the [workspace.package] one).
+workspace_version() { sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1; }
+
+# Resolve the shared co-op password (arg > env > file), validating the mod's 5-char minimum.
+resolve_password() {
+  local pw="${1:-}"
+  [[ -z "$pw" ]] && pw="${UNSEAMLESS_SHARED_PASSWORD:-}"
+  [[ -z "$pw" && -f "$SHARED_PASSWORD_FILE" ]] && pw="$(tr -d '[:space:]' < "$SHARED_PASSWORD_FILE")"
+  [[ -n "$pw" ]] || die "no shared password. Pass --password X, set UNSEAMLESS_SHARED_PASSWORD, or write one to $SHARED_PASSWORD_FILE"
+  # 5 is unseamless_core::config::MIN_PASSWORD_LEN — a fail-fast so we don't ship a config the mod
+  # rejects at startup on a friend's machine; the runtime guard (password_is_valid) stays authoritative.
+  [[ ${#pw} -ge 5 ]] || die "shared password must be >= 5 characters (the mod rejects shorter)."
+  # Restrict to a safe charset: the seed config is written via an UNquoted heredoc (so $build_id et al.
+  # expand) and as a TOML basic string, so a `$`, backtick, or `\` would shell-expand/execute and a `"`
+  # would break the TOML. The mod's own generated passwords are [A-Z0-9], so this never rejects a real one.
+  [[ "$pw" =~ ^[A-Za-z0-9._~!@#%^*()+=-]+$ ]] \
+    || die "shared password has an unsupported character. Use letters, digits, and . _ ~ ! @ # % ^ * ( ) + = - (no spaces, quotes, backslash, backtick, or \$)."
+  printf '%s' "$pw"
+}
+
+cmd_package() {
+  local profile=diag do_apply=0 pw_arg=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --release)    profile=release ;;
+      --diag)       profile=diag ;;
+      --apply)      do_apply=1 ;;
+      --password)   pw_arg="${2:-}"; shift ;;
+      --password=*) pw_arg="${1#*=}" ;;
+      *) die "package: unknown option '$1'" ;;
+    esac
+    shift
+  done
+  command -v zip >/dev/null 2>&1 || die "zip not installed (pacman -S zip)."
+  local password version; password="$(resolve_password "$pw_arg")"; version="$(workspace_version)"
+
+  # Refresh the baked build_id's dirty flag — build.rs only re-runs on a commit move otherwise — then
+  # build WITHOUT the bridge feature (that loopback debug listener is dev-host-only, not for friends).
+  touch "$ROOT/crates/unseamless-coop/build.rs"
+  say "Building friend bundle ($profile, no bridge) for $TRIPLE"
+  ( cd "$ROOT" && cargo build --profile "$profile" )
+
+  local build_id out dll launcher
+  build_id="$(compute_build_id)"
+  out="$(artifact_dir "$profile")"
+  dll="$out/unseamless_coop.dll"; launcher="$out/start_protected_game.exe"
+  [[ -f "$dll" && -f "$launcher" ]] || die "build artifacts missing under $out"
+
+  local stage="$DIST_DIR/staging"
+  rm -rf "$stage"; mkdir -p "$stage"
+  cp "$dll" "$stage/dinput8.dll"
+  cp "$launcher" "$stage/start_protected_game.exe"
+  for f in Install.cmd Install.ps1 Uninstall.cmd Uninstall.ps1 _lib.ps1 README-FRIENDS.txt; do
+    cp "$DIST_SRC/$f" "$stage/$f"
+  done
+
+  # Shared seed config: only what friends must have set — the password and an isolated save extension
+  # — plus debug logging + forwarding so their logs come back to the host. Everything else stays at
+  # the mod's defaults; the host's ConfigSync pushes the authoritative settings live once connected.
+  cat > "$stage/unseamless_coop.toml" <<EOF
+# unseamless-coop shared test config (build $build_id). Everyone in the party uses this so the
+# co-op password matches; the host syncs the rest of the settings to you live once connected.
+
+[session]
+password = "$password"
+
+[save]
+# Isolated from vanilla (.sl2) and ERSC (.co2) so your real saves are never touched.
+file_extension = "$FRIEND_SAVE_EXT"
+
+[debug]
+enabled = true          # capture verbose logs for this test build
+forward_to_host = true  # send your logs to the host so they land in one place
+EOF
+
+  # MANIFEST: build id + sha256 of each binary, for the installer's post-copy verification.
+  {
+    echo "# unseamless-coop friend bundle"
+    echo "build_id: $build_id"
+    echo "version: $version"
+    echo "created: $(date -Is)"
+    echo "save_extension: $FRIEND_SAVE_EXT"
+    echo "files:"
+    printf '  %s  %s\n' "$(sha256sum "$stage/dinput8.dll" | cut -d' ' -f1)" "dinput8.dll"
+    printf '  %s  %s\n' "$(sha256sum "$stage/start_protected_game.exe" | cut -d' ' -f1)" "start_protected_game.exe"
+  } > "$stage/MANIFEST.txt"
+
+  local zipf="$DIST_DIR/unseamless-coop-$build_id.zip"
+  rm -f "$zipf"
+  ( cd "$stage" && zip -qr "$zipf" . )
+  ok "packaged $zipf"
+  say "build_id $build_id · v$version · save ext .$FRIEND_SAVE_EXT · password ${#password} chars"
+  [[ "$build_id" == *-dirty ]] && warn "this is a -dirty build (uncommitted changes) — fine for testing; commit first if you want a clean id to share."
+
+  # --apply: install the SAME built bits locally (host side) with the shared config, so the host runs
+  # exactly what friends do. Reuses the guarded apply (auto-snapshots, never restores).
+  if [[ $do_apply -eq 1 ]]; then
+    say "Installing the same build locally (host) with the shared config"
+    mkdir -p "$(dirname "$CONFIG_DST")"
+    cp "$stage/unseamless_coop.toml" "$CONFIG_DST"
+    local pflag=--diag; [[ "$profile" == release ]] && pflag=--release
+    cmd_apply --no-build "$pflag" --keep-config
+  fi
+  rm -rf "$stage"
+}
+
+cmd_share() {
+  local zipf="${1:-}"
+  command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) not installed."
+  if [[ -z "$zipf" ]]; then
+    zipf="$(ls -1t "$DIST_DIR"/unseamless-coop-*.zip 2>/dev/null | head -1)"
+    [[ -n "$zipf" ]] || die "no zip in $DIST_DIR — run 'rig.sh package' first (or pass a path)."
+  fi
+  [[ -f "$zipf" ]] || die "no such zip: $zipf"
+  say "Sharing $(basename "$zipf") to GitHub prerelease '$SHARE_TAG'"
+  if ! ( cd "$ROOT" && gh release view "$SHARE_TAG" >/dev/null 2>&1 ); then
+    say "Creating prerelease '$SHARE_TAG'"
+    ( cd "$ROOT" && gh release create "$SHARE_TAG" --prerelease --target main \
+        --title "unseamless-coop friend test builds" \
+        --notes "Rolling bucket of test builds for co-op testing. Grab the newest asset; install per README-FRIENDS.txt inside. Not a real release." ) \
+      || die "couldn't create prerelease '$SHARE_TAG'"
+  fi
+  # Auto-prune prior bundle assets so the release holds only the current build (different build_ids
+  # would otherwise accumulate — a new commit changes the asset name, so --clobber alone won't replace
+  # it). Matches only our own `unseamless-coop-*.zip` uploads. NOTE: GitHub's auto-generated "Source
+  # code (zip/tar.gz)" archives are derived from the tag, not assets, so they can't be pruned here.
+  local old
+  while IFS= read -r old; do
+    [[ -n "$old" ]] || continue
+    ( cd "$ROOT" && gh release delete-asset "$SHARE_TAG" "$old" --yes >/dev/null 2>&1 ) && say "pruned old asset: $old"
+  done < <(cd "$ROOT" && gh release view "$SHARE_TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^unseamless-coop-.*\.zip$' || true)
+
+  ( cd "$ROOT" && gh release upload "$SHARE_TAG" "$zipf" --clobber ) || die "upload failed"
+  ok "uploaded $(basename "$zipf")"
+  local url; url="$(cd "$ROOT" && gh release view "$SHARE_TAG" --json assets --jq ".assets[] | select(.name==\"$(basename "$zipf")\") | .url" 2>/dev/null || true)"
+  if [[ -n "$url" ]]; then
+    say "Download URL: $url"
+    # Copy the bare URL to the clipboard by default, so it's ready to paste to friends.
+    if clip_copy "$url"; then ok "copied to clipboard"; else warn "no clipboard tool (wl-copy/xclip/xsel) — URL not copied"; fi
+  else
+    say "Release: $(cd "$ROOT" && gh release view "$SHARE_TAG" --json url --jq .url 2>/dev/null || true)"
+  fi
+}
+
 # ---- dispatch ------------------------------------------------------------------------------------
 usage() {
   cat <<'EOF'
@@ -509,9 +708,18 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          ydotool. Run if a popup is still up after launch.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
                          Auto-dismisses the startup popups; pass --no-dismiss to skip that.
+  package [opts]         Build + assemble a Windows friend-install zip in dist/. Bundles our binaries,
+                         a shared seed config, a sha256 MANIFEST, and the PowerShell installer.
+        --release          Ship the lean profile (default: diag — symbols + the build id in-overlay).
+        --password X       Shared co-op password (else $UNSEAMLESS_SHARED_PASSWORD, else the file
+                           scripts/dist/.shared-password). Must be >= 5 chars.
+        --apply            Also install the same build locally (host) with the shared config.
+  share [zip]            Upload a packaged zip (default: newest in dist/) to the GitHub prerelease
+                         '$SHARE_TAG', creating it if needed. Prints the download URL.
 
 Env overrides: GAME_DIR, BACKUP_DIR, APPID, WINDOW_MARGIN, RIG_WINDOW_WIDTH, RIG_WINDOW_HEIGHT,
-               RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES.
+               RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
+               DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
 EOF
 }
 
@@ -527,6 +735,8 @@ case "$cmd" in
   reposition) reposition_window ;;
   dismiss) cmd_dismiss "$@" ;;
   cycle)   cmd_cycle "$@" ;;
+  package) cmd_package "$@" ;;
+  share)   cmd_share "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd' (try: rig.sh help)" ;;
 esac

@@ -12,10 +12,11 @@ function Write-Ok($m)   { Write-Host "  + $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "  ! $m" -ForegroundColor Yellow }
 function Write-Err($m)  { Write-Host "ERROR: $m" -ForegroundColor Red }
 
-# The game-folder surface our install touches and must be able to restore. Flat files plus the
-# mods\ tree. ERSC's own files (ersc.dll, SeamlessCoop\) are NOT here: like the rig, we never
-# overwrite them — replacing the launcher just leaves ERSC dormant — so they need no restore. We
-# still snapshot them (Backup-ErscForSafety) purely as the belt-and-suspenders the user asked for.
+# Flat game-folder files we back up and restore (not all are written on install: only dinput8.dll
+# and start_protected_game.exe are; mod_loader_config.ini is captured defensively). The mods\ tree is
+# handled separately in Install/Uninstall, not via this array. ERSC's own files (ersc.dll,
+# SeamlessCoop\) are NOT here: like the rig, we never overwrite them (replacing the launcher just
+# leaves ERSC dormant), so they need no restore; Install.ps1 still copies them as a safety snapshot.
 $script:ManagedFiles = @('start_protected_game.exe', 'dinput8.dll', 'mod_loader_config.ini')
 
 # ---- game-folder detection ---------------------------------------------------------------------
@@ -38,7 +39,8 @@ function Get-SteamPath {
 # backslashes doubled ("D:\\SteamLibrary"), so unescape \\ -> \.
 function Get-SteamLibraries([string]$SteamPath) {
     $libs = @()
-    if ($SteamPath) { $libs += $SteamPath }
+    if (-not $SteamPath) { return $libs }   # no Steam in the registry -> let Find-GameDir fall back to the prompt
+    $libs += $SteamPath
     $vdf = Join-Path $SteamPath 'steamapps\libraryfolders.vdf'
     if (Test-Path $vdf) {
         foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s+"([^"]+)"')) {

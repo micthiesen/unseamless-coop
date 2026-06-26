@@ -75,6 +75,10 @@ We follow the same model. (Full per-subsystem inventory: [SDK-COVERAGE.md](SDK-C
 This shrinks the hard RE surface from "an entire netcode" to "how the game's session FSM
 behaves and where ERSC relaxes/persists it" — observable on the rig.
 
+The end-to-end plan for *getting two players connected* — the offline/Steam distinction, the
+private-Steam-channel-first build order, and the decided Steamworks integration approach (hand-bind
+the flat C API at runtime, not the crate) — is its own doc: [COOP-CONNECTION.md](COOP-CONNECTION.md).
+
 ### Keeping it seamless: hold state invariants, don't patch call sites
 
 ERSC byte-patches the many call sites that normally end a co-op session (boss death, fog gate, host

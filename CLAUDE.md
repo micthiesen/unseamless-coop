@@ -61,6 +61,14 @@ expected — the workflow is deliberately split:
   launch the game or read a live log from the Mac. `scripts/deploy.sh` and the `/test-loop` skill
   describe that rig, not this one.
 
+> **When the rig IS the machine you're on (the gaming PC, not the Mac): install with
+> `scripts/rig.sh apply`, NEVER `scripts/deploy.sh`.** This PC runs the user's *real* ERSC + Elden
+> Mod Loader + own-mods stack. `rig.sh` snapshots that stack to a safe backup before standing in for
+> it (and `rig.sh restore` puts it back); `deploy.sh` is the bare install primitive with **no backup
+> safety**, so running it directly clobbers the real `dinput8.dll` (Elden Mod Loader) and launcher
+> with no way back. Same rule for launch/log/kill/restore: drive everything through `rig.sh` (see
+> the `/test-loop` skill, layer 4). `deploy.sh` is only for the Mac-builds-elsewhere handoff.
+
 So: never block on "let me run the game to check." Build, commit, and push from the Mac; the
 in-game verification happens separately and asynchronously. The log-line contract (install →
 heartbeat → effect lines) is the handoff between the two — write code so its behavior is

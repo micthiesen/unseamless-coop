@@ -22,13 +22,16 @@ scripts/rig.sh restore                # explicit: put the original ERSC stack ba
 ```bash
 cargo build --release                 # on the Mac -> unseamless_coop.dll + start_protected_game.exe
 # copy the build outputs to the rig, then on the rig:
-./scripts/deploy.sh                   # dinput8.dll + our launcher into ELDEN RING/Game/
+UNSEAMLESS_DEPLOY_STANDALONE=1 ./scripts/deploy.sh   # dinput8.dll + our launcher into ELDEN RING/Game/
 rm -f "ELDEN RING/Game/unseamless-coop/logs/"*.log   # so a fresh load is unambiguous
 ```
 
-`deploy.sh` installs the cdylib as the game's `dinput8.dll` proxy (auto-loaded, no separate mod
-loader) and our launcher as `start_protected_game.exe` (backing up the original to
-`start_protected_game_eac.exe`). **Launch via Steam "Play"** — it runs our launcher, which starts
+`deploy.sh` is the bare install primitive (no backup safety), so it **refuses to run standalone**
+unless you pass `UNSEAMLESS_DEPLOY_STANDALONE=1` — the explicit acknowledgement for this case: a
+clean rig with no real ERSC stack to protect. On a machine that *does* run the real stack (the gaming
+PC) use `scripts/rig.sh apply` instead (it snapshots first). `deploy.sh` installs the cdylib as the
+game's `dinput8.dll` proxy (auto-loaded, no separate mod loader) and our launcher as
+`start_protected_game.exe` (backing up the original to `start_protected_game_eac.exe`). **Launch via Steam "Play"** — it runs our launcher, which starts
 `eldenring.exe` directly (outside EAC) with `UNSEAMLESS_LAUNCH=1` set. The mod **requires** that
 marker: launched any other way it aborts the process (the EAC guard), so always launch via Steam
 after deploying. On first run it writes a default `unseamless-coop/unseamless_coop.toml` and a run log
