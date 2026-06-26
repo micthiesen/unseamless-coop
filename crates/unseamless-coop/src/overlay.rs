@@ -150,9 +150,11 @@ struct Overlay {
     /// A position to snap the window to next frame, set when it drifts out of the ER viewport so it
     /// stays "locked" inside the game window. `None` when it's in bounds (normal dragging).
     clamp_pos: Option<[f32; 2]>,
-    /// Whether the Settings tab reveals the session password (vs. masking it). Default masked so it
-    /// isn't exposed on a stream/screenshot; toggled by the Reveal/Hide button. Present-thread only.
+    /// Whether the Settings tab reveals the session password / Steam ID (vs. masking them). Both default
+    /// masked — see [`draw_secret_row`]'s streamer-mode note — and are toggled by their own Reveal/Hide
+    /// button. Present-thread only.
     password_revealed: bool,
+    steam_id_revealed: bool,
     /// Controller→menu edge state: turns the raw pad snapshot into per-frame nav/activate/toggle edges.
     /// Updated once per frame in `render_inner`; Present-thread only (see [`crate::input::PadNav`]).
     pad: crate::input::PadNav,
@@ -189,6 +191,7 @@ impl Overlay {
             tab: 0,
             clamp_pos: None,
             password_revealed: false,
+            steam_id_revealed: false,
             pad: crate::input::PadNav::new(),
             // On by default in debug builds (the `diag` profile keeps debug-assertions); off in the
             // stripped release, where it's an opt-in toggled from the Actions tab.
@@ -305,7 +308,15 @@ impl Overlay {
     /// Draw the live **debug panel** — a read-only, bottom-left passive surface rendering the
     /// diagnostic snapshot the game-thread publisher posts ([`crate::debug_panel`]). It's the same
     /// [`DiagnosticReport`] the log dumps produce, shown live (build / session / features / scaling /
-    /// runtime). Bottom-left is the one free corner (notifications top-left, watermark top-right,
+    /// runtime).
+    ///
+    /// **Deliberately exempt from streamer-mode masking** (see [`draw_secret_row`]): this panel shows
+    /// identifying info — the Steam ID and all — *in the clear*, because it's a diagnostics surface, not
+    /// the always-available player UI, and it's opt-in on release builds (off by default there; on in
+    /// debug builds or when toggled from the Actions tab via [`Overlay::show_debug`]). If you ever make
+    /// this panel visible by default on release, revisit that — it would then leak identity on stream.
+    ///
+    /// Bottom-left is the one free corner (notifications top-left, watermark top-right,
     /// Steam's toasts bottom-right). Anchored by its own bottom-left corner (pivot 0,1) so it grows
     /// upward from a fixed inset and never runs off the bottom. Borderless + input-transparent like the
     /// other passive surfaces; reads the snapshot non-blocking and skips the frame before the first
@@ -543,7 +554,7 @@ impl Overlay {
     fn draw_settings_tab(&mut self, ui: &Ui) {
         self.draw_password_row(ui);
         ui.separator();
-        draw_steam_id_row(ui);
+        self.draw_steam_id_row(ui);
         ui.separator();
         ui.text_disabled("Read-only. Edit in unseamless_coop.toml, then relaunch.");
         ui.text_colored(rgba(BLUE, 1.0), "synced");
@@ -562,25 +573,34 @@ impl Overlay {
         }
     }
 
-    /// The session password at the top of the Settings tab — the matchmaking key everyone in the
-    /// party must match. Shown so it can be read off-screen without opening the config file, but
-    /// masked behind a Reveal/Hide toggle so it isn't leaked on a stream or screenshot by default.
-    /// Amber so it stands out from the synced/local palette below it. The mask uses ASCII `*` (the
-    /// menu font is a printable-ASCII subset, so a Unicode bullet would render as a missing glyph).
+    /// The session password at the top of the Settings tab — the matchmaking key everyone in the party
+    /// must match. Drawn through [`draw_secret_row`] so it's masked by default with its own Reveal and
+    /// Copy buttons, identical to the Steam ID below. Amber so it stands out from the synced/local
+    /// palette further down.
     fn draw_password_row(&mut self, ui: &Ui) {
-        let pw = &self.config.session.password;
-        ui.text_colored(rgba(AMBER, 1.0), "Session password:");
-        ui.same_line();
-        if self.password_revealed {
-            ui.text_colored(rgba(AMBER, 1.0), pw);
-        } else {
-            ui.text_colored(rgba(AMBER, 1.0), "*".repeat(pw.chars().count()));
-        }
-        ui.same_line();
-        if ui.small_button(if self.password_revealed { "Hide" } else { "Reveal" }) {
-            self.password_revealed = !self.password_revealed;
-        }
+        // Clone the small string out so the row's value borrow doesn't tangle with the `&mut` reveal flag.
+        let pw = self.config.session.password.clone();
+        draw_secret_row(ui, "Session password:", "session password", &pw, &mut self.password_revealed, AMBER);
         ui.text_disabled("Everyone in your party must match this.");
+    }
+
+    /// Your own Steam ID — the identity a friend needs to connect once the private side-channel lands
+    /// (the connection plan's rung 2); for now exchanged out of band (Discord). Read non-blocking from
+    /// [`crate::steam`]; "resolving" until Steam hands it back shortly after launch. Once resolved it's
+    /// drawn through [`draw_secret_row`] (masked by default, Reveal + Copy), the same treatment as the
+    /// password. Teal so it reads as connection info, distinct from the amber password above.
+    fn draw_steam_id_row(&mut self, ui: &Ui) {
+        match crate::steam::self_steam_id() {
+            Some(id) => {
+                draw_secret_row(ui, "Your Steam ID:", "Steam ID", &id.to_string(), &mut self.steam_id_revealed, TEAL);
+            }
+            None => {
+                ui.text_colored(rgba(TEAL, 1.0), "Your Steam ID:");
+                ui.same_line();
+                ui.text_disabled("resolving from Steam...");
+            }
+        }
+        ui.text_disabled("Share this with friends to connect (co-op connection coming soon).");
     }
 
     /// Hand an activated action to the game thread (via [`crate::actionq`]), retrying any the queue
@@ -744,28 +764,50 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     }
 }
 
-/// Your own Steam ID + a Copy button. This is the identity a friend needs to connect once the private
-/// side-channel lands (the connection plan's rung 2); for now it's exchanged out of band (Discord).
-/// Read non-blocking from [`crate::steam`] — blank until Steam resolves it shortly after launch. Copy
-/// goes through imgui's built-in Win32 clipboard (no Rust clipboard backend is registered, so
-/// `set_clipboard_text` calls Dear ImGui's default Windows impl). Teal so it reads as connection info,
-/// distinct from the amber password above.
-fn draw_steam_id_row(ui: &Ui) {
-    ui.text_colored(rgba(TEAL, 1.0), "Your Steam ID:");
+/// Draw a **sensitive identity row**: a label, the value masked behind `*` by default, a Reveal/Hide
+/// toggle, and a Copy button (which copies the *real* value even while masked). Shared by the session
+/// password and the Steam ID so the two behave identically — DRY, and one place to enforce the policy.
+///
+/// ## Streamer-mode-by-default (the overlay's only mode)
+/// Treat every identifying value a *player-facing* overlay surface shows as if a stream or screenshot is
+/// always capturing it: mask it by default, reveal only on an explicit per-row Reveal click. Copy still
+/// copies the real value while masked, so a player can share their ID without ever putting it on screen.
+/// Any new identifying field on a player-facing surface (this utility window, notifications) should go
+/// through this helper, or follow the same mask-by-default rule — never drawn in the clear.
+///
+/// The **debug panel is the deliberate exception**: it renders the full diagnostic report (Steam ID and
+/// all) unobscured, because it's a diagnostics surface rather than a player-facing one, and it's opt-in
+/// on release builds — off by default there, on only in debug builds or when explicitly toggled (see
+/// [`Overlay::draw_debug_panel`] / [`Overlay::show_debug`]). So the "don't show identifying info" rule is
+/// about the always-available player UI, not the debug-gated panel.
+///
+/// `noun` is the human name used in the copy toast and (as a slug) to keep each row's imgui button ids
+/// unique. The mask uses ASCII `*` — the menu font is a printable-ASCII subset, so a Unicode bullet would
+/// render as a missing glyph.
+fn draw_secret_row(ui: &Ui, label: &str, noun: &str, value: &str, revealed: &mut bool, color: [f32; 3]) {
+    ui.text_colored(rgba(color, 1.0), label);
     ui.same_line();
-    match crate::steam::self_steam_id() {
-        Some(id) => {
-            let text = id.to_string();
-            ui.text_colored(rgba(TEAL, 1.0), &text);
-            ui.same_line();
-            // Unique label doubles as the imgui id; stable across frames since the text is fixed.
-            if ui.small_button("Copy") {
-                ui.set_clipboard_text(&text);
-            }
-        }
-        None => ui.text_disabled("resolving from Steam..."),
+    if *revealed {
+        ui.text_colored(rgba(color, 1.0), value);
+    } else {
+        ui.text_colored(rgba(color, 1.0), "*".repeat(value.chars().count()));
     }
-    ui.text_disabled("Share this with friends to connect (co-op connection coming soon).");
+    ui.same_line();
+    // `###`-suffixed ids: the visible label flips (Reveal/Hide) without changing imgui identity, and the
+    // per-noun slug keeps the password and Steam-ID buttons from colliding on a shared label.
+    if ui.small_button(format!("{}###reveal-{noun}", if *revealed { "Hide" } else { "Reveal" })) {
+        *revealed = !*revealed;
+    }
+    ui.same_line();
+    if ui.small_button(format!("Copy###copy-{noun}")) {
+        // Copy the real value even while masked — sharing without showing it on stream is the whole point.
+        // Goes through our own Win32 clipboard, not imgui's: hudhook's imgui-sys disables the Win32
+        // clipboard impl, so `ui.set_clipboard_text` would only write an in-process buffer (see
+        // `crate::clipboard`).
+        crate::clipboard::set_text(value);
+        // Toast so the click feels responsive — a silent copy reads as a no-op.
+        crate::notify::with_mut(|n| n.info(format!("Copied {noun} to clipboard")));
+    }
 }
 
 fn draw_banners(ui: &Ui, banners: &[Banner]) {

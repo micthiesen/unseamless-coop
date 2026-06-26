@@ -23,6 +23,7 @@ mod bridge;
 // there fails the build loudly instead of silently embedding a listener in the shipped DLL.
 #[cfg(all(feature = "bridge", not(debug_assertions)))]
 compile_error!("the `bridge` feature must not be enabled in a release build (use the `diag` profile)");
+mod clipboard;
 mod config;
 mod debug_panel;
 mod diag;
