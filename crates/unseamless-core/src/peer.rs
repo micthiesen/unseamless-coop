@@ -47,6 +47,24 @@ const LOG_FORWARD_BURST: u32 = 32;
 /// logs-per-second is the binding layer's maintain cadence times this — keep that cadence stable.
 const LOG_FORWARD_REFILL_PER_TICK: f64 = 8.0;
 
+/// User-facing message for a peer whose mod major-version is incompatible with ours. Single-sourced
+/// so the `Peer`'s own notification (below, harness-visible) and the cdylib's overlay surface
+/// (`coop/coop.rs`, which derives the same banner onto the drawn notification model) can't drift to
+/// different wording.
+pub fn version_mismatch_message(peer: PeerId, theirs: Version, ours: Version) -> String {
+    format!("Mod version mismatch with {}: they have {theirs}, you have {ours}", peer_tag(peer))
+}
+
+/// User-facing message for losing contact with a peer (liveness). Shared like
+/// [`version_mismatch_message`].
+pub fn lost_contact_message(peer: PeerId) -> String {
+    format!("Lost contact with {}", peer_tag(peer))
+}
+
+/// User-facing toast when a client adopts the host's pushed settings. Shared like
+/// [`version_mismatch_message`].
+pub const CONFIG_SYNCED_MESSAGE: &str = "Session settings synced from host";
+
 /// Per-sender monotonic sequence gate: accepts a frame only if its `seq` advances past everything
 /// seen from that sender, so a duplicated or reordered-old frame is rejected. The session-action
 /// and log-forward dedups share this one tested concept rather than open-coding the comparison
@@ -175,12 +193,7 @@ impl Peer {
                     self.notifications.set_banner(
                         format!("version:{from}"),
                         Severity::Warning,
-                        format!(
-                            "Mod version mismatch with {}: they have {}, you have {}",
-                            peer_tag(from),
-                            fmt_version(theirs),
-                            fmt_version(self.version),
-                        ),
+                        version_mismatch_message(from, theirs, self.version),
                     );
                 }
                 // The host brings a newcomer in sync with the current shared settings.
@@ -195,7 +208,7 @@ impl Peer {
                     // generation falls through to the else and is ignored (idempotent + ordered).
                     self.applied_config_gen = Some(generation);
                     settings.apply_to(&mut self.config);
-                    self.notifications.info("Session settings synced from host");
+                    self.notifications.info(CONFIG_SYNCED_MESSAGE);
                 }
                 vec![]
             }
@@ -313,7 +326,7 @@ impl Peer {
             self.notifications.set_banner(
                 format!("liveness:{pid}"),
                 Severity::Warning,
-                format!("Lost contact with {}", peer_tag(pid)),
+                lost_contact_message(pid),
             );
         }
         for pid in recovered {
@@ -348,10 +361,6 @@ impl Peer {
     pub fn dropped_logs(&self) -> u64 {
         self.dropped_logs
     }
-}
-
-fn fmt_version(v: Version) -> String {
-    format!("{}.{}.{}", v.major, v.minor, v.patch)
 }
 
 /// Binds a [`Peer`] to a [`Transport`]: encodes the peer's outbound messages onto the wire and

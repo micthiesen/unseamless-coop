@@ -230,6 +230,14 @@ impl Version {
     }
 }
 
+impl std::fmt::Display for Version {
+    /// Canonical `major.minor.patch` rendering, single-sourced so the handshake/version-mismatch
+    /// surfaces (the `Peer`'s notifications and the cdylib's overlay) format a version identically.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -66,8 +66,10 @@ pub fn install() {
 
     // Config before logging: the logger picks its level and writes its header from the config.
     let (config, notes) = crate::config::load(&base);
-    // The in-memory log ring buffer (overlay Log tab) must exist before the logger tees into it.
+    // The in-memory log ring buffer (overlay Log tab) and the co-op forward queue must both exist
+    // before the logger tees into them.
     crate::logbuf::init();
+    crate::forward::init();
     crate::logger::init(&config, &base);
     crate::notify::init();
     // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
@@ -139,6 +141,12 @@ pub fn install() {
     if config.debug.bridge_port > 0 {
         crate::bridge::start(config.debug.bridge_port);
     }
+
+    // The real side-channel: a private Steam P2P link to a manually-entered partner SteamID (rung 2
+    // of docs/COOP-CONNECTION.md). Runs the same host-tested `Session` the bridge does, but over
+    // `ISteamNetworkingMessages` instead of loopback. No-op unless `[coop] peer_steam_id` is set, so
+    // a normal solo session pays nothing. Best-effort: a failure to connect degrades, never aborts.
+    crate::coop::start(&config);
 
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.

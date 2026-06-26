@@ -1,10 +1,10 @@
 //! Process-global **live config**, shared between the game-thread features and the dev bridge.
 //!
 //! Features read this each frame instead of holding a construction-time snapshot, so a config change
-//! from any source takes effect without rebuilding them. Today the only writer is the bridge
-//! applying a received `ConfigSync`; later it'll be the menu and the game-P2P side-channel. A single
-//! `Mutex` guards it — contention is negligible (the main thread reads a field briefly each frame;
-//! the bridge writes only when it receives a sync).
+//! from any source takes effect without rebuilding them. The writers are the co-op side-channel
+//! ([`crate::coop`]) and the dev bridge, each applying a received host `ConfigSync`; later the menu
+//! joins them. A single `Mutex` guards it — contention is negligible (the main thread reads a field
+//! briefly each frame; a writer writes only when it receives a sync).
 
 use std::sync::{Mutex, OnceLock, TryLockError};
 
@@ -35,10 +35,7 @@ pub fn with<R>(f: impl FnOnce(&Config) -> R) -> R {
 }
 
 /// A full clone of the current live config (for seeding a `Session`, where ownership is needed).
-// The live-config write path's consumers are the bridge today and the menu / game-P2P sync next;
-// only `bridge` builds exercise it so far, so allow it to be unused without that feature (real dead
-// code is still caught in the bridge build, where it's used).
-#[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+/// Used by the co-op side-channel ([`crate::coop`]) and the dev bridge to seed their `Session`.
 pub fn snapshot() -> Config {
     with(Clone::clone)
 }
@@ -58,12 +55,11 @@ pub fn try_snapshot() -> Option<Config> {
     }
 }
 
-/// Replace the **whole** live config — e.g. after the bridge applies a received `ConfigSync`. No-op
-/// before [`init`]. The bridge is the only writer today, so this is last-writer-wins with no race;
-/// when a second writer lands (the menu), this should narrow to the changed fields to avoid a
-/// lost update. Poison recovery is safe because the critical section is a single move-assign — a
-/// panic can't leave `Config` half-written.
-#[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+/// Replace the **whole** live config — e.g. after the co-op client (or the dev bridge) applies a
+/// received host `ConfigSync`. No-op before [`init`]. These writers are last-writer-wins with no
+/// race (each runs on its own single thread); when a second concurrent writer lands (the menu), this
+/// should narrow to the changed fields to avoid a lost update. Poison recovery is safe because the
+/// critical section is a single move-assign — a panic can't leave `Config` half-written.
 pub fn set(config: Config) {
     if let Some(m) = LIVE_CONFIG.get() {
         *m.lock().unwrap_or_else(|p| p.into_inner()) = config;

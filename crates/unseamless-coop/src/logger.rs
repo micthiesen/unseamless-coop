@@ -74,10 +74,15 @@ pub fn init(config: &Config, base: &Path) {
     let _ = file.write_all(info.header_block().as_bytes());
 
     let log_config = ConfigBuilder::new().set_time_format_rfc3339().build();
-    // Tee into two sinks: the shareable run file, and an in-memory ring buffer the overlay's Log tab
-    // reads live (`crate::logbuf`). Same level for both, so the in-game log matches the file.
-    let loggers: Vec<Box<dyn SharedLogger>> =
-        vec![WriteLogger::new(level, log_config, file), crate::logbuf::ring_logger(level)];
+    // Tee into three sinks at the same level (so they all agree): the shareable run file, the
+    // in-memory ring buffer the overlay's Log tab reads live (`crate::logbuf`), and the co-op
+    // forward queue (`crate::forward`) — inert unless we're a forwarding client, then drained onto
+    // the side-channel so the host aggregates this client's log.
+    let loggers: Vec<Box<dyn SharedLogger>> = vec![
+        WriteLogger::new(level, log_config, file),
+        crate::logbuf::ring_logger(level),
+        crate::forward::forward_logger(level),
+    ];
     let _ = CombinedLogger::init(loggers);
 
     log::info!("logging at {level} -> {}", path.display());

@@ -5,10 +5,14 @@ one another's worlds" problem from [ARCHITECTURE.md](ARCHITECTURE.md), planned o
 today, what's reverse-engineering-gated, the incremental build order, and the decided approach for
 talking to Steam.
 
-> **Status: rung 1 shipped; rungs 2-4 are design + research.** The mod loads, configures, observes a
-> session, and now reads our own SteamID (rung 1, `coop/steam.rs`) — but it does **not** connect
-> players yet. This doc is the spec for the rest, written for session handoff. Everything game-internal
-> is grounded in the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the rig (per
+> **Status: rungs 1-2 shipped (rung 2 pending two-player rig verification); rungs 3-4 are design +
+> research.** The mod loads, configures, observes a session, reads our own SteamID (rung 1,
+> `coop/steam.rs`), and now stands up a private Steam P2P **side-channel** to a manually-entered
+> partner (rung 2, `coop/coop.rs` + `coop/steam.rs` networking) — running the host-tested
+> `Peer`/`Session` for real (handshake, host config push, liveness, client→host log forwarding). It
+> does **not** yet put players in one another's *world* — that's the game-session RE (rung 3). This
+> doc is the spec for the rest, written for session handoff. Everything game-internal is grounded in
+> the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the rig (per
 > [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
 
 ## The one fact that makes a native path viable: "offline" ≠ no network
@@ -79,17 +83,23 @@ is the one genuinely hard step; rung 4 is deferred.
   `dinput8` load). The Copy button uses imgui's built-in Win32 clipboard. **Still to eyeball on the
   rig:** that the Copy button actually populates the OS clipboard (needs opening the overlay in-game).
 
-### Rung 2 — Private Steam P2P side-channel (the real unblock)
-- Implement a `SteamP2PTransport` satisfying the existing
+### Rung 2 — Private Steam P2P side-channel (the real unblock) — **SHIPPED (pending two-player rig run)**
+- `SteamP2PTransport` ([`coop/coop.rs`](../crates/unseamless-coop/src/coop.rs)) satisfies the existing
   [`Transport`](../crates/unseamless-core/src/transport.rs) trait (`PeerId = u64` is already "a Steam
   ID in production"), over poll-based `ISteamNetworkingMessages` to a **manually-entered** peer
-  SteamID.
-- Run the existing host-tested `Peer`/`Session` over it — the *whole* side-channel (version
-  handshake, `ConfigSync`, session actions, log-forward), already proven on `Loopback`/`TcpTransport`/
-  the bridge.
-- **Payoff:** two real games' mods handshake, the host pushes config, and **log-forwarding actually
-  starts working** (it is inert today — see "Log-forwarding status"). First real peer-to-peer test of
-  the side-channel. Friends "connect" in the mod sense (toasts, synced config), not yet in-world.
+  SteamID (`[coop] peer_steam_id` + `is_host`, swapped out of band via rung 1's copy button).
+- Runs the existing host-tested `Peer`/`Session` over it — the *whole* side-channel (version
+  handshake, `ConfigSync`, liveness, log-forward), already proven on `Loopback`/`TcpTransport`/the
+  bridge. The driver mirrors received config into the live config and surfaces connect / version-
+  mismatch / lost-contact events to the overlay ([`coop/notify`](../crates/unseamless-coop/src/notify.rs)).
+- **Log-forwarding is now wired** ([`coop/forward.rs`](../crates/unseamless-coop/src/forward.rs)): a
+  `ForwardLogger` tees records into a bounded queue that the driver drains through `Peer::forward_log`
+  onto the wire (a forwarding *client* only; own-module lines are dropped to avoid a feedback loop).
+  This is the transport "Log-forwarding status" below was waiting on.
+- **Implementation grounded; the open piece is the two-player rig run** — confirm the NAT/auth open
+  question (peers may need to be Steam friends), that both sides establish without us pumping the
+  SessionRequest callback (we proactively `AcceptSessionWithUser`), and that the `coop` line in the
+  diag report goes `linking → linked`.
 - Slots into the same `Transport` seam as `BridgeTransport`; the bridge (loopback) was the dev-host
   rehearsal for exactly this.
 
@@ -143,10 +153,13 @@ Why hand-binding is small for our needs:
   RING's own `steam_api64.dll` on 2026-06-25 (`x86_64-w64-mingw32-objdump -p … | grep SteamAPI_…`):
   - identity (rung 1, **confirmed live**): `SteamAPI_SteamUser_v021` accessor (rung 1 probes a
     descending version window so a bump self-heals) + `SteamAPI_ISteamUser_GetSteamID` (unversioned).
-  - networking (rung 2, **export-confirmed, not yet called**): `SteamAPI_SteamNetworkingMessages_SteamAPI_v002`
+  - networking (rung 2, **now bound + called** in `coop/steam.rs`): `SteamAPI_SteamNetworkingMessages_SteamAPI_v002`
     accessor + `SteamAPI_ISteamNetworkingMessages_SendMessageToUser` / `_ReceiveMessagesOnChannel` /
-    `_AcceptSessionWithUser` / `_CloseSessionWithUser` (all present in the dump).
-  - `SteamNetworkingIdentity` setup (set the peer's SteamID).
+    `_AcceptSessionWithUser`. (`_CloseSessionWithUser` is present in the dump but left unbound — there's
+    no session teardown in rung 2; the channel lives for the process.)
+  - `SteamNetworkingIdentity` / `SteamNetworkingMessage_t` are built/parsed from the public
+    `steamnetworkingtypes.h` POD layout directly (charted by offset, with compile-time `offset_of!`
+    guards), rather than via the `SteamAPI_SteamNetworkingIdentity_*` helper exports.
 
 Where the crate still earns its keep:
 - **As the map:** its source is the cleanest documentation of the exact `SteamAPI_*` flat names,
@@ -160,14 +173,17 @@ IPC complexity.
 
 ## Log-forwarding status (answers a recurring question)
 
-`[debug] forward_to_host = true` (set in the friend seed config) is **currently a no-op**. The
-forwarding logic exists and is host-tested in [`peer.rs`](../crates/unseamless-core/src/peer.rs), but
-it only runs over a `Transport`, and the cdylib constructs **no live transport** in real co-op (the
-`bridge` is loopback + off in friend builds; the in-band `GameTransport` over `broadcast_packet`
-doesn't exist yet). So today each machine writes only its own local log, and the **manual "zip your
-`logs\` folder and send it" instruction in [README-FRIENDS.txt](../scripts/dist/README-FRIENDS.txt)
-is the only mechanism that works.** **Rung 2 is what lights forwarding up** (it provides the missing
-transport); once it lands, the host aggregates everyone's logs and the manual step can go away.
+`[debug] forward_to_host = true` (set in the friend seed config) was a no-op until rung 2: the
+host-tested forwarding logic in [`peer.rs`](../crates/unseamless-core/src/peer.rs) only runs over a
+`Transport`, and the cdylib had **no live transport** in real co-op. **Rung 2 provides it.** With a
+partner configured (`[coop] peer_steam_id`) and `forward_to_host` on, a client's
+[`ForwardLogger`](../crates/unseamless-coop/src/forward.rs) tees its records into a bounded queue that
+the co-op driver drains through `Peer::forward_log` onto the Steam side-channel, where the host
+aggregates them into its `LogBundle`. Caveats: it's **client→host only**, gated on a configured peer,
+and bounded/rate-limited (a flood is dropped, not buffered without limit). Until a session is actually
+linked, the **manual "zip your `logs\` folder and send it" instruction in
+[README-FRIENDS.txt](../scripts/dist/README-FRIENDS.txt) is still the fallback** — but the automatic
+path now exists and lights up the moment two modded games link.
 
 ## Open questions / risks (confirm on the rig)
 
@@ -188,14 +204,16 @@ transport); once it lands, the host aggregates everyone's logs and the manual st
 
 ## Concrete next step
 
-Rung 1 is shipped (`coop/steam.rs`). Build **rung 2**: a `SteamP2PTransport` satisfying the existing
-[`Transport`](../crates/unseamless-core/src/transport.rs) trait over poll-based
-`ISteamNetworkingMessages` (the v002 accessor + send/receive/accept flat fns already confirmed present
-in the DLL), to a manually-entered peer SteamID, then run the host-tested `Peer`/`Session` over it.
-This is the real unblock: two real games' mods handshake, the host pushes config, and log-forwarding
-starts working. Extend `coop/steam.rs` with the networking bindings; the rung-1 identity + the
-`Transport` seam (`BridgeTransport`/`Loopback` were the rehearsal) are already in place. Watch the
-NAT/auth open question above (the peers may need to be Steam friends) — verify early.
+Rungs 1-2 are shipped (`coop/steam.rs` + `coop/coop.rs` + `coop/forward.rs`). The immediate next
+action is a **two-player rig run** of rung 2: on two machines, set each other's `[coop] peer_steam_id`
+(one with `is_host = true`), launch both, and confirm the side-channel links — the `coop` line in the
+diag report should go `linking → linked`, an overlay "Co-op partner connected" toast should fire, the
+client should adopt the host's config, and (with `forward_to_host`) the host's `LogBundle` should pick
+up the client's lines. Watch the NAT/auth open question (the peers may need to be Steam friends).
+
+Once that's confirmed, build **rung 3** — drive the *game's* session (`CSSessionManager` →
+`Host`/`Client`) so players see each other in-world. Rung 2 gives us the coordination channel ("both
+call join now") and two instances we control to RE the create/join functions against.
 
 ## Cross-references
 
