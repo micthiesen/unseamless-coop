@@ -10,7 +10,11 @@ REPO="$(cd "$SELF/../.." && pwd)"
 
 cd "$REPO"
 
-printf '%-22s %-7s %-16s %-7s %s\n' NAME TMUX BRANCH DIRTY WORKSPACE
+# AHEAD = commits on the worker branch beyond the workspace's own copy of `main`
+# (the create point) -- the at-a-glance "has this worker produced anything yet?"
+# signal. Worker branches live in the independent workspace clones, not here, so
+# this is computed per-workspace (`git -C "$ws"`), not from the orchestrator repo.
+printf '%-20s %-5s %-26s %-6s %-6s %s\n' NAME TMUX BRANCH DIRTY AHEAD WORKSPACE
 found=0
 while IFS= read -r ws; do
   [ -n "$ws" ] || continue
@@ -25,7 +29,8 @@ while IFS= read -r ws; do
   else
     dirty="dirty"
   fi
-  printf '%-22s %-7s %-16s %-7s %s\n' "$name" "$tstate" "$branch" "$dirty" "$ws"
+  ahead="$(git -C "$ws" rev-list --count main..HEAD 2>/dev/null || echo '?')"
+  printf '%-20s %-5s %-26s %-6s %-6s %s\n' "$name" "$tstate" "$branch" "$dirty" "$ahead" "$ws"
 done < <(rift list 2>/dev/null)
 
 if [ "$found" -eq 0 ]; then

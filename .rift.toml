@@ -13,3 +13,13 @@ version = 1
 # build here (cold, would block session start).
 [[hooks.postcreate]]
 run = "cargo fetch --locked"
+
+# Restore tracked files rift's COW copy dropped. rift omits build-output dir
+# *names* (it skips `target/`), which also catches our force-tracked
+# `scripts/dist/` even though git doesn't ignore it — the workspace index still
+# has them, so they show as spurious deletions and a stray `git add -A` would
+# commit the drop onto a worker branch. This restores any tracked path missing
+# from the worktree; it only touches missing files, never clobbering real edits.
+# (Found on the fleet's first run — see docs/ORCHESTRATION.md > Gotchas.)
+[[hooks.postcreate]]
+run = "git ls-files -d -z | xargs -0 -r git checkout --"

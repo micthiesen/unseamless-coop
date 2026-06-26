@@ -150,17 +150,28 @@ inside stays resumable.
 
 A `.rift.toml` at the source root (committed) drives per-workspace setup. `rift create` runs its
 `[[hooks.postcreate]]` entries **in the new workspace root** after the copy (skip with `--no-hooks`;
-a failing hook fails the create). Ours just warms the dependency cache:
+a failing hook fails the create). Ours warms the dependency cache and repairs the copy:
 
 ```toml
 version = 1
 
 [[hooks.postcreate]]
 run = "cargo fetch --locked"
+
+[[hooks.postcreate]]
+run = "git ls-files -d -z | xargs -0 -r git checkout --"
 ```
 
-The cargo registry lives in `$HOME`, shared across workspaces, so this is near-instant. Do **not**
-run `cargo build` here (cold, blocks session start) and do not try to copy `target/`.
+The cargo registry lives in `$HOME`, shared across workspaces, so the fetch is near-instant. Do
+**not** run `cargo build` here (cold, blocks session start) and do not try to copy `target/`.
+
+**The restore hook (first-run gotcha).** rift's COW copy omits build-output dir *names* — it skips
+`target/`, but that also catches our **force-tracked `scripts/dist/`** (git does not ignore it, yet
+rift drops it). The workspace index still has those files, so they show as spurious deletions, and a
+stray `git add -A` on a worker branch would commit the drop. The second hook restores any tracked
+path missing from the worktree (`ls-files -d` → `checkout`); it only touches missing files, never
+clobbering real edits. Do **not** use `rift create --copy-all` for this — it would also re-copy
+`target/`, the very thing we avoid.
 
 ## Worker Lifecycle
 
@@ -187,5 +198,13 @@ Implemented: the worker overlay (`docs/roles/worker.md`), `scripts/fleet/`
 wiring, the `CLAUDE.md` role preamble, and the `/fleet` orchestrator skill.
 
 Exercised end to end: a live ping worker confirmed spawn, the seeded prompt auto-submitting, the
-worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown. Not yet
-exercised: a real feature worker built and integrated to `main`.
+worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown.
+
+**First real run (2026-06, Wave 1 — 5 concurrent feature/polish workers).** Confirmed: parallel
+lanes build green in isolation; a worker handed back a precise rig recipe over `msg` (the spill-to-
+file path triggers for long messages). Fixes that came out of it: the restore postcreate hook
+(above), and a `worker-ls` **AHEAD** column = commits on `worker/<name>` beyond the workspace's own
+`main` (computed per-workspace, since the branches live in the independent clones, not the
+orchestrator repo) — the at-a-glance "has this worker produced anything yet?" signal. Still to
+prove: a feature worker integrated to `main` and a batched rig pass feeding values back to multiple
+lanes.
