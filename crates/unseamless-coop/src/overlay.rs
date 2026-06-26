@@ -782,15 +782,26 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     // A section's vertical extent in text lines: its title plus one per field.
     let section_lines = |s: &ReportSection| 1 + s.fields().len();
 
-    // Per-column rendered height: one line per section title + field, plus one inter-section spacing gap
-    // per boundary. Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide
-    // by construction. The constant per-column overcount (a trailing line's spacing) is identical for
-    // both columns, so it cancels in the difference used for the top-pad — making the alignment exact.
+    // Per-column rendered height: one line per section title + field, plus one inter-section gap per
+    // boundary. Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide by
+    // construction.
     let line_h = ui.text_line_height_with_spacing();
-    let spacing_y = ui.clone_style().item_spacing[1];
+    // The per-boundary gap is the *measured* advance of `ui.spacing()`, not an assumed `item_spacing.y`:
+    // `ui.spacing()` advances the cursor by its own rule, so deriving the gap from the style would leave
+    // a residual that scales with each column's section count (the columns hold different section counts,
+    // so it would NOT cancel). Probing the real advance — then restoring the cursor so the layout is
+    // untouched — makes the per-boundary term identical to what's rendered, so it cancels exactly in the
+    // top-pad difference and the columns bottom-align to the pixel no matter how the sections split.
+    let gap = {
+        let probe = ui.cursor_pos();
+        ui.spacing();
+        let advance = ui.cursor_pos()[1] - probe[1];
+        ui.set_cursor_pos(probe); // undo the probe — measurement only, no layout shift
+        advance
+    };
     let column_height = |col: &[ReportSection]| {
         let lines: usize = col.iter().map(section_lines).sum();
-        lines as f32 * line_h + col.len().saturating_sub(1) as f32 * spacing_y
+        lines as f32 * line_h + col.len().saturating_sub(1) as f32 * gap
     };
 
     // Partition on section boundaries by rendered height: the first split where the left column is at
