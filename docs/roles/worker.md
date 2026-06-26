@@ -41,6 +41,12 @@ Always sign messages `[worker:<name>]` so the orchestrator knows the source. For
 `scripts/fleet/msg` automatically spills multi-line or long messages to a file and sends a short
 "read <path>" pointer, so you can pass it freely.
 
+**Make rig requests batchable.** The orchestrator often runs one game launch for several lanes at
+once, so design any rig probe to be self-contained and inert-by-default (no writes until a value
+lands), and give its log lines a unique prefix (e.g. `scaling-probe:`). Then hand off a precise
+recipe: the seed-config to set, the exact log lines to watch, and what each outcome means. The
+cleaner the recipe, the sooner your values come back.
+
 ## When You Finish Or Get Blocked
 
 Commit your branch, then message the orchestrator: done (with a one-line summary) or blocked (with

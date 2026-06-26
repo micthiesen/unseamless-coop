@@ -114,6 +114,12 @@ message and waits. The orchestrator serializes these against the one game instal
 `scripts/rig.sh`, launches the game, or reads a live log. This is the core reason the role split
 exists; see [RIG-RUNBOOK.md](RIG-RUNBOOK.md) and the `/test-loop` skill (orchestrator-only).
 
+**Batch rig passes when you can.** A game launch is the expensive, serial step, so when several
+lanes have rig-dependent probes pending, prefer combining their probe branches into one diag build
+and observing them in a single play session over launching per-lane. It costs one early seam-merge
+(rerere caches it for final integration) but collapses N launches into one and lets you feed every
+lane its values together. Probes are designed inert-by-default, so they coexist safely in one build.
+
 ## Permissions and Directories
 
 - **Shared, COW-propagated** (checked-in `.claude/settings.json`, so every worker inherits it):
