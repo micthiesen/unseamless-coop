@@ -1,0 +1,62 @@
+# Roadmap
+
+What's built vs. what's next, grouped by what **gates** each item. Detail lives in the linked design
+docs; this is the map. Work proceeds in **waves** (one fleet batch each — see
+[ORCHESTRATION.md](ORCHESTRATION.md)).
+
+## Wave 1 — DONE (2026-06)
+
+Shipped to `main`, rig-verified where applicable:
+
+- **Skip intros**, **separate co-op saves** (`.co2`/`.uco`), **offline/non-EAC launch** + EAC guard,
+  the **`dinput8.dll` proxy loader**, **config + settings registry**, the **diag/log model**.
+- **Boot volume**, **world-time lock** (FrameBegin re-assert; boot-volume re-asserts through the
+  saved-options clobber).
+- **Scaling** — per-player enemy/boss HP/damage/posture via the multiplayer `SpEffectParam` rate rows
+  (rig-verified writes; in-combat effect is 2-player-gated). See [SCALING.md](SCALING.md).
+- **Death debuffs** — stacking penalty tiers, cured at a Site of Grace (flag 9000), repurposed clean
+  rows, ER-voiced toasts. See [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md).
+- **Overlay** (hudhook DX12 + imgui): notifications, session-action menu, settings/log tabs,
+  column-major debug panel with live **vitals + status** readout. See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
+- Host hardening (narrowed live-config writes, host-tested queues), `diag` profile is `panic=unwind`
+  so the per-feature firewall actually catches, cdylib hygiene (typed `HookError`, FFI annotations).
+
+## Wave 2 — next (not started)
+
+### Solo / host-doable (no 2nd player needed)
+
+- **Shipping `panic=unwind` + a "feature disabled" toast.** `diag` is already unwind; flip
+  release/shipping too so a feature panic degrades instead of crashing the player's game. **Gated on an
+  FFI-unwind-safety audit** of every game→us entry point (overlay present-hook, `DllMain`, the
+  input/save/patch hooks) — an unwind into vkd3d/the game is UB; the task-tick path is already wrapped.
+  Then add the notifications toast on the disable path and update CLAUDE.md's firewall claim.
+- **Rung-3 RE prep (diagnostic DLL).** Hook the `CSSessionManager` create/join functions and log their
+  calls — writable + solo-runnable now; the actual transition only fires with a peer. Accelerates the
+  co-op core below. See [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
+- **Overhead nameplates** — screen-space text from projected peer world coords (`cs/camera.rs`
+  projection is charted); the projection is solo-prototypable.
+- **Native `display_status_message` banner fallback** — the charted RVA, as a degraded path if the
+  overlay ever fails to init.
+
+### 2-player-gated (the co-op core + everything riding on it)
+
+- **Rung 2 verification** — confirm the private Steam P2P side-channel links across two machines
+  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven.
+- **Rung 3 — drive the session FSM** to put a peer in your world (the hard RE: the create/join
+  functions, the password-derived AES key). This is what unblocks in-world presence.
+- **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password,
+  evil session), PvP/friendly-fire/team toggles, rune-arc sharing, overhead player display
+  (ping/SL/death-count), enemy/boss-rush modes, inbound-action host authorization. See [FEATURES.md](FEATURES.md).
+- **2-player live verifications:** scaling's in-combat HP/posture effect + the off-by-one player count,
+  the `>4`-player limit, session persistence across area boundaries, death-debuffs `dont_sync`
+  (per-player stacks), client→host log forwarding. See [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
+- **Event toasts** — player join/leave and similar (the notifications surface Michael wants expanded);
+  the side-channel already toasts connect/version/liveness, so this slots in with the session layer.
+
+## Won't-do
+
+- **Offline title-screen popup suppression + FMG watermark** — Arxan-walled / superseded by the
+  overlay watermark. RE record kept in [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md); do not bump
+  the SDK pin for FMG access.
+
+[`/reverse-engineer`]: ../.claude/skills/reverse-engineer
