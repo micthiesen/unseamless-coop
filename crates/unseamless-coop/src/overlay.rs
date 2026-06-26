@@ -211,7 +211,7 @@ impl Overlay {
         // `unseamless_core::pad`.
         let (buttons, lx, ly) = crate::input::pad_snapshot();
         let pad = self.pad.update(buttons, lx, ly, ui.io().delta_time);
-        // Toggle on backtick or the LB+RB+L3+R3 chord (no-repeat: one open/close per press).
+        // Toggle on backtick or the RB+L3+R3 chord (no-repeat: one open/close per press).
         if ui.is_key_pressed_no_repeat(TOGGLE_KEY) || pad.toggle {
             self.open = !self.open;
             if self.open {
@@ -304,7 +304,7 @@ impl Overlay {
                 if cfg!(debug_assertions) {
                     ui.text_disabled(concat!("build ", env!("UNSEAMLESS_BUILD_ID")));
                 }
-                ui.text_disabled("Press ` or LB+RB+L3+R3 to open the menu");
+                ui.text_disabled("Press ` or RB+L3+R3 to open the menu");
             });
     }
 
@@ -466,10 +466,14 @@ impl Overlay {
                             let avail = ui.content_region_avail();
                             ui.child_window(format!("##content-{label}"))
                                 .size([avail[0], avail[1].max(60.0)])
+                                // NO_NAV on the child too: every tab drives its own up/down (Actions
+                                // moves its selection; Settings/Log scroll the view via `scroll_pane`),
+                                // so imgui's own keyboard nav/scroll must not also fire on the arrows.
+                                .flags(WindowFlags::NO_NAV)
                                 .build(|| match label {
                                     "Actions" => self.draw_actions_tab(ui, &ctx, pad),
-                                    "Settings" => self.draw_settings_tab(ui),  // &mut self: reveal toggle
-                                    "Log" => draw_log_tab(ui),
+                                    "Settings" => self.draw_settings_tab(ui, pad), // &mut self: reveal toggle
+                                    "Log" => draw_log_tab(ui, pad),
                                     _ => {}
                                 });
                         }
@@ -554,7 +558,10 @@ impl Overlay {
 
     /// Read-only view of every setting and its current value, coloured by whether the host syncs it
     /// across the party (shared) or it's local to this machine. Editing happens in the config file.
-    fn draw_settings_tab(&mut self, ui: &Ui) {
+    /// Up/down (arrow keys or d-pad / left-stick) scroll this read-only pane — it has no selectable
+    /// rows of its own, so the directional input drives the view, unlike the Actions tab.
+    fn draw_settings_tab(&mut self, ui: &Ui, pad: crate::input::PadEdges) {
+        scroll_pane(ui, pad);
         self.draw_password_row(ui);
         ui.separator();
         self.draw_steam_id_row(ui);
@@ -754,18 +761,54 @@ fn enter_pressed(ui: &Ui) -> bool {
     ui.is_key_pressed_no_repeat(Key::Enter) || ui.is_key_pressed_no_repeat(Key::KeypadEnter)
 }
 
-/// Render a [`DiagnosticReport`] into the current window: each section title in blue, then its
-/// `key = value` lines dimmed and indented under it. Values are ASCII (built that way in
-/// [`crate::diag::build_report`]).
+/// Number of sections laid out per row in the debug panel. The report has ~6 sections, so two columns
+/// roughly halves the panel's height versus one tall stack — using the wide bottom-left space instead
+/// of growing far up the screen.
+const DEBUG_PANEL_COLS: usize = 2;
+/// Horizontal gap, in pixels, added past the widest rendered line to set the column pitch, so the second
+/// column starts at a fixed x regardless of content width. Comfortably larger than the window padding
+/// (~8px at the default style) that offsets column 0's content origin, so the columns stay clear of each
+/// other — the effective inter-column gap is this minus that padding.
+const DEBUG_PANEL_COL_GAP: f32 = 28.0;
+
+/// Render a [`DiagnosticReport`] into the current window as a compact multi-column grid: each section
+/// (title in blue, then its `key = value` lines dimmed and indented) is a self-contained group, and the
+/// groups sit side by side — [`DEBUG_PANEL_COLS`] per row — so the panel stays short rather than one
+/// tall column. Keys and values stay left-aligned (no awkward right-justification). Values are ASCII
+/// (built that way in [`crate::diag::build_report`]).
 fn draw_report(ui: &Ui, report: &DiagnosticReport) {
-    for (i, section) in report.sections().iter().enumerate() {
-        if i > 0 {
-            ui.spacing();
-        }
-        ui.text_colored(rgba(BLUE, 1.0), section.title());
+    // Uniform column pitch = the widest rendered line (title or `key = value`) across every section,
+    // plus a gap. Measuring in the active font and using one pitch for all columns keeps the grid
+    // aligned regardless of which section happens to be widest, and keeps the columns clear of each
+    // other (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
+    let mut pitch = 0.0_f32;
+    for section in report.sections() {
+        pitch = pitch.max(ui.calc_text_size(section.title())[0]);
         for (k, v) in section.fields() {
-            ui.text_disabled(format!("  {k} = {v}"));
+            pitch = pitch.max(ui.calc_text_size(format!("  {k} = {v}"))[0]);
         }
+    }
+    pitch += DEBUG_PANEL_COL_GAP;
+
+    for (i, section) in report.sections().iter().enumerate() {
+        let col = i % DEBUG_PANEL_COLS;
+        if col == 0 {
+            // First column of a new row: a blank line of breathing room above every row but the first.
+            // imgui places the row below the tallest group of the previous row, so uneven section
+            // heights don't overlap.
+            if i > 0 {
+                ui.spacing();
+            }
+        } else {
+            // Later columns: jump to this column's fixed x on the row the previous group started.
+            ui.same_line_with_pos(col as f32 * pitch);
+        }
+        ui.group(|| {
+            ui.text_colored(rgba(BLUE, 1.0), section.title());
+            for (k, v) in section.fields() {
+                ui.text_disabled(format!("  {k} = {v}"));
+            }
+        });
     }
 }
 
@@ -830,9 +873,31 @@ fn draw_toasts(ui: &Ui, toasts: &[Toast]) {
     }
 }
 
+/// Scroll the current window vertically from up/down input — keyboard arrows or the controller d-pad /
+/// left stick (both auto-repeat while held, so holding scrolls continuously). Called *inside* a tab's
+/// scrollable child so `scroll_y`/`set_scroll_y` act on that child. Used by the read-only Log and
+/// Settings panes, which have nothing to select, so up/down scrolls the view — whereas the Actions tab
+/// instead spends up/down moving its selection cursor (see [`Overlay::draw_actions_tab`]). Clamped to
+/// `[0, scroll_max_y]` so it can't overscroll past either end.
+fn scroll_pane(ui: &Ui, pad: crate::input::PadEdges) {
+    let down = ui.is_key_pressed(Key::DownArrow) || pad.down;
+    let up = ui.is_key_pressed(Key::UpArrow) || pad.up;
+    if down == up {
+        return; // neither pressed (or both at once) — nothing to do
+    }
+    // Two text lines per tick: brisk enough to traverse a long log while a direction is held, fine
+    // enough to read line-by-line with taps.
+    let step = ui.text_line_height_with_spacing() * 2.0;
+    let delta = (i32::from(down) - i32::from(up)) as f32 * step;
+    let target = (ui.scroll_y() + delta).clamp(0.0, ui.scroll_max_y());
+    ui.set_scroll_y(target);
+}
+
 /// Our own log tail, coloured by level. Copies the lines out under the non-blocking lock first, then
 /// draws — never holding the log lock across the imgui draw loop (game-thread log pushes block on it).
-fn draw_log_tab(ui: &Ui) {
+/// Up/down (arrow keys or d-pad / left-stick) scroll the tail, like the Settings tab.
+fn draw_log_tab(ui: &Ui, pad: crate::input::PadEdges) {
+    scroll_pane(ui, pad);
     let Some(lines) = crate::logbuf::try_read(|lines| lines.iter().cloned().collect::<Vec<_>>()) else {
         return; // contended this frame; skip drawing the log
     };
@@ -881,6 +946,9 @@ pub fn install(module: usize) {
         return;
     }
     let hmodule = HINSTANCE(module as *mut c_void);
+    // NB: hudhook logs `Render error HRESULT(0xFFFFFFFF)` / `Initialization context incomplete` on the
+    // first frame or two before the swapchain is fully wired — a known-harmless hudhook/imgui startup
+    // artifact (confirmed on the rig), not a real failure. Don't chase it; the overlay renders fine after.
     match Hudhook::builder().with::<ImguiDx12Hooks>(Overlay::new()).with_hmodule(hmodule).build().apply() {
         Ok(()) => log::info!("overlay: DX12 present-hook installed; waiting for the swapchain"),
         Err(e) => log::error!("overlay: hook install failed ({e:?}); no overlay this session"),

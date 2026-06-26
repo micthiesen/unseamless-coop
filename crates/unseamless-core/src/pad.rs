@@ -4,7 +4,7 @@
 //! hands the unpacked `(buttons, lx, ly, dt)` here.
 //!
 //! Directions auto-repeat while held (an initial delay, then a fixed interval — keyboard-repeat feel);
-//! the activate (A), cancel (B), and toggle (the LB+RB+L3+R3 chord) intents fire once per press.
+//! the activate (A), cancel (B), and toggle (the RB+L3+R3 chord) intents fire once per press.
 //! Keeping the repeat/edge/threshold logic here (not in the cdylib) makes it unit-testable on the
 //! host, per the project's core-vs-coop split.
 
@@ -20,11 +20,14 @@ pub const XINPUT_RIGHT_SHOULDER: u16 = 0x0200; // RB
 pub const XINPUT_A: u16 = 0x1000; // confirm / activate
 pub const XINPUT_B: u16 = 0x2000; // cancel / close
 
-/// The overlay-toggle chord: LB + RB + L3 + R3 held together. Deliberately awkward so it's never hit
-/// by accident, and — unlike the Guide/Home button — made of standard bits the plain `XInputGetState`
-/// reports, so it survives Steam Input (which intercepts Guide for most players).
-const TOGGLE_COMBO: u16 =
-    XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
+/// The overlay-toggle chord: RB + L3 + R3 held together. Deliberately awkward so it's never hit by
+/// accident, and — unlike the Guide/Home button — made of standard bits the plain `XInputGetState`
+/// reports, so it survives Steam Input (which intercepts Guide for most players). **LB is deliberately
+/// excluded**: in Elden Ring LB fires the *left-hand* armament — with a catalyst equipped that casts a
+/// spell, so folding LB into the chord would burn FP/mana every time you open the menu. The remaining
+/// three don't touch FP: RB is a right-hand attack (a wasted swing at worst, no resource cost) and
+/// L3/R3 are the stick-clicks (crouch / reset-camera), so tapping them together to open is harmless.
+const TOGGLE_COMBO: u16 = XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
 
 /// Per-direction auto-repeat tuning (seconds): the initial delay before a held direction starts
 /// repeating, then one step per interval.
@@ -53,7 +56,7 @@ pub struct PadEdges {
     pub activate: bool,
     /// B — close the overlay (a Back/Cancel; only acted on while it's open).
     pub cancel: bool,
-    /// The LB+RB+L3+R3 chord — open/close the overlay.
+    /// The RB+L3+R3 chord — open/close the overlay.
     pub toggle: bool,
 }
 
@@ -185,11 +188,10 @@ mod tests {
 
     #[test]
     fn toggle_chord_fires_once_when_the_set_completes() {
-        let full =
-            XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
+        let full = XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
         let mut nav = PadNav::new();
         // A partial chord (and any single member) never toggles.
-        assert!(!nav.update(XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER, 0, 0, FRAME_DT).toggle);
+        assert!(!nav.update(XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB, 0, 0, FRAME_DT).toggle);
         assert!(!nav.update(full & !XINPUT_RIGHT_THUMB, 0, 0, FRAME_DT).toggle);
         // Completing the set fires exactly once; holding it does not re-fire.
         assert!(nav.update(full, 0, 0, FRAME_DT).toggle);
@@ -197,6 +199,20 @@ mod tests {
         // Releasing a member and re-completing fires again.
         assert!(!nav.update(full & !XINPUT_LEFT_THUMB, 0, 0, FRAME_DT).toggle);
         assert!(nav.update(full, 0, 0, FRAME_DT).toggle);
+    }
+
+    #[test]
+    fn toggle_chord_excludes_lb_so_it_doesnt_fire_a_spell() {
+        // LB is intentionally not part of the chord (it casts a spell / wastes mana in-game). The chord
+        // is exactly RB+L3+R3, so it completes without LB ever being pressed.
+        assert_eq!(TOGGLE_COMBO, XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB);
+        assert_eq!(TOGGLE_COMBO & XINPUT_LEFT_SHOULDER, 0, "LB must not be required by the toggle chord");
+
+        // RB+L3+R3 with no LB toggles on completion.
+        let chord = XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
+        assert!(PadNav::new().update(chord, 0, 0, FRAME_DT).toggle);
+        // An incidental LB held alongside is ignored (extra bits don't gate the chord) — still one toggle.
+        assert!(PadNav::new().update(chord | XINPUT_LEFT_SHOULDER, 0, 0, FRAME_DT).toggle);
     }
 
     #[test]

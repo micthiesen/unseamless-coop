@@ -16,7 +16,7 @@
 //! `xinput1_4!XInputGetState` (also immediate, also off the WndProc path, so `message_filter` can't
 //! stop it either). We detour it to do two things at once: (1) **read** the live pad from the game's
 //! own buffer into [`PAD_SNAPSHOT`] so the overlay can drive its menu (d-pad / left-stick to navigate,
-//! A to confirm, B to close, and the **LB+RB+L3+R3 chord** to toggle the overlay); and (2) **blank**
+//! A to confirm, B to close, and the **RB+L3+R3 chord** to toggle the overlay); and (2) **blank**
 //! the pad while the overlay is open (zero the gamepad struct *and* bump `dwPacketNumber` — a game
 //! that skips re-reading on an unchanged packet would otherwise reuse the pre-open input rather than
 //! see the neutral one). The toggle is a chord of standard bits rather than the Guide/Home button on
@@ -113,7 +113,7 @@ pub fn pad_snapshot() -> (u16, i16, i16) {
 /// Publish a connected pad's sample to [`PAD_SNAPSHOT`], claiming ownership for `user_index` unless
 /// another connected pad already holds it (so a second controller never stomps the one driving the
 /// menu; `release_pad` frees it on disconnect). The sample is read straight from the game's own
-/// `XInputGetState` buffer in the detour — every bit we use (the LB+RB+L3+R3 toggle chord, A, B,
+/// `XInputGetState` buffer in the detour — every bit we use (the RB+L3+R3 toggle chord, A, B,
 /// d-pad, sticks) is standard, so there's no separate read and no need for the Guide-only
 /// `XInputGetStateEx`.
 fn capture_pad(user_index: u32, buttons: u16, lx: i16, ly: i16) {
@@ -314,7 +314,7 @@ pub unsafe fn install() -> Result<(), String> {
     // blanked and can't drive the menu — the backtick key still toggles and navigates.
     match unsafe { install_xinput() } {
         Ok(()) => log::info!(
-            "input: hooked XInput GetState (controller menu nav + LB+RB+L3+R3 toggle; pad blanked while open)"
+            "input: hooked XInput GetState (controller menu nav + RB+L3+R3 toggle; pad blanked while open)"
         ),
         Err(e) => log::warn!(
             "input: XInput hook not installed ({e}); controller won't drive the menu or be suppressed"
@@ -324,7 +324,7 @@ pub unsafe fn install() -> Result<(), String> {
 }
 
 /// Hook `xinput1_4!XInputGetState`. ER statically imports `XINPUT1_4.dll`, so it's already loaded by
-/// the time install runs. The toggle chord (LB+RB+L3+R3), A, B, d-pad and sticks are all standard bits
+/// the time install runs. The toggle chord (RB+L3+R3), A, B, d-pad and sticks are all standard bits
 /// the plain `XInputGetState` reports, so the detour reads the game's own buffer — no `XInputGetStateEx`
 /// / Guide-bit dependency, and nothing for Steam Input to intercept.
 ///
