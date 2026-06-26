@@ -16,12 +16,33 @@
 //!   the overlay's bottom-left debug panel each ~10 Hz while it's shown, via [`crate::debug_panel`]. So
 //!   the report model drives the log *and* a live HUD; the only thing that differs is the sink.
 
-use eldenring::cs::{CSEventFlagMan, CSSessionManager, WorldAreaTime};
+use eldenring::cs::{CSEventFlagMan, CSSessionManager, GameDataMan, WorldAreaTime};
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::{DiagnosticReport, FlagScanner};
 use unseamless_core::util::{FrameThrottle, Timer};
 
 use crate::feature::{Feature, Tick};
+
+/// Labels for the local player's 7 status-ailment `resistance_gauges`, in the assumed ER order. See the
+/// re-derivation note in [`build_report`]: confirm the index→ailment mapping on the rig (apply one known
+/// ailment and watch which index climbs) before trusting these names, and relabel if an index is off.
+const AILMENTS: [&str; 7] =
+    ["poison", "scarlet_rot", "hemorrhage", "frostbite", "sleep", "madness", "death_blight"];
+
+/// A snapshot of the local player's vitals + status gauges, copied out of `PlayerGameData` so no game
+/// borrow escapes the singleton access (mirrors how the session read is gathered up front in
+/// [`build_report`]). Each `(cur, max)` pair is current vs. current-max.
+struct Vitals {
+    hp: (u32, u32),
+    fp: (u32, u32),
+    stamina: (u32, u32),
+    /// Current status-ailment buildup per ailment (indexed by [`AILMENTS`]).
+    gauges: [u32; 7],
+    /// Proc threshold (max buildup) per ailment.
+    gauge_max: [u32; 7],
+    /// Active-proc timer per ailment (nonzero while the ailment is procced).
+    proc_timers: [f32; 7],
+}
 
 /// Build a live-state [`DiagnosticReport`]. Reads are gathered first, then the borrow-simple report
 /// is assembled — so a missing singleton (pre-init / title screen) degrades to a "not live" note
@@ -35,6 +56,24 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     let features = crate::app::feature_status();
     // Borrow the roster size for the scaling section below before `session` is moved into the match.
     let party = session.as_ref().map_or(0, |v| v.players);
+    // Live player vitals + status gauges, copied out of GameDataMan's main player. The registry can
+    // surface GameDataMan before its members are wired (the CLAUDE.md unwired-pointer caveat — same guard
+    // boot_volume uses on `game_settings`), so null-check the player-data pointer before dereferencing.
+    let vitals = crate::sdk::with_instance::<GameDataMan, _>(|gd| {
+        if gd.main_player_game_data.as_ptr().is_null() {
+            return None;
+        }
+        let p: &eldenring::cs::PlayerGameData = &gd.main_player_game_data;
+        Some(Vitals {
+            hp: (p.current_hp, p.current_max_hp),
+            fp: (p.current_fp, p.current_max_fp),
+            stamina: (p.current_stamina, p.current_max_stamina),
+            gauges: p.resistance_gauges,
+            gauge_max: p.resistance_gauge_max,
+            proc_timers: p.proc_status_timers,
+        })
+    })
+    .flatten();
 
     let mut r = DiagnosticReport::new(title);
     r.section("build")
@@ -119,6 +158,46 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         }
         None => {
             wt.field("status", "no WorldAreaTime yet (menu / loading)");
+        }
+    }
+
+    // Live player vitals + status, from GameDataMan's main player — exact current/max HP, FP, stamina
+    // (not eyeballed off the bars) so death-debuff and scaling checks read precise numbers. Degrades to a
+    // "not live" note off the playfield (title screen / pre-init), like the session section.
+    match vitals {
+        Some(v) => {
+            r.section("vitals")
+                .field("hp", format!("{}/{}", v.hp.0, v.hp.1))
+                .field("fp", format!("{}/{}", v.fp.0, v.fp.1))
+                .field("stamina", format!("{}/{}", v.stamina.0, v.stamina.1));
+
+            // Status ailments (poison, rot, bleed, ...): current buildup / proc threshold, plus the
+            // active-proc timer while one is ticking. Only ailments that are building or active are
+            // listed, so the panel stays quiet when you're clean and spotlights what's accumulating
+            // during a test.
+            //
+            // ORDER ASSUMED, rig-confirmable: the 7 `resistance_gauges` are labeled in the common ER
+            // status order ([`AILMENTS`]). To verify/fix, apply ONE known ailment in-game (e.g. stand in
+            // Scarlet Rot) and watch which index climbs in the live panel — relabel AILMENTS if it's off.
+            let status = r.section("status");
+            let mut any_active = false;
+            for (i, name) in AILMENTS.iter().enumerate() {
+                let (cur, max, timer) = (v.gauges[i], v.gauge_max[i], v.proc_timers[i]);
+                if cur > 0 || timer > 0.0 {
+                    any_active = true;
+                    if timer > 0.0 {
+                        status.field(*name, format!("{cur}/{max} (proc {timer:.1}s)"));
+                    } else {
+                        status.field(*name, format!("{cur}/{max}"));
+                    }
+                }
+            }
+            if !any_active {
+                status.field("ailments", "none building or active");
+            }
+        }
+        None => {
+            r.section("vitals").field("status", "no GameDataMan yet (pre-init / title screen)");
         }
     }
     r
