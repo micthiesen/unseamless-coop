@@ -23,11 +23,13 @@ use unseamless_core::util::{FrameThrottle, Timer};
 
 use crate::feature::{Feature, Tick};
 
-/// Labels for the local player's 7 status-ailment `resistance_gauges`, in the assumed ER order. See the
-/// re-derivation note in [`build_report`]: confirm the index→ailment mapping on the rig (apply one known
-/// ailment and watch which index climbs) before trusting these names, and relabel if an index is off.
+/// Labels for the local player's 7 status-ailment `resistance_gauges`. Ordered to match the SDK's own
+/// adjacent `*_resist` fields on `PlayerGameData` (poison, rot, bleed, death, frost, sleep, madness) —
+/// the canonical ER internal resist order, which the parallel gauge arrays almost certainly follow (note
+/// this differs from the in-game status-bar order: death precedes frost here). Still rig-confirmable: see
+/// the note in [`build_report`] — apply one known ailment and watch which index climbs, relabel if off.
 const AILMENTS: [&str; 7] =
-    ["poison", "scarlet_rot", "hemorrhage", "frostbite", "sleep", "madness", "death_blight"];
+    ["poison", "scarlet_rot", "hemorrhage", "death_blight", "frostbite", "sleep", "madness"];
 
 /// A snapshot of the local player's vitals + status gauges, copied out of `PlayerGameData` so no game
 /// borrow escapes the singleton access (mirrors how the session read is gathered up front in
@@ -59,6 +61,9 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     // Live player vitals + status gauges, copied out of GameDataMan's main player. The registry can
     // surface GameDataMan before its members are wired (the CLAUDE.md unwired-pointer caveat — same guard
     // boot_volume uses on `game_settings`), so null-check the player-data pointer before dereferencing.
+    // `Option<Option<Vitals>>`: outer `None` = no GameDataMan singleton; inner `None` = singleton up but
+    // its player-data pointer not wired yet. Kept distinct (not flattened) so the section below reports
+    // which of the two it is, rather than conflating them.
     let vitals = crate::sdk::with_instance::<GameDataMan, _>(|gd| {
         if gd.main_player_game_data.as_ptr().is_null() {
             return None;
@@ -72,8 +77,7 @@ pub fn build_report(title: &str) -> DiagnosticReport {
             gauge_max: p.resistance_gauge_max,
             proc_timers: p.proc_status_timers,
         })
-    })
-    .flatten();
+    });
 
     let mut r = DiagnosticReport::new(title);
     r.section("build")
@@ -165,7 +169,7 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     // (not eyeballed off the bars) so death-debuff and scaling checks read precise numbers. Degrades to a
     // "not live" note off the playfield (title screen / pre-init), like the session section.
     match vitals {
-        Some(v) => {
+        Some(Some(v)) => {
             r.section("vitals")
                 .field("hp", format!("{}/{}", v.hp.0, v.hp.1))
                 .field("fp", format!("{}/{}", v.fp.0, v.fp.1))
@@ -195,6 +199,9 @@ pub fn build_report(title: &str) -> DiagnosticReport {
             if !any_active {
                 status.field("ailments", "none building or active");
             }
+        }
+        Some(None) => {
+            r.section("vitals").field("status", "GameDataMan up, player data not wired yet");
         }
         None => {
             r.section("vitals").field("status", "no GameDataMan yet (pre-init / title screen)");
