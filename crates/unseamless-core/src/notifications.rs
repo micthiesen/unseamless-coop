@@ -212,6 +212,10 @@ mod tests {
         n.toast(Severity::Warning, "config error", 2.0); // same -> refresh, not a 2nd toast
         assert_eq!(n.toasts().len(), 1);
         assert_eq!(n.toasts()[0].remaining, 2.0, "timer refreshed");
+        assert!(
+            n.toasts()[0].remaining <= n.toasts()[0].duration,
+            "refresh keeps remaining <= duration (progress fraction stays in [0,1])"
+        );
         // Different severity is a distinct toast.
         n.toast(Severity::Error, "config error", 2.0);
         assert_eq!(n.toasts().len(), 2);

@@ -43,6 +43,8 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::core::{GUID, PCSTR, s};
 
+use crate::hook::HookError;
+
 /// True while the overlay wants the game to ignore input. Set each frame by the overlay; read by the
 /// `GetDeviceState` detour on the game's input thread.
 static BLOCKED: AtomicBool = AtomicBool::new(false);
@@ -92,6 +94,17 @@ struct XInputState {
     gamepad: XInputGamepad,
 }
 
+// A wrong field size/offset here is silent UB at runtime (the detour reads — and blanks — XInput-owned
+// memory through these structs), so pin the layout against the documented `xinput.h` ABI
+// (`XINPUT_GAMEPAD` = 12 bytes, `XINPUT_STATE` = 16) at compile time — `size_of`/`offset_of!` are
+// const, so this fails the build (even cross-compiling) if the structs ever skew from the ABI.
+const _: () = {
+    assert!(size_of::<XInputGamepad>() == 12);
+    assert!(size_of::<XInputState>() == 16);
+    assert!(std::mem::offset_of!(XInputState, packet_number) == 0);
+    assert!(std::mem::offset_of!(XInputState, gamepad) == 4);
+};
+
 /// Pack a pad sample into the snapshot word. The intermediate `as u16` casts are load-bearing: they
 /// truncate to 16 bits *before* zero-extending to `u64`, so a negative stick value can't sign-extend
 /// and clobber the neighbouring field. The top 16 bits (right stick) are intentionally unused.
@@ -136,7 +149,12 @@ fn release_pad(user_index: u32) {
 
 /// `DWORD XInputGetState(DWORD dwUserIndex = rcx, XINPUT_STATE* pState = rdx)`. Capture the pad for our
 /// menu, then (while the overlay is open) blank what the game sees.
-fn xinput_get_state_detour(regs: *mut Registers, original: usize) -> usize {
+///
+/// # Safety
+/// `regs` must point at the saved registers for an `XInputGetState` call (the contract ilhook upholds
+/// at the hook site): `rdx` is null or a writable `XInputState`. `original` must be the real
+/// `XInputGetState` entry. Invoked only from the installed detour.
+unsafe fn xinput_get_state_detour(regs: *mut Registers, original: usize) -> usize {
     let (user_index, state) = unsafe { ((*regs).rcx as u32, (*regs).rdx as *mut XInputState) };
     let original: unsafe extern "system" fn(u32, *mut XInputState) -> u32 =
         unsafe { std::mem::transmute(original) };
@@ -189,7 +207,12 @@ unsafe fn vtable_fn<F: Copy>(obj: RawObj, slot: usize) -> F {
 
 /// The `GetDeviceState` detour: run the real call, then blank the returned state if blocked.
 /// `IDirectInputDevice8W::GetDeviceState(this=rcx, cbData=rdx, lpvData=r8) -> HRESULT`.
-fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
+///
+/// # Safety
+/// `regs` must point at the saved registers for a `GetDeviceState` call (ilhook's hook-site contract):
+/// `r8`/`rdx` describe the device's output buffer and its size. `original` must be the real
+/// `GetDeviceState` entry. Invoked only from the installed detour.
+unsafe fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
     let (this, size, data) = unsafe { ((*regs).rcx, (*regs).rdx, (*regs).r8 as *mut u8) };
     let original: unsafe extern "system" fn(u64, u64, u64) -> usize =
         unsafe { std::mem::transmute(original) };
@@ -210,7 +233,11 @@ fn get_state_detour(regs: *mut Registers, original: usize) -> usize {
 
 /// `SetCursorPos(X = rcx, Y = rdx) -> BOOL`. While blocked, skip the recenter (return TRUE) so the
 /// cursor stays where the user moved it.
-fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
+///
+/// # Safety
+/// `regs` must point at the saved registers for a `SetCursorPos` call (ilhook's hook-site contract).
+/// `original` must be the real `SetCursorPos` entry. Invoked only from the installed detour.
+unsafe fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
     if is_blocked() {
         return 1; // TRUE — claim success without moving the cursor
     }
@@ -220,7 +247,11 @@ fn set_cursor_pos_detour(regs: *mut Registers, original: usize) -> usize {
 
 /// `ClipCursor(lpRect = rcx) -> BOOL`. While blocked, release the cursor (call with NULL) instead of
 /// confining it to the game's rect.
-fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
+///
+/// # Safety
+/// `regs` must point at the saved registers for a `ClipCursor` call (ilhook's hook-site contract).
+/// `original` must be the real `ClipCursor` entry. Invoked only from the installed detour.
+unsafe fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
     let lp_rect = if is_blocked() { 0 } else { unsafe { (*regs).rcx } };
     let original: unsafe extern "system" fn(u64) -> usize = unsafe { std::mem::transmute(original) };
     unsafe { original(lp_rect) }
@@ -231,12 +262,12 @@ fn clip_cursor_detour(regs: *mut Registers, original: usize) -> usize {
 /// at the end) means a *later* hook failing can't drop — and thus unpatch live code / free a closure a
 /// concurrent call points into (UAF) — an already-installed detour. `detour` runs the original (via the
 /// passed pointer) and may alter the result.
-unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<(), String>
+unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<(), HookError>
 where
     T: Fn(*mut Registers, usize) -> usize + Send + Sync + 'static,
 {
     let hook = unsafe { hook_closure_retn(addr, detour, CallbackOption::None, HookFlags::empty()) }
-        .map_err(|e| format!("hooking {what}: {e:?}"))?;
+        .map_err(|e| HookError::Install { what: what.to_string(), detail: format!("{e:?}") })?;
     std::mem::forget(hook);
     Ok(())
 }
@@ -247,11 +278,11 @@ unsafe fn probe_get_device_state(
     di8_create: DInput8CreateFn,
     hinstance: usize,
     guid: &GUID,
-) -> Result<usize, String> {
+) -> Result<usize, HookError> {
     let mut di8: RawObj = std::ptr::null_mut();
     let hr = unsafe { di8_create(hinstance, DIRECTINPUT_VERSION, &IID_IDIRECTINPUT8W, &mut di8, 0) };
     if hr != 0 || di8.is_null() {
-        return Err(format!("DirectInput8Create failed: {hr:#010x}"));
+        return Err(HookError::DInputProbe { what: "DirectInput8Create".to_string(), hr });
     }
     let create_device: CreateDeviceFn = unsafe { vtable_fn(di8, VTBL_CREATE_DEVICE) };
     let release_di8: ReleaseFn = unsafe { vtable_fn(di8, VTBL_RELEASE) };
@@ -259,7 +290,7 @@ unsafe fn probe_get_device_state(
     let hr = unsafe { create_device(di8, guid, &mut device, 0) };
     if hr != 0 || device.is_null() {
         unsafe { release_di8(di8) };
-        return Err(format!("CreateDevice({guid:?}) failed: {hr:#010x}"));
+        return Err(HookError::DInputProbe { what: format!("CreateDevice({guid:?})"), hr });
     }
     let addr = unsafe { *(*device).add(VTBL_GET_DEVICE_STATE) as usize };
     let release_device: ReleaseFn = unsafe { vtable_fn(device, VTBL_RELEASE) };
@@ -270,44 +301,55 @@ unsafe fn probe_get_device_state(
 
 /// Resolve an export to its address, mapping a missing one to an error string. `name` may be a string
 /// (via `s!`) or an ordinal (`PCSTR(n as *const u8)`, the `MAKEINTRESOURCEA` convention).
-fn resolve_proc(module: HMODULE, name: PCSTR, what: &str) -> Result<usize, String> {
-    unsafe { GetProcAddress(module, name) }.map(|p| p as usize).ok_or_else(|| format!("{what} not found"))
+fn resolve_proc(module: HMODULE, name: PCSTR, what: &'static str) -> Result<usize, HookError> {
+    unsafe { GetProcAddress(module, name) }.map(|p| p as usize).ok_or(HookError::ExportNotFound(what))
 }
 
 /// Install the DirectInput `GetDeviceState` detours plus the controller (XInput) hook. Called once from
 /// the deferred overlay-install thread (after the frontend is up; see `app::install`), off the game's
-/// main/task threads. Returns an error string (rather than panicking) so the caller can degrade —
+/// main/task threads. Returns a [`HookError`] (rather than panicking) so the caller can degrade —
 /// without the hooks the overlay still draws, it just won't suppress game input while open.
 ///
 /// # Safety
 /// Standard hooking caveats: patches executable memory in the real `dinput8.dll`. Must run once, off
 /// the main thread, before input is being polled concurrently.
-pub unsafe fn install() -> Result<(), String> {
+pub unsafe fn install() -> Result<(), HookError> {
     // We are `dinput8.dll`; our proxy forwards `DirectInput8Create` to the real one (`proxy.rs`), so
     // the device we probe — and hook — is the real implementation the game also uses.
-    let dinput8 =
-        unsafe { GetModuleHandleA(s!("dinput8.dll")) }.map_err(|e| format!("dinput8.dll not loaded: {e}"))?;
+    let dinput8 = unsafe { GetModuleHandleA(s!("dinput8.dll")) }
+        .map_err(|e| HookError::ModuleNotLoaded { module: "dinput8.dll", err: e })?;
     let di8_create: DInput8CreateFn =
         unsafe { std::mem::transmute(resolve_proc(dinput8, s!("DirectInput8Create"), "DirectInput8Create export")?) };
     let hinstance =
-        unsafe { GetModuleHandleA(PCSTR::null()) }.map_err(|e| format!("GetModuleHandle failed: {e}"))?.0
-            as usize;
+        unsafe { GetModuleHandleA(PCSTR::null()) }.map_err(HookError::ModuleHandle)?.0 as usize;
 
     let kb = unsafe { probe_get_device_state(di8_create, hinstance, &GUID_SYS_KEYBOARD)? };
     let ms = unsafe { probe_get_device_state(di8_create, hinstance, &GUID_SYS_MOUSE)? };
 
     // Keyboard and mouse devices often share one GetDeviceState implementation; hook each distinct
     // address once. (`install_hook` forgets each detour as it installs it — see its doc.)
-    unsafe { install_hook(kb, get_state_detour, "keyboard GetDeviceState")? };
+    unsafe { install_hook(kb, |r, o| get_state_detour(r, o), "keyboard GetDeviceState")? };
     if ms != kb {
-        unsafe { install_hook(ms, get_state_detour, "mouse GetDeviceState")? };
+        unsafe { install_hook(ms, |r, o| get_state_detour(r, o), "mouse GetDeviceState")? };
     }
 
     // Cursor-unlock detours (user32), so the mouse can move over the menu while the overlay is open.
-    let user32 =
-        unsafe { GetModuleHandleA(s!("user32.dll")) }.map_err(|e| format!("user32.dll not loaded: {e}"))?;
-    unsafe { install_hook(resolve_proc(user32, s!("SetCursorPos"), "SetCursorPos")?, set_cursor_pos_detour, "SetCursorPos")? };
-    unsafe { install_hook(resolve_proc(user32, s!("ClipCursor"), "ClipCursor")?, clip_cursor_detour, "ClipCursor")? };
+    let user32 = unsafe { GetModuleHandleA(s!("user32.dll")) }
+        .map_err(|e| HookError::ModuleNotLoaded { module: "user32.dll", err: e })?;
+    unsafe {
+        install_hook(
+            resolve_proc(user32, s!("SetCursorPos"), "SetCursorPos")?,
+            |r, o| set_cursor_pos_detour(r, o),
+            "SetCursorPos",
+        )?
+    };
+    unsafe {
+        install_hook(
+            resolve_proc(user32, s!("ClipCursor"), "ClipCursor")?,
+            |r, o| clip_cursor_detour(r, o),
+            "ClipCursor",
+        )?
+    };
 
     // Controller hook is best-effort: a failure leaves keyboard/mouse suppression (the critical path)
     // intact, so log and continue rather than fail the whole install. Without it, the pad just isn't
@@ -331,10 +373,10 @@ pub unsafe fn install() -> Result<(), String> {
 /// # Safety
 /// Same hooking caveats as [`install`]: patches executable memory in the loaded `xinput1_4.dll`; run
 /// once, off the main thread.
-unsafe fn install_xinput() -> Result<(), String> {
+unsafe fn install_xinput() -> Result<(), HookError> {
     let xinput = unsafe { GetModuleHandleA(s!("xinput1_4.dll")) }
-        .map_err(|e| format!("xinput1_4.dll not loaded: {e}"))?;
+        .map_err(|e| HookError::ModuleNotLoaded { module: "xinput1_4.dll", err: e })?;
     let get_state = resolve_proc(xinput, s!("XInputGetState"), "XInputGetState export")?;
-    unsafe { install_hook(get_state, xinput_get_state_detour, "XInputGetState")? };
+    unsafe { install_hook(get_state, |r, o| xinput_get_state_detour(r, o), "XInputGetState")? };
     Ok(())
 }

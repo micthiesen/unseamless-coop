@@ -77,6 +77,9 @@ pub unsafe extern "system" fn DirectInput8Create(
     ) -> HRESULT;
     unsafe {
         match real_proc(s!("DirectInput8Create")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `DirectInput8Create` resolved by GetProcAddress;
+            // `F` is that export's documented signature, so reinterpreting the untyped `Proc` as `F`
+            // hits the real ABI. Args and return are forwarded verbatim.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(hinst, dwversion, riidltf, ppvout, punkouter),
             None => E_MOD_NOT_FOUND,
         }
@@ -88,6 +91,9 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
     type F = unsafe extern "system" fn() -> HRESULT;
     unsafe {
         match real_proc(s!("DllCanUnloadNow")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `DllCanUnloadNow` from GetProcAddress; `F` is
+            // that export's documented signature, so reinterpreting the untyped `Proc` as `F` hits the
+            // real ABI.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(),
             None => S_FALSE, // "do not unload" — the safe default for a resident proxy
         }
@@ -103,6 +109,9 @@ pub unsafe extern "system" fn DllGetClassObject(
     type F = unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut c_void) -> HRESULT;
     unsafe {
         match real_proc(s!("DllGetClassObject")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `DllGetClassObject` from GetProcAddress; `F` is
+            // that export's documented signature, so reinterpreting the untyped `Proc` as `F` hits the
+            // real ABI. Args and return are forwarded verbatim.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(rclsid, riid, ppv),
             None => CLASS_E_CLASSNOTAVAILABLE,
         }
@@ -114,6 +123,9 @@ pub unsafe extern "system" fn DllRegisterServer() -> HRESULT {
     type F = unsafe extern "system" fn() -> HRESULT;
     unsafe {
         match real_proc(s!("DllRegisterServer")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `DllRegisterServer` from GetProcAddress; `F` is
+            // that export's documented signature, so reinterpreting the untyped `Proc` as `F` hits the
+            // real ABI.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(),
             None => E_MOD_NOT_FOUND,
         }
@@ -125,6 +137,9 @@ pub unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
     type F = unsafe extern "system" fn() -> HRESULT;
     unsafe {
         match real_proc(s!("DllUnregisterServer")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `DllUnregisterServer` from GetProcAddress; `F` is
+            // that export's documented signature, so reinterpreting the untyped `Proc` as `F` hits the
+            // real ABI.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(),
             None => E_MOD_NOT_FOUND,
         }
@@ -136,6 +151,9 @@ pub unsafe extern "system" fn GetdfDIJoystick() -> *mut c_void {
     type F = unsafe extern "system" fn() -> *mut c_void;
     unsafe {
         match real_proc(s!("GetdfDIJoystick")) {
+            // SAFETY: `p` is the real `dinput8.dll`'s `GetdfDIJoystick` from GetProcAddress; `F` is
+            // that export's documented signature, so reinterpreting the untyped `Proc` as `F` hits the
+            // real ABI.
             Some(p) => (std::mem::transmute::<Proc, F>(p))(),
             None => std::ptr::null_mut(),
         }

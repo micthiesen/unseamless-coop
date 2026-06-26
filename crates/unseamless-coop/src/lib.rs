@@ -32,6 +32,7 @@ mod feature;
 mod features;
 mod forward;
 mod guard;
+mod hook;
 mod input;
 mod logbuf;
 mod logger;

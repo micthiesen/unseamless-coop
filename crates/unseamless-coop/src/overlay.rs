@@ -886,7 +886,13 @@ fn draw_secret_row(ui: &Ui, label: &str, noun: &str, value: &str, revealed: &mut
     if *revealed {
         ui.text_colored(rgba(color, 1.0), value);
     } else {
-        ui.text_colored(rgba(color, 1.0), "*".repeat(value.chars().count()));
+        // Mask allocation-free: slice a fixed `*` run to the value's length rather than rebuilding a
+        // `String` every frame (this row redraws at ~60Hz on the Settings tab). The cap dwarfs any
+        // real secret (Steam IDs are 17 chars, passwords a handful); an implausibly long value just
+        // masks up to the cap, which still hides it.
+        const MASK: &str = "****************************************************************"; // 64 '*'
+        let count = value.chars().count().min(MASK.len());
+        ui.text_colored(rgba(color, 1.0), &MASK[..count]);
     }
     ui.same_line();
     // `###`-suffixed ids: the visible label flips (Reveal/Hide) without changing imgui identity, and the

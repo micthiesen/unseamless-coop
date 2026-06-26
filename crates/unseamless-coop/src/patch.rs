@@ -28,6 +28,8 @@ use fromsoftware_shared::program::Program;
 use pelite::pattern::Atom;
 use pelite::pe64::Pe;
 
+use crate::hook::HookError;
+
 /// Overwrite `bytes.len()` bytes at `addr` in the live image: VirtualProtect → write → restore →
 /// FlushInstructionCache. Returns the bytes that were there before (for logging/diagnostics only —
 /// we do **not** keep them to restore; patches are permanent, see the module docs).
@@ -36,7 +38,7 @@ use pelite::pe64::Pe;
 /// `addr` must point at `bytes.len()` valid bytes inside the loaded game image (e.g. a site
 /// validated by [`nop_landmark`]). Must run on the init thread at install, before the patched code
 /// path first executes.
-pub unsafe fn apply(addr: *mut u8, bytes: &[u8]) -> Result<Vec<u8>, windows::core::Error> {
+pub unsafe fn apply(addr: *mut u8, bytes: &[u8]) -> Result<Vec<u8>, HookError> {
     use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows::Win32::System::Memory::{
         PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, VirtualProtect,

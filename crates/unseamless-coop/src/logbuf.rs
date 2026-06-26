@@ -83,7 +83,7 @@ impl Log for RingLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        push(record.level(), format!("{}", record.args()));
+        push(record.level(), record.args().to_string());
     }
 
     fn flush(&self) {}

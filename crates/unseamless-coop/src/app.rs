@@ -68,11 +68,51 @@ pub fn install() {
 
     // Config before logging: the logger picks its level and writes its header from the config.
     let (config, notes) = crate::config::load(&base);
-    // The in-memory log ring buffer (overlay Log tab) and the co-op forward queue must both exist
-    // before the logger tees into them.
+
+    init_subsystems(&base, &config, notes);
+    pre_task_startup(&config, &base);
+
+    // No task system means the mod cannot install a single feature — there's no degraded mode to
+    // fall back to, so fail like the other startup guards: a modal box, then close the game (rather
+    // than leave it running silently unmodded). See CLAUDE.md > "Surfacing errors".
+    let Some(cs_task) = wait_for_task_system() else {
+        crate::guard::fatal(
+            "unseamless-coop couldn't initialize: the game's task system never came up, so the \
+             mod can't run.\n\nThis is unexpected — try launching again. Closing the game now.",
+        );
+    };
+
+    // Build, then register the feature set. A `false` return means `install` somehow ran twice; bail
+    // without re-registering or re-dumping.
+    if !register_features(cs_task, build_features(&config)) {
+        return;
+    }
+
+    // Boot snapshot: a full diagnostic report once everything's registered, so every shared log opens
+    // with the live state at startup (most singletons are still pre-init here — that's expected and
+    // itself informative). Periodic/panic snapshots add the evolving picture.
+    crate::diag::dump("boot");
+
+    // In-game overlay, deferred to its own thread until the frontend is up (see [`spawn_overlay`]).
+    // Installed unless the runtime kill-switch is off, so a Proton/vkd3d render problem can be
+    // disabled by editing the config (no rebuild).
+    if config.debug.overlay {
+        spawn_overlay(module);
+    }
+}
+
+/// Stand up the in-process plumbing every feature depends on, then publish the live config. Ordering
+/// is load-bearing: the log ring buffer (overlay Log tab) and the co-op forward queue must exist
+/// before the logger tees into them, and all of this lands before any feature ticks or any task
+/// registers. Finishes by replaying the config-load notes and publishing the global live config.
+fn init_subsystems(
+    base: &std::path::Path,
+    config: &unseamless_core::config::Config,
+    notes: Vec<crate::config::Note>,
+) {
     crate::logbuf::init();
     crate::forward::init();
-    crate::logger::init(&config, &base);
+    crate::logger::init(config, base);
     crate::notify::init();
     // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
     crate::actionq::init();
@@ -98,7 +138,12 @@ pub fn install() {
     // Publish the loaded config as the process-global live config: features read it each frame, and
     // the bridge writes it when it applies a received ConfigSync. Do this before anything reads it.
     crate::state::init(config.clone());
+}
 
+/// Everything that must run before we block on the game's task system, in the order it has to happen.
+/// Two of these are **fatal guards** (save isolation, co-op password) that close the game rather than
+/// continue in a wrong state — see CLAUDE.md > "Surfacing errors".
+fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::Path) {
     // Resolve our own SteamID off-thread (the identity rung of the co-op connection plan). Steam comes
     // up after our early dinput8 load, so this polls until ready, then publishes the ID for the overlay
     // and logs it. Independent of the overlay kill-switch and of the task system below.
@@ -134,7 +179,7 @@ pub fn install() {
     // early — before we block on the task system — so it lands before the logo gate fires. After the
     // password guard above so a fatal config never patches game memory then immediately aborts.
     // Fail-safe: a missed/ambiguous/drifted AOB just leaves the logos playing (logged), never aborts.
-    apply_boot_patches(&config);
+    apply_boot_patches(config);
 
     // Dev side-channel bridge: a loopback listener running a live `Session` so the harness can drive
     // the mod over a socket (the /test-loop skill's layer 3). Compiled in only with the `bridge`
@@ -148,29 +193,24 @@ pub fn install() {
     // of docs/COOP-CONNECTION.md). Runs the same host-tested `Session` the bridge does, but over
     // `ISteamNetworkingMessages` instead of loopback. No-op unless `[coop] peer_steam_id` is set, so
     // a normal solo session pays nothing. Best-effort: a failure to connect degrades, never aborts.
-    crate::coop::start(&config);
+    crate::coop::start(config);
 
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
-    crate::mods::load_mods(&config, &base);
+    crate::mods::load_mods(config, base);
+}
 
-    // No task system means the mod cannot install a single feature — there's no degraded mode to
-    // fall back to, so fail like the other startup guards: a modal box, then close the game (rather
-    // than leave it running silently unmodded). See CLAUDE.md > "Surfacing errors".
-    let cs_task = match wait_for_task_system() {
-        Some(task) => task,
-        None => crate::guard::fatal(
-            "unseamless-coop couldn't initialize: the game's task system never came up, so the \
-             mod can't run.\n\nThis is unexpected — try launching again. Closing the game now.",
-        ),
-    };
-
-    // SessionLimit before the observer so that — since same-phase tasks tick in registration order
-    // (the loop below registers in vec order) — the observer reads and logs the override we just
-    // wrote, same frame. It's only a logging nicety: were that order to change, the observer would
-    // log the override one frame late, not wrong. Both read the live config (`crate::state`).
+/// Build the feature set **in registration order**, which is semantic: same-phase tasks tick in this
+/// (vec) order. So the order encodes behavior and must be preserved —
+/// - `NotificationsTick` leads so it ages toasts once per frame *before* any producer pushes.
+/// - `SessionLimit` precedes `SessionObserver` so the observer reads and logs the override the same
+///   frame (a logging nicety: were that order to change, the observer would log it one frame late,
+///   not wrong). Both read the live config (`crate::state`).
+///
+/// Appending is safe — the requestable diagnostic probes tack on at the end (empty in normal play).
+fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Feature>> {
     let mut features: Vec<Box<dyn Feature>> = vec![
-        Box::new(NotificationsTick::new()), // ages toasts once per frame, before producers push
+        Box::new(NotificationsTick::new()),
         Box::new(SessionLimit::new()),
         // Hold the area-restriction lever so the party can roam the whole map (reads live config).
         Box::new(SeamlessRoam::new()),
@@ -195,7 +235,14 @@ pub fn install() {
         crate::diag::debug_panel_feature(),
     ];
     // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
-    features.extend(crate::diag::probe_features(&config));
+    features.extend(crate::diag::probe_features(config));
+    features
+}
+
+/// Register each built feature as a recurring task in its phase and publish the lock-free health
+/// registry. Returns `false` if `install` somehow ran twice (the global `APP` was already set), so the
+/// caller can bail without re-registering.
+fn register_features(cs_task: &'static CSTaskImp, features: Vec<Box<dyn Feature>>) -> bool {
     let frames = vec![0u64; features.len()];
 
     // Snapshot (index, name, phase) before moving the app into the global.
@@ -213,7 +260,7 @@ pub fn install() {
 
     if APP.set(Mutex::new(App { features, frames })).is_err() {
         log::error!("install() called twice; ignoring");
-        return;
+        return false;
     }
 
     for (index, name, phase) in registrations {
@@ -240,57 +287,51 @@ pub fn install() {
         std::mem::forget(handle);
         log::info!("registered feature '{name}' in {phase:?}");
     }
+    true
+}
 
-    // Boot snapshot: a full diagnostic report once everything's registered, so every shared log opens
-    // with the live state at startup (most singletons are still pre-init here — that's expected and
-    // itself informative). Periodic/panic snapshots add the evolving picture.
-    crate::diag::dump("boot");
-
-    // In-game overlay (hudhook DX12 present-hook). Installed unless the runtime kill-switch is off,
-    // so a Proton/vkd3d render problem can be disabled by editing the config (no rebuild). Reads
-    // shared app state; never mutates game state.
-    //
-    // Deferred until the frontend is up (title/menu reached — `GameState::frontend_ready`), not
-    // installed at boot. Installing at boot gave hudhook's DX12 backend a half-ready init (the
-    // `Initialization context incomplete` error in the logs) against a swapchain that wasn't up yet,
-    // and that fragile init crashed at the first big transition (character creation / intro). Waiting
-    // for the frontend means `apply()` runs once a real swapchain is presenting, so hudhook initializes
-    // cleanly — and the watermark shows from the title screen, which is where a new player learns the
-    // toggle key. (Rig-validated floor: installing at first *gameplay* is crash-free; if the frontend
-    // init still proves fragile through character creation on the rig, bump this predicate to
-    // `current().in_game()` to fall back to that proven point.) The wait + install run on their own
-    // short-lived thread, like the init thread, so hudhook's `apply()` and the input-hook install stay
-    // off the game's task-scheduler thread. hudhook patches the shared swapchain vtable, so hooking an
-    // already-running swapchain takes effect on the next present (the standard injector path).
-    if config.debug.overlay {
-        std::thread::spawn(move || {
-            while !crate::playstate::current().frontend_ready() {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+/// Spawn the in-game overlay (hudhook DX12 present-hook) install on its own short-lived thread.
+///
+/// Deferred until the frontend is up (title/menu reached — `GameState::frontend_ready`), not
+/// installed at boot. Installing at boot gave hudhook's DX12 backend a half-ready init (the
+/// `Initialization context incomplete` error in the logs) against a swapchain that wasn't up yet,
+/// and that fragile init crashed at the first big transition (character creation / intro). Waiting
+/// for the frontend means `apply()` runs once a real swapchain is presenting, so hudhook initializes
+/// cleanly — and the watermark shows from the title screen, which is where a new player learns the
+/// toggle key. (Rig-validated floor: installing at first *gameplay* is crash-free; if the frontend
+/// init still proves fragile through character creation on the rig, bump this predicate to
+/// `current().in_game()` to fall back to that proven point.) The wait + install run on their own
+/// short-lived thread, like the init thread, so hudhook's `apply()` and the input-hook install stay
+/// off the game's task-scheduler thread. hudhook patches the shared swapchain vtable, so hooking an
+/// already-running swapchain takes effect on the next present (the standard injector path).
+fn spawn_overlay(module: usize) {
+    std::thread::spawn(move || {
+        while !crate::playstate::current().frontend_ready() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        crate::overlay::install(module);
+        // Suppress the game's own DirectInput reads while the overlay is open — it polls keyboard/
+        // mouse via DirectInput, which bypasses the window message queue, so the overlay's message
+        // filter alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it
+        // fails.
+        match unsafe { crate::input::install() } {
+            Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
+            Err(e) => {
+                log::error!(
+                    "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
+                );
+                // Surface it to the player rather than failing silently (in-session problems degrade
+                // + inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
+                crate::notify::with_mut(|n| {
+                    n.set_banner(
+                        "input-degraded",
+                        unseamless_core::notifications::Severity::Warning,
+                        "Heads up: the game still reacts to input while the menu is open (input hook failed)",
+                    )
+                });
             }
-            crate::overlay::install(module);
-            // Suppress the game's own DirectInput reads while the overlay is open — it polls keyboard/
-            // mouse via DirectInput, which bypasses the window message queue, so the overlay's message
-            // filter alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it
-            // fails.
-            match unsafe { crate::input::install() } {
-                Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
-                Err(e) => {
-                    log::error!(
-                        "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
-                    );
-                    // Surface it to the player rather than failing silently (in-session problems degrade
-                    // + inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
-                    crate::notify::with_mut(|n| {
-                        n.set_banner(
-                            "input-degraded",
-                            unseamless_core::notifications::Severity::Warning,
-                            "Heads up: the game still reacts to input while the menu is open (input hook failed)",
-                        )
-                    });
-                }
-            }
-        });
-    }
+        }
+    });
 }
 
 /// Apply one-shot boot-flow code patches gated by config. Currently just skip-intros: NOP the

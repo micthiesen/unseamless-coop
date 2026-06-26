@@ -38,6 +38,8 @@ use unseamless_core::saves::{coop_save_path, isolates_saves, wide_has_vanilla_su
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::core::s;
 
+use crate::hook::HookError;
+
 /// Scan ceiling for `lpFileName`: the Windows extended-length (`\\?\`) path range is ~32K units, so a
 /// real save path hits its NUL well before this. A string with no NUL in range is treated as
 /// unparseable and passed through untouched.
@@ -67,7 +69,7 @@ static LOGGED_REDIRECTS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mut
 /// Patches executable memory in `kernel32`. Call once, on the init thread, before the game first
 /// opens its save (well before the title/load screen, which is the first save read). The `ext` is
 /// captured into the resident detour.
-pub unsafe fn install(ext: &str) -> Result<(), String> {
+pub unsafe fn install(ext: &str) -> Result<(), HookError> {
     if !isolates_saves(ext) {
         log::info!("co-op saves: isolation off (save.file_extension = {ext:?}); using vanilla .sl2");
         return Ok(());
@@ -77,9 +79,9 @@ pub unsafe fn install(ext: &str) -> Result<(), String> {
     let ext = ext.to_string();
 
     let kernel32 = unsafe { GetModuleHandleA(s!("kernel32.dll")) }
-        .map_err(|e| format!("kernel32.dll not loaded: {e}"))?;
+        .map_err(|e| HookError::ModuleNotLoaded { module: "kernel32.dll", err: e })?;
     let proc = unsafe { GetProcAddress(kernel32, s!("CreateFileW")) }
-        .ok_or_else(|| "CreateFileW export not found".to_string())?;
+        .ok_or(HookError::ExportNotFound("CreateFileW export"))?;
     let addr = proc as usize;
 
     // Residual install-time race (accepted, matches input.rs convention): ilhook patches CreateFileW's
@@ -97,7 +99,7 @@ pub unsafe fn install(ext: &str) -> Result<(), String> {
             HookFlags::empty(),
         )
     }
-    .map_err(|e| format!("hooking CreateFileW: {e:?}"))?;
+    .map_err(|e| HookError::Install { what: "CreateFileW".to_string(), detail: format!("{e:?}") })?;
     std::mem::forget(hook); // resident for the process lifetime — never unhook a live IO path
 
     log::info!("co-op saves: redirecting *.sl2 -> *.{ext} (CreateFileW hooked at {addr:#x})");
@@ -107,7 +109,11 @@ pub unsafe fn install(ext: &str) -> Result<(), String> {
 /// The `CreateFileW` detour. `lpFileName` is in `rcx`. If it names a vanilla save, repoint `rcx` at a
 /// rewritten co-op path held in the thread-local buffer; otherwise leave the registers untouched and
 /// the original opens the path as given.
-fn create_file_detour(regs: *mut Registers, ext: &str) {
+///
+/// # Safety
+/// `regs` must point at the saved registers for a `CreateFileW` call (ilhook's hook-site contract):
+/// `rcx` is null or a valid, NUL-terminated `LPCWSTR`. Invoked only from the installed detour.
+unsafe fn create_file_detour(regs: *mut Registers, ext: &str) {
     let ptr = unsafe { (*regs).rcx } as *const u16;
     if ptr.is_null() {
         return;

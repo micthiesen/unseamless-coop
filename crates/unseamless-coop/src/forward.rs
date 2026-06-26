@@ -128,7 +128,7 @@ impl Log for ForwardLogger {
         {
             return;
         }
-        push(LogLevel::from_log_level(record.level()), format!("{}", record.args()));
+        push(LogLevel::from_log_level(record.level()), record.args().to_string());
     }
 
     fn flush(&self) {}

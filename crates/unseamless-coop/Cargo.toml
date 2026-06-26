@@ -41,6 +41,7 @@ windows = { version = "0.62", features = [
 # 0.10 the SDK resolves to (see Cargo.lock) — a mismatch would split the `Atom`/`Pe` types.
 pelite = "0.10"
 log = { workspace = true }
+thiserror = { workspace = true }
 simplelog = { version = "0.12", default-features = false }
 
 # In-game overlay renderer (DX12 present-hook + imgui). Vendors minhook (C) + imgui-sys (C++), built
