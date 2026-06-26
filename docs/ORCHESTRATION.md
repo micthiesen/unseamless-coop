@@ -91,6 +91,24 @@ typing in live: a worker message arriving mid-keystroke interleaves with your in
 a busy orchestrator queues silently (no receipt), so a worker's "wait for the orchestrator" can stall
 if you don't notice it.
 
+## Writing a worker assignment
+
+The first-run workers rated the brief the highest-leverage artifact. Make the parts that worked
+standard:
+
+- **Own-these-files list + a numbered per-task spec + an explicit SCOPE-GUARD / NEVER list.** Zero
+  lane ambiguity.
+- **A cross-lane collision map** — for *every* file the lane touches that another lane also touches,
+  name the sibling lane, whether it's landed or in-flight, who's authoritative, and the integration
+  order. Workers can't see other branches, so this is the one thing they can't self-serve, and it's
+  what lets them write merge-friendly diffs instead of guessing. (Both first-run workers' #1 ask.)
+- **Approximate pointers are fine — the deep dive is the worker's job.** Cite likely file / line /
+  symbol with a "grep to confirm" caveat; they don't need to be exact. A worker finding the real
+  location (e.g. a bit-check that's actually in `pad.rs`, not `input.rs`) is the **intended** flow,
+  not a brief defect — don't over-research the brief, and **reject** that class of worker feedback
+  ("you under-specified the location/type"). Only a wrong *behavioral* instruction (what the feature
+  should do) is a real brief error worth correcting.
+
 ## Integration
 
 The only path code reaches `main`:
@@ -129,6 +147,19 @@ the whole fleet. Kick it off, keep serving workers and rig requests, and collect
 the task notifies you. The squash-merge stays staged-not-committed meanwhile, so nothing lands until
 you've read the review.
 
+### Follow-up deltas, lockfiles, and acks
+
+- **Re-integrating a lane after its first squash-merge conflicts.** The worker branch still carries the
+  commits you already squashed onto `main`, so `worker-integrate` re-applies them and collides. For a
+  *follow-up* commit on an already-landed lane (the iterate-after-review loop), **cherry-pick just the
+  new commits** (`git cherry-pick <sha>…`) onto `main` — don't re-run `worker-integrate`.
+- **Tell the worker the integration SHA** ("integrated through `<sha>`") when a landed lane may get
+  follow-ups. The worker can't see `main`, so on a re-touch of the same file it's otherwise trusting
+  its branch base blindly.
+- **Lockfile / dep bumps are orchestrator-owned at integration.** A worker adding a dependency mutates
+  `Cargo.lock` (shared artifact) — a latent cross-lane conflict. Don't hand-merge `Cargo.lock`;
+  regenerate it (a plain `cargo build`) after merging the lanes.
+
 ## The Rig Is Single and Orchestrator-Owned
 
 A worker that needs a rig run, an RE probe, or in-game validation **asks the orchestrator** by
@@ -166,8 +197,9 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `msg <session> "<text>"` | the flock'd `send-keys` wrapper above (target restricted to `usc-*` sessions). |
 | `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. |
 | `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
-| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` if `worker/<name>` has unintegrated commits. |
-| `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). |
+| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` if `worker/<name>` has unintegrated commits — but its check uses the worker's *stale* `main`, so a squash-merged (already-landed) lane looks unintegrated. Use `-f` for landed lanes; it's safe once the work is on `main`. |
+| `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
+| `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes

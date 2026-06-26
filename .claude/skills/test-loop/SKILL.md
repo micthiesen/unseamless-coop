@@ -147,8 +147,16 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
 - `rig.sh log [-f]` — print/follow the latest `unseamless-coop/logs/unseamless_coop-*.log`.
 - `rig.sh kill` — stops the game **and** the launcher, escalating SIGTERM→SIGKILL and verifying (Wine
   ignores SIGTERM, so this is reliable — don't add your own `pkill -9`).
-- `rig.sh cycle [apply-opts]` — apply → launch → wait for the install/heartbeat lines. The solo
-  smoke test in one shot.
+- `rig.sh cycle [apply-opts]` — apply → launch → wait for the install/heartbeat lines → auto-dismiss
+  the offline popups. The solo smoke test in one shot.
+- `scripts/fleet/rig-verify <worker>… [-- <cycle opts>]` — **orchestrator multi-lane check:** builds
+  `rig/verify` = `main` + the named worker lanes, then runs `rig.sh cycle`. Use this for a fleet verify
+  build (e.g. `rig-verify death-debuffs overlay-ux`) instead of hand-rolling branch+merge+apply+launch.
+
+> **Drive the rig through these — don't hand-roll.** Reach for `cycle` / `rig-verify` (+ `log` to read),
+> not a manual `apply` then `launch` then `ls -1t …/*.log | grep`. `apply` auto-snapshots the real
+> stack, so never pre-check `status` "to be safe" — it's safe + repeatable by design. `launch --wait`
+> already polls for the framework; don't write your own poll loop.
 - `rig.sh seed-save [src-ext]` — copy a real save into the rig's isolated test extension (default
   `co2` → the configured `file_extension`, e.g. `uco`) so you can test on a real character. Backs up
   the existing test save first; never touches the source or the vanilla `.sl2`; game must be closed.

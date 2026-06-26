@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# rig-verify <worker> [<worker>...] [-- <rig.sh cycle opts>]
+#
+# Build a throwaway verify branch = current `main` + the named worker lanes, then run
+# `rig.sh cycle` (apply diag -> launch --wait -> auto-dismiss popups, leaves the game running).
+# One command for the orchestrator's multi-lane rig check — so you never hand-roll
+# branch+merge+apply+launch+grep. After it's up: `scripts/rig.sh log -f` to read,
+# `scripts/rig.sh kill` when done. Returns you to `rig/verify`; `git switch main` after.
+#
+#   scripts/fleet/rig-verify death-debuffs overlay-ux        # main + those two lanes, then cycle
+#   scripts/fleet/rig-verify scaling -- --no-dismiss          # forward opts to `rig.sh cycle`
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+RIFTS="$HOME/Code/.rifts/$(basename "$REPO")"
+die() { echo "rig-verify: $*" >&2; exit 1; }
+
+workers=() cycle_opts=()
+seen_dd=0
+for a in "$@"; do
+  if [ "$seen_dd" -eq 1 ]; then cycle_opts+=("$a"); continue; fi
+  case "$a" in
+    --) seen_dd=1 ;;
+    -*) die "unknown flag '$a' (put rig.sh cycle opts after '--')" ;;
+    *) workers+=("$a") ;;
+  esac
+done
+[ "${#workers[@]}" -gt 0 ] || die "usage: rig-verify <worker> [<worker>...] [-- <cycle opts>]"
+
+cd "$REPO"
+# Require a clean tree so the throwaway branch can't clobber (or silently carry) orchestrator edits.
+git diff --quiet && git diff --cached --quiet || die "working tree dirty — commit/stash, then retry (you're probably on main with edits)."
+
+echo "==> rig/verify = main + ${workers[*]}"
+git branch -D rig/verify 2>/dev/null || true
+git switch -c rig/verify main >/dev/null
+
+for w in "${workers[@]}"; do
+  ws="$RIFTS/$w"
+  [ -d "$ws" ] || { git switch - >/dev/null 2>&1 || true; die "no workspace for '$w' at $ws"; }
+  echo "==> fetch + merge worker/$w"
+  git fetch "$ws" "+worker/$w:refs/fleet/$w" 2>&1 | tail -1
+  if ! git merge --no-edit "refs/fleet/$w"; then
+    echo "rig-verify: conflict merging '$w' — resolve + 'git add', then run: scripts/rig.sh cycle" >&2
+    exit 3
+  fi
+done
+
+echo "==> built rig/verify @ $(git rev-parse --short HEAD); handing off to rig.sh cycle"
+# cycle = apply(diag) -> launch --wait -> auto-dismiss. Seed is whatever's committed; edit
+# scripts/rig/seed-config.toml + commit BEFORE running if a pass needs a non-default toggle.
+exec "$REPO/scripts/rig.sh" cycle ${cycle_opts[@]+"${cycle_opts[@]}"}
