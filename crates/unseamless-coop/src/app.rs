@@ -14,6 +14,7 @@ use eldenring::fd4::FD4TaskData;
 use fromsoftware_shared::SharedTaskImpExt;
 
 use crate::feature::{Feature, Tick};
+use crate::features::boot_volume::BootVolume;
 use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::notifications::NotificationsTick;
@@ -183,6 +184,8 @@ pub fn install() {
         Box::new(CritCoop::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
+        // Sets master volume once at boot, then leaves the in-game slider free (reads live config).
+        Box::new(BootVolume::new()),
         // Feeds the overlay's live debug panel (a published snapshot), but only while that panel is
         // shown — otherwise a single atomic load per frame. Near-free when off; see crate::debug_panel.
         crate::diag::debug_panel_feature(),

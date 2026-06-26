@@ -21,6 +21,11 @@ use crate::diagnostics::LogLevel;
 /// (`crate::settings`) so the file and the UI agree on the range.
 pub const MAX_SCALING_PERCENT: u32 = 1000;
 
+/// Max master volume. The engine's volume sliders run 0..=10 (the SDK charts
+/// `GameSettings::master_volume` with that range). Single-sourced so [`Config::validate`], the menu
+/// (`crate::settings`), and the cdylib's boot-volume write all agree, like [`MAX_SCALING_PERCENT`].
+pub const MAX_MASTER_VOLUME: u8 = 10;
+
 /// Bounds + default for the co-op session player cap ([`Session::max_players`]), shared by
 /// [`Config::validate`] and the settings registry. Vanilla caps a session at 4 (open world) / 6
 /// (arena); the SDK documents 6 as the engine's limit, so we don't exceed it without rig evidence
@@ -183,8 +188,13 @@ pub struct Gameplay {
     pub skip_splash_screens: bool,
     pub append_steam_id: bool,
     pub always_spectate_on_death: bool,
-    /// Boot master volume, 0 (mute) .. 10 (max). Clamped by [`Config::validate`].
-    pub default_boot_master_volume: u8,
+    /// Opt-in for [`boot_master_volume`]: when off (the default) the mod never touches the
+    /// game's volume, so the player's own setting stands. Only when on does the boot-volume write
+    /// happen — otherwise forcing a volume on every launch would override the in-game slider.
+    pub boot_master_volume_enabled: bool,
+    /// Boot master volume, 0 (mute) .. 10 (max). Only applied when [`boot_master_volume_enabled`] is on.
+    /// Clamped by [`Config::validate`].
+    pub boot_master_volume: u8,
 }
 
 /// Per-player scaling percentages ("% added per extra player"); see [`crate::scaling`].
@@ -299,8 +309,21 @@ impl Default for Gameplay {
             skip_splash_screens: true,
             append_steam_id: false,
             always_spectate_on_death: false,
-            default_boot_master_volume: 5,
+            boot_master_volume_enabled: false,
+            boot_master_volume: 5,
         }
+    }
+}
+
+impl Gameplay {
+    /// The master volume to force at boot, or `None` when the opt-in ([`boot_master_volume_enabled`]) is off so
+    /// the player's own setting stands. The value is clamped to [`MAX_MASTER_VOLUME`]. This is the
+    /// host-tested decision behind `coop/features/boot_volume`, kept in core (the cdylib just writes
+    /// the returned value to the game).
+    ///
+    /// [`boot_master_volume_enabled`]: Gameplay::boot_master_volume_enabled
+    pub fn boot_volume_to_apply(&self) -> Option<u8> {
+        self.boot_master_volume_enabled.then(|| self.boot_master_volume.min(MAX_MASTER_VOLUME))
     }
 }
 
@@ -383,15 +406,15 @@ impl Config {
             });
         }
 
-        if self.gameplay.default_boot_master_volume > 10 {
+        if self.gameplay.boot_master_volume > MAX_MASTER_VOLUME {
             warnings.push(ConfigWarning {
-                field: "gameplay.default_boot_master_volume".into(),
+                field: "gameplay.boot_master_volume".into(),
                 message: format!(
-                    "{} out of range 0..=10; clamped to 10",
-                    self.gameplay.default_boot_master_volume
+                    "{} out of range 0..={MAX_MASTER_VOLUME}; clamped to {MAX_MASTER_VOLUME}",
+                    self.gameplay.boot_master_volume
                 ),
             });
-            self.gameplay.default_boot_master_volume = 10;
+            self.gameplay.boot_master_volume = MAX_MASTER_VOLUME;
         }
 
         if self.session.max_players < MIN_SESSION_PLAYERS
@@ -571,10 +594,25 @@ mod tests {
     #[test]
     fn volume_is_clamped_with_warning() {
         let (cfg, warnings) =
-            Config::from_toml_str("[gameplay]\ndefault_boot_master_volume = 99\n").unwrap();
-        assert_eq!(cfg.gameplay.default_boot_master_volume, 10);
+            Config::from_toml_str("[gameplay]\nboot_master_volume = 99\n").unwrap();
+        assert_eq!(cfg.gameplay.boot_master_volume, 10);
         assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].field, "gameplay.default_boot_master_volume");
+        assert_eq!(warnings[0].field, "gameplay.boot_master_volume");
+    }
+
+    #[test]
+    fn boot_volume_to_apply_gates_and_clamps() {
+        // Off by default ⇒ never touch the volume (the opt-in safety invariant).
+        let mut g = Gameplay::default();
+        assert!(!g.boot_master_volume_enabled, "boot volume must be opt-in (off by default)");
+        assert_eq!(g.boot_volume_to_apply(), None);
+
+        // On ⇒ the configured level, clamped to the engine max.
+        g.boot_master_volume_enabled = true;
+        g.boot_master_volume = 3;
+        assert_eq!(g.boot_volume_to_apply(), Some(3));
+        g.boot_master_volume = 99; // a hand-edited file past the bound
+        assert_eq!(g.boot_volume_to_apply(), Some(MAX_MASTER_VOLUME));
     }
 
     #[test]
@@ -667,11 +705,11 @@ mod tests {
     #[test]
     fn volume_boundary_is_exact() {
         // 10 is valid (no warning); 11 clamps.
-        let (cfg, w) = Config::from_toml_str("[gameplay]\ndefault_boot_master_volume = 10\n").unwrap();
-        assert_eq!(cfg.gameplay.default_boot_master_volume, 10);
+        let (cfg, w) = Config::from_toml_str("[gameplay]\nboot_master_volume = 10\n").unwrap();
+        assert_eq!(cfg.gameplay.boot_master_volume, 10);
         assert!(w.is_empty());
-        let (cfg, w) = Config::from_toml_str("[gameplay]\ndefault_boot_master_volume = 11\n").unwrap();
-        assert_eq!(cfg.gameplay.default_boot_master_volume, 10);
+        let (cfg, w) = Config::from_toml_str("[gameplay]\nboot_master_volume = 11\n").unwrap();
+        assert_eq!(cfg.gameplay.boot_master_volume, 10);
         assert_eq!(w.len(), 1);
     }
 

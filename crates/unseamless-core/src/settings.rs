@@ -10,7 +10,8 @@
 //! `docs/ARCHITECTURE.md` > Divergences.
 
 use crate::config::{
-    Config, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS, OverheadDisplay,
+    Config, MAX_MASTER_VOLUME, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS,
+    OverheadDisplay,
 };
 
 /// Stable identifier for a setting, used to address it from the menu / over the wire. Discriminant
@@ -39,6 +40,7 @@ pub enum SettingId {
     WorldTimeHour = 17,
     WorldTimeMinute = 18,
     CritCoop = 19,
+    BootMasterVolumeEnabled = 20,
 }
 
 impl SettingId {
@@ -242,14 +244,22 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
+            id: BootMasterVolumeEnabled,
+            label: "Set master volume on boot",
+            kind: Toggle {
+                get: |c| c.gameplay.boot_master_volume_enabled,
+                set: |c, v| c.gameplay.boot_master_volume_enabled = v,
+            },
+        },
+        Setting {
             id: BootMasterVolume,
             label: "Boot master volume",
             kind: Range {
                 min: 0,
-                max: 10,
+                max: MAX_MASTER_VOLUME as u32,
                 step: 1,
-                get: |c| c.gameplay.default_boot_master_volume as u32,
-                set: |c, v| c.gameplay.default_boot_master_volume = v.min(10) as u8,
+                get: |c| c.gameplay.boot_master_volume as u32,
+                set: |c, v| c.gameplay.boot_master_volume = v.min(MAX_MASTER_VOLUME as u32) as u8,
             },
         },
         Setting {
@@ -339,7 +349,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 19, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 20, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -394,6 +404,23 @@ mod tests {
     }
 
     #[test]
+    fn boot_master_volume_enabled_toggle_binds_to_its_own_config_field() {
+        // Guards the BootMasterVolumeEnabled get/set against a copy-paste pointing at a sibling — especially the
+        // u8 it gates (boot_master_volume) or the neighbour above it (always_spectate_on_death).
+        let reg = registry();
+        let s = reg.iter().find(|s| s.id == SettingId::BootMasterVolumeEnabled).unwrap();
+        let mut cfg = Config::default();
+        cfg.gameplay.boot_master_volume_enabled = false;
+        cfg.gameplay.always_spectate_on_death = true; // neighbour sentinel, set opposite
+        cfg.gameplay.boot_master_volume = 7; // the gated value must be untouched
+        s.adjust(&mut cfg, true);
+        assert!(cfg.gameplay.boot_master_volume_enabled, "must write gameplay.boot_master_volume_enabled");
+        assert!(cfg.gameplay.always_spectate_on_death, "must not touch a neighbouring field");
+        assert_eq!(cfg.gameplay.boot_master_volume, 7, "must not touch the gated level");
+        assert_eq!(s.display_value(&cfg), "On");
+    }
+
+    #[test]
     fn world_time_settings_bind_to_their_own_config_fields() {
         // Guard the 3 new settings' get/set against a copy-paste pointing at a sibling field — the
         // count bump alone wouldn't catch a hour/minute/lock mix-up.
@@ -437,12 +464,12 @@ mod tests {
 
         // Volume range saturates at its own bounds, not the percent bounds.
         let vol = reg.iter().find(|s| s.id == SettingId::BootMasterVolume).unwrap();
-        cfg.gameplay.default_boot_master_volume = 10;
+        cfg.gameplay.boot_master_volume = 10;
         vol.adjust(&mut cfg, true);
-        assert_eq!(cfg.gameplay.default_boot_master_volume, 10);
-        cfg.gameplay.default_boot_master_volume = 0;
+        assert_eq!(cfg.gameplay.boot_master_volume, 10);
+        cfg.gameplay.boot_master_volume = 0;
         vol.adjust(&mut cfg, false);
-        assert_eq!(cfg.gameplay.default_boot_master_volume, 0);
+        assert_eq!(cfg.gameplay.boot_master_volume, 0);
 
         // Max players is the only Range with a non-zero floor (the SDK sentinel makes 1 invalid),
         // so it must saturate at MIN_SESSION_PLAYERS downward, not walk to 0/1.

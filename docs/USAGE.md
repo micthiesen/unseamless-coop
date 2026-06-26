@@ -55,7 +55,7 @@ to apply changes.
   - the `[gameplay]` *rules*: `crit_coop`, `allow_summons`, `death_debuffs`, `roam_anywhere`.
 - **Per-player** — each person sets their own; not shared:
   - the rest of `[gameplay]` — overhead display, skip splash screens, append steam id,
-    spectate-on-death, boot volume.
+    spectate-on-death, the set-volume-on-boot toggle and its level.
   - `[loader]` (your own `mods/`), `[debug]` (your logging), `[save]` (save-file extension),
     `[language]` (locale).
 

@@ -61,7 +61,7 @@ free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count 
 | Spirit summons allowed in MP | `allow_summons` | E |
 | Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
 | Spectate-on-death system | `always_spectate_on_death` | M |
-| Boot master volume | `default_boot_master_volume` | E |
+| Boot master volume | `boot_master_volume_enabled` + `boot_master_volume` | **built** — `coop/features/boot_volume.rs` writes `GameDataMan::game_settings.master_volume` (0..=10, charted) once when the singleton is live, then leaves the in-game slider free. Opt-in via `boot_master_volume_enabled` (off by default). Rig-TODO: confirm the audio engine picks up the live write. |
 | Lock time of day (permanent day/night) | `world_time.{lock,hour,minute}` | **built** — `coop/features/world_time.rs` re-asserts `WorldAreaTime::request_time` each frame (charted). Menu-adjustable. Local config; host-enforced sync is a follow-up. |
 | Overhead player display (ping / soul level / death count / Steam ID) | `overhead_player_display`, `append_steam_id_to_players` | M |
 

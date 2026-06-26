@@ -18,7 +18,10 @@ overhead_display = "normal"
 skip_splash_screens = true
 append_steam_id = false
 always_spectate_on_death = false
-default_boot_master_volume = 5
+# On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's
+# the only verification surface for coop/features/boot_volume (the cdylib logic can't be host-tested).
+boot_master_volume_enabled = true
+boot_master_volume = 5
 
 [scaling]
 enemy_health = 35
