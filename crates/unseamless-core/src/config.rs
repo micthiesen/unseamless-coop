@@ -54,7 +54,40 @@ pub struct Config {
     pub death_debuffs: crate::death_debuffs::DeathDebuffTuning,
     pub world_time: WorldTime,
     pub coop: Coop,
+    pub nameplates: Nameplates,
 }
+
+/// Overhead peer **nameplates**: screen-space labels drawn over each co-op partner, projected from
+/// their world position (see [`crate::projection`] and `docs/OVERLAY-RENDERING.md`). The *content*
+/// shown is selected by [`Gameplay::overhead_display`]; this block holds the nameplate-specific
+/// rendering knobs. Off by default — it's a Wave-2 surface that only has peers to draw in a real
+/// co-op session, so a fresh install pays nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Nameplates {
+    /// Master switch for drawing overhead nameplates. Default off.
+    pub enabled: bool,
+    /// Cull peers farther than this many meters from the camera (a label on a peer across the map is
+    /// noise). Clamped to [`MIN_NAMEPLATE_DISTANCE`]..=[`MAX_NAMEPLATE_DISTANCE`] by
+    /// [`Config::validate`]. Integer meters (so [`Config`] stays `Eq` and it maps to a menu `Range`).
+    pub max_distance_m: u32,
+    /// Debug/solo aid: also draw a nameplate over your *own* character. Off in normal play (you don't
+    /// label yourself), but it makes the projection + draw verifiable solo on the rig before the real
+    /// remote-peer feed lands. Default off.
+    pub show_self: bool,
+}
+
+impl Default for Nameplates {
+    fn default() -> Self {
+        Self { enabled: false, max_distance_m: DEFAULT_NAMEPLATE_DISTANCE, show_self: false }
+    }
+}
+
+/// Bounds + default for [`Nameplates::max_distance_m`], shared by [`Config::validate`] and the
+/// settings registry so the file and the menu agree on the range.
+pub const MIN_NAMEPLATE_DISTANCE: u32 = 5;
+pub const MAX_NAMEPLATE_DISTANCE: u32 = 300;
+pub const DEFAULT_NAMEPLATE_DISTANCE: u32 = 60;
 
 /// Private Steam P2P **side-channel** pairing (rung 2 of `docs/COOP-CONNECTION.md`). For now the
 /// partner is entered by hand — two players swap SteamIDs out of band (the rung-1 copy button), each
@@ -461,6 +494,21 @@ impl Config {
                 message: format!("{} exceeds {MAX_FLAG_SCAN}; clamped", self.debug.probes.event_flag_scan_count),
             });
             self.debug.probes.event_flag_scan_count = MAX_FLAG_SCAN;
+        }
+
+        if self.nameplates.max_distance_m < MIN_NAMEPLATE_DISTANCE
+            || self.nameplates.max_distance_m > MAX_NAMEPLATE_DISTANCE
+        {
+            let clamped =
+                self.nameplates.max_distance_m.clamp(MIN_NAMEPLATE_DISTANCE, MAX_NAMEPLATE_DISTANCE);
+            warnings.push(ConfigWarning {
+                field: "nameplates.max_distance_m".into(),
+                message: format!(
+                    "{} out of range {MIN_NAMEPLATE_DISTANCE}..={MAX_NAMEPLATE_DISTANCE}; clamped to {clamped}",
+                    self.nameplates.max_distance_m
+                ),
+            });
+            self.nameplates.max_distance_m = clamped;
         }
 
         if self.world_time.hour > 23 {

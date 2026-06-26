@@ -37,6 +37,7 @@ mod input;
 mod logbuf;
 mod logger;
 mod mods;
+mod nameplates;
 mod notify;
 mod overlay;
 mod patch;

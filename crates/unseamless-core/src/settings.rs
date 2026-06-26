@@ -10,8 +10,8 @@
 //! `docs/ARCHITECTURE.md` > Divergences.
 
 use crate::config::{
-    Config, MAX_MASTER_VOLUME, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS,
-    OverheadDisplay,
+    Config, MAX_MASTER_VOLUME, MAX_NAMEPLATE_DISTANCE, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS,
+    MIN_NAMEPLATE_DISTANCE, MIN_SESSION_PLAYERS, OverheadDisplay,
 };
 
 /// Stable identifier for a setting, used to address it from the menu / over the wire. Discriminant
@@ -41,6 +41,8 @@ pub enum SettingId {
     WorldTimeMinute = 18,
     CritCoop = 19,
     BootMasterVolumeEnabled = 20,
+    Nameplates = 21,
+    NameplateDistance = 22,
 }
 
 impl SettingId {
@@ -244,6 +246,25 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
+            id: Nameplates,
+            label: "Overhead nameplates",
+            kind: Toggle {
+                get: |c| c.nameplates.enabled,
+                set: |c, v| c.nameplates.enabled = v,
+            },
+        },
+        Setting {
+            id: NameplateDistance,
+            label: "Nameplate distance (m)",
+            kind: Range {
+                min: MIN_NAMEPLATE_DISTANCE,
+                max: MAX_NAMEPLATE_DISTANCE,
+                step: 5,
+                get: |c| c.nameplates.max_distance_m,
+                set: |c, v| c.nameplates.max_distance_m = v,
+            },
+        },
+        Setting {
             id: BootMasterVolumeEnabled,
             label: "Set master volume on boot",
             kind: Toggle {
@@ -349,7 +370,29 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 20, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 22, "registry size changed — update this if you added a setting");
+    }
+
+    #[test]
+    fn nameplate_settings_bind_to_their_own_config_fields() {
+        // Guard the two nameplate settings' get/set against a copy-paste pointing at a sibling field.
+        let reg = registry();
+        let mut cfg = Config::default();
+
+        let toggle = reg.iter().find(|s| s.id == SettingId::Nameplates).unwrap();
+        cfg.nameplates.enabled = false;
+        cfg.nameplates.max_distance_m = 42; // neighbour sentinel
+        toggle.adjust(&mut cfg, true);
+        assert!(cfg.nameplates.enabled, "toggle must write nameplates.enabled");
+        assert_eq!(cfg.nameplates.max_distance_m, 42, "toggle must not touch the distance");
+        assert_eq!(toggle.display_value(&cfg), "On");
+
+        let dist = reg.iter().find(|s| s.id == SettingId::NameplateDistance).unwrap();
+        cfg.nameplates.max_distance_m = 60;
+        cfg.nameplates.show_self = true; // neighbour sentinel
+        dist.adjust(&mut cfg, true); // +5
+        assert_eq!(cfg.nameplates.max_distance_m, 65, "distance must write nameplates.max_distance_m");
+        assert!(cfg.nameplates.show_self, "distance must not touch show_self");
     }
 
     #[test]

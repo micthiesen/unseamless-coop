@@ -6,6 +6,7 @@ use unseamless_core::util::{Applied, Latch};
 pub mod boot_volume;
 pub mod crit_coop;
 pub mod death_debuffs;
+pub mod nameplates;
 pub mod notifications;
 pub mod observer;
 pub mod playstate;

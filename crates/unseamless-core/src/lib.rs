@@ -25,6 +25,7 @@ pub mod menu;
 pub mod notifications;
 pub mod pad;
 pub mod peer;
+pub mod projection;
 pub mod protocol;
 pub mod saves;
 pub mod scaling;

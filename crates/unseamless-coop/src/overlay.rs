@@ -94,6 +94,13 @@ const DIM_GREY: [f32; 3] = [0.55, 0.55, 0.55];
 /// can't drift apart.
 const PASSIVE_BG_ALPHA: f32 = 0.35;
 
+// Overhead nameplates: bright white text with a dark drop shadow (one pixel down-right) so a label
+// stays legible over any part of the game world. The projected NDC points come from the game-thread
+// feature (see [`crate::nameplates`]); the shadow is the same contrast trick the cursor orb uses.
+const NAMEPLATE_TEXT: [f32; 3] = [1.0, 1.0, 1.0];
+const NAMEPLATE_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
+const NAMEPLATE_SHADOW_OFFSET: f32 = 1.0;
+
 /// One inset, in pixels, from the viewport edge, shared by every overlay surface: the top-left
 /// notifications (left + top), the top-right watermark (right + top), and the utility window's
 /// default top edge. Tweak here to move them all together.
@@ -237,6 +244,10 @@ impl Overlay {
             self.config = cfg;
         }
         self.draw_notifications(ui);
+        // Overhead peer nameplates: screen-space labels the game-thread feature
+        // (`crate::features::nameplates`) projected and published to `crate::nameplates`. Drawn over
+        // the world but behind our own windows; a no-op when nothing's published (off / no peers).
+        self.draw_nameplates(ui);
         // Branded corner stamp — only off the playfield (title/main menu, character select, loading),
         // never a persistent in-play banner. The game-thread probe (`crate::features::playstate`)
         // publishes the flag; we read it non-blocking here.
@@ -279,6 +290,39 @@ impl Overlay {
                 draw_banners(ui, &banners);
                 draw_toasts(ui, &toasts);
             });
+    }
+
+    /// Draw overhead peer nameplates from the projected labels the game-thread feature publishes
+    /// ([`crate::nameplates`]). Reads them non-blocking; maps each NDC point to pixels with this
+    /// frame's `display_size` (the projection deliberately stops at NDC — see
+    /// [`unseamless_core::projection`]) and draws centered text with a drop shadow. Uses the
+    /// **background** draw list so labels sit over the game world but behind our own windows (the
+    /// utility menu stays on top). A no-op when the list is empty or momentarily contended, so it's
+    /// cheap on the present hook.
+    fn draw_nameplates(&self, ui: &Ui) {
+        let Some(mut labels) = crate::nameplates::snapshot() else {
+            return; // contended this frame, or not initialized — skip
+        };
+        if labels.is_empty() {
+            return; // off, or no peers visible — nothing to draw
+        }
+        // Paint farthest-first so a nearer peer's label draws on top when two overlap on screen.
+        labels.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        let disp = ui.io().display_size;
+        // Crisp menu font for the labels (held to function end); toasts keep the compact default.
+        let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
+        // One background draw list, reused for every label and dropped at function end. It's a
+        // different list from the foreground one `draw_cursor_marker`/`draw_title_hint` bind, and this
+        // runs before the utility window's `draw_ghost_box` (the other background-list user), so the
+        // imgui-rs one-live-instance rule isn't violated.
+        let dl = ui.get_background_draw_list();
+        for n in &labels {
+            let [sx, sy] = unseamless_core::projection::ndc_to_screen(n.ndc, disp);
+            // Center the text horizontally on the projected point.
+            let x = sx - ui.calc_text_size(&n.text)[0] * 0.5;
+            dl.add_text([x + NAMEPLATE_SHADOW_OFFSET, sy + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, &n.text);
+            dl.add_text([x, sy], rgba(NAMEPLATE_TEXT, 1.0), &n.text);
+        }
     }
 
     /// Draw the branded corner stamp — mod name + version + the backtick hint — anchored to the

@@ -17,6 +17,7 @@ use crate::feature::{Feature, Tick};
 use crate::features::boot_volume::BootVolume;
 use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
+use crate::features::nameplates::Nameplates;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
@@ -118,6 +119,8 @@ fn init_subsystems(
     crate::actionq::init();
     // Snapshot cell the debug-panel publisher posts into and the overlay reads. Before any tick.
     crate::debug_panel::init();
+    // Label cell the nameplates feature posts projected peer labels into and the overlay draws.
+    crate::nameplates::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
         // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
@@ -229,6 +232,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         Box::new(DeathDebuffsFeature::new()),
         // Clears crit-invuln so co-op partners can damage during crits (PostPhysics). No-op when off.
         Box::new(CritCoop::new()),
+        // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
+        // camera + positions only). Reads live config; no-op (publishes nothing) when off.
+        Box::new(Nameplates::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
         // Writes the per-player enemy/boss scaling curve into the multiplayer SpEffect rate rows
