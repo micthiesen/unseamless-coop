@@ -195,6 +195,12 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
     // a normal solo session pays nothing. Best-effort: a failure to connect degrades, never aborts.
     crate::coop::start(config);
 
+    // Rung-3 RE prep: install the session create/join logging hooks (gated by `[debug.probes]
+    // session_probe`, off by default). Inert when off, and inert-but-announced when on until the
+    // create/join AOBs are charted on the rig — see `coop/session_probe` + docs/SESSION-RE-RUNBOOK.md.
+    // A pure diagnostic, so it degrades (logs) and never aborts.
+    crate::session_probe::install_hooks(config);
+
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(config, base);
@@ -234,8 +240,12 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         // shown — otherwise a single atomic load per frame. Near-free when off; see crate::debug_panel.
         crate::diag::debug_panel_feature(),
     ];
-    // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
+    // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play):
+    // the diag probes, plus the rung-3 session probe's gated FSM rising-edge logger (every
+    // lobby/protocol transition, under the `session-probe:` prefix; solo it just sits at `lobby=None`,
+    // the transition machinery still running). Off by default; on for a create/join RE run.
     features.extend(crate::diag::probe_features(config));
+    features.extend(crate::session_probe::probe_features(config));
     features
 }
 

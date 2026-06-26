@@ -76,8 +76,9 @@ pub unsafe fn apply(addr: *mut u8, bytes: &[u8]) -> Result<Vec<u8>, HookError> {
 /// `offset` bytes to the site (in RVA space, so `rva_to_va` bounds-checks it against the mapped image
 /// — we never form a wild pointer), and verify the byte there equals `expect`. Returns the live site
 /// pointer, or `None` (logged) on any failure: no/ambiguous match, out-of-range site, or wrong
-/// opcode. Shared by [`overwrite_landmark`] / [`nop_landmark`].
-fn resolve_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8) -> Option<*mut u8> {
+/// opcode. Shared by [`overwrite_landmark`] / [`nop_landmark`] and the read-only hook resolver in
+/// [`crate::session_probe`] (which uses it to locate a function entry to detour, not to overwrite).
+pub(crate) fn resolve_landmark(name: &str, landmark: &[Atom], offset: isize, expect: u8) -> Option<*mut u8> {
     let program = Program::current();
     let mut save = [0u32; 1]; // pelite writes the unique match-start RVA into the implicit Save(0)
     if !program.scanner().finds_code(landmark, &mut save) {

@@ -165,6 +165,14 @@ pub struct DebugProbes {
     /// How many flags to scan from `event_flag_scan_start`. Clamped to [`MAX_FLAG_SCAN`] (a huge range
     /// scanned per frame is wasteful and pointless). `0` = scanner off.
     pub event_flag_scan_count: u32,
+    /// Install the rung-3 session create/join RE probe (`coop/session_probe`): rising-edge logging of
+    /// every `CSSessionManager` lobby/protocol FSM transition, plus a logging hook on the session
+    /// create/join initiation functions — all under the greppable `session-probe:` log prefix. Off by
+    /// default. The FSM-transition half works solo (it just stays at `lobby=None` without a peer); the
+    /// hook half stays **inert** until the create/join function AOBs are charted on the rig (a precise
+    /// TODO — see `docs/SESSION-RE-RUNBOOK.md`). Enable for a two-player rig run that captures the
+    /// `None -> TryToCreateSession -> Host` / `None -> TryToJoinSession -> Client` transition.
+    pub session_probe: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
@@ -488,6 +496,26 @@ mod tests {
         assert!(warnings.is_empty(), "seed config should not warn: {warnings:?}");
         assert!(cfg.debug.enabled, "seed enables debug logging so rig runs capture verbose lines");
         assert!(cfg.password_is_valid(), "seed password must clear MIN_PASSWORD_LEN");
+    }
+
+    #[test]
+    fn session_probe_defaults_off_and_round_trips() {
+        // The rung-3 RE probe must be opt-in (off by default)...
+        assert!(!DebugProbes::default().session_probe, "session_probe must default off");
+
+        // ...it must default off when [debug.probes] is present but omits the key (the realistic shape
+        // of a config that predates this flag — guards #[serde(default)] on the field, not just Default).
+        let (old, w) = Config::from_toml_str("[debug.probes]\nsnapshot_secs = 5\n").unwrap();
+        assert!(!old.debug.probes.session_probe, "missing key must default off");
+        assert!(w.is_empty(), "{w:?}");
+
+        // ...and a hand-set `true` must survive a real serialize -> parse round-trip (catches a future
+        // skip_serializing / key-rename that would silently drop the value when config is persisted).
+        let mut cfg = Config::default();
+        cfg.debug.probes.session_probe = true;
+        let (reparsed, w) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
+        assert!(reparsed.debug.probes.session_probe, "session_probe must survive round-trip");
+        assert!(w.is_empty(), "{w:?}");
     }
 
     #[test]

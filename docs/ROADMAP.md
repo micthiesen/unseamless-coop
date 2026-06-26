@@ -30,9 +30,11 @@ Shipped to `main`, rig-verified where applicable:
   FFI-unwind-safety audit** of every game→us entry point (overlay present-hook, `DllMain`, the
   input/save/patch hooks) — an unwind into vkd3d/the game is UB; the task-tick path is already wrapped.
   Then add the notifications toast on the disable path and update CLAUDE.md's firewall claim.
-- **Rung-3 RE prep (diagnostic DLL).** Hook the `CSSessionManager` create/join functions and log their
-  calls — writable + solo-runnable now; the actual transition only fires with a peer. Accelerates the
-  co-op core below. See [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
+- **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
+  `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
+  are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
+  Accelerates the co-op core below. See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md),
+  [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
 - **Overhead nameplates** — screen-space text from projected peer world coords (`cs/camera.rs`
   projection is charted); the projection is solo-prototypable.
 

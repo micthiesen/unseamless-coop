@@ -220,6 +220,9 @@ call join now") and two instances we control to RE the create/join functions aga
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the two layers, "drive the game's networking" decision, the
   in-band side-channel + self-healing design, divergences.
 - [SDK-COVERAGE.md](SDK-COVERAGE.md) — per-subsystem charted/gap inventory (networking/session).
+- [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) — the rung-3 create/join RE recipe: the gated
+  `session-probe` instrumentation (`coop/session_probe`) and the exact "find these two initiation
+  functions" task for the rig.
 - [RIG-RUNBOOK.md](RIG-RUNBOOK.md) — the session observation run (executable once rung 3 lands).
 - [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md) — the offline/EAC presentation and why we're
   "offline" but Steam-connected.

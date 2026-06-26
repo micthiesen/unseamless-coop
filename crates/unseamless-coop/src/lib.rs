@@ -45,6 +45,7 @@ mod proxy;
 mod saves;
 mod sdk;
 mod session;
+mod session_probe;
 mod state;
 mod steam;
 
