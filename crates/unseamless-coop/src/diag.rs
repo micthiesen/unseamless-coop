@@ -16,7 +16,7 @@
 //!   the overlay's bottom-left debug panel each ~10 Hz while it's shown, via [`crate::debug_panel`]. So
 //!   the report model drives the log *and* a live HUD; the only thing that differs is the sink.
 
-use eldenring::cs::{CSEventFlagMan, CSSessionManager};
+use eldenring::cs::{CSEventFlagMan, CSSessionManager, WorldAreaTime};
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::{DiagnosticReport, FlagScanner};
 use unseamless_core::util::{FrameThrottle, Timer};
@@ -101,6 +101,26 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         .field("party_size", count)
         .field("enemy", format!("hp x{:.2} dmg x{:.2} pos x{:.2}", enemy.health, enemy.damage, enemy.posture))
         .field("boss", format!("hp x{:.2} dmg x{:.2} pos x{:.2}", boss.health, boss.damage, boss.posture));
+
+    // World time of day: the live clock plus the engine's target-of-day, so the time-lock is
+    // self-serve verifiable in the overlay panel (and any shared log dump) without grepping for a log
+    // line. `engine_target` is `WorldAreaTime`'s own target field — our re-assert drives it while the
+    // lock holds (so `clock` tracks it), but with the lock off it's the engine's natural progression
+    // target, not our config. `None` until the WorldAreaTime singleton is live (menu / loading); the
+    // `lock` flag is the config intent.
+    let area_time = crate::sdk::with_instance::<WorldAreaTime, _>(|t| {
+        (t.clock.hours(), t.clock.minutes(), t.target_hour, t.target_minute)
+    });
+    let wt = r.section("world_time");
+    wt.field("lock", crate::state::with(|c| c.world_time.lock));
+    match area_time {
+        Some((h, m, th, tm)) => {
+            wt.field("clock", format!("{h:02}:{m:02}")).field("engine_target", format!("{th:02}:{tm:02}"));
+        }
+        None => {
+            wt.field("status", "no WorldAreaTime yet (menu / loading)");
+        }
+    }
     r
 }
 

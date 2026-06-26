@@ -8,12 +8,10 @@
 //! or a continuously-steered setpoint: it keeps getting pulled back. Lock off → we stop re-asserting,
 //! normal progression resumes. A state write, like `session_limit` / `seamless`; off by default.
 //!
-//! **Rig-derivation note (the mechanism is unverified):** if the rig shows the clock *jittering* or
-//! creeping forward, the robust freeze is the adjacent `WorldAreaTime::time_passage_multiplier = 0.0`
-//! (halts advance with no oscillation) — that freezes at the *current* time, so locking to a specific
-//! time would be "request_time(target) until reached, then set the multiplier to 0". And if the game's
-//! time task runs *after* `FrameBegin`, our write is overwritten that frame; a later phase is the knob
-//! to try. Confirm which behavior the engine has on the rig before settling the approach.
+//! **Mechanism confirmed on the rig:** locking to 22:00 at the default `FrameBegin` phase held the
+//! clock steady for several minutes — no creep, no jitter — so the per-frame `request_time` re-assert
+//! is sufficient on its own. (A later task phase, or zeroing `time_passage_multiplier`, were the
+//! fallbacks if the game's own time task had clobbered our write; the rig showed neither is needed.)
 //!
 //! Local config for now (each player sets their own time); host-enforced sync is a noted follow-up —
 //! time-of-day desync between co-op players is a known annoyance worth syncing later.
@@ -40,8 +38,8 @@ impl Feature for WorldTimeLock {
         "world-time-lock"
     }
 
-    // Default phase (`FrameBegin`): plain time state, not frame-order-sensitive — but see the
-    // rig-derivation note (a later phase is the fix if the engine's time task clobbers our write).
+    // Default phase (`FrameBegin`): plain time state, rig-confirmed not frame-order-sensitive — the
+    // per-frame re-assert holds the clock here without needing a later phase (see the module docs).
 
     fn on_frame(&mut self, _tick: Tick) {
         let (lock, hour, minute) =
