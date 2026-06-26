@@ -781,17 +781,27 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     }
     // A section's vertical extent in text lines: its title plus one per field.
     let section_lines = |s: &ReportSection| 1 + s.fields().len();
-    let total_lines: usize = sections.iter().map(section_lines).sum();
 
-    // Partition on section boundaries: pour sections into the left column until it holds at least half
-    // the lines, so it ends up the taller (heavier) of the two; the rest go right. Static-ish, no
-    // rebalancing. `split == sections.len()` (everything left) when there's only one section.
+    // Per-column rendered height: one line per section title + field, plus one inter-section spacing gap
+    // per boundary. Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide
+    // by construction. The constant per-column overcount (a trailing line's spacing) is identical for
+    // both columns, so it cancels in the difference used for the top-pad — making the alignment exact.
+    let line_h = ui.text_line_height_with_spacing();
+    let spacing_y = ui.clone_style().item_spacing[1];
+    let column_height = |col: &[ReportSection]| {
+        let lines: usize = col.iter().map(section_lines).sum();
+        lines as f32 * line_h + col.len().saturating_sub(1) as f32 * spacing_y
+    };
+
+    // Partition on section boundaries by rendered height: the first split where the left column is at
+    // least as tall as the right. Left height grows / right height shrinks as the split moves right, so
+    // this is the most balanced split with left >= right — left is the heavier column and the pad below
+    // is non-negative by construction. Falls back to `split == sections.len()` (everything left, a single
+    // column) for one section, or the degenerate case where one section out-measures all the rest.
     let mut split = sections.len();
-    let mut acc = 0;
-    for (i, s) in sections.iter().enumerate() {
-        acc += section_lines(s);
-        if acc * 2 >= total_lines {
-            split = i + 1;
+    for k in 1..sections.len() {
+        if column_height(&sections[..k]) >= column_height(&sections[k..]) {
+            split = k;
             break;
         }
     }
@@ -809,15 +819,6 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
         }
     }
     pitch += DEBUG_PANEL_COL_GAP;
-
-    // Per-column height for bottom-alignment. The constant per-column overcount (a trailing line's
-    // spacing) is identical for both, so it cancels in the difference below — making the top-pad exact.
-    let line_h = ui.text_line_height_with_spacing();
-    let spacing_y = ui.clone_style().item_spacing[1];
-    let column_height = |col: &[ReportSection]| {
-        let lines: usize = col.iter().map(section_lines).sum();
-        lines as f32 * line_h + col.len().saturating_sub(1) as f32 * spacing_y
-    };
 
     ui.group(|| draw_report_column(ui, left));
     if !right.is_empty() {
