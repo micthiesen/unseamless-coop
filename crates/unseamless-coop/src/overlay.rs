@@ -29,7 +29,7 @@ use hudhook::imgui::{
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
-use unseamless_core::diagnostics::DiagnosticReport;
+use unseamless_core::diagnostics::{DiagnosticReport, ReportSection};
 use unseamless_core::menu::{Menu, MenuOutcome, SessionContext};
 use unseamless_core::notifications::{Banner, Severity, Toast};
 use unseamless_core::protocol::SessionAction;
@@ -761,54 +761,90 @@ fn enter_pressed(ui: &Ui) -> bool {
     ui.is_key_pressed_no_repeat(Key::Enter) || ui.is_key_pressed_no_repeat(Key::KeypadEnter)
 }
 
-/// Number of sections laid out per row in the debug panel. The report has ~6 sections, so two columns
-/// roughly halves the panel's height versus one tall stack — using the wide bottom-left space instead
-/// of growing far up the screen.
-const DEBUG_PANEL_COLS: usize = 2;
-/// Horizontal gap, in pixels, added past the widest rendered line to set the column pitch, so the second
-/// column starts at a fixed x regardless of content width. Comfortably larger than the window padding
-/// (~8px at the default style) that offsets column 0's content origin, so the columns stay clear of each
-/// other — the effective inter-column gap is this minus that padding.
+/// Horizontal gap, in pixels, added past the widest rendered line to set the right column's x, so it
+/// starts at a fixed offset regardless of content width. Comfortably larger than the window padding
+/// (~8px at the default style) that offsets the left column's content origin, so the columns stay clear
+/// of each other — the effective inter-column gap is this minus that padding.
 const DEBUG_PANEL_COL_GAP: f32 = 28.0;
 
-/// Render a [`DiagnosticReport`] into the current window as a compact multi-column grid: each section
-/// (title in blue, then its `key = value` lines dimmed and indented) is a self-contained group, and the
-/// groups sit side by side — [`DEBUG_PANEL_COLS`] per row — so the panel stays short rather than one
-/// tall column. Keys and values stay left-aligned (no awkward right-justification). Values are ASCII
-/// (built that way in [`crate::diag::build_report`]).
+/// Render a [`DiagnosticReport`] into the current window as a compact two-column layout. The sections
+/// fill **column-major**: partitioned on section boundaries into a heavier LEFT column (filled first,
+/// top to bottom) and a lighter RIGHT one, each drawn as its own vertical stack — so a section's fields
+/// never split across columns. Both columns are **bottom-aligned** (the shorter right column is top-
+/// padded), pooling all the unused space in the top-right corner. Halves the height versus one tall
+/// stack while using the wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built
+/// that way in [`crate::diag::build_report`]).
 fn draw_report(ui: &Ui, report: &DiagnosticReport) {
-    // Uniform column pitch = the widest rendered line (title or `key = value`) across every section,
-    // plus a gap. Measuring in the active font and using one pitch for all columns keeps the grid
-    // aligned regardless of which section happens to be widest, and keeps the columns clear of each
-    // other (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
+    let sections = report.sections();
+    if sections.is_empty() {
+        return;
+    }
+    // A section's vertical extent in text lines: its title plus one per field.
+    let section_lines = |s: &ReportSection| 1 + s.fields().len();
+    let total_lines: usize = sections.iter().map(section_lines).sum();
+
+    // Partition on section boundaries: pour sections into the left column until it holds at least half
+    // the lines, so it ends up the taller (heavier) of the two; the rest go right. Static-ish, no
+    // rebalancing. `split == sections.len()` (everything left) when there's only one section.
+    let mut split = sections.len();
+    let mut acc = 0;
+    for (i, s) in sections.iter().enumerate() {
+        acc += section_lines(s);
+        if acc * 2 >= total_lines {
+            split = i + 1;
+            break;
+        }
+    }
+    let (left, right) = sections.split_at(split);
+
+    // Right column's x = widest rendered line (title or `  key = value`) across every section, plus a
+    // gap. One pitch measured over all sections keeps the right column clear of the left regardless of
+    // which section is widest (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
+    let line_width = |text: &str| ui.calc_text_size(text)[0];
     let mut pitch = 0.0_f32;
-    for section in report.sections() {
-        pitch = pitch.max(ui.calc_text_size(section.title())[0]);
-        for (k, v) in section.fields() {
-            pitch = pitch.max(ui.calc_text_size(format!("  {k} = {v}"))[0]);
+    for s in sections {
+        pitch = pitch.max(line_width(s.title()));
+        for (k, v) in s.fields() {
+            pitch = pitch.max(line_width(&format!("  {k} = {v}")));
         }
     }
     pitch += DEBUG_PANEL_COL_GAP;
 
-    for (i, section) in report.sections().iter().enumerate() {
-        let col = i % DEBUG_PANEL_COLS;
-        if col == 0 {
-            // First column of a new row: a blank line of breathing room above every row but the first.
-            // imgui places the row below the tallest group of the previous row, so uneven section
-            // heights don't overlap.
-            if i > 0 {
-                ui.spacing();
-            }
-        } else {
-            // Later columns: jump to this column's fixed x on the row the previous group started.
-            ui.same_line_with_pos(col as f32 * pitch);
-        }
+    // Per-column height for bottom-alignment. The constant per-column overcount (a trailing line's
+    // spacing) is identical for both, so it cancels in the difference below — making the top-pad exact.
+    let line_h = ui.text_line_height_with_spacing();
+    let spacing_y = ui.clone_style().item_spacing[1];
+    let column_height = |col: &[ReportSection]| {
+        let lines: usize = col.iter().map(section_lines).sum();
+        lines as f32 * line_h + col.len().saturating_sub(1) as f32 * spacing_y
+    };
+
+    ui.group(|| draw_report_column(ui, left));
+    if !right.is_empty() {
+        ui.same_line_with_pos(pitch);
         ui.group(|| {
-            ui.text_colored(rgba(BLUE, 1.0), section.title());
-            for (k, v) in section.fields() {
-                ui.text_disabled(format!("  {k} = {v}"));
+            // Top-pad the lighter right column by the height difference so its bottom lines up with the
+            // left's — pushing the empty space into the top-right corner.
+            let pad = (column_height(left) - column_height(right)).max(0.0);
+            if pad > 0.0 {
+                ui.dummy([0.0, pad]);
             }
+            draw_report_column(ui, right);
         });
+    }
+}
+
+/// Draw one column of the debug panel: each section's title in blue, then its `key = value` lines dimmed
+/// and indented, with a blank gap between sections.
+fn draw_report_column(ui: &Ui, sections: &[ReportSection]) {
+    for (i, section) in sections.iter().enumerate() {
+        if i > 0 {
+            ui.spacing();
+        }
+        ui.text_colored(rgba(BLUE, 1.0), section.title());
+        for (k, v) in section.fields() {
+            ui.text_disabled(format!("  {k} = {v}"));
+        }
     }
 }
 
