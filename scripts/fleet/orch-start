@@ -21,6 +21,8 @@ if tmux has-session -t "$sess" 2>/dev/null; then
 fi
 
 cd "$REPO"
+# `--name` is a display badge only (never resumes); "$@" comes last so a
+# user-supplied --name overrides this default.
 tmux new-session -d -s "$sess" -c "$REPO" \
-  claude --add-dir "$RIFTS" "$@"
+  claude --name "usc-orch" --add-dir "$RIFTS" "$@"
 exec tmux attach -t "$sess"

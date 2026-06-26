@@ -104,8 +104,10 @@ if [ ! -f "$ws/docs/roles/worker.md" ]; then
 fi
 seed="Read $assignment for your assignment (you are worker:$name). Then begin."
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
+# `--name` is a display badge only (prompt box / window title / resume picker); it
+# never resumes, so every spawn is a fresh session regardless of the badge.
 tmux new-session -d -s "$sess" -c "$ws" \
-  claude --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
+  claude --name "usc-$name" --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
