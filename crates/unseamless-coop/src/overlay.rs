@@ -221,8 +221,11 @@ impl Overlay {
                 self.actions_sel = 0;
             }
         }
-        // B closes the menu (Back/Cancel), but only while it's open — when closed, B is a game input.
-        if self.open && pad.cancel {
+        // Esc or B (Back/Cancel) closes the menu, but only while it's open — when closed they're game
+        // inputs (Esc = pause, B = game action), and the input suppressor keeps the game from seeing
+        // them while we're open. Esc is intentionally NOT advertised in the title hint (backtick is the
+        // one documented toggle); it's just a familiar "get me out" key.
+        if self.open && (pad.cancel || ui.is_key_pressed_no_repeat(Key::Escape)) {
             self.open = false;
         }
         // Mirror the open-state into the input suppressor every frame: while open the game doesn't see
