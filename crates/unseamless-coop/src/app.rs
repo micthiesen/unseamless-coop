@@ -58,6 +58,8 @@ pub fn install() {
     crate::notify::init();
     // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
     crate::actionq::init();
+    // Snapshot cell the debug-panel publisher posts into and the overlay reads. Before any tick.
+    crate::debug::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
         // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
@@ -152,6 +154,9 @@ pub fn install() {
         Box::new(DeathDebuffsFeature::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
+        // Feeds the overlay's live debug panel (a published snapshot), but only while that panel is
+        // shown — otherwise a single atomic load per frame. Near-free when off; see crate::debug.
+        crate::diag::debug_panel_feature(),
     ];
     // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
     features.extend(crate::diag::probe_features(&config));
@@ -203,28 +208,47 @@ pub fn install() {
     // In-game overlay (hudhook DX12 present-hook). Installed unless the runtime kill-switch is off,
     // so a Proton/vkd3d render problem can be disabled by editing the config (no rebuild). Reads
     // shared app state; never mutates game state.
+    //
+    // Deferred until the frontend is up (title/menu reached — `GameState::frontend_ready`), not
+    // installed at boot. Installing at boot gave hudhook's DX12 backend a half-ready init (the
+    // `Initialization context incomplete` error in the logs) against a swapchain that wasn't up yet,
+    // and that fragile init crashed at the first big transition (character creation / intro). Waiting
+    // for the frontend means `apply()` runs once a real swapchain is presenting, so hudhook initializes
+    // cleanly — and the watermark shows from the title screen, which is where a new player learns the
+    // toggle key. (Rig-validated floor: installing at first *gameplay* is crash-free; if the frontend
+    // init still proves fragile through character creation on the rig, bump this predicate to
+    // `current().in_game()` to fall back to that proven point.) The wait + install run on their own
+    // short-lived thread, like the init thread, so hudhook's `apply()` and the input-hook install stay
+    // off the game's task-scheduler thread. hudhook patches the shared swapchain vtable, so hooking an
+    // already-running swapchain takes effect on the next present (the standard injector path).
     if config.debug.overlay {
-        crate::overlay::install(module);
-        // Suppress the game's own DirectInput reads while the overlay is open — it polls keyboard/mouse
-        // via DirectInput, which bypasses the window message queue, so the overlay's message filter
-        // alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it fails.
-        match unsafe { crate::input::install() } {
-            Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
-            Err(e) => {
-                log::error!(
-                    "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
-                );
-                // Surface it to the player rather than failing silently (in-session problems degrade +
-                // inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
-                crate::notify::with_mut(|n| {
-                    n.set_banner(
-                        "input-degraded",
-                        unseamless_core::notifications::Severity::Warning,
-                        "Heads up: the game still reacts to input while the menu is open (input hook failed)",
-                    )
-                });
+        std::thread::spawn(move || {
+            while !crate::playstate::current().frontend_ready() {
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
-        }
+            crate::overlay::install(module);
+            // Suppress the game's own DirectInput reads while the overlay is open — it polls keyboard/
+            // mouse via DirectInput, which bypasses the window message queue, so the overlay's message
+            // filter alone can't stop WASD/clicks reaching the game. Degrade (overlay still draws) if it
+            // fails.
+            match unsafe { crate::input::install() } {
+                Ok(()) => log::info!("input: hooked DirectInput GetDeviceState for overlay capture"),
+                Err(e) => {
+                    log::error!(
+                        "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
+                    );
+                    // Surface it to the player rather than failing silently (in-session problems degrade
+                    // + inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
+                    crate::notify::with_mut(|n| {
+                        n.set_banner(
+                            "input-degraded",
+                            unseamless_core::notifications::Severity::Warning,
+                            "Heads up: the game still reacts to input while the menu is open (input hook failed)",
+                        )
+                    });
+                }
+            }
+        });
     }
 }
 

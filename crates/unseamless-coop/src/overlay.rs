@@ -28,6 +28,7 @@ use hudhook::imgui::{
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
+use unseamless_core::diagnostics::DiagnosticReport;
 use unseamless_core::menu::{Menu, MenuOutcome, SessionContext};
 use unseamless_core::notifications::{Banner, Severity, Toast};
 use unseamless_core::protocol::SessionAction;
@@ -155,6 +156,18 @@ struct Overlay {
     /// Whether the Settings tab reveals the session password (vs. masking it). Default masked so it
     /// isn't exposed on a stream/screenshot; toggled by the Reveal/Hide button. Present-thread only.
     password_revealed: bool,
+    /// Controller→menu edge state: turns the raw pad snapshot into per-frame nav/activate/toggle edges.
+    /// Updated once per frame in `render_inner`; Present-thread only (see [`crate::input::PadNav`]).
+    pad: crate::input::PadNav,
+    /// Whether the bottom-left **debug panel** is shown. Defaults to on in debug builds (`diag`
+    /// profile), off in release; toggled from the Actions tab. Independent of `open` and of gameplay
+    /// state — unlike the watermark, it stays up during play. Mirrored to [`crate::debug`] each frame
+    /// so the game-thread publisher only does work while it's shown. Present-thread only.
+    show_debug: bool,
+    /// Cursor into the Actions tab's combined list — the menu's action rows followed by the trailing
+    /// debug-overlay toggle (index `== menu rows`). Owns selection across both (the core `Menu`'s own
+    /// cursor is only synced to it at activation), so arrow/d-pad nav spans the toggle row too.
+    actions_sel: usize,
 }
 
 impl Overlay {
@@ -170,16 +183,30 @@ impl Overlay {
             tab: 0,
             clamp_pos: None,
             password_revealed: false,
+            pad: crate::input::PadNav::new(),
+            // On by default in debug builds (the `diag` profile keeps debug-assertions); off in the
+            // stripped release, where it's an opt-in toggled from the Actions tab.
+            show_debug: cfg!(debug_assertions),
+            actions_sel: 0,
         }
     }
 
     /// The actual per-frame work, run inside `render`'s panic firewall.
     fn render_inner(&mut self, ui: &Ui) {
-        // Toggle on backtick (no-repeat: one open/close per physical press).
-        if ui.is_key_pressed_no_repeat(TOGGLE_KEY) {
+        // Sample the controller once per frame (drives the Guide-button toggle below and, while open,
+        // the menu nav). Computed every frame regardless of open-state so the Home button can *open*
+        // the menu, not just navigate it. The raw snapshot comes from the XInput hook; the pure
+        // edge/repeat logic lives in `unseamless_core::pad`.
+        let (buttons, lx, ly) = crate::input::pad_snapshot();
+        let pad = self.pad.update(buttons, lx, ly, ui.io().delta_time);
+        // Toggle on backtick or the controller Home/Guide button (no-repeat: one open/close per press).
+        if ui.is_key_pressed_no_repeat(TOGGLE_KEY) || pad.toggle {
             self.open = !self.open;
             if self.open {
-                self.menu.home(&session_context());
+                // Home the Actions cursor; `draw_actions_tab` repairs it to the first enabled row (0
+                // can be a disabled action when opened mid-session). It owns nav, syncing the core
+                // `Menu` only at activation, so we reset its cursor rather than the menu's here.
+                self.actions_sel = 0;
             }
         }
         // Mirror the open-state into the input suppressor every frame: while open the game doesn't see
@@ -197,8 +224,15 @@ impl Overlay {
         if !crate::playstate::in_gameplay() {
             self.draw_watermark(ui);
         }
+        // Live debug panel (bottom-left): shown whenever toggled on, including during gameplay (unlike
+        // the watermark). Mirror its visibility to the game thread every frame so the publisher only
+        // does work while it's shown; then draw from the snapshot it posts.
+        crate::debug::set_panel_visible(self.show_debug);
+        if self.show_debug {
+            self.draw_debug_panel(ui);
+        }
         if self.open {
-            self.draw_utility_window(ui);
+            self.draw_utility_window(ui, pad);
             draw_cursor_marker(ui);
         }
         // Retry any actions the queue refused last frame.
@@ -251,7 +285,32 @@ impl Overlay {
                 if cfg!(debug_assertions) {
                     ui.text_disabled(concat!("build ", env!("UNSEAMLESS_BUILD_ID")));
                 }
-                ui.text_disabled("Press ` to open the menu");
+                ui.text_disabled("Press ` or controller Home to open the menu");
+            });
+    }
+
+    /// Draw the live **debug panel** — a read-only, bottom-left passive surface rendering the
+    /// diagnostic snapshot the game-thread publisher posts ([`crate::debug`]). It's the same
+    /// [`DiagnosticReport`] the log dumps produce, shown live (build / session / features / scaling /
+    /// runtime). Bottom-left is the one free corner (notifications top-left, watermark top-right,
+    /// Steam's toasts bottom-right). Anchored by its own bottom-left corner (pivot 0,1) so it grows
+    /// upward from a fixed inset and never runs off the bottom. Borderless + input-transparent like the
+    /// other passive surfaces; reads the snapshot non-blocking and skips the frame before the first
+    /// publish or on contention.
+    fn draw_debug_panel(&self, ui: &Ui) {
+        let disp = ui.io().display_size;
+        ui.window("##unseamless-debug")
+            .position([OVERLAY_MARGIN, disp[1] - OVERLAY_MARGIN], Condition::Always)
+            .position_pivot([0.0, 1.0])
+            .bg_alpha(PASSIVE_BG_ALPHA)
+            .flags(passive_window_flags())
+            .build(|| {
+                let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
+                match crate::debug::snapshot() {
+                    Some(report) => draw_report(ui, &report),
+                    // ASCII only (the menu font is a printable-ASCII subset, so no Unicode ellipsis).
+                    None => ui.text_disabled("debug panel: gathering..."),
+                }
             });
     }
 
@@ -273,17 +332,18 @@ impl Overlay {
     }
 
     /// Draw the toggleable utility window with its tabs.
-    fn draw_utility_window(&mut self, ui: &Ui) {
+    fn draw_utility_window(&mut self, ui: &Ui, pad: crate::input::PadEdges) {
         let ctx = session_context();
-        // Left/Right cycle tabs. Compute the force-select target here (before the bar) so the arrow
-        // lands on the new tab even though imgui otherwise owns tab state; the active tab writes back
-        // `self.tab` below, so mouse clicks are tracked too and the next arrow moves from the right place.
+        // Left/Right (arrow keys or d-pad / left-stick) cycle tabs. Compute the force-select target here
+        // (before the bar) so the input lands on the new tab even though imgui otherwise owns tab state;
+        // the active tab writes back `self.tab` below, so mouse clicks are tracked too and the next move
+        // starts from the right place.
         let mut force_tab = None;
-        if ui.is_key_pressed(Key::RightArrow) {
+        if ui.is_key_pressed(Key::RightArrow) || pad.right {
             self.tab = (self.tab + 1) % TABS.len();
             force_tab = Some(self.tab);
         }
-        if ui.is_key_pressed(Key::LeftArrow) {
+        if ui.is_key_pressed(Key::LeftArrow) || pad.left {
             self.tab = (self.tab + TABS.len() - 1) % TABS.len();
             force_tab = Some(self.tab);
         }
@@ -335,7 +395,7 @@ impl Overlay {
                             ui.child_window(format!("##content-{label}"))
                                 .size([avail[0], avail[1].max(60.0)])
                                 .build(|| match label {
-                                    "Actions" => self.draw_actions_tab(ui, &ctx),
+                                    "Actions" => self.draw_actions_tab(ui, &ctx, pad),
                                     "Settings" => self.draw_settings_tab(ui),  // &mut self: reveal toggle
                                     "Log" => draw_log_tab(ui),
                                     _ => {}
@@ -346,42 +406,83 @@ impl Overlay {
             });
     }
 
-    /// The interactive session-action list. Up/down move the cursor (skipping disabled rows), Enter or
-    /// a click activates the selected action; the activated action is handed to the game thread.
-    fn draw_actions_tab(&mut self, ui: &Ui, ctx: &SessionContext) {
-        if ui.is_key_pressed(Key::DownArrow) {
-            self.menu.select_next(ctx);
-        }
-        if ui.is_key_pressed(Key::UpArrow) {
-            self.menu.select_prev(ctx);
-        }
-        let mut activate = enter_pressed(ui);
-
-        // `rows` indices are 1:1 with the menu's items (actions-only, no filtering), so a row index is a
-        // valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows).
+    /// The interactive session-action list, plus a trailing **debug-overlay** toggle. Up/down (arrow
+    /// keys or d-pad / left-stick) move the cursor across both (skipping disabled action rows); Enter,
+    /// the controller A button, or a click activates the selected row. Activating an action hands it to
+    /// the game thread; activating the toggle flips the local debug panel (no game round-trip).
+    ///
+    /// The overlay owns the combined cursor ([`Overlay::actions_sel`]) rather than the core `Menu`'s,
+    /// so the toggle can live in the same nav list as the menu rows without that pure model knowing
+    /// about an overlay-local UI control. The menu's own cursor is synced (via `select_index`) only at
+    /// the moment of activation.
+    fn draw_actions_tab(&mut self, ui: &Ui, ctx: &SessionContext, pad: crate::input::PadEdges) {
+        // `rows` indices are 1:1 with the menu's items (actions-only, no filtering), so a row index is
+        // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows).
         let rows = self.menu.rows(&self.config, ctx);
+        let n = rows.len();
+        // Combined list = the `n` action rows, then the debug-toggle row at index `n` (always enabled).
+        let total = n + 1;
+        let enabled = |i: usize| if i < n { rows[i].enabled } else { true };
+
+        // Repair the cursor if it's out of range or on a now-disabled row (e.g. the session context
+        // changed since last frame), landing it on the first enabled row.
+        if self.actions_sel >= total || !enabled(self.actions_sel) {
+            self.actions_sel = (0..total).find(|&i| enabled(i)).unwrap_or(0);
+        }
+        // One enabled step in `dir`'s direction, skipping disabled rows and wrapping; no-op if none.
+        let step = |from: usize, dir: isize| {
+            let mut idx = from;
+            for _ in 0..total {
+                idx = (idx as isize + dir).rem_euclid(total as isize) as usize;
+                if enabled(idx) {
+                    return idx;
+                }
+            }
+            from
+        };
+        if ui.is_key_pressed(Key::DownArrow) || pad.down {
+            self.actions_sel = step(self.actions_sel, 1);
+        }
+        if ui.is_key_pressed(Key::UpArrow) || pad.up {
+            self.actions_sel = step(self.actions_sel, -1);
+        }
+        let mut activate = enter_pressed(ui) || pad.activate;
+
         let mut clicked = None;
         for (i, row) in rows.iter().enumerate() {
             if row.enabled {
                 // Action labels are unique, so each doubles as a stable imgui id.
-                if ui.selectable_config(&row.label).selected(row.selected).build() {
+                if ui.selectable_config(&row.label).selected(i == self.actions_sel).build() {
                     clicked = Some(i);
                 }
             } else {
                 ui.text_disabled(&row.label);
             }
         }
+        // The debug-overlay toggle row, last. Its on/off state is in the label so the row reads as a
+        // toggle; a unique label keeps it a stable imgui id distinct from the action rows above.
+        ui.separator();
+        let toggle_label = format!("Debug overlay: {}", if self.show_debug { "on" } else { "off" });
+        if ui.selectable_config(&toggle_label).selected(self.actions_sel == n).build() {
+            clicked = Some(n);
+        }
         if let Some(i) = clicked {
-            self.menu.select_index(i);
+            self.actions_sel = i;
             activate = true;
         }
 
         if activate {
-            // actions_only never mutates config on activate; pass a scratch clone (per activation, not
-            // per frame) so the `&mut Config` signature is satisfied without touching our snapshot.
-            let mut scratch = self.config.clone();
-            if let MenuOutcome::Action(action) = self.menu.activate(&mut scratch, ctx) {
-                self.request_action(action);
+            if self.actions_sel == n {
+                self.show_debug = !self.show_debug;
+            } else {
+                // Sync the core menu's cursor to the activated action row, then fire it. actions_only
+                // never mutates config on activate; pass a scratch clone (per activation, not per
+                // frame) so the `&mut Config` signature is satisfied without touching our snapshot.
+                self.menu.select_index(self.actions_sel);
+                let mut scratch = self.config.clone();
+                if let MenuOutcome::Action(action) = self.menu.activate(&mut scratch, ctx) {
+                    self.request_action(action);
+                }
             }
         }
     }
@@ -539,6 +640,21 @@ fn draw_cursor_marker(ui: &Ui) {
 /// Enter (main or keypad) pressed this frame, no key-repeat — one activation per physical press.
 fn enter_pressed(ui: &Ui) -> bool {
     ui.is_key_pressed_no_repeat(Key::Enter) || ui.is_key_pressed_no_repeat(Key::KeypadEnter)
+}
+
+/// Render a [`DiagnosticReport`] into the current window: each section title in blue, then its
+/// `key = value` lines dimmed and indented under it. All values are ASCII (built that way in
+/// [`crate::diag::build_report`]) so the printable-ASCII menu font has every glyph.
+fn draw_report(ui: &Ui, report: &DiagnosticReport) {
+    for (i, section) in report.sections().iter().enumerate() {
+        if i > 0 {
+            ui.spacing();
+        }
+        ui.text_colored(rgba(BLUE, 1.0), section.title());
+        for (k, v) in section.fields() {
+            ui.text_disabled(format!("  {k} = {v}"));
+        }
+    }
 }
 
 fn draw_banners(ui: &Ui, banners: &[Banner]) {

@@ -286,6 +286,17 @@ impl DiagnosticReport {
         out.push_str("==== end diagnostic ====\n");
         out
     }
+
+    /// The report title (the moment it was built for). For a structured renderer — the overlay's
+    /// live debug panel draws the report itself rather than the delimited text [`render`] produces.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The report's sections, in order, for a structured (non-text) renderer like the debug panel.
+    pub fn sections(&self) -> &[ReportSection] {
+        &self.sections
+    }
 }
 
 impl ReportSection {
@@ -293,6 +304,16 @@ impl ReportSection {
     pub fn field(&mut self, key: impl Into<String>, value: impl std::fmt::Display) -> &mut Self {
         self.fields.push((key.into(), value.to_string()));
         self
+    }
+
+    /// The section title — for a structured renderer (the debug panel draws it as a header).
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The section's `(key, value)` lines, in order — for a structured renderer like the debug panel.
+    pub fn fields(&self) -> &[(String, String)] {
+        &self.fields
     }
 }
 

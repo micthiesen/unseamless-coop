@@ -24,6 +24,7 @@ mod bridge;
 #[cfg(all(feature = "bridge", not(debug_assertions)))]
 compile_error!("the `bridge` feature must not be enabled in a release build (use the `diag` profile)");
 mod config;
+mod debug;
 mod diag;
 mod feature;
 mod features;

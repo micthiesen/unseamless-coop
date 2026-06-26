@@ -30,6 +30,8 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     let session = crate::sdk::with_instance::<CSSessionManager, _>(crate::session::read);
     let in_gameplay = crate::playstate::in_gameplay();
     let features = crate::app::feature_status();
+    // Borrow the roster size for the scaling section below before `session` is moved into the match.
+    let party = session.as_ref().map_or(0, |v| v.players);
 
     let mut r = DiagnosticReport::new(title);
     r.section("build")
@@ -73,6 +75,20 @@ pub fn build_report(title: &str) -> DiagnosticReport {
             }
         }
     }
+
+    // Per-player scaling the (host-tested) core would produce for the current party size — the same
+    // multipliers the observer logs, surfaced here so the boot/panic/periodic dumps and the live debug
+    // panel show them too. ASCII `x` (not the observer's `×`) so the panel's printable-ASCII menu font
+    // renders it. The math saturates for any count, so we only guard the usize->u32 narrowing + the
+    // `.max(1)` (a 0-player pre-session count would otherwise scale by the empty-party case).
+    let count = u32::try_from(party).unwrap_or(u32::MAX).max(1);
+    let scaling = crate::state::with(|c| c.scaling);
+    let enemy = scaling.enemy_multipliers(count);
+    let boss = scaling.boss_multipliers(count);
+    r.section("scaling")
+        .field("party_size", count)
+        .field("enemy", format!("hp x{:.2} dmg x{:.2} pos x{:.2}", enemy.health, enemy.damage, enemy.posture))
+        .field("boss", format!("hp x{:.2} dmg x{:.2} pos x{:.2}", boss.health, boss.damage, boss.posture));
     r
 }
 
@@ -95,6 +111,53 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
         features.push(Box::new(FlagScanProbe::new(p.event_flag_scan_start, p.event_flag_scan_count)));
     }
     features
+}
+
+/// The game-thread feature that feeds the overlay's live debug panel. Always registered (it's not a
+/// `[debug.probes]` lever — the panel is a built-in surface), but inert unless the overlay says the
+/// panel is shown, so when off it costs a single atomic load per frame.
+pub fn debug_panel_feature() -> Box<dyn Feature> {
+    Box::new(DebugPanelProbe::new())
+}
+
+/// Publishes a live [`DiagnosticReport`] snapshot for the overlay's debug panel — but only while the
+/// panel is shown ([`crate::debug::panel_visible`]). Throttled to ~10 Hz: the panel is for reading,
+/// and 60 Hz churn would flicker the fast fields and waste allocations. Reuses [`build_report`] so the
+/// panel is a live view of the same diagnostic block the log dumps produce; a `runtime` (frame/fps)
+/// section is appended here since the per-tick frame/delta aren't available to `build_report` itself.
+///
+/// Note: like the periodic snapshot probe, this ticks while the `APP` lock is held, so the report's
+/// per-feature status reads "unavailable (mid-tick)" — every other section is fully live.
+struct DebugPanelProbe {
+    throttle: FrameThrottle,
+}
+
+impl DebugPanelProbe {
+    /// Publish every ~6 frames (~10 Hz at 60 fps).
+    const PUBLISH_PERIOD: u64 = 6;
+
+    fn new() -> Self {
+        Self { throttle: FrameThrottle::every(Self::PUBLISH_PERIOD) }
+    }
+}
+
+impl Feature for DebugPanelProbe {
+    fn name(&self) -> &'static str {
+        "debug-panel"
+    }
+
+    fn on_frame(&mut self, tick: Tick) {
+        // Off costs one atomic load: do nothing unless the overlay says the panel is shown. The
+        // throttle only advances on visible frames, so its period is in shown-frames (which is fine).
+        if !crate::debug::panel_visible() || !self.throttle.tick() {
+            return;
+        }
+        let mut report = build_report("debug");
+        // fps from this tick's delta; guard the divide (delta is 0 on the very first frame).
+        let fps = if tick.delta > 0.0 { 1.0 / tick.delta } else { 0.0 };
+        report.section("runtime").field("frame", tick.frame).field("fps", format!("{fps:.0}"));
+        crate::debug::publish(report);
+    }
 }
 
 /// Periodically log a full diagnostic snapshot, for watching state evolve over a session on request.
