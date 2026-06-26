@@ -31,12 +31,12 @@ pub fn init() {
 }
 
 /// Publish whether the debug panel is shown (overlay → game thread).
-pub fn set_panel_visible(visible: bool) {
+pub fn set_visible(visible: bool) {
     VISIBLE.store(visible, Ordering::Relaxed);
 }
 
 /// Whether the debug panel is shown — the gate the game-thread publisher checks before doing any work.
-pub fn panel_visible() -> bool {
+pub fn visible() -> bool {
     VISIBLE.load(Ordering::Relaxed)
 }
 

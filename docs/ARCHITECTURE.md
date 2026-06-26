@@ -65,7 +65,7 @@ We follow the same model. (Full per-subsystem inventory: [SDK-COVERAGE.md](SDK-C
 - **Transport = the game's** (Steam P2P, already encrypted). We do not reinvent it.
 - **What the mod adds:** relax `session_player_limit` and area-boundary teardown; keep sessions
   alive across map transitions; coordinate mod state (config sync, session actions like
-  open/lock/break-in) over a **small mod-specific side-channel** — our own packet type(s) sent
+  open/lock/leave) over a **small mod-specific side-channel** — our own packet type(s) sent
   via `broadcast_packet` and read in a `receive_packet` task.
 - **Interop scope:** because base networking is the game's own, vanilla multiplayer mechanisms
   come along for free. We make **no attempt** to interoperate with *vanilla ERSC's* side-channel

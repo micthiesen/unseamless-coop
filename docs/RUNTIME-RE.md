@@ -13,7 +13,7 @@ Most development does not need any of this. Before reaching for runtime RE, note
 macOS host alone we can already:
 
 - Build every **SDK-driven feature** (the `[SCALING]` params, `allow_summons`,
-  `skip_splash_screens`, death debuffs, give-ember, etc.). These are typed-field/param writes
+  `skip_splash_screens`, death debuffs, etc.). These are typed-field/param writes
   the `fromsoftware-rs` SDK already exposes — write Rust, cross-compile, deploy + eyeball the
   log on the rig. That's the **M1** milestone and it needs no Frida.
 - **Statically analyze clean binaries** — `eldenring.exe` is well-charted (the SDK is built

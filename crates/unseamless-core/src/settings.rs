@@ -18,7 +18,8 @@ use crate::config::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum SettingId {
-    AllowInvaders = 0,
+    // 0 was AllowInvaders (removed). Discriminants are stable/append-only (see doc above), so the
+    // value is retired rather than reused.
     DeathDebuffs = 1,
     AllowSummons = 2,
     SkipSplashScreens = 3,
@@ -37,6 +38,7 @@ pub enum SettingId {
     WorldTimeLock = 16,
     WorldTimeHour = 17,
     WorldTimeMinute = 18,
+    CritCoop = 19,
 }
 
 impl SettingId {
@@ -55,7 +57,7 @@ impl SettingId {
                 | BossHealth
                 | BossDamage
                 | BossPosture
-                | AllowInvaders
+                | CritCoop
                 | DeathDebuffs
                 | AllowSummons
                 | RoamAnywhere
@@ -169,11 +171,11 @@ pub fn registry() -> Vec<Setting> {
 
     vec![
         Setting {
-            id: AllowInvaders,
-            label: "Allow invaders",
+            id: CritCoop,
+            label: "Crit co-op",
             kind: Toggle {
-                get: |c| c.gameplay.allow_invaders,
-                set: |c, v| c.gameplay.allow_invaders = v,
+                get: |c| c.gameplay.crit_coop,
+                set: |c, v| c.gameplay.crit_coop = v,
             },
         },
         Setting {
@@ -348,7 +350,7 @@ mod tests {
         // `is_shared` to the wire subset rather than to a parallel literal.
         let crate::protocol::SharedSettings {
             scaling: _, // expands to the 6 percent settings (enemy/boss × health/damage/posture)
-            allow_invaders: _,
+            crit_coop: _,
             death_debuffs: _,
             allow_summons: _,
             roam_anywhere: _,
@@ -357,7 +359,7 @@ mod tests {
 
         let expected = [
             EnemyHealth, EnemyDamage, EnemyPosture, BossHealth, BossDamage, BossPosture,
-            AllowInvaders, DeathDebuffs, AllowSummons, RoamAnywhere, MaxPlayers,
+            CritCoop, DeathDebuffs, AllowSummons, RoamAnywhere, MaxPlayers,
         ];
         let shared: Vec<SettingId> = registry().iter().map(|s| s.id).filter(|id| id.is_shared()).collect();
         assert_eq!(shared.len(), expected.len(), "shared-setting count drifted from SharedSettings");
@@ -369,11 +371,11 @@ mod tests {
     #[test]
     fn toggle_flips() {
         let reg = registry();
-        let s = reg.iter().find(|s| s.id == SettingId::AllowInvaders).unwrap();
+        let s = reg.iter().find(|s| s.id == SettingId::CritCoop).unwrap();
         let mut cfg = Config::default();
-        assert!(cfg.gameplay.allow_invaders);
+        assert!(cfg.gameplay.crit_coop);
         s.adjust(&mut cfg, true);
-        assert!(!cfg.gameplay.allow_invaders);
+        assert!(!cfg.gameplay.crit_coop);
         assert_eq!(s.display_value(&cfg), "Off");
     }
 

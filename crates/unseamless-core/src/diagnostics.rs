@@ -287,13 +287,8 @@ impl DiagnosticReport {
         out
     }
 
-    /// The report title (the moment it was built for). For a structured renderer — the overlay's
-    /// live debug panel draws the report itself rather than the delimited text [`render`] produces.
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    /// The report's sections, in order, for a structured (non-text) renderer like the debug panel.
+    /// The report's sections, in order, for a structured (non-text) renderer like the overlay's live
+    /// debug panel (which draws the report itself rather than the delimited text [`render`] produces).
     pub fn sections(&self) -> &[ReportSection] {
         &self.sections
     }

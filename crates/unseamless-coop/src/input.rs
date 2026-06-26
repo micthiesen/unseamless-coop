@@ -14,15 +14,17 @@
 //!
 //! **Controller** rides the same idea on a different API: ER polls the pad through
 //! `xinput1_4!XInputGetState` (also immediate, also off the WndProc path, so `message_filter` can't
-//! stop it either). We detour it to do three things at once: (1) **blank** the pad while the overlay is
-//! open (zero only the gamepad struct, never `dwPacketNumber` — the game treats an unchanged packet as
-//! "reuse last input", which would *freeze* the pre-open input rather than neutralise it); (2) **read**
-//! the live pad into [`PAD_SNAPSHOT`] so the overlay can drive its menu (d-pad / left-stick + A); and
-//! (3) capture the **Guide/Home button** via the undocumented `XInputGetStateEx` (ordinal 100, exported
-//! by both Windows and wine) — the plain `XInputGetState` masks that bit out, so ER never sees it,
-//! which makes it the ideal overlay-toggle. The pure menu-translation ([`PadNav`] → per-frame edges)
-//! lives in [`unseamless_core::pad`] (host-tested); this module is just the OS binding that feeds it.
-//! (XInput is a flat C export, so unlike DirectInput there's no COM-vtable probe.)
+//! stop it either). We detour it to do two things at once: (1) **read** the live pad from the game's
+//! own buffer into [`PAD_SNAPSHOT`] so the overlay can drive its menu (d-pad / left-stick to navigate,
+//! A to confirm, B to close, and the **LB+RB+L3+R3 chord** to toggle the overlay); and (2) **blank**
+//! the pad while the overlay is open (zero the gamepad struct *and* bump `dwPacketNumber` — a game
+//! that skips re-reading on an unchanged packet would otherwise reuse the pre-open input rather than
+//! see the neutral one). The toggle is a chord of standard bits rather than the Guide/Home button on
+//! purpose: Steam Input intercepts Guide for most players, but the plain `XInputGetState` reports the
+//! chord, so there's nothing for it to eat and no need for the Guide-only `XInputGetStateEx`. The pure
+//! menu-translation ([`PadNav`] → per-frame edges) lives in [`unseamless_core::pad`] (host-tested);
+//! this module is just the OS binding that feeds it. (XInput is a flat C export, so unlike DirectInput
+//! there's no COM-vtable probe.)
 //!
 //! Technique mirrors the `fromsoftware-rs` SDK's `debug` crate (public SDK — our reference per
 //! CLAUDE.md > "Lean on the SDK"), reduced to a single "overlay open?" flag.
@@ -34,7 +36,6 @@
 //! hooks are installed once and never removed (process-lifetime, like our task handles — unhooking a
 //! live input path is a use-after-free risk).
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_retn};
@@ -59,8 +60,8 @@ fn is_blocked() -> bool {
 // ---- Controller (XInput) --------------------------------------------------------------------------
 //
 // The pure menu-translation logic (edge/repeat state machine, button bits, thresholds) lives in
-// `unseamless_core::pad`; this half is the OS binding — the `XInputGetState` hook, the atomic snapshot,
-// reading the Guide bit. Re-exported so the overlay keeps a single `crate::input::Pad*` import path.
+// `unseamless_core::pad`; this half is the OS binding — the `XInputGetState` hook and the atomic
+// snapshot. Re-exported so the overlay keeps a single `crate::input::Pad*` import path.
 pub use unseamless_core::pad::{PadEdges, PadNav};
 
 /// Latest pad sample, packed `buttons | (lx << 16) | (ly << 32)` so a frame reads consistently with one
@@ -71,11 +72,6 @@ static PAD_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 /// Stops a second pad from stomping the first, and lets a disconnect of the owning pad reset the
 /// snapshot to neutral so a direction held at disconnect can't auto-repeat in the menu forever.
 static PAD_OWNER: AtomicI32 = AtomicI32::new(-1);
-/// The real `XInputGetStateEx` (ordinal 100), resolved at install. Called by the detour to read the
-/// Guide bit; `None` until installed (then the toggle/nav simply stay quiet).
-static XINPUT_GET_STATE_EX: OnceLock<XInputGetStateExFn> = OnceLock::new();
-
-type XInputGetStateExFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -114,48 +110,18 @@ pub fn pad_snapshot() -> (u16, i16, i16) {
     unpack_pad(PAD_SNAPSHOT.load(Ordering::Relaxed))
 }
 
-thread_local! {
-    /// Re-entrancy guard for [`capture_pad`]. A third-party `xinput1_4.dll` shim (Steam Input, x360ce,
-    /// …) can implement `XInputGetStateEx` by calling the (hooked) `XInputGetState`, which would
-    /// otherwise recurse `detour → capture_pad → Ex → detour → …` straight to a stack-overflow abort
-    /// (fatal under `panic = "abort"`). The guard caps the depth at one. Per-thread, since the recursion
-    /// is same-thread.
-    static IN_CAPTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Clears [`IN_CAPTURE`] on scope exit (incl. early returns / a panic) so a bailed [`capture_pad`]
-/// can't wedge the guard permanently on.
-struct CaptureGuard;
-impl Drop for CaptureGuard {
-    fn drop(&mut self) {
-        IN_CAPTURE.with(|g| g.set(false));
-    }
-}
-
-/// Read the full pad state (incl. the Guide bit) via `XInputGetStateEx` and publish it to
-/// [`PAD_SNAPSHOT`], claiming ownership for `user_index` unless another connected pad already holds it.
-/// Called only for a game-confirmed-connected index. This is a second (stateless) XInput poll per
-/// connected pad on every game poll — a permanent overhead, the cost of reading the Guide bit the plain
-/// API hides; small, but not free.
-fn capture_pad(user_index: u32) {
-    if IN_CAPTURE.with(|g| g.replace(true)) {
-        return; // re-entered via a shim's Ex→GetState; bail rather than recurse (outer call owns the guard)
-    }
-    let _guard = CaptureGuard; // resets IN_CAPTURE on return
-    let Some(ex) = XINPUT_GET_STATE_EX.get() else { return };
-    let mut st = XInputState::default();
-    // ERROR_SUCCESS == 0; anything else means it raced to disconnected between the game's read and ours.
-    if unsafe { ex(user_index, &mut st) } != 0 {
-        return;
-    }
+/// Publish a connected pad's sample to [`PAD_SNAPSHOT`], claiming ownership for `user_index` unless
+/// another connected pad already holds it (so a second controller never stomps the one driving the
+/// menu; `release_pad` frees it on disconnect). The sample is read straight from the game's own
+/// `XInputGetState` buffer in the detour — every bit we use (the LB+RB+L3+R3 toggle chord, A, B,
+/// d-pad, sticks) is standard, so there's no separate read and no need for the Guide-only
+/// `XInputGetStateEx`.
+fn capture_pad(user_index: u32, buttons: u16, lx: i16, ly: i16) {
     let idx = user_index as i32;
     let owner = PAD_OWNER.load(Ordering::Relaxed);
-    // Claim the snapshot if it's free or already ours, so a second controller never stomps the pad
-    // currently driving the menu. (`release_pad` frees it when the owner disconnects.)
     if owner < 0 || owner == idx {
         PAD_OWNER.store(idx, Ordering::Relaxed);
-        let g = st.gamepad;
-        PAD_SNAPSHOT.store(pack_pad(g.buttons, g.thumb_lx, g.thumb_ly), Ordering::Relaxed);
+        PAD_SNAPSHOT.store(pack_pad(buttons, lx, ly), Ordering::Relaxed);
     }
 }
 
@@ -175,11 +141,12 @@ fn xinput_get_state_detour(regs: *mut Registers, original: usize) -> usize {
     let original: unsafe extern "system" fn(u32, *mut XInputState) -> u32 =
         unsafe { std::mem::transmute(original) };
     let ret = unsafe { original(user_index, state) };
-    if ret == 0 {
-        // Connected (ERROR_SUCCESS): `state` was written and the index is real. Capture for our menu,
-        // then blank if the overlay is open.
-        capture_pad(user_index);
-        if is_blocked() && !state.is_null() {
+    if ret == 0 && !state.is_null() {
+        // Connected (ERROR_SUCCESS): `state` holds this poll's real pad. Capture it for our menu (read
+        // before any blanking), then blank what the game sees if the overlay is open.
+        let g = unsafe { (*state).gamepad };
+        capture_pad(user_index, g.buttons, g.thumb_lx, g.thumb_ly);
+        if is_blocked() {
             unsafe {
                 (*state).gamepad = XInputGamepad::default();
                 // Also bump packet_number. A game that skips re-reading on an unchanged packet would
@@ -189,7 +156,7 @@ fn xinput_get_state_detour(regs: *mut Registers, original: usize) -> usize {
                 (*state).packet_number = (*state).packet_number.wrapping_add(1);
             }
         }
-    } else {
+    } else if ret != 0 {
         // Not connected (or error): if our nav pad vanished, drop to neutral so held dirs don't stick.
         release_pad(user_index);
     }
@@ -347,7 +314,7 @@ pub unsafe fn install() -> Result<(), String> {
     // blanked and can't drive the menu — the backtick key still toggles and navigates.
     match unsafe { install_xinput() } {
         Ok(()) => log::info!(
-            "input: hooked XInput GetState (controller menu nav + Home-button toggle; pad blanked while open)"
+            "input: hooked XInput GetState (controller menu nav + LB+RB+L3+R3 toggle; pad blanked while open)"
         ),
         Err(e) => log::warn!(
             "input: XInput hook not installed ({e}); controller won't drive the menu or be suppressed"
@@ -356,13 +323,10 @@ pub unsafe fn install() -> Result<(), String> {
     Ok(())
 }
 
-/// Hook `xinput1_4!XInputGetState` and resolve `XInputGetStateEx` (ordinal 100). ER statically imports
-/// `XINPUT1_4.dll`, so it's already loaded by the time install runs.
-///
-/// Note: the Guide/Home toggle depends on that button reaching the game's XInput layer. Under
-/// Proton/Steam, Steam Input commonly intercepts Guide for its own overlay, so the toggle may be inert
-/// on the rig even when this installs cleanly — that's an accepted limitation (the backtick key always
-/// toggles). Verify on the rig rather than assuming it works.
+/// Hook `xinput1_4!XInputGetState`. ER statically imports `XINPUT1_4.dll`, so it's already loaded by
+/// the time install runs. The toggle chord (LB+RB+L3+R3), A, B, d-pad and sticks are all standard bits
+/// the plain `XInputGetState` reports, so the detour reads the game's own buffer — no `XInputGetStateEx`
+/// / Guide-bit dependency, and nothing for Steam Input to intercept.
 ///
 /// # Safety
 /// Same hooking caveats as [`install`]: patches executable memory in the loaded `xinput1_4.dll`; run
@@ -371,13 +335,6 @@ unsafe fn install_xinput() -> Result<(), String> {
     let xinput = unsafe { GetModuleHandleA(s!("xinput1_4.dll")) }
         .map_err(|e| format!("xinput1_4.dll not loaded: {e}"))?;
     let get_state = resolve_proc(xinput, s!("XInputGetState"), "XInputGetState export")?;
-    // XInputGetStateEx is exported by ordinal 100 only (no name on real Windows); resolve it via
-    // MAKEINTRESOURCEA(100) — i.e. a PCSTR whose pointer value *is* the ordinal — so it works on both
-    // Windows and wine/Proton. It returns the Guide bit the plain API masks; that's our toggle.
-    let ex_addr = resolve_proc(xinput, PCSTR(100 as *const u8), "XInputGetStateEx (ordinal 100)")?;
-    let ex: XInputGetStateExFn = unsafe { std::mem::transmute(ex_addr) };
-    // First (and only) writer wins; install runs once. Ignore the Result — a redundant set is harmless.
-    let _ = XINPUT_GET_STATE_EX.set(ex);
     unsafe { install_hook(get_state, xinput_get_state_detour, "XInputGetState")? };
     Ok(())
 }

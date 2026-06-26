@@ -33,14 +33,14 @@ Difficulty legend (rough, from our side of the rewrite):
 From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
 - Open / Join / Lock / Unlock / Leave world
-- Break-in (invasion-style join), rapid re-entry break-in, call break-in SOS, cancel break-in
 - Session password (`cooppassword`, show-password action)
 - "Evil session": start / seek / view / leave (invasion-style sessions)
 
 ## Combat & PvP toggles (M, gated on session layer)
 
 - Toggle PvP, PvP teams, friendly fire
-- Dried finger toggle (more concurrent players/invaders), `allow_invaders`
+- Crit co-op (`crit_coop`): co-op partners can damage enemies during crits (riposte/backstab/guard
+  counter), instead of the enemy being invulnerable to all but the player who landed it. On by default.
 
 ## Per-player scaling ([SCALING.md](SCALING.md))
 
@@ -59,7 +59,6 @@ free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count 
 |---|---|---|
 | Death debuffs (Rot Essence SpEffects, cured at grace) ([DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) | `death_debuffs` | E–M |
 | Spirit summons allowed in MP | `allow_summons` | E |
-| Give ember | (action) | M |
 | Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
 | Spectate-on-death system | `always_spectate_on_death` | M |
 | Boot master volume | `default_boot_master_volume` | E |
@@ -70,8 +69,8 @@ free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count 
 
 - **Enemy rush:** easy / med / hard / infinite
 - **Boss rush** (+ base-DLC variants); arena waves (`YKBR2_*` battle start/wave/end)
-- **Custom mod goods** (`MODGOODS_*`): hosting / joining / break-in / leaving / game-rule-change
-  / rune-arc / Rot items ×5 / dried-finger items — custom inventory items driving session actions.
+- **Custom mod goods** (`MODGOODS_*`): hosting / joining / leaving / game-rule-change
+  / rune-arc / Rot items ×5 — custom inventory items driving session actions.
   **Divergence: not a build target.** These exist in ERSC only because items were its easiest
   action trigger; we use the overlay menu instead (ARCHITECTURE.md > Divergences). Catalogued
   here for reference only.

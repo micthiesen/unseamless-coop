@@ -52,7 +52,7 @@ to apply changes.
 - **The host decides for everyone** — the host's values for these are pushed to the party and
   override each client's own:
   - `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
-  - the `[gameplay]` *rules*: `allow_invaders`, `allow_summons`, `death_debuffs`, `roam_anywhere`.
+  - the `[gameplay]` *rules*: `crit_coop`, `allow_summons`, `death_debuffs`, `roam_anywhere`.
 - **Per-player** — each person sets their own; not shared:
   - the rest of `[gameplay]` — overhead display, skip splash screens, append steam id,
     spectate-on-death, boot volume.

@@ -28,6 +28,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GAME_DIR="${GAME_DIR:-/mnt/games/SteamLibrary/steamapps/common/ELDEN RING/Game}"
 BACKUP_DIR="${BACKUP_DIR:-$HOME/.local/share/unseamless-coop/rig-backup}"
 APPID="${APPID:-1245620}"
+# Elden Ring's save folder (…/EldenRing/<SteamID64>), used by `seed-save`. Empty = derive it from the
+# Steam library that holds GAME_DIR (…/steamapps/common/… -> …/steamapps/compatdata/APPID/pfx/…); set
+# it explicitly if your prefix lives elsewhere.
+SAVE_DIR="${SAVE_DIR:-}"
 TRIPLE="x86_64-pc-windows-gnu"
 SEED_CONFIG="$ROOT/scripts/rig/seed-config.toml"
 # Where/how big the game runs during a rig launch. The point: keep your Steam launch options set to
@@ -51,8 +55,15 @@ RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
 # ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
 # with `cycle --no-dismiss`, or trigger it yourself with `rig.sh dismiss`.
 RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
-# How many confirm presses `dismiss` sends (one per popup + 'press any button' + a little slack).
-RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-6}"
+# How many confirm presses `dismiss` sends, and the gap between them. The startup popups are MODAL
+# and persist until confirmed, so the loop doesn't need to press fast — it needs to keep pressing
+# long enough to outlast the slowest popup's *appearance*. The "offline mode" popup (#3) only fires
+# after a connection attempt times out (~10-15s), well after the first two, so the total span must
+# reach that. The per-press re-focus (focus_game_window, ~0.7s incl. its own settle sleep) already
+# adds spacing, so the explicit interval can stay short: 8 × (~0.7 + 1.5) ≈ 18s span, enough to
+# catch the late popup without dragging the sequence out.
+RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-8}"
+RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-1.5}"
 
 # ---- friend-bundle packaging (rig.sh package / share) ------------------------------------------
 # `package` builds the mod and assembles a self-contained zip a friend installs on Windows
@@ -433,20 +444,86 @@ cmd_dismiss() {
   [[ "$presses" =~ ^[0-9]+$ ]] || { warn "dismiss: press count must be a number, got '$presses'"; return 1; }
   [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
   pgrep -f '[e]ldenring.exe' >/dev/null || warn "eldenring.exe doesn't look like it's running yet"
-  # Only inject if we actually focused the game window — otherwise the keypresses would land in the
-  # terminal or whatever else has focus (e.g. if the launch never came up).
-  if ! focus_game_window; then
-    warn "no gamescope window found to focus — skipping injection so keys don't go to the wrong window"
+  say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart), re-focusing the game window before each…"
+  local i focused=0
+  for ((i = 0; i < presses; i++)); do
+    # Re-focus before EVERY press, not just once up front: a popup appearing (or KWin reshuffling
+    # focus) can steal it between presses, so a one-time focus would leave later keys landing in the
+    # terminal or wherever else has focus. Only inject when we actually hold the game window —
+    # skip this press otherwise so keys never go to the wrong place.
+    if focus_game_window; then
+      focused=1
+    else
+      warn "couldn't focus the gamescope window this attempt — skipping this press"
+      sleep "$RIG_DISMISS_INTERVAL"
+      continue
+    fi
+    ydo key 28:1 28:0 || { warn "ydotool failed — is ydotoold running and YDOTOOL_SOCKET correct?"; return 1; }
+    sleep "$RIG_DISMISS_INTERVAL"
+  done
+  if [[ $focused -eq 0 ]]; then
+    warn "never managed to focus the game window — nothing dismissed; clear popups manually or: scripts/rig.sh dismiss"
     return 1
   fi
-  say "Dismissing startup popups: $presses confirm presses (Enter) into the game window…"
-  local i
-  for ((i = 0; i < presses; i++)); do
-    ydo key 28:1 28:0 || { warn "ydotool failed — is ydotoold running and YDOTOOL_SOCKET correct?"; return 1; }
-    sleep 1.2
-  done
-  ydo key 18:1 18:0 || true   # one E too, in case a dialog wants the menu-accept key over Enter
+  focus_game_window || true     # one more focus before the fallback key
+  ydo key 18:1 18:0 || true     # one E too, in case a dialog wants the menu-accept key over Enter
   ok "sent. If a popup is still up, run: scripts/rig.sh dismiss"
+}
+
+# ---- seed the test save from a real save (rig.sh seed-save) ------------------------------------
+# Resolve the Elden Ring save directory (…/EldenRing/<SteamID64>). Honors SAVE_DIR; otherwise derives
+# it from the Steam library holding GAME_DIR. Prints the path on success, returns 1 if not found.
+resolve_save_dir() {
+  if [[ -n "$SAVE_DIR" ]]; then printf '%s\n' "$SAVE_DIR"; return 0; fi
+  local steamapps root sub
+  steamapps="$(cd "$GAME_DIR/../../.." && pwd)" || return 1   # …/common/ELDEN RING/Game -> …/steamapps
+  root="$steamapps/compatdata/$APPID/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing"
+  [[ -d "$root" ]] || return 1
+  # One numeric SteamID64 subdir holds the saves; take the first (typically the only one).
+  sub="$(find "$root" -mindepth 1 -maxdepth 1 -type d -regex '.*/[0-9]+' 2>/dev/null | head -n1)"
+  [[ -n "$sub" ]] || return 1
+  printf '%s\n' "$sub"
+}
+
+# The save extension the installed config redirects to (what a rig run reads/writes) — falls back to
+# the seed config, then "uco".
+configured_save_ext() {
+  local f ext
+  for f in "$CONFIG_DST" "$SEED_CONFIG"; do
+    [[ -f "$f" ]] || continue
+    ext="$(sed -nE 's/^[[:space:]]*file_extension[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$f" | head -n1)"
+    [[ -n "$ext" ]] && { printf '%s\n' "$ext"; return 0; }
+  done
+  printf 'uco\n'
+}
+
+# Copy a real save into the rig's isolated test extension so you can test on a real character. Source
+# extension is the arg (default `co2`, this machine's real ERSC co-op save); destination is whatever
+# the installed config redirects to (e.g. `uco`). Backs up the existing test save first, and never
+# touches the source or the vanilla `.sl2`. Game must be closed.
+cmd_seed_save() {
+  local src_ext="${1:-co2}"
+  local dst_ext; dst_ext="$(configured_save_ext)"
+  [[ "$dst_ext" == "sl2" ]] && die "configured save ext is 'sl2' (vanilla) — refusing to overwrite your single-player save"
+  [[ "$src_ext" == "sl2" ]] && die "refusing to copy *from* the vanilla 'sl2' — pass a co-op extension (e.g. co2)"
+  [[ "$src_ext" == "$dst_ext" ]] && die "source and destination extension are both '$src_ext' — nothing to do"
+  pgrep -f '[e]ldenring.exe' >/dev/null && die "Elden Ring is running — close it before seeding the save"
+  local dir; dir="$(resolve_save_dir)" || die "couldn't find the Elden Ring save folder (set SAVE_DIR=…)"
+  local src="$dir/ER0000.$src_ext"
+  [[ -f "$src" ]] || die "source save not found: $src"
+  local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
+  say "Seeding test save in $dir"
+  say "  ER0000.$src_ext  ->  ER0000.$dst_ext   (+ .bak)"
+  # Back up the existing destination (the previous test save) before overwriting; never touch src/.sl2.
+  local f
+  for f in "ER0000.$dst_ext" "ER0000.$dst_ext.bak"; do
+    [[ -f "$dir/$f" ]] && { cp -p "$dir/$f" "$dir/$f.seedbak-$stamp"; ok "backed up $f -> $f.seedbak-$stamp"; }
+  done
+  cp -p "$src" "$dir/ER0000.$dst_ext"; ok "copied ER0000.$src_ext -> ER0000.$dst_ext"
+  if [[ -f "$src.bak" ]]; then
+    cp -p "$src.bak" "$dir/ER0000.$dst_ext.bak"; ok "copied ER0000.$src_ext.bak -> ER0000.$dst_ext.bak"
+  fi
+  ok "done. The rig build (file_extension=\"$dst_ext\") will now load this character."
 }
 
 cmd_log() {
@@ -703,9 +780,16 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   reposition             Move the running game window to the top-left (and reveal it if hidden). Only
                          moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
                          blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
+  seed-save [src-ext]    Copy a real save into the rig's isolated test extension so you can test on a
+                         real character. src-ext defaults to 'co2' (this machine's real ERSC save);
+                         destination is whatever the installed config redirects to (e.g. 'uco').
+                         Backs up the existing test save first; never touches the source or vanilla
+                         '.sl2'. NOT a per-run step — the test save already in place is usually fine,
+                         so only run this on initial apply or when you want to reset/refresh it.
+                         Game must be closed.
   dismiss [N]            Click through the startup popups (offline-mode / connection-error) by
-                         injecting N confirm presses (default 6) into the focused game window via
-                         ydotool. Run if a popup is still up after launch.
+                         injecting N confirm presses (default 8) into the focused game window via
+                         ydotool, re-focusing the window before each. Run if a popup is still up.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
                          Auto-dismisses the startup popups; pass --no-dismiss to skip that.
   package [opts]         Build + assemble a Windows friend-install zip in dist/. Bundles our binaries,
@@ -717,9 +801,9 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   share [zip]            Upload a packaged zip (default: newest in dist/) to the GitHub prerelease
                          '$SHARE_TAG', creating it if needed. Prints the download URL.
 
-Env overrides: GAME_DIR, BACKUP_DIR, APPID, WINDOW_MARGIN, RIG_WINDOW_WIDTH, RIG_WINDOW_HEIGHT,
-               RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
-               DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
+Env overrides: GAME_DIR, BACKUP_DIR, APPID, SAVE_DIR, WINDOW_MARGIN, RIG_WINDOW_WIDTH,
+               RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
+               RIG_DISMISS_INTERVAL, DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
 EOF
 }
 
@@ -733,6 +817,7 @@ case "$cmd" in
   log)     cmd_log "$@" ;;
   kill)    cmd_kill "$@" ;;
   reposition) reposition_window ;;
+  seed-save) cmd_seed_save "$@" ;;
   dismiss) cmd_dismiss "$@" ;;
   cycle)   cmd_cycle "$@" ;;
   package) cmd_package "$@" ;;

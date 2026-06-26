@@ -150,7 +150,10 @@ pub const MAX_FLAG_SCAN: u32 = 65_536;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Gameplay {
-    pub allow_invaders: bool,
+    /// Let co-op partners damage an enemy during a critical (riposte/backstab/guard counter) instead
+    /// of it being invulnerable to everyone but the player who landed it. Host-enforced; default on.
+    /// The mod clears the enemy's crit-invuln flag each frame (see `coop/features/crit_coop`).
+    pub crit_coop: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
     /// Let the party roam the whole map together instead of being tethered to the host's multiplay
@@ -269,7 +272,7 @@ impl OverheadDisplay {
 impl Default for Gameplay {
     fn default() -> Self {
         Self {
-            allow_invaders: true,
+            crit_coop: true,
             death_debuffs: true,
             allow_summons: true,
             roam_anywhere: true,
@@ -468,9 +471,9 @@ mod tests {
     fn unknown_keys_are_ignored_for_extensibility() {
         // A config written by a newer build (extra key) still loads on an older one.
         let (cfg, warnings) =
-            Config::from_toml_str("[gameplay]\nallow_invaders = false\nfuture_option = 42\n")
+            Config::from_toml_str("[gameplay]\ncrit_coop = false\nfuture_option = 42\n")
                 .unwrap();
-        assert!(!cfg.gameplay.allow_invaders);
+        assert!(!cfg.gameplay.crit_coop);
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 

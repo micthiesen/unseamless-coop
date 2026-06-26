@@ -83,6 +83,17 @@ impl Scaling {
             posture: multiplier(self.boss_posture, players),
         }
     }
+
+    /// The normalized party size and the `(enemy, boss)` multiplier pair for a raw connected-player
+    /// count — the "what would scaling be for this party" derivation shared by the session observer's
+    /// log and the diagnostic report, so the two surfaces can't drift. The `usize -> u32` narrowing
+    /// saturates rather than wrapping; no `.max(1)` is applied because [`multiplier`] already treats 0
+    /// and 1 players identically (no extra players -> x1.0), so the returned `count` is the true party
+    /// size, fit for display.
+    pub fn party_multipliers(&self, players: usize) -> (u32, StatMultipliers, StatMultipliers) {
+        let count = u32::try_from(players).unwrap_or(u32::MAX);
+        (count, self.enemy_multipliers(count), self.boss_multipliers(count))
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +118,23 @@ mod tests {
         assert_eq!(scaling().boss_multipliers(1), StatMultipliers::IDENTITY);
         // 0 players (degenerate) also clamps to identity, not negative.
         assert_eq!(multiplier(35, 0), 1.0);
+    }
+
+    #[test]
+    fn party_multipliers_preserves_count_and_matches_per_category() {
+        let s = scaling();
+        // The raw count is preserved for display (no `.max(1)`): a 0-player pre-session reads as 0,
+        // not a fabricated 1 — even though 0 and 1 produce identical (vanilla) multipliers.
+        let (c0, e0, b0) = s.party_multipliers(0);
+        assert_eq!(c0, 0);
+        assert_eq!(e0, StatMultipliers::IDENTITY);
+        assert_eq!(b0, StatMultipliers::IDENTITY);
+        assert_eq!(s.party_multipliers(1), (1, StatMultipliers::IDENTITY, StatMultipliers::IDENTITY));
+        // For a real party it equals the per-category helpers (the derivation both surfaces share).
+        let (c3, e3, b3) = s.party_multipliers(3);
+        assert_eq!((c3, e3, b3), (3, s.enemy_multipliers(3), s.boss_multipliers(3)));
+        // A usize that overflows u32 saturates rather than wrapping.
+        assert_eq!(s.party_multipliers(usize::MAX).0, u32::MAX);
     }
 
     #[test]

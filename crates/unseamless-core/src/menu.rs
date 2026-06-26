@@ -1,8 +1,12 @@
 //! The in-game menu model: a flat list of rows (session actions + tunable settings), a cursor,
 //! and the navigation/edit logic. **Pure** — it owns no rendering and no game state, so it's
-//! fully host-tested here. The cdylib's overlay draws [`Menu::rows`] and forwards key presses to
-//! [`Menu::select_next`]/`select_prev`/`activate` (it uses the actions-only [`Menu::actions_only`]
-//! and renders settings read-only, so `adjust`/setting-edit stay reserved for a future editable menu).
+//! fully host-tested here. The cdylib's overlay draws [`Menu::rows`] and activates a row via
+//! [`Menu::select_index`] + [`Menu::activate`]. It owns its *own* combined cursor (so it can append
+//! an overlay-local toggle row after the actions) and drives the skip-disabled/wrap stepping through
+//! the shared [`step_enabled`]/[`first_enabled`] helpers here — the same primitives [`Menu`]'s own
+//! [`Menu::select_next`]/`select_prev`/`home` use — so the navigation algorithm stays single-sourced
+//! and host-tested even though the overlay doesn't drive the `Menu` cursor directly. The full
+//! actions+settings layout and `adjust`/setting-edit stay reserved for a future editable menu.
 //!
 //! ## Divergence from ERSC (intentional)
 //! ERSC drives session actions (host/join/leave/…) through **in-game items** and fixed hotkeys.
@@ -48,15 +52,12 @@ fn action_items() -> Vec<MenuItem> {
     vec![
         action(OpenWorld, not_in_session),
         action(JoinWorld, not_in_session),
-        action(BreakInWorld, not_in_session),
         action(LeaveWorld, in_session),
         action(LockWorld, host_in_session),
         action(UnlockWorld, host_in_session),
         action(TogglePvp, host_in_session),
         action(TogglePvpTeams, host_in_session),
         action(ToggleFriendlyFire, host_in_session),
-        action(ToggleDriedFinger, host_in_session),
-        action(GiveEmber, in_session),
     ]
 }
 
@@ -79,6 +80,32 @@ pub enum MenuOutcome {
     Action(SessionAction),
     /// A setting's value changed; the caller should persist config / re-apply effects.
     SettingChanged(SettingId),
+}
+
+/// Step a cursor from `from` to the next index in `0..total` for which `enabled` is true, moving
+/// forward (`forward`) or backward, skipping disabled indices and wrapping. Returns `from` unchanged
+/// if `total == 0` or no index is enabled. The single source of the "skip-disabled-and-wrap" nav used
+/// by both [`Menu::move_selection`] and the overlay's combined Actions-tab cursor, so the algorithm
+/// stays host-tested in one place rather than re-derived in the (untestable) cdylib.
+pub fn step_enabled(from: usize, total: usize, forward: bool, enabled: impl Fn(usize) -> bool) -> usize {
+    if total == 0 {
+        return from;
+    }
+    let step = if forward { 1 } else { total - 1 }; // wrap-safe forward/backward by 1
+    let mut idx = from;
+    for _ in 0..total {
+        idx = (idx + step) % total;
+        if enabled(idx) {
+            return idx;
+        }
+    }
+    from // all disabled: leave the cursor where it was
+}
+
+/// The first index in `0..total` for which `enabled` is true, or `0` if none (or `total == 0`).
+/// Pairs with [`step_enabled`] to home a cursor onto the first usable row.
+pub fn first_enabled(total: usize, enabled: impl Fn(usize) -> bool) -> usize {
+    (0..total).find(|&i| enabled(i)).unwrap_or(0)
 }
 
 pub struct Menu {
@@ -141,22 +168,10 @@ impl Menu {
     }
 
     /// Move the cursor one enabled row in the direction of `delta`'s sign (forward if `>= 0`),
-    /// skipping disabled rows and wrapping. No-op if every row is disabled.
+    /// skipping disabled rows and wrapping. No-op if every row is disabled. Shares its stepping with
+    /// the overlay's combined cursor via [`step_enabled`].
     pub fn move_selection(&mut self, delta: isize, ctx: &SessionContext) {
-        let n = self.items.len();
-        if n == 0 {
-            return;
-        }
-        let step = if delta >= 0 { 1 } else { n - 1 }; // wrap-safe forward/backward by 1
-        let mut idx = self.selected;
-        for _ in 0..n {
-            idx = (idx + step) % n;
-            if self.is_enabled(idx, ctx) {
-                self.selected = idx;
-                return;
-            }
-        }
-        // all disabled: leave cursor where it was
+        self.selected = step_enabled(self.selected, self.items.len(), delta >= 0, |i| self.is_enabled(i, ctx));
     }
 
     /// Home the cursor onto the first enabled row for `ctx`. Call this when the menu opens or the
@@ -166,12 +181,12 @@ impl Menu {
         if self.is_enabled(self.selected, ctx) {
             return;
         }
-        self.selected = 0;
-        if !self.is_enabled(0, ctx) {
-            self.move_selection(1, ctx);
-        }
+        self.selected = first_enabled(self.items.len(), |i| self.is_enabled(i, ctx));
     }
 
+    // `select_next`/`select_prev` (and `move_selection`/`home`) are the cursor API a future editable
+    // menu would drive directly; the overlay's actions tab now owns its own combined cursor and calls
+    // the shared `step_enabled`/`first_enabled` helpers instead, so these stay host-tested below.
     pub fn select_next(&mut self, ctx: &SessionContext) {
         self.move_selection(1, ctx);
     }
@@ -248,11 +263,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn step_enabled_skips_disabled_and_wraps_both_ways() {
+        // Rows 1 and 3 enabled; 0, 2, 4 disabled.
+        let enabled = |i: usize| matches!(i, 1 | 3);
+        // Forward from 1 -> 3, then wraps 3 -> 1 (skipping 4, 0, 2).
+        assert_eq!(step_enabled(1, 5, true, enabled), 3);
+        assert_eq!(step_enabled(3, 5, true, enabled), 1);
+        // Backward from 3 -> 1, then wraps 1 -> 3.
+        assert_eq!(step_enabled(3, 5, false, enabled), 1);
+        assert_eq!(step_enabled(1, 5, false, enabled), 3);
+        // From a disabled row, forward finds the next enabled one.
+        assert_eq!(step_enabled(0, 5, true, enabled), 1);
+        assert_eq!(step_enabled(2, 5, false, enabled), 1);
+    }
+
+    #[test]
+    fn step_enabled_degenerate_cases_leave_cursor_put() {
+        // total == 0: no rows, returns `from` unchanged.
+        assert_eq!(step_enabled(7, 0, true, |_| true), 7);
+        // Every row disabled: bounded loop returns `from`, never spins.
+        assert_eq!(step_enabled(2, 5, true, |_| false), 2);
+        // Single enabled row: stepping lands back on it.
+        assert_eq!(step_enabled(3, 5, true, |i| i == 3), 3);
+    }
+
+    #[test]
+    fn first_enabled_finds_first_or_falls_back_to_zero() {
+        assert_eq!(first_enabled(5, |i| i >= 2), 2);
+        assert_eq!(first_enabled(5, |i| i == 0), 0);
+        // None enabled (or empty) falls back to 0.
+        assert_eq!(first_enabled(5, |_| false), 0);
+        assert_eq!(first_enabled(0, |_| true), 0);
+    }
+
+    #[test]
     fn rows_cover_actions_and_settings() {
         let menu = Menu::new();
         let rows = menu.rows(&Config::default(), &SessionContext::default());
-        // 11 actions + 19 settings.
-        assert_eq!(rows.len(), 30);
+        // 8 actions + 19 settings.
+        assert_eq!(rows.len(), 27);
         // Action rows have no value; setting rows do.
         assert!(rows[0].value.is_none());
         assert!(rows.iter().filter(|r| r.value.is_some()).count() == 19);
@@ -262,7 +311,7 @@ mod tests {
     fn actions_only_has_no_setting_rows() {
         let menu = Menu::actions_only();
         let rows = menu.rows(&Config::default(), &SessionContext::default());
-        assert_eq!(rows.len(), 11, "actions-only menu shows just the 11 session actions");
+        assert_eq!(rows.len(), 8, "actions-only menu shows just the 8 session actions");
         assert!(rows.iter().all(|r| r.value.is_none()), "no setting rows (those carry a value)");
 
         // Navigation + activation still work; the homed cursor (out of session) lands on OpenWorld.
@@ -275,10 +324,10 @@ mod tests {
 
     #[test]
     fn select_index_points_the_cursor_and_ignores_out_of_range() {
-        let mut menu = Menu::actions_only(); // 11 items, valid indices 0..=10
+        let mut menu = Menu::actions_only(); // 8 items, valid indices 0..=7
         menu.select_index(3);
         assert_eq!(menu.selected(), 3);
-        menu.select_index(11); // == len: out of range, ignored (guards the `<` vs `<=` boundary)
+        menu.select_index(8); // == len: out of range, ignored (guards the `<` vs `<=` boundary)
         assert_eq!(menu.selected(), 3);
         menu.select_index(999);
         assert_eq!(menu.selected(), 3);
@@ -370,10 +419,10 @@ mod tests {
         while !matches!(menu.items[menu.selected], MenuItem::Setting(_)) {
             menu.selected += 1;
         }
-        let before = cfg.gameplay.allow_invaders;
+        let before = cfg.gameplay.crit_coop;
         let outcome = menu.activate(&mut cfg, &ctx);
         assert!(matches!(outcome, MenuOutcome::SettingChanged(_)));
-        assert_ne!(cfg.gameplay.allow_invaders, before);
+        assert_ne!(cfg.gameplay.crit_coop, before);
     }
 
     #[test]

@@ -489,14 +489,14 @@ mod tests {
         let v = Version::new(0, 1, 0);
         let (mut host, mut client) = pair(v, v);
         host.peer_mut().config_mut().scaling.boss_health = 250;
-        host.peer_mut().config_mut().gameplay.allow_invaders = false;
+        host.peer_mut().config_mut().gameplay.crit_coop = false;
 
         host.connect();
         client.connect();
         run(&mut [&mut host, &mut client]); // handshake triggers the host's ConfigSync
 
         assert_eq!(client.peer().config().scaling.boss_health, 250);
-        assert!(!client.peer().config().gameplay.allow_invaders);
+        assert!(!client.peer().config().gameplay.crit_coop);
         assert!(
             client.peer().notifications().toasts().iter().any(|t| t.message.contains("synced")),
             "client should be notified of the sync"
@@ -518,11 +518,11 @@ mod tests {
         assert_eq!(host.peer().last_action(), None, "host-only action from a client is dropped");
         assert!(host.peer().notifications().toasts().iter().any(|t| t.message.contains("host-only")));
 
-        // A non-host-only action (GiveEmber) from the client is accepted.
-        let ember = client.peer_mut().session_action(SessionAction::GiveEmber);
-        client.broadcast(ember);
+        // A non-host-only action (JoinWorld) from the client is accepted.
+        let join = client.peer_mut().session_action(SessionAction::JoinWorld);
+        client.broadcast(join);
         run(&mut [&mut host, &mut client]);
-        assert_eq!(host.peer().last_action(), Some((CLIENT, SessionAction::GiveEmber)));
+        assert_eq!(host.peer().last_action(), Some((CLIENT, SessionAction::JoinWorld)));
     }
 
     #[test]
@@ -621,10 +621,10 @@ mod tests {
     fn duplicate_action_is_applied_once() {
         let v = Version::new(0, 1, 0);
         let mut host = Peer::new(HOST, HOST, v, Config::default());
-        let frame = ModMessage::SessionAction { seq: 1, action: SessionAction::GiveEmber };
+        let frame = ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld };
         host.handle(CLIENT, frame.clone());
         host.handle(CLIENT, frame); // duplicate delivery
-        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::GiveEmber)));
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::JoinWorld)));
         // A second, genuinely-new action (higher seq) is still accepted.
         host.handle(CLIENT, ModMessage::SessionAction { seq: 2, action: SessionAction::OpenWorld });
         assert_eq!(host.last_action(), Some((CLIENT, SessionAction::OpenWorld)));

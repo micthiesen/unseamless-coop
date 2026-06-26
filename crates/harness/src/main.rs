@@ -160,21 +160,21 @@ fn scenario_config_sync() {
     header("config-sync: host's shared settings converge to the client");
     let mut host_cfg = Config::default();
     host_cfg.scaling.boss_health = 250;
-    host_cfg.gameplay.allow_invaders = false;
+    host_cfg.gameplay.crit_coop = false;
     let (mut host, mut client) = pair(V, V, host_cfg, Config::default());
 
     println!(
-        "  client BEFORE: boss_health={}, allow_invaders={}",
+        "  client BEFORE: boss_health={}, crit_coop={}",
         client.peer().config().scaling.boss_health,
-        client.peer().config().gameplay.allow_invaders
+        client.peer().config().gameplay.crit_coop
     );
     host.connect();
     client.connect();
     converge(&mut host, &mut client);
     println!(
-        "  client AFTER:  boss_health={}, allow_invaders={}",
+        "  client AFTER:  boss_health={}, crit_coop={}",
         client.peer().config().scaling.boss_health,
-        client.peer().config().gameplay.allow_invaders
+        client.peer().config().gameplay.crit_coop
     );
     show_notifications("client", &client);
 }
@@ -193,9 +193,9 @@ fn scenario_session_action() {
     println!("  host accepted action: {:?}", host.peer().last_action());
     show_notifications("host", &host);
 
-    println!("  client sends GiveEmber (allowed for anyone)...");
-    let ember = client.peer_mut().session_action(SessionAction::GiveEmber);
-    client.broadcast(ember);
+    println!("  client sends JoinWorld (allowed for anyone)...");
+    let join = client.peer_mut().session_action(SessionAction::JoinWorld);
+    client.broadcast(join);
     converge(&mut host, &mut client);
     println!("  host accepted action: {:?}", host.peer().last_action());
 }
@@ -280,7 +280,7 @@ fn run_tcp_host(addr: &str) {
 
     let mut host_cfg = Config::default();
     host_cfg.scaling.boss_health = 250;
-    host_cfg.gameplay.allow_invaders = false;
+    host_cfg.gameplay.crit_coop = false;
     let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg), transport);
     host.connect();
     let changed = host.peer_mut().mark_config_changed();
@@ -309,13 +309,13 @@ fn run_bridge_host(addr: &str) {
     // The config we push. max_players=4 is the recognizable change to watch land in the mod's log.
     let mut host_cfg = Config::default();
     host_cfg.session.max_players = 4;
-    host_cfg.gameplay.allow_invaders = true;
+    host_cfg.gameplay.crit_coop = true;
     host_cfg.scaling.boss_health = 250;
     let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg), transport);
     host.connect();
     let changed = host.peer_mut().mark_config_changed();
     host.broadcast(changed);
-    println!("[bridge-host] pushing config to the mod (max_players=4, allow_invaders=true)…");
+    println!("[bridge-host] pushing config to the mod (max_players=4, crit_coop=true)…");
     drive_tcp(&mut host, 60);
 
     println!("[bridge-host] mod handshaked: known_peers = {:?}", host.peer().known_peers());
@@ -338,7 +338,7 @@ fn run_tcp_client(addr: &str) {
     drive_tcp(&mut client, 40);
     let synced = client.peer().config().scaling.boss_health;
     println!("[client] boss_health AFTER  = {synced}");
-    println!("[client] allow_invaders     = {}", client.peer().config().gameplay.allow_invaders);
+    println!("[client] crit_coop          = {}", client.peer().config().gameplay.crit_coop);
     println!("[client] known peers        = {:?}", client.peer().known_peers());
     for b in client.peer().notifications().banners() {
         println!("[client] banner: {}", b.message);

@@ -192,14 +192,11 @@ impl SessionObserver {
 
         // What scaling WOULD be for this party size, via the host-tested core. The exact
         // player-count source and application mechanism are RE-gated; this logs the candidate so
-        // we can confirm it on the rig. The core's multiplier math saturates for any count, so we
-        // only need to guard the usize->u32 narrowing.
-        let count = u32::try_from(players).unwrap_or(u32::MAX).max(1);
+        // we can confirm it on the rig. `party_multipliers` owns the usize->u32 narrowing and the
+        // count->multipliers derivation, shared with the diagnostic report so the two can't drift.
         // Reads the live config, so these multipliers reflect a config the bridge may have synced
         // (still read-only here — the observer writes nothing).
-        let scaling = crate::state::with(|c| c.scaling);
-        let enemy = scaling.enemy_multipliers(count);
-        let boss = scaling.boss_multipliers(count);
+        let (count, enemy, boss) = crate::state::with(|c| c.scaling).party_multipliers(players);
         log::info!(
             "  scaling@{count}p: enemy(hp×{:.2} dmg×{:.2} pos×{:.2}) boss(hp×{:.2} dmg×{:.2} pos×{:.2})",
             enemy.health,

@@ -47,7 +47,7 @@ pub fn with_active_main_player<R>(f: impl FnOnce(&mut PlayerIns) -> R) -> Option
 }
 
 /// Apply a SpEffect to the local player by row id (`dont_sync = true` keeps it local, not networked —
-/// what per-player effects like death debuffs / give-ember / rune-arc want). Returns whether it was
+/// what per-player effects like death debuffs / rune-arc want). Returns whether it was
 /// applied (i.e. a live, active player was present). The shared lever behind several features.
 pub fn apply_speffect_to_main_player(id: i32, dont_sync: bool) -> bool {
     with_active_main_player(|p| p.apply_speffect(id, dont_sync)).is_some()

@@ -3,6 +3,7 @@
 
 use unseamless_core::util::{Applied, Latch};
 
+pub mod crit_coop;
 pub mod death_debuffs;
 pub mod notifications;
 pub mod observer;

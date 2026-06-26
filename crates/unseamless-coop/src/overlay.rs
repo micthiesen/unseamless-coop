@@ -23,7 +23,8 @@ use std::ffi::c_void;
 
 use hudhook::hooks::dx12::ImguiDx12Hooks;
 use hudhook::imgui::{
-    Condition, Context, FontConfig, FontId, FontSource, Io, Key, TabItemFlags, Ui, WindowFlags,
+    Condition, Context, FontConfig, FontId, FontSource, Io, Key, MouseButton, TabItemFlags, Ui,
+    WindowFlags,
 };
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
@@ -38,29 +39,12 @@ use windows::Win32::Foundation::HINSTANCE;
 /// Key that toggles the utility window: backtick / grave (`` ` ``). Unbound in Elden Ring and the
 /// universal "console" key. Hardcoded for now; a config-bound key can come later.
 const TOGGLE_KEY: Key = Key::GraveAccent;
-/// Window title: version, then a control hint, with a stable `###` id so the visible label can change
-/// (and carry the hint) without changing the window's identity — which would reset its remembered
-/// position. ASCII only: the title bar draws in the default font, which has no arrow glyphs.
-///
-/// Debug builds splice the baked `UNSEAMLESS_BUILD_ID` in as its own ` | build <id>` section, so a
-/// screenshot of a friend's window self-identifies the exact build under test. Release titles omit
-/// it (it's still in the log header). Built once into a `'static` via `OnceLock` rather than a
-/// `concat!` const because the hint string would otherwise have to be duplicated across the two
-/// branches; the `###unseamless-coop` id is identical in both, so window identity/position is stable
-/// across profiles.
+/// Window title: just the mod name + version, with a stable `###` id so window identity (and its
+/// remembered position) is independent of the visible label. The control hint is no longer baked in —
+/// a short close hint is drawn right-aligned in the title bar instead (see [`draw_title_hint`]) — and
+/// the build id now lives in the debug panel, not the title.
 fn window_title() -> &'static str {
-    use std::sync::OnceLock;
-    static TITLE: OnceLock<String> = OnceLock::new();
-    TITLE.get_or_init(|| {
-        let base = concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION"));
-        let hint = "    |    Up/Dn: select    L/R: tabs    Enter: use    `: close";
-        let id = "###unseamless-coop";
-        if cfg!(debug_assertions) {
-            format!("{base}    |    build {}{hint}{id}", env!("UNSEAMLESS_BUILD_ID"))
-        } else {
-            format!("{base}{hint}{id}")
-        }
-    })
+    concat!("unseamless-coop  v", env!("CARGO_PKG_VERSION"), "###unseamless-coop")
 }
 /// Crisp UI font: a printable-ASCII subset of **Spleen 8x16** (BSD-2 — see
 /// `assets/menu-font.LICENSE.txt`), a pixel font with a 16px native size, baked at that size. A bitmap
@@ -70,6 +54,11 @@ const MENU_FONT: &[u8] = include_bytes!("../assets/menu-font.otf");
 const MENU_FONT_SIZE: f32 = 16.0;
 /// The utility window's tabs, in order. Left/Right arrows cycle through them.
 const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
+/// Short hint drawn right-aligned in the utility window's title bar: backtick (the toggle key) or B
+/// (the controller cancel) closes it. ASCII (incl. backtick) so it renders in the default title font.
+const CLOSE_HINT: &str = "` or B to close";
+/// Right inset of the title-bar close hint from the window's right edge, in pixels.
+const TITLE_HINT_INSET: f32 = 8.0;
 
 // Software-cursor marker: a small faded orb drawn at the mouse hotspot (so it sits at the tip of ER's
 // own cursor when both show, and reads as a position dot when ours is the only one). Three concentric
@@ -83,6 +72,14 @@ const CURSOR_CORE_R: f32 = 2.5;
 const CURSOR_GLOW: [f32; 4] = [0.55, 0.85, 1.0, 0.16];
 const CURSOR_RING: [f32; 4] = [0.0, 0.0, 0.0, 0.50];
 const CURSOR_CORE: [f32; 4] = [0.65, 0.90, 1.0, 0.95];
+
+// Home-snap ghost box: a white outline (with a faint fill) drawn over the window's home rectangle —
+// its default position + size — while the window is dragged with the cursor inside that rectangle.
+// Releasing the drag there snaps the window back to that exact spot and size. White so it reads as a
+// neutral "drop here" target against ER's gold/UI palette.
+const GHOST_FILL: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
+const GHOST_LINE: [f32; 4] = [1.0, 1.0, 1.0, 0.85];
+const GHOST_LINE_THICKNESS: f32 = 2.0;
 
 // One palette, referenced everywhere, so the severity / log-level / provenance colours can't silently
 // drift apart (they're the same swatches used in different contexts, on purpose).
@@ -161,13 +158,22 @@ struct Overlay {
     pad: crate::input::PadNav,
     /// Whether the bottom-left **debug panel** is shown. Defaults to on in debug builds (`diag`
     /// profile), off in release; toggled from the Actions tab. Independent of `open` and of gameplay
-    /// state — unlike the watermark, it stays up during play. Mirrored to [`crate::debug`] each frame
+    /// state — unlike the watermark, it stays up during play. Mirrored to [`crate::debug_panel`] each frame
     /// so the game-thread publisher only does work while it's shown. Present-thread only.
     show_debug: bool,
     /// Cursor into the Actions tab's combined list — the menu's action rows followed by the trailing
     /// debug-overlay toggle (index `== menu rows`). Owns selection across both (the core `Menu`'s own
     /// cursor is only synced to it at activation), so arrow/d-pad nav spans the toggle row too.
     actions_sel: usize,
+    /// Home-snap affordance state. `home_dragging` latches true once an in-progress window move is
+    /// detected (the window position changed while the left button is held) and clears on release —
+    /// so it stays set if the drag pauses over the target, and a release can still be attributed to a
+    /// drag the frame the button goes up. `last_win_pos` is last frame's window position, the baseline
+    /// for that move detection. `home_snap` requests a snap-to-home (the window's default position +
+    /// size) be applied next frame, via `position`/`size(Always)` before `build`. Present-thread only.
+    home_dragging: bool,
+    last_win_pos: Option<[f32; 2]>,
+    home_snap: bool,
 }
 
 impl Overlay {
@@ -188,18 +194,21 @@ impl Overlay {
             // stripped release, where it's an opt-in toggled from the Actions tab.
             show_debug: cfg!(debug_assertions),
             actions_sel: 0,
+            home_dragging: false,
+            last_win_pos: None,
+            home_snap: false,
         }
     }
 
     /// The actual per-frame work, run inside `render`'s panic firewall.
     fn render_inner(&mut self, ui: &Ui) {
-        // Sample the controller once per frame (drives the Guide-button toggle below and, while open,
-        // the menu nav). Computed every frame regardless of open-state so the Home button can *open*
-        // the menu, not just navigate it. The raw snapshot comes from the XInput hook; the pure
-        // edge/repeat logic lives in `unseamless_core::pad`.
+        // Sample the controller once per frame (drives the toggle chord below and, while open, the menu
+        // nav). Computed every frame regardless of open-state so the chord can *open* the menu, not just
+        // navigate it. The raw snapshot comes from the XInput hook; the pure edge/repeat logic lives in
+        // `unseamless_core::pad`.
         let (buttons, lx, ly) = crate::input::pad_snapshot();
         let pad = self.pad.update(buttons, lx, ly, ui.io().delta_time);
-        // Toggle on backtick or the controller Home/Guide button (no-repeat: one open/close per press).
+        // Toggle on backtick or the LB+RB+L3+R3 chord (no-repeat: one open/close per press).
         if ui.is_key_pressed_no_repeat(TOGGLE_KEY) || pad.toggle {
             self.open = !self.open;
             if self.open {
@@ -208,6 +217,10 @@ impl Overlay {
                 // `Menu` only at activation, so we reset its cursor rather than the menu's here.
                 self.actions_sel = 0;
             }
+        }
+        // B closes the menu (Back/Cancel), but only while it's open — when closed, B is a game input.
+        if self.open && pad.cancel {
+            self.open = false;
         }
         // Mirror the open-state into the input suppressor every frame: while open the game doesn't see
         // keyboard/mouse (but imgui still gets them via hudhook's WndProc hook), and closing the window
@@ -227,7 +240,7 @@ impl Overlay {
         // Live debug panel (bottom-left): shown whenever toggled on, including during gameplay (unlike
         // the watermark). Mirror its visibility to the game thread every frame so the publisher only
         // does work while it's shown; then draw from the snapshot it posts.
-        crate::debug::set_panel_visible(self.show_debug);
+        crate::debug_panel::set_visible(self.show_debug);
         if self.show_debug {
             self.draw_debug_panel(ui);
         }
@@ -285,18 +298,19 @@ impl Overlay {
                 if cfg!(debug_assertions) {
                     ui.text_disabled(concat!("build ", env!("UNSEAMLESS_BUILD_ID")));
                 }
-                ui.text_disabled("Press ` or controller Home to open the menu");
+                ui.text_disabled("Press ` or LB+RB+L3+R3 to open the menu");
             });
     }
 
     /// Draw the live **debug panel** — a read-only, bottom-left passive surface rendering the
-    /// diagnostic snapshot the game-thread publisher posts ([`crate::debug`]). It's the same
+    /// diagnostic snapshot the game-thread publisher posts ([`crate::debug_panel`]). It's the same
     /// [`DiagnosticReport`] the log dumps produce, shown live (build / session / features / scaling /
     /// runtime). Bottom-left is the one free corner (notifications top-left, watermark top-right,
     /// Steam's toasts bottom-right). Anchored by its own bottom-left corner (pivot 0,1) so it grows
     /// upward from a fixed inset and never runs off the bottom. Borderless + input-transparent like the
     /// other passive surfaces; reads the snapshot non-blocking and skips the frame before the first
-    /// publish or on contention.
+    /// publish or on contention. Drawn in the compact default font (like the toasts) rather than the
+    /// crisp menu font — the smaller type suits a dense, glanceable info panel.
     fn draw_debug_panel(&self, ui: &Ui) {
         let disp = ui.io().display_size;
         ui.window("##unseamless-debug")
@@ -305,10 +319,8 @@ impl Overlay {
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
-                let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
-                match crate::debug::snapshot() {
+                match crate::debug_panel::snapshot() {
                     Some(report) => draw_report(ui, &report),
-                    // ASCII only (the menu font is a printable-ASCII subset, so no Unicode ellipsis).
                     None => ui.text_disabled("debug panel: gathering..."),
                 }
             });
@@ -331,6 +343,40 @@ impl Overlay {
         }
     }
 
+    /// Home-snap affordance (called inside the window's build closure, so `is_window_focused` and the
+    /// mouse state refer to this window). While the window is being dragged with the cursor inside its
+    /// home rectangle (`home_pos` + `home_size`), draw a white ghost box over that rectangle; releasing
+    /// the drag there requests a snap-to-home next frame (applied via `position`/`size(Always)`), which
+    /// repositions *and* resizes the window back to exactly where it first opened.
+    fn handle_home_snap(&mut self, ui: &Ui, home_pos: [f32; 2], home_size: [f32; 2]) {
+        let pos = ui.window_pos();
+        let mouse_down = ui.io().mouse_down[0];
+        // Detect an in-progress window move by a position change while the button is held, then latch
+        // it. This (unlike `is_any_item_active`, which imgui sets to the window's move-id during a
+        // title-bar drag) distinguishes a window move from a selectable drag: only a move shifts the
+        // window position. Latching keeps it true if the drag pauses over the target.
+        if mouse_down && self.last_win_pos.is_some_and(|p| p != pos) {
+            self.home_dragging = true;
+        }
+        // Trigger zone = the visual ghost: full width, top quarter of the home rect, anchored at the
+        // home top-left. Hit-test and ghost use the same rect so the highlight is exactly where the
+        // snap arms. The snap itself still restores the full window size (`WINDOW_DEFAULT_SIZE`).
+        let snap_zone = [home_size[0], home_size[1] / 4.0];
+        let in_home = point_in_rect(ui.io().mouse_pos, home_pos, snap_zone);
+        if self.home_dragging && mouse_down && in_home {
+            draw_ghost_box(ui, home_pos, snap_zone);
+        }
+        // Snap on release inside the box — checked before clearing the latch, since the release frame's
+        // button is already up.
+        if self.home_dragging && ui.is_mouse_released(MouseButton::Left) && in_home {
+            self.home_snap = true;
+        }
+        if !mouse_down {
+            self.home_dragging = false;
+        }
+        self.last_win_pos = Some(pos);
+    }
+
     /// Draw the toggleable utility window with its tabs.
     fn draw_utility_window(&mut self, ui: &Ui, pad: crate::input::PadEdges) {
         let ctx = session_context();
@@ -350,9 +396,13 @@ impl Overlay {
         // If the window drifted out of the ER viewport last frame, snap it back this frame ("lock" it
         // to the game window). Taken into a local first so the build closure can re-borrow `self`.
         let clamp = self.clamp_pos.take();
+        // Whether to snap the window back to its home rectangle (default position + size) this frame —
+        // requested last frame when the user released a drag with the cursor over the home box.
+        let home_snap = std::mem::take(&mut self.home_snap);
         // Default placement (first open only): horizontally centered, a top-margin down from the top.
         // `.max(0.0)` only matters for a viewport narrower than the window. The clamp/drag logic owns
-        // every later position; this is just where it first appears.
+        // every later position; this is just where it first appears. Also the home rectangle the
+        // home-snap affordance targets (position = `default_pos`, size = `WINDOW_DEFAULT_SIZE`).
         let disp = ui.io().display_size;
         let default_pos = [((disp[0] - WINDOW_DEFAULT_SIZE[0]) / 2.0).max(0.0), OVERLAY_MARGIN];
         let mut win = ui
@@ -371,11 +421,19 @@ impl Overlay {
                     | WindowFlags::NO_NAV
                     | WindowFlags::NO_SCROLLBAR,
             );
-        if let Some(p) = clamp {
+        // Home-snap wins over the edge clamp: it targets the in-bounds default rectangle, so applying
+        // both position and size here puts the window exactly back where it first opened.
+        if home_snap {
+            win = win.position(default_pos, Condition::Always).size(WINDOW_DEFAULT_SIZE, Condition::Always);
+        } else if let Some(p) = clamp {
             win = win.position(p, Condition::Always);
         }
         win.build(|| {
                 self.clamp_into_viewport(ui);
+                self.handle_home_snap(ui, default_pos, WINDOW_DEFAULT_SIZE);
+                // Right-aligned close hint on the title bar, drawn here while the default font is still
+                // active (matches the title text) and before the menu font is pushed.
+                draw_title_hint(ui);
                 // Push our crisp font for the whole window (incl. the log child); toasts keep the
                 // compact default. Token held to closure end, then popped.
                 let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
@@ -420,31 +478,22 @@ impl Overlay {
         // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows).
         let rows = self.menu.rows(&self.config, ctx);
         let n = rows.len();
-        // Combined list = the `n` action rows, then the debug-toggle row at index `n` (always enabled).
+        // Combined list = the `n` action rows, then the debug-panel toggle row at index `n` (always
+        // enabled). The skip-disabled/wrap stepping reuses the core menu's host-tested helpers so this
+        // cursor can't drift from `Menu`'s own nav.
         let total = n + 1;
         let enabled = |i: usize| if i < n { rows[i].enabled } else { true };
 
         // Repair the cursor if it's out of range or on a now-disabled row (e.g. the session context
         // changed since last frame), landing it on the first enabled row.
         if self.actions_sel >= total || !enabled(self.actions_sel) {
-            self.actions_sel = (0..total).find(|&i| enabled(i)).unwrap_or(0);
+            self.actions_sel = unseamless_core::menu::first_enabled(total, enabled);
         }
-        // One enabled step in `dir`'s direction, skipping disabled rows and wrapping; no-op if none.
-        let step = |from: usize, dir: isize| {
-            let mut idx = from;
-            for _ in 0..total {
-                idx = (idx as isize + dir).rem_euclid(total as isize) as usize;
-                if enabled(idx) {
-                    return idx;
-                }
-            }
-            from
-        };
         if ui.is_key_pressed(Key::DownArrow) || pad.down {
-            self.actions_sel = step(self.actions_sel, 1);
+            self.actions_sel = unseamless_core::menu::step_enabled(self.actions_sel, total, true, enabled);
         }
         if ui.is_key_pressed(Key::UpArrow) || pad.up {
-            self.actions_sel = step(self.actions_sel, -1);
+            self.actions_sel = unseamless_core::menu::step_enabled(self.actions_sel, total, false, enabled);
         }
         let mut activate = enter_pressed(ui) || pad.activate;
 
@@ -459,10 +508,12 @@ impl Overlay {
                 ui.text_disabled(&row.label);
             }
         }
-        // The debug-overlay toggle row, last. Its on/off state is in the label so the row reads as a
-        // toggle; a unique label keeps it a stable imgui id distinct from the action rows above.
+        // The debug-panel toggle row, last. The on/off state rides in the visible label, but a fixed
+        // `###` id keeps the row's imgui identity stable as that text flips (otherwise the id would
+        // change each toggle). "Debug panel" — not "overlay" — to avoid colliding with the whole-
+        // overlay `[debug] overlay` config switch; this only controls the bottom-left panel.
         ui.separator();
-        let toggle_label = format!("Debug overlay: {}", if self.show_debug { "on" } else { "off" });
+        let toggle_label = format!("Debug panel: {}###debug-panel-toggle", if self.show_debug { "on" } else { "off" });
         if ui.selectable_config(&toggle_label).selected(self.actions_sel == n).build() {
             clicked = Some(n);
         }
@@ -613,7 +664,7 @@ impl ImguiRenderLoop for Overlay {
 }
 
 /// The current session context for menu gating. Until the co-op/session layer lands (rig-gated) we
-/// have no live session, so this is the not-in-session default — only Host / Join / Break-in enabled.
+/// have no live session, so this is the not-in-session default — only Host / Join enabled.
 fn session_context() -> SessionContext {
     SessionContext::default()
 }
@@ -637,14 +688,48 @@ fn draw_cursor_marker(ui: &Ui) {
     dl.add_circle(p, CURSOR_CORE_R, CURSOR_CORE).filled(true).build();
 }
 
+/// Draw the right-aligned close hint on the utility window's title bar. imgui has no native
+/// right-alignment for title text, so we place it manually: measure the text in the current (default)
+/// font and put it flush to the title bar's right edge, vertically centered in the bar (`frame_height`).
+/// Uses the foreground draw list because inside the build closure the window draw list is clipped to
+/// the content region (the title bar is excluded), so a window-draw-list call there wouldn't show. Must
+/// be called before the menu font is pushed so the hint matches the title's font. One foreground draw
+/// list, dropped at function end — never alive at the same time as `draw_ghost_box`'s or
+/// `draw_cursor_marker`'s (all sequential).
+fn draw_title_hint(ui: &Ui) {
+    let pos = ui.window_pos();
+    let size = ui.window_size();
+    let text = ui.calc_text_size(CLOSE_HINT);
+    let x = pos[0] + size[0] - text[0] - TITLE_HINT_INSET;
+    let y = pos[1] + (ui.frame_height() - text[1]) * 0.5;
+    let dl = ui.get_foreground_draw_list();
+    dl.add_text([x, y], rgba(DIM_GREY, 1.0), CLOSE_HINT);
+}
+
+/// Whether a point lies inside the axis-aligned rectangle at `pos` with `size` (inclusive edges).
+fn point_in_rect(p: [f32; 2], pos: [f32; 2], size: [f32; 2]) -> bool {
+    p[0] >= pos[0] && p[0] <= pos[0] + size[0] && p[1] >= pos[1] && p[1] <= pos[1] + size[1]
+}
+
+/// Draw the home-snap ghost box — a faint white fill under a white outline — over the home rectangle,
+/// on the foreground draw list (above the dragged window) so it reads as a "drop here" target. Binds
+/// one foreground draw list and drops it at function end; safe because `draw_cursor_marker` (the only
+/// other foreground-list user) runs later, after the window has closed — never with this one alive.
+fn draw_ghost_box(ui: &Ui, pos: [f32; 2], size: [f32; 2]) {
+    let max = [pos[0] + size[0], pos[1] + size[1]];
+    let dl = ui.get_foreground_draw_list();
+    dl.add_rect(pos, max, GHOST_FILL).filled(true).build();
+    dl.add_rect(pos, max, GHOST_LINE).thickness(GHOST_LINE_THICKNESS).build();
+}
+
 /// Enter (main or keypad) pressed this frame, no key-repeat — one activation per physical press.
 fn enter_pressed(ui: &Ui) -> bool {
     ui.is_key_pressed_no_repeat(Key::Enter) || ui.is_key_pressed_no_repeat(Key::KeypadEnter)
 }
 
 /// Render a [`DiagnosticReport`] into the current window: each section title in blue, then its
-/// `key = value` lines dimmed and indented under it. All values are ASCII (built that way in
-/// [`crate::diag::build_report`]) so the printable-ASCII menu font has every glyph.
+/// `key = value` lines dimmed and indented under it. Values are ASCII (built that way in
+/// [`crate::diag::build_report`]).
 fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     for (i, section) in report.sections().iter().enumerate() {
         if i > 0 {

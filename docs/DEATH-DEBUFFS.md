@@ -50,7 +50,7 @@ The `dont_sync` bool is interesting: the apply path can optionally tell the game
 effect. For death debuffs we want each player's own debuff applied locally (the death is the local
 player's), so `dont_sync = true` is the likely choice — confirm on the rig whether co-op partners
 should each carry their own stack (almost certainly yes; ERSC debuffs are per-player). The same
-`dont_sync` knob is why this method underlies **give-ember** and **rune-arc sharing** too (see §F).
+`dont_sync` knob is why this method underlies **rune-arc sharing** too (see §F).
 
 Calling it is exactly our existing pattern: reach `WorldChrMan` via `crate::sdk::with_instance_mut`,
 take `main_player` (`Option<OwnedPtr<PlayerIns>>`, `cs/world_chr_man.rs:59`), and call
@@ -217,14 +217,14 @@ Notes:
 - Logging rule: the per-frame HP/flag reads must be `log::debug!`/`trace!`; only milestones
   (a debuff applied, cured at grace) may be `info!`.
 
-## F. Shared Mechanism: Give-Ember and Rune-Arc
+## F. Shared Mechanism: Rune-Arc Sharing
 
-`apply_speffect` is **the same lever** behind two other ERSC features in
-[FEATURES.md](FEATURES.md): **give ember** and **rune-arc sharing** are "apply SpEffect X to the
-player" actions, just triggered from a session action instead of a death edge. So building the apply
-helper for death debuffs gives us those for near-free — they differ only in *which* row and *what
-triggers it* (a menu action vs. the death/grace edges). Worth factoring the "apply a SpEffect to the
-main player by ID" call into a small shared helper (e.g. on the sdk module) that all three use.
+`apply_speffect` is **the same lever** behind another ERSC feature in
+[FEATURES.md](FEATURES.md): **rune-arc sharing** is an "apply SpEffect X to the player" action, just
+triggered from a session action instead of a death edge. So building the apply helper for death
+debuffs gives it for near-free — they differ only in *which* row and *what triggers it* (a menu
+action vs. the death/grace edges). Worth factoring the "apply a SpEffect to the main player by ID"
+call into a small shared helper (e.g. on the sdk module) that both use.
 
 ## Status / Next Steps
 
@@ -238,7 +238,7 @@ main player by ID" call into a small shared helper (e.g. on the sdk module) that
       `intensify_past_cap` (true), `intensity_step_percent` (50), `max_intensity_percent` (300);
       validated/clamped. The on/off toggle stays the synced `gameplay.death_debuffs`.
 - [x] **Shared apply/remove helper**: `sdk::apply_speffect_to_main_player` /
-      `remove_speffect_from_main_player` (active-player guarded) — reused by give-ember + rune-arc.
+      `remove_speffect_from_main_player` (active-player guarded) — reused by rune-arc sharing.
 - [x] **Death-edge detection + feature scaffold** (`coop/features/death_debuffs.rs`): rising edge of
       main-player `hp<=0` (active-guarded, `WorldChrMan_PostPhysics` phase) drives the model; live
       config; inert + silent until the two rig blanks below are filled (no bogus SpEffect ids sent).

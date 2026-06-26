@@ -4,19 +4,27 @@
 //! hands the unpacked `(buttons, lx, ly, dt)` here.
 //!
 //! Directions auto-repeat while held (an initial delay, then a fixed interval — keyboard-repeat feel);
-//! the activate/toggle buttons fire once per physical press. Keeping the repeat/edge/threshold logic
-//! here (not in the cdylib) makes it unit-testable on the host, per the project's core-vs-coop split.
+//! the activate (A), cancel (B), and toggle (the LB+RB+L3+R3 chord) intents fire once per press.
+//! Keeping the repeat/edge/threshold logic here (not in the cdylib) makes it unit-testable on the
+//! host, per the project's core-vs-coop split.
 
 /// XINPUT_GAMEPAD `wButtons` bits we read (a subset of the standard mask).
 pub const XINPUT_DPAD_UP: u16 = 0x0001;
 pub const XINPUT_DPAD_DOWN: u16 = 0x0002;
 pub const XINPUT_DPAD_LEFT: u16 = 0x0004;
 pub const XINPUT_DPAD_RIGHT: u16 = 0x0008;
-/// Guide / "Home" button. Undocumented: the plain `XInputGetState` masks it out; only
-/// `XInputGetStateEx` reports it — which is exactly why it's a safe overlay toggle (the game, calling
-/// the plain API, is structurally blind to it).
-pub const XINPUT_GUIDE: u16 = 0x0400;
-pub const XINPUT_A: u16 = 0x1000;
+pub const XINPUT_LEFT_THUMB: u16 = 0x0040; // left stick click (L3)
+pub const XINPUT_RIGHT_THUMB: u16 = 0x0080; // right stick click (R3)
+pub const XINPUT_LEFT_SHOULDER: u16 = 0x0100; // LB
+pub const XINPUT_RIGHT_SHOULDER: u16 = 0x0200; // RB
+pub const XINPUT_A: u16 = 0x1000; // confirm / activate
+pub const XINPUT_B: u16 = 0x2000; // cancel / close
+
+/// The overlay-toggle chord: LB + RB + L3 + R3 held together. Deliberately awkward so it's never hit
+/// by accident, and — unlike the Guide/Home button — made of standard bits the plain `XInputGetState`
+/// reports, so it survives Steam Input (which intercepts Guide for most players).
+const TOGGLE_COMBO: u16 =
+    XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
 
 /// Per-direction auto-repeat tuning (seconds): the initial delay before a held direction starts
 /// repeating, then one step per interval.
@@ -34,14 +42,18 @@ const LEFT: usize = 2;
 const RIGHT: usize = 3;
 
 /// One frame's edge-triggered controller intents for the overlay menu. Directions auto-repeat while
-/// held; `activate`/`toggle` fire once per physical press.
+/// held; `activate`/`cancel`/`toggle` fire once per physical press.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct PadEdges {
     pub up: bool,
     pub down: bool,
     pub left: bool,
     pub right: bool,
+    /// A — confirm the selected action.
     pub activate: bool,
+    /// B — close the overlay (a Back/Cancel; only acted on while it's open).
+    pub cancel: bool,
+    /// The LB+RB+L3+R3 chord — open/close the overlay.
     pub toggle: bool,
 }
 
@@ -94,18 +106,22 @@ impl PadNav {
             self.held[i] = dirs[i];
         }
 
-        // A / Guide: rising edge only (one action per press), like the keyboard's no-repeat keys.
-        // Capture the previous mask before overwriting it so the edge test reads last frame's state.
+        // A / B / the toggle chord: rising edge only (one action per press), like the keyboard's
+        // no-repeat keys. Capture the previous mask before overwriting it so the edge tests read last
+        // frame's state.
         let prev = self.prev_buttons;
         self.prev_buttons = buttons;
         let pressed = |bit: u16| buttons & bit != 0 && prev & bit == 0;
+        // The chord toggles once, on the frame its full set first becomes held (not while it's holding).
+        let combo_held = |b: u16| b & TOGGLE_COMBO == TOGGLE_COMBO;
         PadEdges {
             up: fire[UP],
             down: fire[DOWN],
             left: fire[LEFT],
             right: fire[RIGHT],
             activate: pressed(XINPUT_A),
-            toggle: pressed(XINPUT_GUIDE),
+            cancel: pressed(XINPUT_B),
+            toggle: combo_held(buttons) && !combo_held(prev),
         }
     }
 }
@@ -155,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn activate_and_toggle_are_one_shot_per_press() {
+    fn activate_and_cancel_are_one_shot_per_press() {
         let mut nav = PadNav::new();
         assert!(nav.update(XINPUT_A, 0, 0, FRAME_DT).activate);
         assert!(!nav.update(XINPUT_A, 0, 0, FRAME_DT).activate); // held: never auto-repeats
@@ -163,8 +179,24 @@ mod tests {
         assert!(nav.update(XINPUT_A, 0, 0, FRAME_DT).activate); // re-press
 
         let mut nav = PadNav::new();
-        assert!(nav.update(XINPUT_GUIDE, 0, 0, FRAME_DT).toggle);
-        assert!(!nav.update(XINPUT_GUIDE, 0, 0, FRAME_DT).toggle);
+        assert!(nav.update(XINPUT_B, 0, 0, FRAME_DT).cancel);
+        assert!(!nav.update(XINPUT_B, 0, 0, FRAME_DT).cancel); // held: one-shot
+    }
+
+    #[test]
+    fn toggle_chord_fires_once_when_the_set_completes() {
+        let full =
+            XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER | XINPUT_LEFT_THUMB | XINPUT_RIGHT_THUMB;
+        let mut nav = PadNav::new();
+        // A partial chord (and any single member) never toggles.
+        assert!(!nav.update(XINPUT_LEFT_SHOULDER | XINPUT_RIGHT_SHOULDER, 0, 0, FRAME_DT).toggle);
+        assert!(!nav.update(full & !XINPUT_RIGHT_THUMB, 0, 0, FRAME_DT).toggle);
+        // Completing the set fires exactly once; holding it does not re-fire.
+        assert!(nav.update(full, 0, 0, FRAME_DT).toggle);
+        assert!(!nav.update(full, 0, 0, FRAME_DT).toggle);
+        // Releasing a member and re-completing fires again.
+        assert!(!nav.update(full & !XINPUT_LEFT_THUMB, 0, 0, FRAME_DT).toggle);
+        assert!(nav.update(full, 0, 0, FRAME_DT).toggle);
     }
 
     #[test]

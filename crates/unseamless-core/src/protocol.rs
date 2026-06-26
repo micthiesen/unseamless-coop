@@ -31,10 +31,12 @@ pub const MAGIC: [u8; 2] = *b"UC";
 /// *shifted* the `ConfigSync` payload (an older decoder would misparse). v4 added `roam_anywhere` as a
 /// 4th bit in the existing settings byte — the wire length is unchanged, so an un-bumped older decoder
 /// would parse fine but silently *drop the new flag* and diverge on roam; the bump turns that silent
-/// setting-divergence into a clean `UnknownVersion` rejection instead.
-pub const VERSION: u8 = 4;
+/// setting-divergence into a clean `UnknownVersion` rejection instead. v5 repurposed settings bit 0
+/// from the removed `allow_invaders` to `crit_coop` (same wire width, changed *meaning*), so a v4
+/// decoder would misread the flag — the bump rejects it cleanly instead.
+pub const VERSION: u8 = 5;
 
-/// Number of bools packed into the `ConfigSync` settings byte (`allow_invaders`, `death_debuffs`,
+/// Number of bools packed into the `ConfigSync` settings byte (`crit_coop`, `death_debuffs`,
 /// `allow_summons`, `roam_anywhere`). Single-sources the count so the encode (`pack_bools`) and decode
 /// (`unpack_bools`) can't drift to different `N` and silently cross-map bits — a count change here is a
 /// compile error at both call sites until their arrays/destructures match.
@@ -83,7 +85,7 @@ pub enum ModMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedSettings {
     pub scaling: Scaling,
-    pub allow_invaders: bool,
+    pub crit_coop: bool,
     pub death_debuffs: bool,
     pub allow_summons: bool,
     pub roam_anywhere: bool,
@@ -98,7 +100,7 @@ impl From<&Config> for SharedSettings {
     fn from(c: &Config) -> Self {
         Self {
             scaling: c.scaling,
-            allow_invaders: c.gameplay.allow_invaders,
+            crit_coop: c.gameplay.crit_coop,
             death_debuffs: c.gameplay.death_debuffs,
             allow_summons: c.gameplay.allow_summons,
             roam_anywhere: c.gameplay.roam_anywhere,
@@ -113,7 +115,7 @@ impl SharedSettings {
     /// local rules match — the per-field mapping lives here in core, not in the cdylib.
     pub fn apply_to(&self, cfg: &mut Config) {
         cfg.scaling = self.scaling;
-        cfg.gameplay.allow_invaders = self.allow_invaders;
+        cfg.gameplay.crit_coop = self.crit_coop;
         cfg.gameplay.death_debuffs = self.death_debuffs;
         cfg.gameplay.allow_summons = self.allow_summons;
         cfg.gameplay.roam_anywhere = self.roam_anywhere;
@@ -130,24 +132,21 @@ impl SharedSettings {
 pub enum SessionAction {
     OpenWorld = 0,
     JoinWorld = 1,
-    BreakInWorld = 2,
-    LeaveWorld = 3,
-    LockWorld = 4,
-    UnlockWorld = 5,
-    TogglePvp = 6,
-    TogglePvpTeams = 7,
-    ToggleFriendlyFire = 8,
-    ToggleDriedFinger = 9,
-    GiveEmber = 10,
+    LeaveWorld = 2,
+    LockWorld = 3,
+    UnlockWorld = 4,
+    TogglePvp = 5,
+    TogglePvpTeams = 6,
+    ToggleFriendlyFire = 7,
 }
 
 impl SessionAction {
     /// Every variant, for enumerating the action set (menu build, tests) without re-typing the list.
-    pub const ALL: [SessionAction; 11] = {
+    pub const ALL: [SessionAction; 8] = {
         use SessionAction::*;
         [
-            OpenWorld, JoinWorld, BreakInWorld, LeaveWorld, LockWorld, UnlockWorld, TogglePvp,
-            TogglePvpTeams, ToggleFriendlyFire, ToggleDriedFinger, GiveEmber,
+            OpenWorld, JoinWorld, LeaveWorld, LockWorld, UnlockWorld, TogglePvp,
+            TogglePvpTeams, ToggleFriendlyFire,
         ]
     };
 
@@ -158,26 +157,23 @@ impl SessionAction {
         match self {
             OpenWorld => "Host / open world",
             JoinWorld => "Join world",
-            BreakInWorld => "Break into world",
             LeaveWorld => "Leave world",
             LockWorld => "Lock world",
             UnlockWorld => "Unlock world",
             TogglePvp => "Toggle PvP",
             TogglePvpTeams => "Toggle PvP teams",
             ToggleFriendlyFire => "Toggle friendly fire",
-            ToggleDriedFinger => "Toggle dried finger",
-            GiveEmber => "Give ember",
         }
     }
 
-    /// Whether only the host may perform this action (lock/unlock and the PvP/dried-finger
-    /// toggles). The apply layer authorizes an inbound action by the **sender's** role using this,
-    /// since the menu's local-UI gating doesn't constrain a packet from a peer.
+    /// Whether only the host may perform this action (lock/unlock and the PvP toggles). The apply
+    /// layer authorizes an inbound action by the **sender's** role using this, since the menu's
+    /// local-UI gating doesn't constrain a packet from a peer.
     pub fn is_host_only(self) -> bool {
         use SessionAction::*;
         matches!(
             self,
-            LockWorld | UnlockWorld | TogglePvp | TogglePvpTeams | ToggleFriendlyFire | ToggleDriedFinger
+            LockWorld | UnlockWorld | TogglePvp | TogglePvpTeams | ToggleFriendlyFire
         )
     }
 }
@@ -234,7 +230,7 @@ impl ModMessage {
                 }
                 w.extend_from_slice(&s.max_players.to_be_bytes());
                 w.push(pack_bools::<SETTINGS_BOOL_COUNT>([
-                    s.allow_invaders,
+                    s.crit_coop,
                     s.death_debuffs,
                     s.allow_summons,
                     s.roam_anywhere,
@@ -289,13 +285,13 @@ impl ModMessage {
                 scaling.clamp_percentages();
                 // Same reasoning for the player cap: clamp to the config's accepted range.
                 let max_players = r.u32()?.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
-                let [allow_invaders, death_debuffs, allow_summons, roam_anywhere] =
+                let [crit_coop, death_debuffs, allow_summons, roam_anywhere] =
                     unpack_bools::<SETTINGS_BOOL_COUNT>(r.u8()?);
                 ModMessage::ConfigSync {
                     generation,
                     settings: SharedSettings {
                         scaling,
-                        allow_invaders,
+                        crit_coop,
                         death_debuffs,
                         allow_summons,
                         roam_anywhere,
@@ -402,7 +398,7 @@ mod tests {
                 boss_damage: 0,
                 boss_posture: 20,
             },
-            allow_invaders: true,
+            crit_coop: true,
             death_debuffs: false,
             allow_summons: true,
             roam_anywhere: true,
@@ -415,7 +411,7 @@ mod tests {
             ModMessage::Hello { mod_version: 0x0001_0203 },
             ModMessage::ConfigSync { generation: 7, settings: shared() },
             ModMessage::SessionAction { seq: 1, action: SessionAction::LockWorld },
-            ModMessage::SessionAction { seq: u32::MAX, action: SessionAction::GiveEmber },
+            ModMessage::SessionAction { seq: u32::MAX, action: SessionAction::JoinWorld },
             ModMessage::Ping { frame: u64::MAX },
             ModMessage::Log(LogRecord {
                 seq: 42,
@@ -438,7 +434,7 @@ mod tests {
         // Set each projected field to a non-default value so a wrong mapping (e.g. two fields
         // reading the same config bool) is caught.
         let mut cfg = crate::config::Config::default();
-        cfg.gameplay.allow_invaders = false;
+        cfg.gameplay.crit_coop = false;
         cfg.gameplay.death_debuffs = false;
         cfg.gameplay.allow_summons = false;
         cfg.gameplay.roam_anywhere = false; // non-default (default on)
@@ -446,7 +442,7 @@ mod tests {
         cfg.session.max_players = 4; // non-default, host-enforced
         cfg.session.password = "secret".into(); // machine-local; SharedSettings has no such field
         let shared = SharedSettings::from(&cfg);
-        assert!(!shared.allow_invaders);
+        assert!(!shared.crit_coop);
         assert!(!shared.death_debuffs);
         assert!(!shared.allow_summons);
         assert!(!shared.roam_anywhere);
@@ -462,7 +458,7 @@ mod tests {
         // one of them fails this test (default==default would otherwise hide the omission). The shared
         // bools all default to `true`/`true`/`true`/`true`, so flip each to `false`.
         let mut host = crate::config::Config::default();
-        host.gameplay.allow_invaders = false;
+        host.gameplay.crit_coop = false;
         host.gameplay.death_debuffs = false;
         host.gameplay.allow_summons = false;
         host.gameplay.roam_anywhere = false;
@@ -534,7 +530,7 @@ mod tests {
         // cross-contaminates another (a single-combo test couldn't catch an OR-ing bug).
         for bits in 0u8..16 {
             let mut s = shared();
-            s.allow_invaders = bits & 1 != 0;
+            s.crit_coop = bits & 1 != 0;
             s.death_debuffs = bits & 2 != 0;
             s.allow_summons = bits & 4 != 0;
             s.roam_anywhere = bits & 8 != 0;
@@ -586,6 +582,17 @@ mod tests {
     }
 
     #[test]
+    fn rejects_superseded_v4_frame() {
+        // v5 repurposed settings bit 0 (`allow_invaders` -> `crit_coop`) at unchanged wire width, so a
+        // v4 frame would parse but silently misread the flag. This pins the 4->5 bump: it fails the
+        // moment someone reverts `VERSION` to 4 (which the generic `rejects_unknown_version`'s 99 can't
+        // catch, since 99 != 4 would still reject).
+        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        bytes[2] = 4;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(4)));
+    }
+
+    #[test]
     fn config_sync_generation_sits_at_a_fixed_offset() {
         // Pin the on-wire position of `generation` (bytes 4..8, right after magic+version+tag), so
         // an encoder offset regression that a symmetric decode bug would hide is still caught.
@@ -618,6 +625,20 @@ mod tests {
         // magic, version, SESSION_ACTION tag, seq=1, action=250 (undefined).
         let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::SESSION_ACTION, 0, 0, 0, 1, 250];
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::BadValue));
+    }
+
+    #[test]
+    fn session_action_discriminant_boundary_after_removal() {
+        // After removing `BreakInWorld`, `ToggleDriedFinger`, and `GiveEmber` and renumbering
+        // contiguously, the top valid discriminant is 7 (`ToggleFriendlyFire`) and byte 8 is now
+        // undefined. Pin both ends so a future off-by-one renumber or an accidental re-add at slot 8 is
+        // caught (the `ALL`-length/label-uniqueness tests only catch additions, not this freed slot).
+        let frame = |action: u8| [MAGIC[0], MAGIC[1], VERSION, tag::SESSION_ACTION, 0, 0, 0, 1, action];
+        assert_eq!(
+            ModMessage::decode(&frame(7)),
+            Ok(ModMessage::SessionAction { seq: 1, action: SessionAction::ToggleFriendlyFire }),
+        );
+        assert_eq!(ModMessage::decode(&frame(8)), Err(DecodeError::BadValue));
     }
 
     #[test]

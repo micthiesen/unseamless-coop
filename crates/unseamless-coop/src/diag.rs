@@ -4,7 +4,7 @@
 //! pure model + renderer live in host-tested [`unseamless_core::diagnostics`]; this fills it from live
 //! game state and wires the probes.
 //!
-//! ## Two surfaces, sized for remote testers (who can't be driven interactively)
+//! ## Surfaces, sized for remote testers (who can't be driven interactively)
 //! - **Always-on snapshots** ([`dump`]): a full report at boot and on a feature panic — unconditional
 //!   `dump` calls. With logging on (friend/diag builds), these land in the shared log automatically —
 //!   no action needed — so "what was the live state when it broke" is already captured.
@@ -12,6 +12,9 @@
 //!   specific tester to flip ("set this, reproduce, send the log"). Today: a **periodic snapshot** and
 //!   an **event-flag scanner** — the reusable "which flag flips when I do X in-game" finder (e.g. the
 //!   death-debuff cure flag, by resting at a grace).
+//! - **Live panel feed** ([`debug_panel_feature`]): the same [`build_report`] published (not logged) to
+//!   the overlay's bottom-left debug panel each ~10 Hz while it's shown, via [`crate::debug_panel`]. So
+//!   the report model drives the log *and* a live HUD; the only thing that differs is the sink.
 
 use eldenring::cs::{CSEventFlagMan, CSSessionManager};
 use unseamless_core::config::Config;
@@ -62,9 +65,9 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     let feat = r.section("features");
     feat.field("in_gameplay", in_gameplay);
     match features {
-        // Re-entrant call (a dump from inside a tick) couldn't read the list — note it, don't fake it.
+        // Before registration completes (earliest boot) the lock-free registry isn't set yet.
         None => {
-            feat.field("status", "unavailable (snapshot taken mid-tick; APP lock held)");
+            feat.field("status", "not registered yet (pre-init)");
         }
         Some(list) if list.is_empty() => {
             feat.field("status", "not registered yet");
@@ -76,15 +79,11 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         }
     }
 
-    // Per-player scaling the (host-tested) core would produce for the current party size — the same
-    // multipliers the observer logs, surfaced here so the boot/panic/periodic dumps and the live debug
-    // panel show them too. ASCII `x` (not the observer's `×`) so the panel's printable-ASCII menu font
-    // renders it. The math saturates for any count, so we only guard the usize->u32 narrowing + the
-    // `.max(1)` (a 0-player pre-session count would otherwise scale by the empty-party case).
-    let count = u32::try_from(party).unwrap_or(u32::MAX).max(1);
-    let scaling = crate::state::with(|c| c.scaling);
-    let enemy = scaling.enemy_multipliers(count);
-    let boss = scaling.boss_multipliers(count);
+    // Per-player scaling the (host-tested) core would produce for the current party size, via the
+    // shared `Scaling::party_multipliers` (the same derivation the observer logs), surfaced here so the
+    // boot/panic/periodic dumps and the live debug panel show them too. ASCII `x` (not the observer's
+    // `×`) so the panel's printable-ASCII menu font renders it.
+    let (count, enemy, boss) = crate::state::with(|c| c.scaling).party_multipliers(party);
     r.section("scaling")
         .field("party_size", count)
         .field("enemy", format!("hp x{:.2} dmg x{:.2} pos x{:.2}", enemy.health, enemy.damage, enemy.posture))
@@ -121,13 +120,12 @@ pub fn debug_panel_feature() -> Box<dyn Feature> {
 }
 
 /// Publishes a live [`DiagnosticReport`] snapshot for the overlay's debug panel — but only while the
-/// panel is shown ([`crate::debug::panel_visible`]). Throttled to ~10 Hz: the panel is for reading,
+/// panel is shown ([`crate::debug_panel::visible`]). Throttled to ~10 Hz: the panel is for reading,
 /// and 60 Hz churn would flicker the fast fields and waste allocations. Reuses [`build_report`] so the
 /// panel is a live view of the same diagnostic block the log dumps produce; a `runtime` (frame/fps)
 /// section is appended here since the per-tick frame/delta aren't available to `build_report` itself.
-///
-/// Note: like the periodic snapshot probe, this ticks while the `APP` lock is held, so the report's
-/// per-feature status reads "unavailable (mid-tick)" — every other section is fully live.
+/// Every section is live, including per-feature health — `feature_status` reads the lock-free
+/// `FEATURES` registry, not the (tick-held) `APP` mutex, so it stays readable from inside this tick.
 struct DebugPanelProbe {
     throttle: FrameThrottle,
 }
@@ -149,14 +147,14 @@ impl Feature for DebugPanelProbe {
     fn on_frame(&mut self, tick: Tick) {
         // Off costs one atomic load: do nothing unless the overlay says the panel is shown. The
         // throttle only advances on visible frames, so its period is in shown-frames (which is fine).
-        if !crate::debug::panel_visible() || !self.throttle.tick() {
+        if !crate::debug_panel::visible() || !self.throttle.tick() {
             return;
         }
         let mut report = build_report("debug");
         // fps from this tick's delta; guard the divide (delta is 0 on the very first frame).
         let fps = if tick.delta > 0.0 { 1.0 / tick.delta } else { 0.0 };
         report.section("runtime").field("frame", tick.frame).field("fps", format!("{fps:.0}"));
-        crate::debug::publish(report);
+        crate::debug_panel::publish(report);
     }
 }
 

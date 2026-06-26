@@ -149,6 +149,12 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
   ignores SIGTERM, so this is reliable — don't add your own `pkill -9`).
 - `rig.sh cycle [apply-opts]` — apply → launch → wait for the install/heartbeat lines. The solo
   smoke test in one shot.
+- `rig.sh seed-save [src-ext]` — copy a real save into the rig's isolated test extension (default
+  `co2` → the configured `file_extension`, e.g. `uco`) so you can test on a real character. Backs up
+  the existing test save first; never touches the source or the vanilla `.sl2`; game must be closed.
+  **Not a per-run step** — the test save already on disk is usually fine, so only run this on the
+  *initial* apply on a fresh rig, or when you deliberately want to reset/refresh the test character.
+  Day-to-day `apply`/`launch`/`cycle` leave it alone.
 - `rig.sh restore` — roll back to the original stack (explicit).
 
 The seed config (`scripts/rig/seed-config.toml`) sets `[debug] enabled = true` so the run captures

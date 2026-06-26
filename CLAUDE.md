@@ -100,6 +100,19 @@ larger holistic chunks review better than a trickle of fragments, so build the w
 first, then ultracheck the lot. (Unlike the global stacking workflow, we ship one chunk per commit
 to `main`, so the ultracheck happens per-chunk, not per-PR.)
 
+**Concurrent sessions.** There are often other Claude sessions building in this repo at the same
+time. Michael tries to scope each session to independent work so they don't collide, so by default
+stay in your lane. But if you *do* hit a conflict — uncommitted changes you didn't make, a dirty
+working tree, a file another session is clearly mid-edit on — **preserve their work, don't clobber
+it.** Don't `git checkout`/`stash`/reset away changes you didn't make or blindly overwrite a file
+that's diverged from what you expected. Integrate alongside them, keep both sets of changes, and if
+the two genuinely conflict, stop and surface it rather than picking a winner. Work together
+gracefully.
+
+This is *not* a rule against committing other sessions' changes — a commit sweeping in unrelated
+in-progress work from another session is fine, Michael doesn't mind. "Preserve their work" means
+don't *destroy* it (reset/stash/overwrite); it doesn't mean fence it out of your commit.
+
 ## Docs & naming
 
 - The project name is always **`unseamless-coop`** — lowercase, hyphenated. Never title-case or

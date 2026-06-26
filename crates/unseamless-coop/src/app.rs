@@ -5,6 +5,7 @@
 //! exactly one feature; since tasks run on the game's main thread the lock is effectively
 //! uncontended (it just satisfies the `Fn`/`'static` bounds the scheduler requires).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use eldenring::fd4::FD4TaskData;
 use fromsoftware_shared::SharedTaskImpExt;
 
 use crate::feature::{Feature, Tick};
+use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
@@ -32,12 +34,24 @@ struct App {
     features: Vec<Box<dyn Feature>>,
     /// Per-feature tick counters (index-aligned with `features`).
     frames: Vec<u64>,
-    /// Per-feature kill switch (index-aligned): set when a feature's `on_frame` panics, so it
-    /// isn't re-ticked on possibly-torn internal state every subsequent frame.
-    disabled: Vec<bool>,
 }
 
 static APP: OnceLock<Mutex<App>> = OnceLock::new();
+
+/// One registered feature's stable identity + live health, kept in [`FEATURES`] **outside** the `APP`
+/// mutex.
+struct FeatureSlot {
+    name: &'static str,
+    /// Set when this feature's `on_frame` panics; it's then skipped on every later frame.
+    disabled: AtomicBool,
+}
+
+/// Lock-free registry of every feature's identity + disabled state, index-aligned with `App.features`.
+/// Deliberately separate from [`APP`] so reads never need that (tick-held) lock: [`tick`] checks it to
+/// skip a panicked feature, [`disable_feature`] sets it, and [`feature_status`] reads it without
+/// contending the tick lock. That decoupling is what keeps the live debug panel's `features` section
+/// readable instead of perpetually "unavailable" when its publisher runs mid-tick.
+static FEATURES: OnceLock<Vec<FeatureSlot>> = OnceLock::new();
 
 /// Runs on the init thread spawned from `DllMain` (off the loader lock, off the main thread —
 /// [`CSTaskImp::wait_for_instance`] blocks on main-thread init). Config load and logging come
@@ -59,7 +73,7 @@ pub fn install() {
     // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
     crate::actionq::init();
     // Snapshot cell the debug-panel publisher posts into and the overlay reads. Before any tick.
-    crate::debug::init();
+    crate::debug_panel::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
         // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
@@ -152,16 +166,17 @@ pub fn install() {
         Box::new(PlayStateProbe::new()),
         // Stacking death penalty (reads HP after PostPhysics). Reads live config; no-op when off.
         Box::new(DeathDebuffsFeature::new()),
+        // Clears crit-invuln so co-op partners can damage during crits (PostPhysics). No-op when off.
+        Box::new(CritCoop::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
         // Feeds the overlay's live debug panel (a published snapshot), but only while that panel is
-        // shown — otherwise a single atomic load per frame. Near-free when off; see crate::debug.
+        // shown — otherwise a single atomic load per frame. Near-free when off; see crate::debug_panel.
         crate::diag::debug_panel_feature(),
     ];
     // Append any requestable diagnostic probes enabled in `[debug.probes]` (empty in normal play).
     features.extend(crate::diag::probe_features(&config));
     let frames = vec![0u64; features.len()];
-    let disabled = vec![false; features.len()];
 
     // Snapshot (index, name, phase) before moving the app into the global.
     let registrations: Vec<(usize, &'static str, _)> = features
@@ -170,7 +185,13 @@ pub fn install() {
         .map(|(i, f)| (i, f.name(), f.phase()))
         .collect();
 
-    if APP.set(Mutex::new(App { features, frames, disabled })).is_err() {
+    // Publish the lock-free feature registry (identity + health) before any task can fire, so both
+    // `tick`'s skip check and the diagnostic snapshot read it without the `APP` lock.
+    let _ = FEATURES.set(
+        registrations.iter().map(|&(_, name, _)| FeatureSlot { name, disabled: AtomicBool::new(false) }).collect(),
+    );
+
+    if APP.set(Mutex::new(App { features, frames })).is_err() {
         log::error!("install() called twice; ignoring");
         return;
     }
@@ -188,9 +209,9 @@ pub fn install() {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data))).is_err()
                 {
                     disable_feature(index);
-                    // Capture the live state around the panic into the (shared) log. Called here, not
-                    // inside disable_feature, so the tick's APP lock has already unwound/released —
-                    // diag::feature_status re-locks, which would deadlock if we still held it.
+                    // Capture the live state around the panic into the (shared) log. Safe here: the
+                    // panicked tick's APP lock has already unwound, and the dump path (feature_status,
+                    // disable_feature) is now lock-free, so there's no re-lock to deadlock on.
                     crate::diag::dump("feature-panic");
                 }
             },
@@ -320,7 +341,9 @@ fn tick(index: usize, data: &FD4TaskData) {
     // re-locking is memory-safe. The *feature* that panicked may have torn its own invariants, but
     // we never re-tick it — `disable_feature` flags it below.
     let mut app = app.lock().unwrap_or_else(|poison| poison.into_inner());
-    if app.disabled.get(index).copied().unwrap_or(true) {
+    // Skip a feature disabled by a prior panic (read lock-free from FEATURES). An out-of-range or
+    // pre-registration index reads as disabled, so we never tick something we can't account for.
+    if feature_disabled(index) {
         return;
     }
     let Some(frame) = app.frames.get_mut(index).map(|f| {
@@ -335,29 +358,27 @@ fn tick(index: usize, data: &FD4TaskData) {
     }
 }
 
+/// Whether the feature at `index` has been disabled by a prior panic. Lock-free (reads [`FEATURES`]),
+/// so it's safe to call from inside a feature tick. An out-of-range or pre-registration index reads as
+/// disabled.
+fn feature_disabled(index: usize) -> bool {
+    FEATURES.get().and_then(|f| f.get(index)).map(|s| s.disabled.load(Ordering::Relaxed)).unwrap_or(true)
+}
+
 /// Snapshot of each registered feature's name and whether it's been disabled (panicked), for the
-/// diagnostic report. `None` if the app isn't up yet, or if the `APP` lock is already held — which
-/// happens when a dump runs *inside* a feature tick (the periodic snapshot probe). We `try_lock`
-/// rather than block precisely so that re-entrant case degrades to "unavailable" instead of
-/// deadlocking the non-reentrant mutex on the game thread.
+/// diagnostic report + live debug panel. Reads the lock-free [`FEATURES`] registry, so — unlike a read
+/// of the `APP` mutex — it stays available even when called from *inside* a feature tick (the periodic
+/// snapshot + debug-panel publishers), which is what keeps the panel's `features` section live. `None`
+/// only before registration completes (earliest boot).
 pub fn feature_status() -> Option<Vec<(&'static str, bool)>> {
-    let app = APP.get()?;
-    let app = match app.try_lock() {
-        Ok(guard) => guard,
-        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return None, // re-entrant: called from within a tick
-    };
-    Some(app.features.iter().zip(&app.disabled).map(|(f, &d)| (f.name(), d)).collect())
+    FEATURES.get().map(|f| f.iter().map(|s| (s.name, s.disabled.load(Ordering::Relaxed))).collect())
 }
 
 /// Mark a feature as permanently disabled after its `on_frame` panicked (the panic hook already
-/// logged the backtrace). Keeps one bad feature from wedging or spamming the rest.
+/// logged the backtrace). Keeps one bad feature from wedging or spamming the rest. Lock-free: sets the
+/// [`FEATURES`] flag without touching `APP`.
 fn disable_feature(index: usize) {
-    let Some(app) = APP.get() else { return };
-    let mut app = app.lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some(slot) = app.disabled.get_mut(index) {
-        *slot = true;
-    }
-    let name = app.features.get(index).map(|f| f.name()).unwrap_or("?");
-    log::error!("feature '{name}' (index {index}) panicked; disabled for the rest of the session");
+    let Some(slot) = FEATURES.get().and_then(|f| f.get(index)) else { return };
+    slot.disabled.store(true, Ordering::Relaxed);
+    log::error!("feature '{}' (index {index}) panicked; disabled for the rest of the session", slot.name);
 }

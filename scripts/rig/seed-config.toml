@@ -10,7 +10,7 @@
 # shorter than 5 chars at startup, so it must be set to *something* valid.
 
 [gameplay]
-allow_invaders = false
+crit_coop = true
 death_debuffs = true
 allow_summons = true
 roam_anywhere = true
