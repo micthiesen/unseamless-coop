@@ -35,8 +35,6 @@ Shipped to `main`, rig-verified where applicable:
   co-op core below. See [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
 - **Overhead nameplates** — screen-space text from projected peer world coords (`cs/camera.rs`
   projection is charted); the projection is solo-prototypable.
-- **Native `display_status_message` banner fallback** — the charted RVA, as a degraded path if the
-  overlay ever fails to init.
 
 ### 2-player-gated (the co-op core + everything riding on it)
 
@@ -58,5 +56,10 @@ Shipped to `main`, rig-verified where applicable:
 - **Offline title-screen popup suppression + FMG watermark** — Arxan-walled / superseded by the
   overlay watermark. RE record kept in [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md); do not bump
   the SDK pin for FMG access.
+- **Native `display_status_message` banner fallback** — a degraded notification path via the charted
+  `CSMenuManImp::display_status_message` RVA, for when the overlay fails to init. Dropped: not worth
+  the added surface for a path the overlay already covers. The RE record (the call is charted/callable)
+  stays in [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) for reference; we just won't ship it as a
+  fallback.
 
 [`/reverse-engineer`]: ../.claude/skills/reverse-engineer

@@ -142,9 +142,11 @@ Ranked by how much we'd want them (we almost certainly stay with hudhook; these 
    the game's own big center banners via `STATUS_MESSAGE_*` constants. It needs **no renderer at all** —
    it's the game drawing for us. It can't render an interactive menu or styled toasts, but it's the
    natural backend for *simple* notifications (and is discussed in
-   [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md)). **Recommended as a complement regardless:** ship
-   it first for plain "connected / version mismatch" messages so we have working user-facing feedback
-   *before* any overlay exists, and keep it as the degraded path if the overlay can't init on the rig.
+   [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md)). **Decided won't-do (2026-06-26):** we will *not*
+   ship this as a degraded notification fallback — it's not worth the added surface for a path the
+   hudhook overlay already covers (see [ROADMAP.md](ROADMAP.md) > Won't-do). This entry stays as the
+   RE record that the call is charted/callable, kept only as a genuine last-ditch escape hatch if the
+   DX12 hook itself ever proves unshippable on the rig — not as a planned complement.
 2. **`CSEzDraw` (SDK, `cs/rend_man.rs`) — world-space debug primitives.** `RendMan.debug_ez_draw`
    exposes `draw_line` / `draw_sphere` / `draw_capsule` / etc. via charted RVAs. This is a **3D
    world-space** debug drawer (lines/shapes in the scene), **not a 2D screen-space UI layer** — wrong
@@ -225,9 +227,10 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
    closing it returns control. (ER practice tool uses a hold-`RShift` reveal; pick our own.)
 4. **Render `notifications.rs`.** Wire the present-detour render loop to read shared `Notifications` (via
    `try_lock`) and draw `toasts()` as a corner stack + `banners()` as a top strip, colored by
-   `Severity`. Drive `tick(delta)` from a frame task, not the render loop. **In parallel / first, ship
-   `CSMenuManImp::display_status_message` for plain messages** so we have user feedback even before this
-   step lands.
+   `Severity`. Drive `tick(delta)` from a frame task, not the render loop. (Originally this step also
+   planned a `CSMenuManImp::display_status_message` complement for plain messages; that native-banner
+   path is now a **won't-do** — see [ROADMAP.md](ROADMAP.md) > Won't-do — so the overlay is the sole
+   notification surface.)
 5. **Render `menu.rs`.** Draw `Menu::rows(cfg, ctx)` as a list (selected row highlighted, disabled rows
    dimmed, settings showing `value`), and forward the toggle/nav keys to
    `select_next`/`select_prev`/`activate`/`adjust`. The model already returns `MenuOutcome`; the cdylib
@@ -246,7 +249,8 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
   hudhook + imgui aligns us with the SDK's own tooling rather than introducing a new dependency family.
 - **`CSMenuManImp::display_status_message(i32)` is charted/callable** (`cs/menu_man.rs`) — the native
   banner path, no overlay required. RVA-backed, so it assumes the rig's game version matches the SDK's
-  RVA bundle (ER 2.6.2.0 WW / 2.6.2.1 JP); confirm before relying on it.
+  RVA bundle (ER 2.6.2.0 WW / 2.6.2.1 JP); confirm before relying on it. (We decided **not** to ship it
+  as a notification fallback — see [ROADMAP.md](ROADMAP.md) > Won't-do; this is RE record only.)
 
 ## Status & Next Steps
 
@@ -258,8 +262,10 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
       window is open we return `MessageFilter::InputAll` (game ignores movement/attack); closed, we
       return `empty()`. hudhook always feeds imgui *before* consulting the filter, so backtick-to-close
       still registers — the keyboard-leak gotcha doesn't apply. Rig-verify the actual in-game feel.
-- [ ] Ship `CSMenuManImp::display_status_message` for plain notifications *first* (works with zero
-      overlay), as both an early win and the degraded fallback.
+- [~] **Won't-do:** ship `CSMenuManImp::display_status_message` as a degraded notification fallback.
+      Dropped 2026-06-26 — not worth the surface for a path the overlay already covers
+      ([ROADMAP.md](ROADMAP.md) > Won't-do). The call stays charted/callable (above) as a last-ditch
+      escape hatch only.
 - [x] Wire `notifications.rs` into the render loop (shared state via `try_lock`; `tick` on a frame task).
 - [x] Wire `menu.rs` (actions) into the render loop + input (nav/activate → `MenuOutcome` → `actionq` →
       game thread). Settings are shown read-only (synced/local); live editing deferred. Plus a live Log
