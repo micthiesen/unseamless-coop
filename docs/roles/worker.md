@@ -27,6 +27,8 @@ your workspace path, and your branch `worker/<name>`.
   reading a live game log, no in-game validation. There is one game install and one rig, serialized
   through the orchestrator.
 - **Never spawn or remove workers**, and never touch another worker's workspace.
+- **Never run `/ultracheck`.** The orchestrator runs it once, per lane, when integrating your branch
+  to `main` (against the final merged tree). You do a *lighter* self-check instead — see below.
 
 ## When You Need Something Serial
 
@@ -49,9 +51,16 @@ cleaner the recipe, the sooner your values come back.
 
 ## When You Finish Or Get Blocked
 
-Commit your branch, then message the orchestrator: done (with a one-line summary) or blocked (with
+**Before you report done, self-check your lane.** Spawn **one** fresh-context reviewer (a single
+`check` agent) over your branch diff and fix what it finds. Keep it light and fast — a first-pass
+filter while you still have full context, **not** a full `/ultracheck` swarm (the orchestrator runs
+that at integration). Note in your done message that you self-checked.
+
+Then commit your branch and message the orchestrator: done (with a one-line summary) or blocked (with
 why). Do **not** tear yourself down; the orchestrator manages your lifecycle and integrates your
 branch.
 
-Everything else in `CLAUDE.md` still applies: the safety invariants, the logging rule, clean-room
-hygiene, and the build/test commands. Stay in your lane and preserve other sessions' work.
+Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
+hygiene, the build/test commands — **except** its "ultracheck after each holistic chunk" rule: in the
+fleet that happens once, at the orchestrator, per lane (see above). Stay in your lane and preserve
+other sessions' work.

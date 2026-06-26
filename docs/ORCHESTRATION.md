@@ -107,6 +107,22 @@ The only path code reaches `main`:
 This is why "workers never commit" is really "workers never commit **to `main`**": git's 3-way
 merge and `rerere` need commits to operate on, so workers must commit to their own branch.
 
+### Ultracheck happens here, per lane
+
+`CLAUDE.md`'s "ultracheck after each holistic chunk" maps onto the fleet as **one ultracheck per
+lane, run by the orchestrator at integration** — each lane *is* the holistic chunk and lands as its
+own squashed commit. **Workers do not run `/ultracheck`** (a full swarm nested in a rift workspace is
+wasteful and reviews a stale base); they run a *lighter* one-shot `check` self-review before
+reporting done (see [roles/worker.md](roles/worker.md)). The orchestrator then:
+
+- Reviews each lane **rebased onto current `main`** (so it sees interactions with already-landed
+  lanes), not the worker's original fork point.
+- Scales depth to the lane: a full `/ultracheck` swarm for logic-heavy lanes; a single `check` agent
+  is enough for trivial or already-rig-verified ones. Apply surviving findings before the commit.
+- After the whole wave lands, runs **one final seam pass** focused on the cross-lane integration
+  points (shared files like `diag.rs` / `features/mod.rs` / `config.rs`, and any refactor that meets
+  another lane's additions) — the class of bug per-lane review structurally can't catch.
+
 ## The Rig Is Single and Orchestrator-Owned
 
 A worker that needs a rig run, an RE probe, or in-game validation **asks the orchestrator** by
