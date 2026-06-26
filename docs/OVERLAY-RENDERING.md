@@ -58,8 +58,8 @@ What it is, from its own docs:
 
 `hudhook` 0.9.1 (`default-features = false, features = ["dx12"]`) **cross-compiles cleanly to
 `x86_64-pc-windows-gnu` via mingw** — confirmed in a throwaway cdylib on the Linux rig, in both the
-dev profile and the shipping profile (`panic = "abort"`, `lto = true`, `opt-level = "z"`, `strip`),
-producing a valid stripped PE32+ DLL. It resolves `windows` **0.62.2**, which matches the cdylib's
+dev profile and the shipping profile (`lto = true`, `opt-level = "z"`, `strip`; shipping is now
+`panic = "unwind"` — see docs/FFI-UNWIND-AUDIT.md), producing a valid stripped PE32+ DLL. It resolves `windows` **0.62.2**, which matches the cdylib's
 existing `windows = "0.62"` pin (no version split). So the overlay is buildable on our normal
 Mac/Linux cross-toolchain — no native-Windows build host needed.
 

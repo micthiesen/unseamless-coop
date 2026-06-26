@@ -11,8 +11,15 @@ license = "MIT"
 log = "0.4"
 thiserror = "2"
 
+# `panic = "unwind"` (not "abort"): the per-feature `catch_unwind` firewall in app.rs — "a feature
+# panics -> it's disabled + toasted, the game keeps running" — is a NO-OP under abort (a panic aborts
+# the whole game before the catch). Shipping with unwind makes that graceful-degrade real in the
+# player's build, the same reason `diag` uses it. Safe to flip only because every game->us FFI entry
+# point is firewalled so a panic can't unwind across an `extern` boundary into vkd3d/the game (UB);
+# that audit is docs/FFI-UNWIND-AUDIT.md. The `opt-level = "z"` + LTO keep the unwind tables' size
+# cost negligible.
 [profile.release]
-panic = "abort"
+panic = "unwind"
 opt-level = "z"
 codegen-units = 1
 lto = true
@@ -23,11 +30,12 @@ strip = true
 # when chasing a crash; the shipping build stays lean (stripped). Not for release.
 [profile.diag]
 inherits = "release"
-# Override the inherited `panic = "abort"`: the diag build is for chasing rig crashes, and the
-# per-feature `catch_unwind` firewall in app.rs (the "a feature panics -> it's disabled, the game
-# keeps running" guarantee) is a NO-OP under abort. With unwind, a panicking feature/probe is caught
-# and disabled instead of aborting the whole game — so a batched multi-probe rig run survives one bad
-# probe. (Found on the first rig run: a scaling-probe panic aborted the game under the inherited abort.)
+# Stated explicitly (release is now `panic = "unwind"` too, so this is belt-and-suspenders rather than
+# an override): the diag build chases rig crashes, and the per-feature `catch_unwind` firewall in
+# app.rs (the "a feature panics -> it's disabled, the game keeps running" guarantee) is a NO-OP under
+# abort. With unwind, a panicking feature/probe is caught and disabled instead of aborting the whole
+# game — so a batched multi-probe rig run survives one bad probe. (Found on the first rig run: a
+# scaling-probe panic aborted the game under abort, before release was flipped to unwind.)
 panic = "unwind"
 opt-level = 1
 debug = true

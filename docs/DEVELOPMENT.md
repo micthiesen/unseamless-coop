@@ -119,8 +119,9 @@ the pattern), then map the located region/offset/bit to a typed SDK field.
 File logger via `simplelog`/`log`, set up by `logger::init` on the init thread. The DLL runs
 inside the game's (Proton) working directory (normally `ELDEN RING/Game/`), so the run log lands
 under `unseamless-coop/logs/`; the startup line records the actual cwd (Proton's can differ) and a
-panic hook records panics (with `panic = "abort"` the process still exits, but the trace and a
-backtrace survive). The self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
+panic hook records panics (the shipped profile is now `panic = "unwind"`, so a feature panic is caught
+by the per-task firewall — the game keeps running — and the trace + backtrace survive; see
+docs/FFI-UNWIND-AUDIT.md). The self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
 Verbosity is `[debug]` config, **off by default** — hot-path logs must use `log::debug!`/`trace!`.
 
 ## Run + verify loop (Linux + Proton rig)

@@ -266,7 +266,31 @@ unsafe fn install_hook<T>(addr: usize, detour: T, what: &str) -> Result<(), Hook
 where
     T: Fn(*mut Registers, usize) -> usize + Send + Sync + 'static,
 {
-    let hook = unsafe { hook_closure_retn(addr, detour, CallbackOption::None, HookFlags::empty()) }
+    // FFI firewall: ilhook invokes this detour from an `extern "win64"` trampoline with no catch of
+    // its own, so a panic would unwind across that boundary into the game's input thread — UB under
+    // `panic = "unwind"` (now every shipped profile; see docs/FFI-UNWIND-AUDIT.md). Wrap every detour
+    // so a panic is contained: log it once (a repeat at input-poll rate would flood) and return 0.
+    // The detour bodies are allocation-free with no `unwrap`/index/`panic!`, and the only fallible-
+    // looking step (calling `original`) runs before any of our work — so this is soundness insurance
+    // for an effectively-unreachable path. 0 reads as DI_OK / ERROR_SUCCESS / FALSE, all benign here.
+    let what_log = what.to_string();
+    let logged = AtomicBool::new(false);
+    let guarded = move |regs: *mut Registers, original: usize| -> usize {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detour(regs, original))) {
+            Ok(v) => v,
+            Err(_) => {
+                if !logged.swap(true, Ordering::Relaxed) {
+                    // Contained log: we're already in the recovery arm, so a logging panic here would
+                    // unwind across ilhook's trampoline — the boundary we just caught for.
+                    crate::logger::error_contained(format_args!(
+                        "input: '{what_log}' detour panicked; suppressed at the FFI boundary (returning 0)"
+                    ));
+                }
+                0
+            }
+        }
+    };
+    let hook = unsafe { hook_closure_retn(addr, guarded, CallbackOption::None, HookFlags::empty()) }
         .map_err(|e| HookError::Install { what: what.to_string(), detail: format!("{e:?}") })?;
     std::mem::forget(hook);
     Ok(())

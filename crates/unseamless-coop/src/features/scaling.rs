@@ -85,11 +85,13 @@ fn rows_defined() -> bool {
 /// `true` when param `P`'s holder is wired (its res cap exists). **Load guard for every
 /// `SoloParamRepository` access.** The SDK's `get`/`get_mut`/`rows` funnel through `get_param_file`,
 /// which `.expect()`s the holder's res cap and so **panics** before regulation params finish loading
-/// (e.g. at the title screen). A panic inside a task aborts the whole game under the shipped
-/// `panic = "abort"` profiles (the per-feature `catch_unwind` firewall only catches under
-/// `panic = "unwind"`), so we must never reach that path: check the holder is populated first and skip
-/// the frame otherwise. The check itself is panic-free (`solo_param_holders.get` / `get_res_cap` are
-/// fully fallible). `P::INDEX` is the [`SoloParam`] repository index (77 for MultiPlayCorrectionParam).
+/// (e.g. at the title screen). The shipped profile is now `panic = "unwind"`, so the per-feature
+/// `catch_unwind` firewall would *catch* such a panic — but it would also disable scaling for the rest
+/// of the session, so we still must never reach that path: a caught panic means no scaling at all,
+/// whereas this guard just skips the one frame and resumes once params load. Check the holder is
+/// populated first and skip the frame otherwise. The check itself is panic-free (`solo_param_holders.get`
+/// / `get_res_cap` are fully fallible). `P::INDEX` is the [`SoloParam`] repository index (77 for
+/// MultiPlayCorrectionParam).
 fn param_loaded<P: SoloParam>(repo: &SoloParamRepository) -> bool {
     repo.solo_param_holders.get(P::INDEX as usize).and_then(|h| h.get_res_cap(0)).is_some()
 }

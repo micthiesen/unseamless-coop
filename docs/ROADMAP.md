@@ -18,18 +18,17 @@ Shipped to `main`, rig-verified where applicable:
   rows, ER-voiced toasts. See [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md).
 - **Overlay** (hudhook DX12 + imgui): notifications, session-action menu, settings/log tabs,
   column-major debug panel with live **vitals + status** readout. See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
-- Host hardening (narrowed live-config writes, host-tested queues), `diag` profile is `panic=unwind`
-  so the per-feature firewall actually catches, cdylib hygiene (typed `HookError`, FFI annotations).
+- Host hardening (narrowed live-config writes, host-tested queues), cdylib hygiene (typed
+  `HookError`, FFI annotations).
+- **Shipping `panic=unwind` + a "feature disabled" toast.** Every game→us FFI entry point is
+  firewalled with `catch_unwind` ([FFI-UNWIND-AUDIT.md](FFI-UNWIND-AUDIT.md)), so release/shipping now
+  builds with `panic=unwind` like `diag` — a feature panic is caught, disabled, and toasted (plain
+  voice) instead of crashing the player's game.
 
 ## Wave 2 — next (not started)
 
 ### Solo / host-doable (no 2nd player needed)
 
-- **Shipping `panic=unwind` + a "feature disabled" toast.** `diag` is already unwind; flip
-  release/shipping too so a feature panic degrades instead of crashing the player's game. **Gated on an
-  FFI-unwind-safety audit** of every game→us entry point (overlay present-hook, `DllMain`, the
-  input/save/patch hooks) — an unwind into vkd3d/the game is UB; the task-tick path is already wrapped.
-  Then add the notifications toast on the disable path and update CLAUDE.md's firewall claim.
 - **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
   `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).

@@ -629,36 +629,71 @@ impl Overlay {
 
 impl ImguiRenderLoop for Overlay {
     fn initialize<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
-        // Called once before hudhook bakes the font atlas, so fonts added here get rasterized.
-        let fonts = ctx.fonts();
-        // Keep the compact default (ProggyClean) as the atlas default so the passive toasts stay small;
-        // our crisp subset is an extra font pushed only for the utility window.
-        // Index 0 stays the compact 13px default for the passive toasts. The menu font is Spleen 8x16
-        // baked at its native 16px with oversampling off + pixel snap, so it stays crisp.
-        fonts.add_font(&[FontSource::DefaultFontData { config: None }]);
-        let id = fonts.add_font(&[FontSource::TtfData {
-            data: MENU_FONT,
-            size_pixels: MENU_FONT_SIZE,
-            config: Some(FontConfig {
-                oversample_h: 1,
-                oversample_v: 1,
-                pixel_snap_h: true,
-                ..FontConfig::default()
-            }),
-        }]);
-        self.font = Some(SyncFontId(id));
+        // FFI firewall (see `render`): hudhook calls this across its `extern "system"` present-hook
+        // boundary with no catch of its own, so a panic here would unwind into vkd3d/the game — UB
+        // under `panic = "unwind"`. Build the fonts inside the catch and only commit on success;
+        // a panic disables the overlay for the session rather than risking the boundary.
+        let baked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Called once before hudhook bakes the font atlas, so fonts added here get rasterized.
+            let fonts = ctx.fonts();
+            // Keep the compact default (ProggyClean) as the atlas default so the passive toasts stay
+            // small; our crisp subset is an extra font pushed only for the utility window. Index 0
+            // stays the compact 13px default; the menu font is Spleen 8x16 baked at its native 16px
+            // with oversampling off + pixel snap, so it stays crisp.
+            fonts.add_font(&[FontSource::DefaultFontData { config: None }]);
+            fonts.add_font(&[FontSource::TtfData {
+                data: MENU_FONT,
+                size_pixels: MENU_FONT_SIZE,
+                config: Some(FontConfig {
+                    oversample_h: 1,
+                    oversample_v: 1,
+                    pixel_snap_h: true,
+                    ..FontConfig::default()
+                }),
+            }])
+        }));
+        match baked {
+            Ok(id) => self.font = Some(SyncFontId(id)),
+            Err(_) => {
+                self.disabled = true;
+                // Contained log (see crate::logger::error_contained): the recovery arm runs in the same
+                // present-hook frame, so a logging panic would unwind across hudhook's FFI boundary.
+                crate::logger::error_contained(format_args!(
+                    "overlay: initialize panicked; overlay disabled for the rest of the session"
+                ));
+            }
+        }
     }
 
     fn before_render<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
         if self.disabled {
             return; // a disabled overlay is fully inert (mirrors `render`'s guard)
         }
-        // Keep imgui's own arrow cursor off — we draw our own marker (`draw_cursor_marker`) at the mouse
-        // hotspot instead, which complements ER's cursor rather than clashing with a second arrow.
-        ctx.io_mut().mouse_draw_cursor = false;
+        // FFI firewall (see `render`): also called across hudhook's present-hook boundary. The body
+        // can't realistically panic (one bool write), but catch it for the same soundness reason.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Keep imgui's own arrow cursor off — we draw our own marker (`draw_cursor_marker`) at the
+            // mouse hotspot instead, which complements ER's cursor rather than clashing with a second.
+            ctx.io_mut().mouse_draw_cursor = false;
+        }))
+        .is_err()
+        {
+            self.disabled = true;
+            crate::logger::error_contained(format_args!(
+                "overlay: before_render panicked; overlay disabled for the rest of the session"
+            ));
+        }
     }
 
     fn message_filter(&self, _io: &Io) -> MessageFilter {
+        if self.disabled {
+            return MessageFilter::empty(); // inert when disabled (mirrors `render`/`before_render`)
+        }
+        // FFI firewall: hudhook samples this in `prepare_render` on the Present thread (the same
+        // `extern "system"` present-hook boundary as `render`), so a panic would unwind across it. It
+        // only loads `self.open` (a bool — can't panic), but catch defensively and default to *not*
+        // filtering (empty) so a panic can never strand window input.
+        //
         // While the utility window is open, swallow keyboard/mouse/raw input so the game doesn't also
         // act on it while we navigate. hudhook feeds every message to imgui *before* consulting this, so
         // backtick-to-close still registers. Two caveats, both to confirm on the rig: (1) the filter is
@@ -666,11 +701,10 @@ impl ImguiRenderLoop for Overlay {
         // backtick is unbound in ER); (2) this blocks only WndProc input — if the game reads movement
         // out-of-band (DirectInput/XInput/GetAsyncKeyState), `MessageFilter` can't stop it, so verify
         // that movement/attack actually halt with the window open.
-        if self.open {
-            MessageFilter::InputAll
-        } else {
-            MessageFilter::empty()
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if self.open { MessageFilter::InputAll } else { MessageFilter::empty() }
+        }))
+        .unwrap_or_else(|_| MessageFilter::empty())
     }
 
     fn render(&mut self, ui: &mut Ui) {
@@ -678,10 +712,10 @@ impl ImguiRenderLoop for Overlay {
             return;
         }
         // FFI firewall: hudhook calls `render` from its `extern "system"` present hook with no catch of
-        // its own, so a panic here would unwind across that boundary — UB under `panic = "unwind"` (a
-        // bare `cargo build`), abort under the shipped `panic = "abort"`. Mirror app.rs's per-task
-        // catch: on a render panic, disable the overlay for the session (the panic hook already logged
-        // the backtrace) rather than risk the game.
+        // its own, so a panic here would unwind across that boundary into vkd3d/the game — UB, and now
+        // load-bearing in the player's build since every shipped profile is `panic = "unwind"` (see
+        // docs/FFI-UNWIND-AUDIT.md). Mirror app.rs's per-task catch: on a render panic, disable the
+        // overlay for the session (the panic hook already logged the backtrace) rather than risk the game.
         let ui: &Ui = ui;
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.render_inner(ui))).is_err() {
             self.disabled = true;
@@ -690,7 +724,9 @@ impl ImguiRenderLoop for Overlay {
             // it too, or it would keep swallowing all window input for the rest of the session.
             self.open = false;
             crate::input::set_blocked(false);
-            log::error!("overlay: render panicked; overlay disabled for the rest of the session");
+            crate::logger::error_contained(format_args!(
+                "overlay: render panicked; overlay disabled for the rest of the session"
+            ));
         }
     }
 }

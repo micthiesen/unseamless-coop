@@ -194,7 +194,7 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/mods.rs` (load `mods/` DLLs in order) | — | done (FS+LoadLibrary glue; rig-gated) |
 | `launcher` bin (`start_protected_game.exe`) | — | done (rig-gated) |
 | `unseamless-core/` player/world sync model | 2 | planned (the game's job; rig-gated) |
-| `coop/app.rs`, `feature.rs` | — | done |
+| `coop/app.rs`, `feature.rs` | — | done; per-task `catch_unwind` firewall (panicking feature → disabled + plain-voice toast). Shipping builds `panic=unwind`, gated on [FFI-UNWIND-AUDIT.md](FFI-UNWIND-AUDIT.md) |
 | `coop/config.rs` (disk load) | 1 | done |
 | `coop/features/observer.rs` | 2 | done (read-only); logs `session_player_limit_override` |
 | `coop/state.rs` (process-global live `Config`; features read each frame, bridge/menu write) | — | done |

@@ -31,6 +31,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
@@ -91,10 +92,33 @@ pub unsafe fn install(ext: &str) -> Result<(), HookError> {
     // the rig. If intermittent startup crashes ever appear here, the fix is a thread-suspending
     // ThreadCallback around the patch.
     let ext_for_hook = ext.clone();
+    // FFI firewall: ilhook invokes this detour from an `extern "win64"` trampoline (no catch of its
+    // own), so a panic would unwind across that boundary into whatever thread opened the file — UB
+    // under `panic = "unwind"` (every shipped profile now; see docs/FFI-UNWIND-AUDIT.md). Contain it:
+    // log once and return. The detour stages its `rcx` rewrite *before* its one remaining fallible
+    // step (the redirect log), so on a (believed-unreachable) panic the registers are either untouched
+    // (panic before staging → original opens the path as given) or already pointing at the co-op
+    // buffer (panic during the log → original opens the co-op save) — never a half-written redirect,
+    // and the safety-critical isolation is preserved on the reachable branch. Logged loudly so the
+    // rare path is never silent.
+    let logged_panic = AtomicBool::new(false);
     let hook = unsafe {
         hook_closure_jmp_back(
             addr,
-            move |regs: *mut Registers| create_file_detour(regs, &ext_for_hook),
+            move |regs: *mut Registers| {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    create_file_detour(regs, &ext_for_hook)
+                }))
+                .is_err()
+                    && !logged_panic.swap(true, Ordering::Relaxed)
+                {
+                    // Contained log: in the recovery arm, a logging panic would unwind across ilhook's
+                    // trampoline — the boundary we just caught for.
+                    crate::logger::error_contained(format_args!(
+                        "co-op saves: CreateFileW detour panicked; suppressed at the FFI boundary (path left as-is)"
+                    ));
+                }
+            },
             CallbackOption::None,
             HookFlags::empty(),
         )
@@ -139,6 +163,23 @@ unsafe fn create_file_detour(regs: *mut Registers, ext: &str) {
         return;
     };
 
+    // Stage the rewritten path in the thread-local buffer and repoint rcx at it — done **before** the
+    // redirect log below, deliberately. The redirect is the safety-critical effect (open the co-op
+    // save, never the vanilla one), and logging is the one remaining fallible step on this path; under
+    // `panic = "unwind"` a logging panic would unwind out of this detour with rcx already pointing at
+    // the co-op buffer, so we still fail toward isolation rather than the vanilla save. (The FFI
+    // firewall in `install` contains that unwind; this ordering decides *which* file the original
+    // `CreateFileW` then opens if it ever happens.) The buffer is safe from re-entrant clobbering: the
+    // only re-entry source on this thread is the logger, which never opens a *.sl2 path (a re-entrant
+    // call returns at the suffix pre-filter, never reaching here).
+    REWRITE_BUF.with(|buf| {
+        let mut buf = buf.borrow_mut();
+        buf.clear();
+        buf.extend(coop.encode_utf16());
+        buf.push(0); // NUL-terminate for CreateFileW
+        unsafe { (*regs).rcx = buf.as_ptr() as u64 };
+    });
+
     // Announce each distinct redirect once (at info, so it shows even with hot-path logging off), then
     // stay silent on the game's constant reopens of the same save — otherwise one save load logs the
     // same line dozens of times and buries the rest of the diag log. Insert under the lock, then log
@@ -148,19 +189,6 @@ unsafe fn create_file_detour(regs: *mut Registers, ext: &str) {
     if first_time {
         log::info!("co-op saves: redirecting {path} -> {coop}");
     }
-
-    // Stage the rewritten path in the thread-local buffer and repoint rcx at it. The buffer is safe
-    // from re-entrant clobbering because the only thing in this detour that could re-enter CreateFileW
-    // on this thread is the logging above, and the logger never opens a *.sl2 path (so a re-entrant
-    // call returns at the suffix pre-filter, never reaching this staging block). Staging last — with
-    // no work after — is belt-and-suspenders on top of that invariant.
-    REWRITE_BUF.with(|buf| {
-        let mut buf = buf.borrow_mut();
-        buf.clear();
-        buf.extend(coop.encode_utf16());
-        buf.push(0); // NUL-terminate for CreateFileW
-        unsafe { (*regs).rcx = buf.as_ptr() as u64 };
-    });
 }
 
 /// Scan a wide (UTF-16) C string for its NUL terminator, up to `cap` units. Returns the length in

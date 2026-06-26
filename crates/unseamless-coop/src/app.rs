@@ -280,16 +280,24 @@ fn register_features(cs_task: &'static CSTaskImp, features: Vec<Box<dyn Feature>
         let handle = cs_task.run_recurring(
             move |data: &FD4TaskData| {
                 // FFI firewall: a panic must NEVER unwind across the SDK's `extern "C"` task
-                // boundary — that's UB. Under the shipped `panic = "abort"` profiles a panic
-                // aborts before unwinding (so this is a no-op there), but a default `cargo build`
-                // uses `panic = "unwind"`, and this catch is what keeps that build sound.
+                // boundary — that's UB. Every shipped profile is now `panic = "unwind"` (release
+                // and diag alike, after the FFI-unwind audit — see docs/FFI-UNWIND-AUDIT.md), so
+                // this catch is load-bearing in the player's build, not just a debug aid: a
+                // panicking feature is caught, disabled, and toasted instead of crashing the game.
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(index, data))).is_err()
                 {
-                    disable_feature(index);
-                    // Capture the live state around the panic into the (shared) log. Safe here: the
-                    // panicked tick's APP lock has already unwound, and the dump path (feature_status,
-                    // disable_feature) is now lock-free, so there's no re-lock to deadlock on.
-                    crate::diag::dump("feature-panic");
+                    // The recovery runs in this same SDK-invoked task closure, so it must ALSO never
+                    // unwind across the `extern "C"` boundary. Both steps are fallible under unwind:
+                    // `disable_feature` logs + toasts (locks), and `diag::dump` reads live game
+                    // singletons that — right after a feature panic, with state most likely torn —
+                    // can themselves panic on an unwired pointer. Wrap the whole branch in its own
+                    // firewall so a second panic is contained, not propagated. (Lock-safe: the
+                    // panicked tick's APP lock already unwound, and the dump/notify paths use
+                    // independent, poison-recovering locks, so there's no re-lock to deadlock on.)
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        disable_feature(index);
+                        crate::diag::dump("feature-panic");
+                    }));
                 }
             },
             phase,
@@ -452,4 +460,16 @@ fn disable_feature(index: usize) {
     let Some(slot) = FEATURES.get().and_then(|f| f.get(index)) else { return };
     slot.disabled.store(true, Ordering::Relaxed);
     log::error!("feature '{}' (index {index}) panicked; disabled for the rest of the session", slot.name);
+    // Tell the player a feature went away — the game keeps running. This is a *diagnostic* message, so
+    // PLAIN voice, not ER lore (CLAUDE.md > "Surfacing errors"). Lock-safe: the panicked tick already
+    // unwound its `APP` lock, and `notify` owns an independent, poison-recovering Mutex, so this can't
+    // deadlock against the lock the panic released. Panic-safety is provided by the caller — the task
+    // firewall wraps this whole recovery branch in its own `catch_unwind` (see `register_features`) —
+    // so a (re-)panic from logging or toasting here is contained, not propagated across the boundary.
+    crate::notify::with_mut(|n| {
+        n.warn(format!(
+            "A feature was disabled after an error; the game will continue. ({})",
+            slot.name
+        ))
+    });
 }

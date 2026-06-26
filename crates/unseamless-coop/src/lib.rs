@@ -62,12 +62,31 @@ unsafe extern "system" fn DllMain(module: HINSTANCE, reason: u32, _: *mut c_void
     if reason == DLL_PROCESS_ATTACH {
         SELF_MODULE.store(module.0 as usize, Ordering::Relaxed);
         // EAC safety FIRST, synchronously: if our launcher didn't start the game, abort before
-        // anything else runs (this does not return in that case). See `guard`.
+        // anything else runs (this does not return in that case). See `guard`. It only ever
+        // *aborts* (never unwinds), so it stays outside the firewall below and keeps its hard
+        // guarantee.
         guard::ensure_launched_by_us_or_abort();
+        // FFI firewall: the loader calls `DllMain` across this `extern "system"` boundary, so a
+        // panic must never unwind out of it (UB into the Windows loader, with no abort to stop it
+        // now that every shipped profile is `panic = "unwind"` — see docs/FFI-UNWIND-AUDIT.md). The
+        // only realistic panic here is `thread::spawn` failing to create the init thread; contain
+        // it so a failure degrades to "unmodded but running" instead of UB.
+        //
         // Off the loader lock and off the main thread: the init thread loads config, brings up
         // logging, loads other mods, waits for the task system, then registers per-frame tasks.
         // `wait_for_instance` must not run on the main thread (it blocks on main-thread init).
-        std::thread::spawn(app::install);
+        if std::panic::catch_unwind(|| {
+            std::thread::spawn(app::install);
+        })
+        .is_err()
+        {
+            // The panic hook isn't installed until `app::install` runs, so this path predates it — a
+            // best-effort stderr line is all we can manage, and even that is itself wrapped: `eprintln!`
+            // panics on a stderr write error, which here would unwind into the loader.
+            let _ = std::panic::catch_unwind(|| {
+                eprintln!("unseamless-coop: init-thread spawn panicked in DllMain; running unmodded");
+            });
+        }
     }
     true.into()
 }

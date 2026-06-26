@@ -91,6 +91,16 @@ pub fn init(config: &Config, base: &Path) {
     }
 }
 
+/// Emit an `error!` line from inside an FFI **recovery branch** with no chance of itself unwinding
+/// across the boundary. The log sinks lock mutexes and allocate, so a poisoned/contended sink can
+/// panic; in a recovery branch (a firewall's `Err` arm, running in the same foreign-invoked frame)
+/// that panic would escape the very boundary the firewall just contained. Same guard the panic hook
+/// uses, lifted into a helper for the firewalls in app.rs / overlay.rs / input.rs / saves.rs. Cheap:
+/// one `catch_unwind` on an already-cold path.
+pub fn error_contained(args: std::fmt::Arguments) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| log::error!("{args}")));
+}
+
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         // The hook itself must never panic: a panic-while-panicking escalates to an immediate

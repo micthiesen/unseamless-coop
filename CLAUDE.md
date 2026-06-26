@@ -181,8 +181,12 @@ macOS).
   `targets = ["x86_64-pc-windows-gnu"]`) so `rustup` installs it automatically.
 - The GNU target links with **mingw-w64**. Install it (`brew install mingw-w64` on macOS,
   `pacman -S mingw-w64-gcc` on Arch); cargo finds `x86_64-w64-mingw32-gcc` on PATH.
-- Release profile mirrors `er-crit-coop`: `panic = "abort"`, `opt-level = "z"`,
-  `codegen-units = 1`, `lto = true`, `strip = true`.
+- Release profile: `panic = "unwind"`, `opt-level = "z"`, `codegen-units = 1`, `lto = true`,
+  `strip = true`. **`unwind`, not `abort`** (the one divergence from `er-crit-coop`'s release
+  profile): it's what makes the per-feature `catch_unwind` firewall real in the player's build (a
+  feature panic is caught + disabled + toasted, not a game crash). Safe only because *every* game→us
+  FFI entry point is firewalled so a panic can't unwind across an `extern` boundary into vkd3d/the
+  game — see [`docs/FFI-UNWIND-AUDIT.md`](docs/FFI-UNWIND-AUDIT.md).
 - Builds are **not** bit-reproducible across hosts (CI mingw vs local mingw differ); the
   release `.dll` won't sha-match a local build. Compare `.text` size with
   `x86_64-w64-mingw32-objdump -h` to sanity-check equivalence.
@@ -253,9 +257,13 @@ all*:
 - **In-session problem → toast/banner (+ log), never fatal.** Once we're installed and ticking,
   anything that goes wrong degrades gracefully and informs via the notifications model
   (`unseamless-core/notifications.rs`): config-clamp warnings, a peer **version mismatch**, a feature
-  **panicking** (it's disabled for the session, the game keeps running), **connection lost**, etc.
-  Never kill the player's game for these. (The toast/banner model is host-tested; the renderer is the
-  in-game overlay, `coop/overlay.rs` — hudhook DX12 + imgui, shipping.)
+  **panicking** (it's caught by the per-task `catch_unwind` firewall, disabled for the session, and a
+  plain-voice toast tells the player — the game keeps running), **connection lost**, etc. Never kill
+  the player's game for these. This degrade-don't-crash guarantee is why the shipping profile builds
+  with `panic = "unwind"` (the firewall is a no-op under `abort`) and why every game→us FFI boundary
+  is itself firewalled so a panic can't unwind across it ([`docs/FFI-UNWIND-AUDIT.md`](docs/FFI-UNWIND-AUDIT.md)).
+  (The toast/banner model is host-tested; the renderer is the in-game overlay, `coop/overlay.rs` —
+  hudhook DX12 + imgui, shipping.)
 - **Rule of thumb: if we can't install, close loudly; if we're installed and something goes wrong,
   degrade and notify.** Don't reach for `guard::fatal` from inside a feature's `on_frame` — by then
   we're past install, so it's a toast/banner.
