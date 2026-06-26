@@ -30,7 +30,8 @@
 //! the borrowed wide slice, only converting/rewriting on a `*.sl2` / `*.sl2.bak` hit.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
 use unseamless_core::saves::{coop_save_path, isolates_saves, wide_has_vanilla_suffix};
@@ -50,9 +51,13 @@ thread_local! {
     static REWRITE_BUF: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Logged-once latch so the first redirect emits a milestone `info` line (visible even with hot-path
-/// logging off), while subsequent ones stay at `debug`.
-static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+/// Distinct save paths we've already announced a redirect for, so each mapping is logged **once** (at
+/// `info`, visible even with hot-path logging off) rather than on every file open. Elden Ring reopens
+/// `ER0000.sl2` constantly during a session — dozens of identical lines per save — which otherwise
+/// drowns the diag/shared log. The set stays tiny (a couple of paths: the save + its `.bak`). Locked
+/// only on a save-suffix hit (already rare — the non-save hot path returns at the suffix pre-filter)
+/// and never while logging, so it can't deadlock against a re-entrant open.
+static LOGGED_REDIRECTS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Install the co-op-save redirect for extension `ext` (the validated `save.file_extension`). No-op
 /// (returns `Ok`) when isolation is off (`ext` empty or `sl2`) — the user opted back into the vanilla
@@ -128,12 +133,14 @@ fn create_file_detour(regs: *mut Registers, ext: &str) {
         return;
     };
 
-    // Milestone on the first redirect; debug thereafter. This is the rare save-hit branch (not the
-    // per-open hot path), but kept off `info` after the first to honor the hot-path logging rule.
-    if !ANNOUNCED.swap(true, Ordering::Relaxed) {
+    // Announce each distinct redirect once (at info, so it shows even with hot-path logging off), then
+    // stay silent on the game's constant reopens of the same save — otherwise one save load logs the
+    // same line dozens of times and buries the rest of the diag log. Insert under the lock, then log
+    // *after* the guard drops (end of the let statement), so a re-entrant open from the logger can't
+    // deadlock on this mutex.
+    let first_time = LOGGED_REDIRECTS.lock().unwrap_or_else(|p| p.into_inner()).insert(path.clone());
+    if first_time {
         log::info!("co-op saves: redirecting {path} -> {coop}");
-    } else {
-        log::debug!("co-op saves: redirecting {path} -> {coop}");
     }
 
     // Stage the rewritten path in the thread-local buffer and repoint rcx at it. The buffer is safe
