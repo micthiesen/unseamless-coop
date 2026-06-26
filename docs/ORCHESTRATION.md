@@ -123,6 +123,12 @@ reporting done (see [roles/worker.md](roles/worker.md)). The orchestrator then:
   points (shared files like `diag.rs` / `features/mod.rs` / `config.rs`, and any refactor that meets
   another lane's additions) — the class of bug per-lane review structurally can't catch.
 
+**Always run review agents in the background** (`Agent` with `run_in_background: true`) — every
+`/ultracheck` swarm and every standalone `check`. A review can take minutes; blocking on it stalls
+the whole fleet. Kick it off, keep serving workers and rig requests, and collect the findings when
+the task notifies you. The squash-merge stays staged-not-committed meanwhile, so nothing lands until
+you've read the review.
+
 ## The Rig Is Single and Orchestrator-Owned
 
 A worker that needs a rig run, an RE probe, or in-game validation **asks the orchestrator** by
