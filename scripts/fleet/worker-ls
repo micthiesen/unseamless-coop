@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# worker-ls
+#
+# List active workers, derived live from `rift list` + tmux (no registry file to
+# drift). Also flags orphan tmux sessions with no matching workspace.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+
+cd "$REPO"
+
+printf '%-22s %-7s %-16s %-7s %s\n' NAME TMUX BRANCH DIRTY WORKSPACE
+found=0
+while IFS= read -r ws; do
+  [ -n "$ws" ] || continue
+  found=1
+  name="$(basename "$ws")"
+  sess="usc-worker-$name"
+  if tmux has-session -t "$sess" 2>/dev/null; then tstate="live"; else tstate="-"; fi
+  branch="$(git -C "$ws" branch --show-current 2>/dev/null || true)"
+  [ -n "$branch" ] || branch="(detached)"
+  if git -C "$ws" diff --quiet 2>/dev/null && git -C "$ws" diff --cached --quiet 2>/dev/null; then
+    dirty="clean"
+  else
+    dirty="dirty"
+  fi
+  printf '%-22s %-7s %-16s %-7s %s\n' "$name" "$tstate" "$branch" "$dirty" "$ws"
+done < <(rift list 2>/dev/null)
+
+if [ "$found" -eq 0 ]; then
+  echo "(no worker workspaces)"
+fi
+
+# Flag orphans: a live tmux session with no matching workspace.
+while IFS= read -r sess; do
+  [ -n "$sess" ] || continue
+  name="${sess#usc-worker-}"
+  [ -d "$HOME/Code/.rifts/$(basename "$REPO")/$name" ] || \
+    echo "orphan tmux session (no workspace): $sess  -> tmux kill-session -t $sess"
+done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^usc-worker-' || true)
+
+if [ "$found" -eq 1 ]; then
+  echo
+  echo "tip: reopen/revive a worker window -> scripts/fleet/worker-open <name>"
+fi

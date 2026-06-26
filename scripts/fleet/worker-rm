@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# worker-rm <name> [-f|--force]
+#
+# Tear a worker down: kill its tmux session (and the Claude Code session in it),
+# trash its rift workspace, and garbage-collect. REFUSES (without -f) if the
+# worker has commits on worker/<name> that were never integrated, since the rift
+# workspace is the only copy of that branch and trashing it is unrecoverable.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+
+name=""
+force=0
+for a in "$@"; do
+  case "$a" in
+    -f|--force) force=1 ;;
+    -*) echo "worker-rm: unknown flag '$a'" >&2; exit 2 ;;
+    *) name="$a" ;;
+  esac
+done
+if [ -z "$name" ]; then
+  echo "usage: worker-rm <name> [-f|--force]" >&2
+  exit 2
+fi
+
+sess="usc-worker-$name"
+ws="$HOME/Code/.rifts/$(basename "$REPO")/$name"
+branch="worker/$name"
+
+if [ -d "$ws" ]; then
+  # Unintegrated COMMITS are the unrecoverable-loss signal (the working-tree dirt
+  # a worker inherits from the orchestrator is noise, not its own work). Refuse
+  # unless forced.
+  unintegrated="$(git -C "$ws" log --oneline "main..$branch" 2>/dev/null || true)"
+  if [ -n "$unintegrated" ] && [ "$force" -ne 1 ]; then
+    echo "REFUSING to remove '$name': it has unintegrated commits on $branch:" >&2
+    echo "$unintegrated" >&2
+    echo "Integrate first (scripts/fleet/worker-integrate $name), or re-run with -f to discard." >&2
+    exit 1
+  fi
+  if [ -n "$(git -C "$ws" status --porcelain 2>/dev/null || true)" ]; then
+    echo "WARNING: '$name' has uncommitted/untracked changes in $ws (removing anyway)" >&2
+  fi
+fi
+
+if tmux has-session -t "$sess" 2>/dev/null; then
+  tmux kill-session -t "$sess"
+  echo "killed tmux session $sess"
+else
+  echo "no tmux session $sess"
+fi
+
+cd "$REPO"
+if [ -d "$ws" ]; then
+  rift remove --force "$ws" >/dev/null || echo "WARNING: rift remove failed for $ws" >&2
+  rift gc >/dev/null 2>&1 || true
+  echo "trashed workspace $ws"
+else
+  echo "no workspace at $ws"
+fi
+
+rm -f "$FLEET_DIR/assignments/$name.md"
+echo "worker '$name' removed."

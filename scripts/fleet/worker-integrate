@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# worker-integrate <name>
+#
+# Pull a worker's branch into the canonical repo for the orchestrator to land on
+# `main`. Fetches `worker/<name>` from the worker's workspace (cheap: shared COW
+# history) into the stable ref `refs/fleet/<name>` and squash-merges that into the
+# current branch, leaving the result staged but uncommitted so the orchestrator
+# writes one clean commit. (A named ref, not FETCH_HEAD, so an intervening fetch
+# for another worker can't make the merge target the wrong branch.) `rerere` is
+# enabled, so recurring cross-worker conflicts resolve once and replay. If the
+# canonical tree is dirty, it fetches only and prints the command to run after you
+# commit/stash your own changes.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+
+name="${1:-}"
+if [ -z "$name" ]; then
+  echo "usage: worker-integrate <name>" >&2
+  exit 2
+fi
+
+ws="$HOME/Code/.rifts/$(basename "$REPO")/$name"
+branch="worker/$name"
+ref="refs/fleet/$name"
+if [ ! -d "$ws" ]; then
+  echo "worker-integrate: no workspace at $ws" >&2
+  exit 1
+fi
+
+cd "$REPO"
+echo "==> fetching $branch from $ws into $ref"
+git fetch "$ws" "+$branch:$ref"
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  cat >&2 <<EOF
+
+Canonical tree is dirty -- not auto-merging. Fetched to $ref.
+Commit or stash your orchestrator changes, then:
+
+    git merge --squash $ref && git commit
+
+EOF
+  exit 0
+fi
+
+echo "==> squash-merging into $(git branch --show-current)"
+if git merge --squash "$ref"; then
+  cat <<EOF
+
+Staged (not committed). Review, then commit to main, e.g.:
+
+    git commit -m "feat: <summary of $name>"
+
+EOF
+else
+  cat >&2 <<EOF
+
+Conflicts during squash-merge. Resolve them (rerere will assist on repeats),
+'git add' the results, then 'git commit'. To abandon: 'git reset --merge'.
+
+EOF
+  exit 1
+fi

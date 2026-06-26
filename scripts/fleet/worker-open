@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# worker-open <name>
+#
+# (Re)open a worker's Claude Code session in an Alacritty window:
+#   - session live      -> pop a window attached to it
+#   - session dead but
+#     workspace remains  -> revive it in tmux with `claude -c` (continue its last
+#                           conversation, so it keeps context) and pop a window
+#   - nothing there      -> tell you to use worker-new
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+
+name="${1:-}"
+if [ -z "$name" ]; then
+  echo "usage: worker-open <name>" >&2
+  exit 2
+fi
+
+sess="usc-worker-$name"
+ws="$HOME/Code/.rifts/$(basename "$REPO")/$name"
+
+pop_window() {
+  if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
+    setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
+    echo "opened Alacritty attached to $sess"
+  else
+    echo "no display; attach with:  tmux attach -t $sess"
+  fi
+}
+
+if tmux has-session -t "$sess" 2>/dev/null; then
+  echo "$sess is live; opening a window."
+  pop_window
+elif [ -d "$ws" ]; then
+  echo "$sess is dead; reviving in $ws (claude -c)."
+  # Re-trust the workspace path so the worker's .claude/settings.json allow rules
+  # load (an untrusted path drops them).
+  trust_json="$HOME/.claude.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
+    cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
+    if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      mv "$tmp" "$trust_json"
+    else
+      rm -f "${tmp:-}"
+    fi
+  fi
+  # Re-apply the worker overlay: --append-system-prompt-file is a launch-time
+  # system prompt, NOT stored in the conversation, so `claude -c` alone would drop
+  # it and the revived session would fall back to the orchestrator default.
+  tmux new-session -d -s "$sess" -c "$ws" \
+    claude -c --append-system-prompt-file "$ws/docs/roles/worker.md"
+  pop_window
+else
+  echo "worker-open: no worker '$name' (no live session, no workspace at $ws)." >&2
+  echo "             create one with:  scripts/fleet/worker-new $name \"<guidance>\"" >&2
+  exit 1
+fi

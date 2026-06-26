@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# worker-new <name> [guidance...]
+#
+# Materialize a worker: a rift copy-on-write workspace on its own branch, with a
+# Claude Code session running in a detached tmux session (popped open in
+# Alacritty), seeded to read its assignment. See docs/ORCHESTRATION.md.
+#
+#   worker-new boot-volume "Implement the boot_volume feature; see docs/FEATURES.md."
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+
+name="${1:-}"; shift || true
+if [ -z "$name" ]; then
+  echo "usage: worker-new <name> [guidance...]" >&2
+  exit 2
+fi
+if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+  echo "worker-new: name must be kebab-case [a-z0-9_-], got '$name'" >&2
+  exit 2
+fi
+guidance="$*"
+
+sess="usc-worker-$name"
+branch="worker/$name"
+ws="$HOME/Code/.rifts/$(basename "$REPO")/$name"
+
+if tmux has-session -t "$sess" 2>/dev/null; then
+  echo "worker-new: '$name' already has a live tmux session ($sess)" >&2
+  exit 1
+fi
+if [ -e "$ws" ]; then
+  echo "worker-new: workspace already exists at $ws (run 'worker-rm $name' first)" >&2
+  exit 1
+fi
+
+cd "$REPO"
+echo "==> rift create $name (runs .rift.toml postcreate hooks)"
+log="$(mktemp)"
+if ! rift create --name "$name" >"$log" 2>&1; then
+  echo "worker-new: rift create failed:" >&2
+  cat "$log" >&2
+  # a failed postcreate hook can still leave the workspace registered; clean up
+  [ -d "$ws" ] && { rift remove --force "$ws" >/dev/null 2>&1 || true; rift gc >/dev/null 2>&1 || true; }
+  exit 1
+fi
+rm -f "$log"
+if [ ! -d "$ws" ]; then
+  echo "worker-new: expected workspace at $ws not found after create" >&2
+  exit 1
+fi
+echo "    workspace: $ws"
+
+echo "==> branch $branch"
+git -C "$ws" switch -c "$branch"
+
+# Trust the new workspace path so the worker's COW-copied .claude/settings.json
+# allow rules + additionalDirectories actually load. Claude Code drops a project's
+# permissions on an untrusted path, and each new rift workspace path is untrusted
+# by default. ~/.claude.json is live, not git-tracked; edit it atomically.
+echo "==> trust workspace in ~/.claude.json"
+trust_json="$HOME/.claude.json"
+if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
+  cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
+  if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv "$tmp" "$trust_json"
+    echo "    trusted $ws"
+  else
+    rm -f "${tmp:-}"
+    echo "    WARNING: could not set workspace trust; worker may drop its allow rules until you accept its trust dialog once." >&2
+  fi
+else
+  echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
+fi
+
+echo "==> assignment"
+mkdir -p "$FLEET_DIR/assignments" "$FLEET_DIR/payloads"
+assignment="$FLEET_DIR/assignments/$name.md"
+{
+  echo "# Worker Assignment: $name"
+  echo
+  echo "- **Your name:** \`$name\` (sign messages \`[worker:$name]\`)"
+  echo "- **Workspace:** \`$ws\`"
+  echo "- **Branch:** \`$branch\` (WIP-commit here freely; never commit to \`main\`)"
+  echo "- **Reach the orchestrator:** \`scripts/fleet/msg usc-orch \"[worker:$name] ...\"\`"
+  echo
+  echo "## Task"
+  echo
+  if [ -n "$guidance" ]; then
+    echo "$guidance"
+  else
+    echo "_(none provided at launch; the orchestrator will message you.)_"
+  fi
+} >"$assignment"
+echo "    $assignment"
+
+echo "==> launching Claude Code in tmux session $sess"
+if [ ! -f "$ws/docs/roles/worker.md" ]; then
+  echo "worker-new: $ws/docs/roles/worker.md missing -- the worker role overlay won't load." >&2
+  echo "            Commit docs/roles/worker.md so rift copies it into workspaces, then retry." >&2
+  exit 1
+fi
+seed="Read $assignment for your assignment (you are worker:$name). Then begin."
+# tmux runs the command directly (no shell), so no quoting hazard on the seed.
+tmux new-session -d -s "$sess" -c "$ws" \
+  claude --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
+
+if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
+  setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
+  echo "    opened Alacritty attached to $sess"
+else
+  echo "    no display detected; attach with:  tmux attach -t $sess"
+fi
+
+echo
+echo "worker '$name' is up."
+echo "  message it:  scripts/fleet/msg $sess \"[orchestrator] ...\""
+echo "  integrate:   scripts/fleet/worker-integrate $name"
+echo "  remove:      scripts/fleet/worker-rm $name"
+
+if ! tmux has-session -t usc-orch 2>/dev/null; then
+  echo
+  echo "  NOTE: no 'usc-orch' session is running, so this worker's messages to the"
+  echo "        orchestrator will fail until you start one:  scripts/fleet/orch-start"
+fi

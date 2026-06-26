@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# orch-start [claude args...]
+#
+# Start (or attach to) the orchestrator Claude Code session. It runs in a tmux
+# session named `usc-orch` so workers can reach it with `msg usc-orch ...`, and
+# launches with `--add-dir` over the rifts tree so it can fetch/integrate worker
+# branches. No worker role overlay -> it is the orchestrator by default
+# (CLAUDE.md). See docs/ORCHESTRATION.md.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+RIFTS="$HOME/Code/.rifts/$(basename "$REPO")"
+sess="usc-orch"
+
+mkdir -p "$RIFTS"
+
+if tmux has-session -t "$sess" 2>/dev/null; then
+  echo "orchestrator session '$sess' already running; attaching."
+  exec tmux attach -t "$sess"
+fi
+
+cd "$REPO"
+tmux new-session -d -s "$sess" -c "$REPO" \
+  claude --add-dir "$RIFTS" "$@"
+exec tmux attach -t "$sess"

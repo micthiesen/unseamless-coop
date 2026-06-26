@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# msg <tmux-session> <text...>   (or pipe text on stdin)
+#
+# Deliver a message to another Claude Code session by typing into its tmux pane
+# (the `wt claude send` pattern). An idle session starts a new turn (wakes it); a
+# busy session queues it as the next input. Multi-line or long messages are
+# spilled to a file in the shared fleet dir and replaced with a short "read <path>"
+# pointer, so a stray newline can't submit half a message and a giant paste can't
+# garble the input. A flock serializes concurrent sends to the same pane.
+#
+# Convention: prefix cross-session messages with their source, e.g.
+#   msg usc-orch         "[worker:auth] need a rig run for the save hook"
+#   msg usc-worker-auth  "[orchestrator] rig says the hook fired; proceed"
+set -euo pipefail
+
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+
+sess="${1:-}"; shift || true
+if [ -z "$sess" ]; then
+  echo "usage: msg <tmux-session> <text...>   (or pipe text on stdin)" >&2
+  exit 2
+fi
+# Only ever target fleet sessions, so a typo/confusion can't type into an
+# unrelated shell pane (an auto-approved send-keys-into-anything primitive).
+if ! [[ "$sess" =~ ^usc-(orch|worker-[a-z0-9][a-z0-9_-]*)$ ]]; then
+  echo "msg: refusing target '$sess' -- only fleet sessions (usc-orch, usc-worker-<name>) allowed" >&2
+  exit 2
+fi
+if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
+if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
+
+if ! tmux has-session -t "$sess" 2>/dev/null; then
+  echo "msg: no live tmux session '$sess'" >&2
+  exit 1
+fi
+
+mkdir -p "$FLEET_DIR/payloads"
+exec 9>"$FLEET_DIR/.msg.lock"
+flock 9
+
+send() {
+  # -l sends the text literally; -- stops tmux treating a message that starts
+  # with '-' as a flag (which would silently drop it).
+  tmux send-keys -t "$sess" -l -- "$1"
+  tmux send-keys -t "$sess" Enter
+}
+
+if [[ "$text" == *$'\n'* ]] || [ "${#text}" -gt 800 ]; then
+  f="$(mktemp "$FLEET_DIR/payloads/msg-XXXXXX.md")"
+  printf '%s\n' "$text" >"$f"
+  send "(message waiting) read $f and respond to it"
+  echo "msg: long message -> $f (pointer sent to $sess)"
+else
+  send "$text"
+  echo "msg: sent to $sess"
+fi

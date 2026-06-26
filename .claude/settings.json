@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "/home/michael/.local/share/unseamless-fleet"
+    ],
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo fetch:*)",
+      "Bash(scripts/test-core.sh:*)",
+      "Bash(scripts/fleet/msg:*)",
+      "Bash(scripts/fleet/worker-ls:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git switch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git fetch:*)",
+      "Bash(git merge:*)"
+    ]
+  }
+}

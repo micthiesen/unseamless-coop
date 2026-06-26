@@ -1,0 +1,15 @@
+# rift copy-on-write workspace config (https://github.com/anomalyco/rift).
+# Postcreate hooks run in the NEW workspace root after a `rift create`.
+# This is the per-worker setup extension point for the orchestration fleet
+# (see docs/ORCHESTRATION.md). Keep hooks cheap: they run synchronously and a
+# failing hook fails the create.
+version = 1
+
+# Warm the dependency cache. The cargo registry lives in $HOME (shared across
+# all workspaces), so this is usually near-instant; it just ensures a fresh
+# worker's first `cargo build` doesn't stall on a download. We do NOT copy
+# `target/` (rift excludes it by default; cargo embeds absolute paths, so a
+# reflinked target at a new path tends to invalidate anyway) and we do NOT
+# build here (cold, would block session start).
+[[hooks.postcreate]]
+run = "cargo fetch --locked"

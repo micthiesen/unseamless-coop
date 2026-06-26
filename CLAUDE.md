@@ -113,6 +113,26 @@ This is *not* a rule against committing other sessions' changes — a commit swe
 in-progress work from another session is fine, Michael doesn't mind. "Preserve their work" means
 don't *destroy* it (reset/stash/overwrite); it doesn't mean fence it out of your commit.
 
+## Orchestrator / worker fleet
+
+This repo can be developed as a one-orchestrator / many-worker fleet of Claude Code sessions over
+[rift](https://github.com/anomalyco/rift) copy-on-write workspaces, coordinated over tmux. **You are
+the orchestrator unless a worker role is injected** (workers launch with
+`--append-system-prompt-file docs/roles/worker.md`, which overrides this). The full design and the
+`scripts/fleet/` tooling are in [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The load-bearing split:
+
+- **Orchestrator (default, this session):** owns the rig, RE, and in-game validation; owns
+  integration and the only commits to `main`; plans with Michael and manages the worker lifecycle
+  (`scripts/fleet/worker-new|ls|open|rm|integrate`). It can also just do the work itself; spawning
+  workers is optional, not required.
+- **Worker:** one lane of feature work in its own rift workspace, WIP-committing to `worker/<name>`.
+  Never drives the rig and never commits to `main`; anything serial it asks the orchestrator for by
+  message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`).
+
+The rig is single (one game install, one `unseamless-coop/` config+log dir, one Steam), so all
+rig/RE/validation serializes through the orchestrator. This is the structured form of the
+concurrent-sessions guidance above.
+
 ## Docs & naming
 
 - The project name is always **`unseamless-coop`** — lowercase, hyphenated. Never title-case or
