@@ -178,20 +178,52 @@ mod tests {
     }
 
     #[test]
-    fn rotated_camera_still_centers_a_point_dead_ahead() {
-        // Camera looking down +x, with an orthonormal frame that isn't axis-trivial for right/up.
+    fn rotated_camera_projects_along_its_own_basis() {
+        // Camera looking down +x, with a non-trivial right/up frame (right = world -z, up = world +y).
         let cam = Camera {
             position: [5.0, 1.0, 0.0],
             right: [0.0, 0.0, -1.0],
             up: [0.0, 1.0, 0.0],
             forward: [1.0, 0.0, 0.0],
-            fov_y: std::f32::consts::FRAC_PI_2,
+            fov_y: std::f32::consts::FRAC_PI_2, // focal = 1
             aspect_ratio: 1.0,
         };
-        // A point straight ahead along +x (same y, same z) lands dead center.
-        let p = cam.project([15.0, 1.0, 0.0]).expect("in front");
-        assert!(close(p.ndc[0], 0.0) && close(p.ndc[1], 0.0), "{:?}", p.ndc);
-        assert!(close(p.depth, 10.0), "depth {}", p.depth);
+        // A point straight ahead along +forward lands dead center (the easy half).
+        let ahead = cam.project([15.0, 1.0, 0.0]).expect("in front");
+        assert!(close(ahead.ndc[0], 0.0) && close(ahead.ndc[1], 0.0), "{:?}", ahead.ndc);
+        assert!(close(ahead.depth, 10.0), "depth {}", ahead.depth);
+
+        // The discriminating half: offset the point along the camera's *rotated* right and up by
+        // ASYMMETRIC amounts (right edge, half-up) at depth 10. rel = [10, 5, -10] → depth = rel·forward
+        // = 10, rel·right = -rel.z = 10 → ndc_x = +1, rel·up = rel.y = 5 → ndc_y = +0.5. Asymmetric so a
+        // swapped/negated/transposed right⇄up basis would move the asserted NDC — unlike a dead-ahead
+        // point, whose zero offsets vanish regardless of what right/up are.
+        let off = cam.project([15.0, 6.0, -10.0]).expect("in front");
+        assert!(close(off.ndc[0], 1.0), "rotated right edge: {:?}", off.ndc);
+        assert!(close(off.ndc[1], 0.5), "rotated half-up: {:?}", off.ndc);
+        assert!(close(off.depth, 10.0), "depth {}", off.depth);
+    }
+
+    #[test]
+    fn near_plane_positive_depth_is_culled() {
+        // A point in front but nearer than MIN_DEPTH (the w≈0 degenerate the constant guards) culls,
+        // rather than dividing by a near-zero depth and flinging the label to infinity.
+        let cam = cam_origin(1.0);
+        assert!(cam.project([0.0, 0.0, MIN_DEPTH * 0.5]).is_none(), "inside the near plane");
+        assert!(cam.project([0.0, 0.0, MIN_DEPTH * 2.0]).is_some(), "just outside it projects");
+    }
+
+    #[test]
+    fn nan_fov_culls_via_on_screen_not_project() {
+        // A NaN fov (e.g. a torn matrix read) slips past project()'s `<= 0` guards — `NaN <= 0.0` is
+        // false — so project yields NaN NDC rather than `None` (its documented contract). The cull then
+        // happens in `on_screen` (`abs(NaN) <= limit` is false), so a NaN never silently draws a label
+        // at a bogus pixel. This pins both halves of that contract.
+        let mut cam = cam_origin(1.0);
+        cam.fov_y = f32::NAN;
+        let p = cam.project([0.0, 0.0, 10.0]).expect("NaN fov still returns Some, culled downstream");
+        assert!(p.ndc[0].is_nan() && p.ndc[1].is_nan(), "expected NaN ndc, got {:?}", p.ndc);
+        assert!(!p.on_screen(0.1), "NaN ndc must not be on-screen");
     }
 
     #[test]

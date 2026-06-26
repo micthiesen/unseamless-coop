@@ -723,6 +723,11 @@ impl ImguiRenderLoop for Overlay {
         .is_err()
         {
             self.disabled = true;
+            // Same input-suppression release as `render`'s disable arm: if we die here while the window
+            // is open, `render` then early-returns on `disabled` and never runs its own cleanup, so the
+            // DirectInput block + WndProc filter would stay latched for the session. Clear both here.
+            self.open = false;
+            crate::input::set_blocked(false);
             crate::logger::error_contained(format_args!(
                 "overlay: before_render panicked; overlay disabled for the rest of the session"
             ));

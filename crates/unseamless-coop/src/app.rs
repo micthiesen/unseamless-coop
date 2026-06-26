@@ -478,4 +478,11 @@ fn disable_feature(index: usize) {
             slot.name
         ))
     });
+    // Clear the nameplates overlay surface. A disabled feature never publishes again, so a feature
+    // that fed a *world-locked* overlay would otherwise leave its last labels frozen at stale screen
+    // positions while the camera/world move under them (a visible glitch — unlike an aging toast or a
+    // static debug panel). nameplates is the only such surface; clearing it here is the graceful-
+    // degrade that "a panicking feature is disabled, the game keeps running" intends. Cheap + idempotent
+    // for every other feature's disable, and inside the caller's firewall so a re-panic stays contained.
+    crate::nameplates::publish(Vec::new());
 }

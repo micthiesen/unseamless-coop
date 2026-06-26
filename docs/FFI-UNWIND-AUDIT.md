@@ -67,7 +67,10 @@ from the game's scheduler across a C boundary every frame. The closure already w
   feature panic — exactly when state is most likely transitional/torn — those reads can `.expect()`/
   panic on an unwired pointer. Without the wrap, that second panic unwinds across the `extern "C"`
   scheduler boundary (UB). The `panic = "abort"` → `unwind` flip is what turned this latent structure
-  into a live path, so the wrap is part of the same change. Recovery logging is `error_contained`.
+  into a live path, so the wrap is part of the same change. Here the recovery's `log::error!` + toast
+  are kept safe by that surrounding `catch_unwind` (the whole branch is wrapped), not by routing each
+  log through `error_contained` the way the input/save/overlay sites do — same guarantee, different
+  mechanism (this site already needed the branch wrap for `diag::dump`).
 
 ### `lib.rs` — `DllMain` (firewall added)
 The loader calls `DllMain` across `extern "system"`. The EAC guard runs first and only ever *aborts*

@@ -151,9 +151,9 @@ fn install_one(name: &'static str, site: &Option<HookSite>) {
 /// Two load-bearing safety properties this body keeps:
 /// 1. **No unwind across the FFI boundary.** `ilhook` invokes this from an `extern "win64"` trampoline
 ///    with no `catch_unwind` of its own; a panic unwinding into game code is UB — the same reason the
-///    task-tick path is wrapped in `app::install`. The shipping `release` profile is `panic = "abort"`
-///    (a panic aborts, never unwinds), but the `diag` build — the one used on the rig to chart and
-///    first fire these hooks — is `panic = "unwind"`, so we wrap the body in `catch_unwind` here.
+///    task-tick path is wrapped in `app::install`. Every shipped profile is now `panic = "unwind"`
+///    (release and `diag` alike — see docs/FFI-UNWIND-AUDIT.md), so this firewall is load-bearing in
+///    the player's build, not just the rig's diag build; we wrap the body in `catch_unwind` here.
 /// 2. **Read-only.** It only reads scalar register values; it never dereferences a handed pointer or
 ///    writes game memory, so it can't perturb the session it observes.
 ///

@@ -19,12 +19,15 @@
 //!    are exercisable solo on the rig before any session exists.
 //!
 //! ## Conventions to confirm on the rig
-//! The projection assumes `forward` points where the camera looks, `fov` is vertical, and world `+Y`
-//! is up (so [`HEAD_OFFSET_M`] lifts the label above the feet/center physics position). If labels land
-//! mirrored, squashed, or at the wrong height on the rig, those are the knobs — see
-//! [`unseamless_core::projection`].
+//! The projection assumes `forward` points where the camera looks, `fov` is vertical **and in radians**,
+//! and world `+Y` is up (so [`HEAD_OFFSET_M`] lifts the label above the feet/center physics position).
+//! If labels land mirrored, squashed, or at the wrong height, those are the knobs. The fov-unit one is
+//! the nastiest: a degrees-vs-radians mismatch grossly mis-projects *everything* (a silent total
+//! failure, not a cosmetic skew), so confirm it first — see [`unseamless_core::projection`].
 
-use eldenring::cs::{CSCamera, CSTaskGroupIndex, ChrIns, WorldChrMan};
+use eldenring::cs::{
+    CSCamExt, CSCamera, CSTaskGroupIndex, ChrIns, ChrLoadStatus, ChrSet, WorldChrMan,
+};
 use fromsoftware_shared::Subclass;
 use unseamless_core::config::OverheadDisplay;
 use unseamless_core::projection::Camera;
@@ -61,7 +64,9 @@ impl Feature for Nameplates {
 
     fn phase(&self) -> CSTaskGroupIndex {
         // After physics so character positions are settled this frame (same reasoning as crit_coop /
-        // death_debuffs). We only read positions + the camera; we never write game state.
+        // death_debuffs). We only read positions + the camera; we never write game state. This phase
+        // must also stay *after* `CameraStep` (it is, in the task order) so the camera matrix we read
+        // is this frame's — moving this earlier would read a stale/half-updated camera.
         CSTaskGroupIndex::WorldChrMan_PostPhysics
     }
 
@@ -101,21 +106,59 @@ impl Feature for Nameplates {
     }
 }
 
-/// Build the host-tested [`Camera`] from the live main camera's named `CSCam` fields. Uses
+/// Build the host-tested [`Camera`] from the live main camera's named `CSCam` accessors. Uses
 /// `pers_cam_1` — the composited camera the game actually renders from (the `camera_mask` blends the
-/// others into it). The `matrix` rows are the camera's world-space basis + position (the SDK reads
-/// them the same way via `CSCamExt::{right,up,forward,position}`), so no raw offsets here.
+/// others into it). `None` when `pers_cam_1` isn't wired yet: a live `CSCamera` doesn't guarantee its
+/// composited sub-camera pointer is set (early boot / loading), and an unwired deref is a segfault
+/// `catch_unwind` can't catch — so we null-guard the `OwnedPtr` the same way [`crate::session::read`]
+/// guards the tether warp-data pointer (reading the pointer's address is not a deref).
 fn camera_from(cam: &CSCamera) -> Option<Camera> {
+    if cam.pers_cam_1.as_ptr().is_null() {
+        return None;
+    }
     let c = &*cam.pers_cam_1;
-    let m = &c.matrix;
+    // Named SDK basis accessors (`CSCamExt`) rather than raw matrix indexing: rows 0/1/2 are the
+    // right/up/forward basis, row 3 the world position, and the trait reads exactly those rows.
+    // `fov` is the engine's **vertical** fov in **radians** and `aspect_ratio` is width/height — both
+    // are rig-to-confirm (a degrees-vs-radians mismatch mis-projects everything, not just mirrors it).
+    let (right, up, forward, position) = (c.right(), c.up(), c.forward(), c.position());
     Some(Camera {
-        // row 3 = translation (camera world position); rows 0/1/2 = right/up/forward basis vectors.
-        position: [m.3.0, m.3.1, m.3.2],
-        right: [m.0.0, m.0.1, m.0.2],
-        up: [m.1.0, m.1.1, m.1.2],
-        forward: [m.2.0, m.2.1, m.2.2],
+        position: [position.0, position.1, position.2],
+        right: [right.0, right.1, right.2],
+        up: [up.0, up.1, up.2],
+        forward: [forward.0, forward.1, forward.2],
         fov_y: c.fov,
         aspect_ratio: c.aspect_ratio,
+    })
+}
+
+/// Iterate a `ChrSet` yielding only **fully loaded** (`ChrLoadStatus::Active`) characters. The SDK's
+/// `ChrSet::characters()` yields a `ChrIns` *regardless* of load status (the CLAUDE.md UAF caveat), and
+/// a `player_chr_set` phantom mid-join transits `Initializing`/`NetworkInitializing`/`ReadyForActivation`
+/// with its `modules` pointers not yet wired — so reading `modules.physics.position` off such an entry
+/// is a segfault `catch_unwind` can't catch. We gate on the **entry's** `chr_load_status` (the robust
+/// form CLAUDE.md prescribes), not the in-`ChrIns` `is_active` flag, because the two aren't guaranteed
+/// to flip in lockstep for a joining network peer (a rig-confirm item). Mirrors the SDK's own entry
+/// walk, reading the status alongside the pointer.
+fn active_characters<T>(set: &ChrSet<T>) -> impl Iterator<Item = &mut T> + '_
+where
+    T: Subclass<ChrIns> + 'static,
+{
+    let mut current = set.entries;
+    let end = unsafe { current.add(set.capacity as usize) };
+    std::iter::from_fn(move || {
+        while current != end {
+            let entry = unsafe { current.as_ref() };
+            let (status, chr_ins) = (entry.chr_load_status, entry.chr_ins);
+            current = unsafe { current.add(1) };
+            if status != ChrLoadStatus::Active {
+                continue;
+            }
+            if let Some(mut chr_ins) = chr_ins {
+                return Some(unsafe { chr_ins.as_mut() });
+            }
+        }
+        None
     })
 }
 
@@ -131,13 +174,11 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
     // Remote-peer roster (real session only). TODO(co-op core): replace the placeholder label with the
     // peer's real name + ping/SL/death-count once the session layer can map a phantom to an identity.
     let mut peer_n = 0;
-    for chr in wcm.player_chr_set.characters() {
+    // `active_characters` already skips any entry whose `chr_load_status` isn't `Active`, so each
+    // `base` here is safe to deref (its modules are wired) — see the helper's docs for why that's the
+    // load-bearing guard rather than the in-`ChrIns` `is_active` flag.
+    for chr in active_characters(&wcm.player_chr_set) {
         let base = chr.superclass();
-        // Skip a mid-load/teardown, half-wired `ChrIns` before chasing its module pointers — the
-        // CLAUDE.md `characters()`-yields-regardless-of-load-status UAF caveat (same gate as crit_coop).
-        if !base.chr_flags1c8.is_active() {
-            continue;
-        }
         // Skip the local player here; it's handled by `show_self` below.
         if main_ptr == Some(std::ptr::from_ref(base) as usize) {
             continue;
@@ -168,6 +209,9 @@ fn push_label(labels: &mut Vec<NameplateLabel>, camera: &Camera, base: &ChrIns, 
     let Some(projected) = camera.project(world) else {
         return; // behind the camera
     };
+    // `depth` is forward (view-Z) distance, not radial distance, so `max_distance_m` culls an off-axis
+    // peer at a slightly larger true range than the name implies — acceptable for a "don't draw distant
+    // labels" cull. `as f32` is lossless: max_dist is clamped to a small integer-meter range.
     if projected.depth > max_dist as f32 || !projected.on_screen(ON_SCREEN_MARGIN) {
         return; // too far, or off the edges of the frame
     }
