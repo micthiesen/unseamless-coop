@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# _color -- deterministic name->color mapping for fleet sessions. Sourced (not
+# executed) by worker-new / worker-open / orch-start to pick each Claude Code
+# session's prompt-bar color: same name -> same color on every spawn, with one
+# slot (red) reserved for the orchestrator. A glance at the colored prompt bar
+# says which session you're looking at.
+#
+# This file is JUST the mapping. APPLYING the color is done out-of-band by
+# scripts/fleet/_color-inject (the `/color` slash command has no CLI flag and no
+# settings key, and only takes effect from an idle prompt, so it must be typed
+# into the TUI). The injector is spawned DETACHED and is purely best-effort, so a
+# coloring failure can never block a spawn or endanger the worker's seed prompt
+# (which stays a launch arg, wholly independent of any of this).
+#
+# Distinctness is best-effort, not guaranteed: workers hash into the 7 non-orch
+# slots, so two worker names can collide on a color (likely past ~4 concurrent
+# workers, certain past 7). Stability and the reserved orchestrator slot are the
+# hard guarantees; collision-free distinctness would need a live-session registry
+# and isn't worth that coupling here.
+
+# Palette = the exact color names Claude Code's `/color` accepts. Slot 0 (red) is
+# RESERVED for the orchestrator; workers hash into slots 1..N-1.
+_FLEET_COLORS=( red blue green yellow purple orange pink cyan )
+
+# fleet_color_name <name> -- echo the `/color` name for <name>. Only the literal
+# orchestrator session name `usc-orch` (what orch-start passes) takes the reserved
+# red slot 0; every other name -- including a worker that happens to be called
+# "orch" -- hashes into slots 1..N-1 via `% (n-1) + 1` and so can never land on
+# red. cksum is POSIX and deterministic, so the mapping is stable across runs.
+fleet_color_name() {
+  local name="$1" n="${#_FLEET_COLORS[@]}" h
+  if [ "$name" = "usc-orch" ]; then
+    echo "${_FLEET_COLORS[0]}"
+    return
+  fi
+  h="$(printf '%s' "$name" | cksum | cut -d' ' -f1)"
+  echo "${_FLEET_COLORS[$(( h % (n - 1) + 1 ))]}"
+}

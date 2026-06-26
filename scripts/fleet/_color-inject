@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# _color-inject <session> <color>
+#
+# Best-effort: set a Claude Code session's prompt-bar color via the `/color`
+# slash command, injected with tmux send-keys ONCE the TUI is idle. The fleet
+# scripts spawn this DETACHED (setsid), so it never blocks a spawn and is fully
+# decoupled from the worker's seed prompt: the seed is delivered as a launch arg,
+# wholly independent of this process. If the TUI never goes idle, or tmux / the
+# session vanishes, or anything else fails, we give up SILENTLY -- a coloring
+# failure must never affect the session. Hence no `set -e`: every step is guarded
+# and a failure just ends the (best-effort) attempt.
+set -uo pipefail
+
+sess="${1:-}"; color="${2:-}"
+[ -n "$sess" ] && [ -n "$color" ] || exit 0
+command -v tmux >/dev/null 2>&1 || exit 0
+
+# `/color` only executes from an idle prompt. We wait for a POSITIVE idle signal,
+# not bare quiescence: Claude shows an "esc to interrupt" footer while a turn is
+# running, so idle = the pane has rendered AND that busy marker is absent. With
+# the seed delivered as a launch arg the worker is busy from t=0, so this
+# normally fires when its first turn finishes (seconds to minutes); we cap the
+# wait so a forever-busy worker doesn't leave a poller lingering.
+maxwait="${UNSEAMLESS_COLOR_IDLE_MAXWAIT:-300}"
+i=0
+idle=0
+while [ "$i" -lt "$maxwait" ]; do
+  tmux has-session -t "$sess" 2>/dev/null || exit 0   # session gone -> nothing to color
+  pane="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || pane=""
+  if [ -n "$pane" ] && ! printf '%s' "$pane" | grep -qi 'esc to interrupt'; then
+    idle=1
+    break
+  fi
+  sleep 2
+  i=$(( i + 2 ))
+done
+[ "$idle" -eq 1 ] || exit 0   # never idled within the window -> no color, no harm
+
+# Send the command literally (`-l` so tmux doesn't key-name-lookup the text;
+# `--` ends option parsing), then submit it as a separate Enter key.
+tmux send-keys -t "$sess" -l -- "/color $color" 2>/dev/null || exit 0
+tmux send-keys -t "$sess" Enter 2>/dev/null || exit 0
+
+# Post-send verify: we can't read the bar color from captured text, but if the
+# literal "/color" is still sitting in the input box the Enter didn't land, so
+# retry the submit once. (Best-effort: if it's still stuck, leave it be.)
+sleep 1
+pane="$(tmux capture-pane -p -t "$sess" 2>/dev/null)" || pane=""
+if printf '%s' "$pane" | grep -qi '/color'; then
+  tmux send-keys -t "$sess" Enter 2>/dev/null || true
+fi
+exit 0

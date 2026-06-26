@@ -13,6 +13,15 @@ REPO="$(cd "$SELF/../.." && pwd)"
 RIFTS="$HOME/Code/.rifts/$(basename "$REPO")"
 sess="usc-orch"
 
+# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
+# source so a future merge that drops the helper can't break a spawn.
+if [ -f "$SELF/_color" ]; then
+  # shellcheck source=scripts/fleet/_color
+  source "$SELF/_color"
+else
+  fleet_color_name() { :; }
+fi
+
 mkdir -p "$RIFTS"
 
 if tmux has-session -t "$sess" 2>/dev/null; then
@@ -25,4 +34,11 @@ cd "$REPO"
 # user-supplied --name overrides this default.
 tmux new-session -d -s "$sess" -c "$REPO" \
   claude --name "usc-orch" --add-dir "$RIFTS" "$@"
+# Reserved orchestrator color (red), best-effort and ONLY on a fresh start (this
+# branch) -- the attach-existing path above leaves a running session untouched.
+# Detached, so the attach below is never delayed by the injector's idle-wait.
+color="$(fleet_color_name "usc-orch" 2>/dev/null || true)"
+if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
+  setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
+fi
 exec tmux attach -t "$sess"

@@ -12,6 +12,15 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 
+# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
+# source so a future merge that drops the helper can't break a revive.
+if [ -f "$SELF/_color" ]; then
+  # shellcheck source=scripts/fleet/_color
+  source "$SELF/_color"
+else
+  fleet_color_name() { :; }
+fi
+
 name="${1:-}"
 if [ -z "$name" ]; then
   echo "usage: worker-open <name>" >&2
@@ -52,6 +61,15 @@ elif [ -d "$ws" ]; then
   tmux new-session -d -s "$sess" -c "$ws" \
     claude -c --append-system-prompt-file "$ws/docs/roles/worker.md"
   pop_window
+  # The revived instance is a fresh client, so its prompt-bar color was lost
+  # (/color is per-session, never persisted) -- re-apply the worker's stable
+  # color, best-effort + detached. Only on revive: a still-live session (branch
+  # above) keeps its color and must not be typed into while the user may be
+  # mid-conversation.
+  color="$(fleet_color_name "$name" 2>/dev/null || true)"
+  if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
+    setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
+  fi
 else
   echo "worker-open: no worker '$name' (no live session, no workspace at $ws)." >&2
   echo "             create one with:  scripts/fleet/worker-new $name \"<guidance>\"" >&2

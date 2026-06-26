@@ -12,6 +12,16 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
+# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
+# source so a future merge that drops the helper can't break a spawn -- with no
+# helper, fleet_color_name yields nothing and coloring is simply skipped.
+if [ -f "$SELF/_color" ]; then
+  # shellcheck source=scripts/fleet/_color
+  source "$SELF/_color"
+else
+  fleet_color_name() { :; }
+fi
+
 name="${1:-}"; shift || true
 if [ -z "$name" ]; then
   echo "usage: worker-new <name> [guidance...]" >&2
@@ -106,6 +116,8 @@ seed="Read $assignment for your assignment (you are worker:$name). Then begin."
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
 # `--name` is a display badge only (prompt box / window title / resume picker); it
 # never resumes, so every spawn is a fresh session regardless of the badge.
+# The seed stays a LAUNCH ARG so it can never be dropped; coloring (below) is
+# layered on separately and is purely best-effort.
 tmux new-session -d -s "$sess" -c "$ws" \
   claude --name "usc-$name" --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
 
@@ -114,6 +126,16 @@ if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 
   echo "    opened Alacritty attached to $sess"
 else
   echo "    no display detected; attach with:  tmux attach -t $sess"
+fi
+
+# Per-session prompt-bar color, fully decoupled from the seed above. A DETACHED
+# injector waits for the TUI to go idle (after its first turn) and then sends
+# `/color`; if it never idles, or the helper is missing, the worker just goes
+# uncolored -- never unseeded. Best-effort throughout.
+color="$(fleet_color_name "$name" 2>/dev/null || true)"
+if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
+  echo "    coloring session $color (best-effort, when idle)"
+  setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
 fi
 
 echo
