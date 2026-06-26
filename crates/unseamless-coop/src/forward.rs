@@ -26,6 +26,7 @@ use std::sync::{Mutex, OnceLock, TryLockError};
 use log::{LevelFilter, Log, Metadata, Record};
 use simplelog::{Config as SlConfig, SharedLogger};
 use unseamless_core::diagnostics::LogLevel;
+use unseamless_core::util::{ReentryGuard, push_capped};
 
 /// Bounded backlog of records awaiting forward, so a logging burst can't grow it without bound. The
 /// driver drains it ~10×/s and the `Peer` rate-limits the wire, so this is the only place records
@@ -39,27 +40,11 @@ static QUEUE: OnceLock<Mutex<VecDeque<(LogLevel, String)>>> = OnceLock::new();
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
-    /// Set on the driver thread for the duration of a [`drain`] send loop. While set, this thread's
-    /// own log records are dropped by [`ForwardLogger::log`], so the act of forwarding can't enqueue
-    /// more work to forward — regardless of which module/crate emitted the line.
+    /// Set on the driver thread for the duration of a [`drain`] send loop (via core's
+    /// [`ReentryGuard`]). While set, this thread's own log records are dropped by
+    /// [`ForwardLogger::log`], so the act of forwarding can't enqueue more work to forward —
+    /// regardless of which module/crate emitted the line.
     static IN_FORWARD: Cell<bool> = const { Cell::new(false) };
-}
-
-/// RAII guard that marks the current thread "inside forwarding" (see [`IN_FORWARD`]) and clears it on
-/// drop, so the flag is reset even if a forward closure panics.
-struct ForwardGuard;
-
-impl ForwardGuard {
-    fn enter() -> Self {
-        IN_FORWARD.with(|f| f.set(true));
-        ForwardGuard
-    }
-}
-
-impl Drop for ForwardGuard {
-    fn drop(&mut self) {
-        IN_FORWARD.with(|f| f.set(false));
-    }
 }
 
 /// Create the shared queue. Call **before** [`forward_logger`] is installed (in `app::install`,
@@ -78,8 +63,8 @@ pub fn set_enabled(on: bool) {
 ///
 /// `f` does network I/O (Steam sends), so the queue is copied out and the lock **released** before
 /// any `f` call — otherwise a producer thread logging into [`push`] would block on a send. The send
-/// loop runs under a [`ForwardGuard`] so any record `f`'s path logs (on this thread) is dropped, not
-/// re-enqueued.
+/// loop runs under a [`ReentryGuard`] on [`IN_FORWARD`] so any record `f`'s path logs (on this
+/// thread) is dropped, not re-enqueued.
 pub fn drain(mut f: impl FnMut(LogLevel, String)) {
     let Some(m) = QUEUE.get() else { return };
     let batch: Vec<(LogLevel, String)> = {
@@ -90,20 +75,20 @@ pub fn drain(mut f: impl FnMut(LogLevel, String)) {
         };
         q.drain(..).collect()
     };
-    let _guard = ForwardGuard::enter();
-    for (level, message) in batch {
-        f(level, message);
-    }
+    IN_FORWARD.with(|flag| {
+        let _guard = ReentryGuard::enter(flag);
+        for (level, message) in batch {
+            f(level, message);
+        }
+    });
 }
 
-/// Enqueue a record for forwarding, dropping the oldest when full.
+/// Enqueue a record for forwarding, dropping the oldest when full (the shared host-tested
+/// drop-oldest discipline, [`push_capped`]).
 fn push(level: LogLevel, message: String) {
     let Some(m) = QUEUE.get() else { return };
     let mut q = m.lock().unwrap_or_else(|p| p.into_inner());
-    if q.len() == CAP {
-        q.pop_front();
-    }
-    q.push_back((level, message));
+    push_capped(&mut q, (level, message), CAP);
 }
 
 /// A `simplelog::SharedLogger` that tees records into the forward queue — but only while [`ENABLED`]

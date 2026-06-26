@@ -26,8 +26,10 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
 
 ## What this means for the rewrite
 
-- **Layer 1 (buildable blind):** scaling, event flags, summons toggle, world time — all CHARTED
-  params/flags. Write against the SDK; verify on the rig.
+- **Layer 1 (buildable blind):** event flags, summons toggle, world time — all CHARTED params/flags.
+  Write against the SDK; verify on the rig. Scaling's *config + math* are host-built and host-tested
+  (`unseamless-core/scaling.rs`), but its concrete in-game lever (which `SpEffectParam` rows to edit)
+  is rig-gated — see the resolved-mechanism bullet below.
 - **Splash/intro skip is NOT a param** (despite the name): the SDK charts no movie-player type or
   skip function (only the `MovieStep` task phase and a `pre_opening_movie_wait_sec` param, neither a
   lever). It's an AOB-scan + NOP of the boot-flow logo gate — see [SKIP-INTROS.md](SKIP-INTROS.md).
@@ -46,10 +48,11 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
 - **Scaling mechanism resolved (see [SCALING.md](SCALING.md)):** at our pin `MultiPlayCorrectionParam`
   is *SpEffect indirection*, not a rate table — it holds `client1/2/3_sp_effect_id` keyed by
   extra-player count, and the real multipliers live in the referenced `SpEffectParam` rate rows
-  (`max_hp_rate`, `*_attack_power_rate`, posture rate). The idempotent lever is **editing those
-  SpEffect rate rows once at load**, not the correction param and not per-frame `NpcParam.hp`.
-  Enemy/boss split comes from `NpcParam.multi_play_correction_param_id` (no boss flag).
-  `MultiSoulBonusRateParam` is runes-only. The concrete row/SpEffect-ID map is rig-gated.
+  (`max_hp_rate`, `*_attack_power_rate`, posture rate). So the lever is **editing those `SpEffectParam`
+  rate rows once at load** — idempotent, and neither the correction param nor a per-frame `NpcParam.hp`
+  write. Enemy vs. boss split comes from `NpcParam.multi_play_correction_param_id` (there's no boss
+  flag); `MultiSoulBonusRateParam` is runes-only. The concrete row/SpEffect-ID map is the rig-gated
+  part — the SDK charts the param types, but which IDs map to which player count is RE'd on the rig.
 
 > This table reflects the pinned commit. If the `fromsoftware-rs` rev is bumped, re-verify the
 > field/method names — struct layouts are read against a specific revision.

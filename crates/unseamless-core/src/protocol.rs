@@ -477,6 +477,41 @@ mod tests {
     }
 
     #[test]
+    fn narrowed_writers_compose_without_a_lost_update() {
+        // Models the cdylib's `state::update` narrowing (see `unseamless-coop/src/state.rs`): two
+        // concurrent writers each touch only the fields they own — the overlay menu writes a
+        // machine-local field, the co-op `ConfigSync` path writes the host's shared subset. Applied to
+        // the same live config in *either order*, both changes must survive (a whole-config `set`
+        // would clobber whichever ran first). This is the property that makes the second writer safe.
+        let shared = SharedSettings::from(&{
+            let mut host = crate::config::Config::default();
+            host.gameplay.crit_coop = false; // host-enforced shared field, flipped off default
+            host.session.max_players = 4;
+            host
+        });
+        // The menu's narrowed write: a machine-local field SharedSettings has no say over.
+        let menu_write = |c: &mut crate::config::Config| c.debug.enabled = true;
+        // The sync's narrowed write: only the shared subset.
+        let sync_write = |c: &mut crate::config::Config| shared.apply_to(c);
+
+        let mut menu_then_sync = crate::config::Config::default();
+        menu_write(&mut menu_then_sync);
+        sync_write(&mut menu_then_sync);
+
+        let mut sync_then_menu = crate::config::Config::default();
+        sync_write(&mut sync_then_menu);
+        menu_write(&mut sync_then_menu);
+
+        // Order doesn't matter, and both writers' changes are present in each result.
+        assert_eq!(menu_then_sync, sync_then_menu, "narrowed writes are order-independent");
+        for c in [&menu_then_sync, &sync_then_menu] {
+            assert!(c.debug.enabled, "the menu's local write survived the sync");
+            assert!(!c.gameplay.crit_coop, "the sync's shared write survived the menu write");
+            assert_eq!(c.session.max_players, 4, "the sync's player cap survived");
+        }
+    }
+
+    #[test]
     fn config_sync_clamps_out_of_range_max_players_from_the_wire() {
         // Decode must bound an untrusted player cap to the config's range on both sides, and leave
         // an in-range value untouched (so the clamp isn't accidentally `.clamp(MAX, MAX)` etc.).

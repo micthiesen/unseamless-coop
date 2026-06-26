@@ -148,8 +148,9 @@ We reimplement ERSC's *effect*, not its design, and intentionally differ. Full l
 - **Config = TOML + serde** (`unseamless-core/config.rs`), not ERSC's `.ini`. Don't add an INI parser.
 - **One settings registry** (`unseamless-core/settings.rs`) drives both the config file and the
   menu — declare an option once. Don't hand-wire per-option UI.
-- **Session actions = an overlay menu** (`unseamless-core/menu.rs` model + a planned egui/DX12
-  overlay), **not** ERSC's custom in-game items (`MODGOODS_*`) or a native pause-menu entry (no
+- **Session actions = an overlay menu** (`unseamless-core/menu.rs` model + a shipping imgui/DX12
+  overlay via hudhook, `coop/overlay.rs`), **not** ERSC's custom in-game items (`MODGOODS_*`) or a
+  native pause-menu entry (no
   SDK API for that). The `MODGOODS_*` surface in FEATURES.md is reference, not a build target.
 - **Networking = drive the game's own session layer + a private side-channel**
   (`unseamless-core/protocol.rs`); no bespoke transport, no vanilla-ERSC interop.

@@ -6,10 +6,14 @@ later overhead player nameplates — on top of Elden Ring by hooking the game's 
 path, and getting that to work under **Proton/vkd3d**. This is the single biggest UI dependency: it's
 the renderer those two host-tested models have always assumed but never had.
 
-This is a **research note**, not an implemented feature. Game-internal and Proton claims below are
-either grounded in the pinned `fromsoftware-rs` SDK source (cited as such), in open-source overlay
-code we may read and use (cited, license noted), or are behavioral inferences to confirm on the rig
-(hedged). Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene: we reimplement from behavior + public
+**Status: the renderer shipped.** `coop/overlay.rs` draws the session-action menu, notification
+toasts/banners, the read-only settings view, and a live log tail through **hudhook (DX12 present-hook)
++ Dear ImGui** — the decision this note worked through, now built and wired. What remains unverified is
+the **Proton/vkd3d rig behavior**: the game-internal and Proton claims below are either grounded in the
+pinned `fromsoftware-rs` SDK source (cited as such), in open-source overlay code we read and use (cited,
+license noted), or are behavioral inferences to confirm on the rig (hedged) — that rig confirmation
+(does the box render under vkd3d, does input capture feel right) is the open part, not the renderer
+choice. Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene: we reimplement from behavior + public
 SDK/open-source, never from ERSC's bytes (it's closed + Themida-packed — there's nothing to copy here
 anyway; ERSC ships its own DX renderer hook we don't get to see).
 
@@ -155,24 +159,24 @@ Ranked by how much we'd want them (we almost certainly stay with hudhook; these 
 
 ## egui vs imgui
 
-The project leans **egui** ([ARCHITECTURE.md](ARCHITECTURE.md) mentions a planned egui/DX12 overlay),
-but **hudhook today is imgui-only** (egui is on its roadmap, not shipped as of 0.9.1). So there's a
-real fork:
+**Resolved: imgui via hudhook, shipped.** Early notes leaned egui, but **hudhook is imgui-only** (egui
+is on its roadmap, not shipped as of 0.9.1), so the overlay ships on Dear ImGui. The reasoning that
+settled it:
 
 - **Use hudhook → use imgui.** Lowest risk by far: it's what the crate ships, what the SDK's debug
   tooling already uses (`hudhook::imgui::Ui`), and what the ER practice tool proves on Proton. `menu.rs`
   and `notifications.rs` are renderer-agnostic (`MenuRow`/`Toast`/`Banner` are plain data), so wiring
-  them to imgui widgets is mechanical — imgui-rs's `ui.window().build(|| ui.text(...))` maps directly
-  onto a list of rows and a stack of toasts. **Recommended.**
+  them to imgui widgets was mechanical — imgui-rs's `ui.window().build(|| ui.text(...))` maps directly
+  onto a list of rows and a stack of toasts. **This is what we did.**
 - **Insist on egui → you leave hudhook's paved path.** Options are a separate egui-DX12 hook crate
   (e.g. `egui_hooks` / an egui-d3d12 renderer) bolted onto a hand-rolled present detour, or wait for
   hudhook's egui support. Both mean owning more of the render/hook plumbing and re-proving Proton
   compatibility from scratch — exactly the fragile part hudhook already solved. Not worth it for a
   menu + toasts.
 
-Recommendation: **adopt imgui via hudhook now**; revisit egui only if hudhook ships egui support and
-there's a concrete reason. Keep the core models renderer-agnostic so the choice stays swappable (they
-already are). Update ARCHITECTURE.md's "egui/DX12 overlay" wording to "imgui/DX12 overlay via hudhook."
+The core models stayed renderer-agnostic, so the choice remains swappable if hudhook ever ships egui
+support and there's a concrete reason — but there's no plan to revisit. (ARCHITECTURE.md's Divergences
+already describe the shipped surface as an "ImGui overlay … via hudhook.")
 
 ## Injection Fit (Coexisting With Our Loader + Task System)
 
@@ -260,7 +264,8 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
 - [x] Wire `menu.rs` (actions) into the render loop + input (nav/activate → `MenuOutcome` → `actionq` →
       game thread). Settings are shown read-only (synced/local); live editing deferred. Plus a live Log
       tab (`logbuf`). **Backtick** toggles the window; text enlarged via `set_window_font_scale`.
-- [ ] Decide egui vs imgui formally: recommend **imgui via hudhook**; update ARCHITECTURE.md wording.
+- [x] Decided egui vs imgui: **imgui via hudhook** (egui is hudhook-roadmap-only). Shipped on imgui;
+      ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.
 
 ## Sources

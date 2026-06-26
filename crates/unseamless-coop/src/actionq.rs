@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock, TryLockError};
 
 use unseamless_core::protocol::SessionAction;
+use unseamless_core::util::push_capped;
 
 static QUEUE: OnceLock<Mutex<VecDeque<SessionAction>>> = OnceLock::new();
 
@@ -29,28 +30,21 @@ pub fn init() {
 /// Try to enqueue one action **without blocking**. Returns `false` only if uninitialized or the lock is
 /// momentarily held by the draining game thread — the caller retries next frame so a keypress is never
 /// dropped by contention. A *full* queue (drain wedged) instead drops the oldest and reports success, so
-/// the producer's retry buffer can't grow unbounded either.
+/// the producer's retry buffer can't grow unbounded either (the drop-oldest discipline is
+/// [`unseamless_core::util::push_capped`], host-tested in core).
 pub fn try_offer(action: SessionAction) -> bool {
     let Some(m) = QUEUE.get() else { return false };
     match m.try_lock() {
         Ok(mut q) => {
-            push_capped(&mut q, action);
+            push_capped(&mut q, action, CAP);
             true
         }
         Err(TryLockError::Poisoned(p)) => {
-            push_capped(&mut p.into_inner(), action);
+            push_capped(&mut p.into_inner(), action, CAP);
             true
         }
         Err(TryLockError::WouldBlock) => false,
     }
-}
-
-/// Append, evicting the oldest first if at [`CAP`].
-fn push_capped(q: &mut VecDeque<SessionAction>, action: SessionAction) {
-    while q.len() >= CAP {
-        q.pop_front();
-    }
-    q.push_back(action);
 }
 
 /// Drain all queued actions on the game thread. The lock is held only to move the items out.

@@ -238,6 +238,53 @@ impl std::fmt::Display for Version {
     }
 }
 
+/// Push `item` onto a bounded queue, evicting the **oldest** entries first until it fits within
+/// `cap`. Returns how many were evicted (`0` in the common, not-full case). This is the shared
+/// drop-oldest discipline the cdylib's cross-thread queues use — the forward-log backlog
+/// (`forward.rs`) and the session-action queue (`actionq.rs`) — so a producer burst can't grow
+/// either without bound: a stale oldest line/verb is the right thing to lose. Lives in core (not
+/// those modules) so the eviction logic is host-tested here, where the cdylib can't run its tests.
+///
+/// `cap` is treated as **at least 1**: a `cap` of 0 still stores the one `item` (the empty-queue
+/// `pop_front` breaks the loop), since "a queue that can hold nothing" is never what a caller wants.
+pub fn push_capped<T>(queue: &mut std::collections::VecDeque<T>, item: T, cap: usize) -> usize {
+    let mut evicted = 0;
+    while queue.len() >= cap {
+        // `pop_front` is `None` only when already empty (cap == 0) — stop rather than spin.
+        if queue.pop_front().is_none() {
+            break;
+        }
+        evicted += 1;
+    }
+    queue.push_back(item);
+    evicted
+}
+
+/// Scoped, single-thread **reentrancy** flag. While a [`ReentryGuard`] from [`ReentryGuard::enter`]
+/// is alive, [`Cell::get`](std::cell::Cell::get) on the same flag reads `true`, so code can detect
+/// and skip recursive re-entry into a region. The guard clears the flag on drop — including on a
+/// panic unwind — so a panic inside the region can't wedge it stuck-on.
+///
+/// The cdylib's forward-log tee (`forward.rs`) uses this against a `thread_local` flag: a forwarding
+/// send may itself log, which would re-enter the logger; the flag set across the send loop makes
+/// those records drop instead of re-enqueue. Extracted here so the RAII set/clear (and its
+/// panic-safety) is host-tested in core, which the cdylib's own tests can't be.
+pub struct ReentryGuard<'a>(&'a std::cell::Cell<bool>);
+
+impl<'a> ReentryGuard<'a> {
+    /// Mark `flag` active for the lifetime of the returned guard.
+    pub fn enter(flag: &'a std::cell::Cell<bool>) -> Self {
+        flag.set(true);
+        ReentryGuard(flag)
+    }
+}
+
+impl Drop for ReentryGuard<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +455,69 @@ mod tests {
         assert_eq!(Version::parse("1.999.0"), None); // minor > u8
         assert_eq!(Version::parse("1.0.70000"), None); // patch > u16
         assert_eq!(Version::parse("255.255.65535"), Some(Version::new(255, 255, 65535)));
+    }
+
+    #[test]
+    fn push_capped_below_cap_keeps_everything_in_order() {
+        let mut q = std::collections::VecDeque::new();
+        for n in 0..3 {
+            assert_eq!(push_capped(&mut q, n, 4), 0, "no eviction below cap");
+        }
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn push_capped_at_cap_drops_oldest_and_keeps_newest() {
+        let mut q = std::collections::VecDeque::new();
+        // Fill to cap (no eviction), then one more push evicts exactly the oldest.
+        for n in 0..3 {
+            push_capped(&mut q, n, 3);
+        }
+        assert_eq!(push_capped(&mut q, 3, 3), 1, "one eviction once at cap");
+        assert_eq!(q.iter().copied().collect::<Vec<_>>(), [1, 2, 3], "oldest (0) dropped, newest kept");
+        // Steady state at cap: each further push evicts one and the window slides.
+        assert_eq!(push_capped(&mut q, 4, 3), 1);
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), [2, 3, 4]);
+    }
+
+    #[test]
+    fn push_capped_evicts_a_preexisting_overflow_down_to_cap() {
+        // A queue already over cap (cap lowered, or seeded large) is brought back within cap in one
+        // push — the while-loop evicts until it fits, not just a single pop.
+        let mut q: std::collections::VecDeque<i32> = (0..5).collect();
+        assert_eq!(push_capped(&mut q, 99, 2), 4, "evict 4 to land at cap (1 survivor + new = 2)");
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), [4, 99]);
+    }
+
+    #[test]
+    fn push_capped_cap_zero_stores_the_one_item_without_spinning() {
+        // Degenerate cap: the empty-queue pop_front breaks the loop, so we store the item rather
+        // than loop forever or panic.
+        let mut q = std::collections::VecDeque::new();
+        assert_eq!(push_capped(&mut q, 7, 0), 0);
+        assert_eq!(q.into_iter().collect::<Vec<_>>(), [7]);
+    }
+
+    #[test]
+    fn reentry_guard_sets_while_alive_and_clears_on_drop() {
+        let flag = std::cell::Cell::new(false);
+        assert!(!flag.get(), "starts inactive");
+        {
+            let _g = ReentryGuard::enter(&flag);
+            assert!(flag.get(), "active while the guard is alive");
+        }
+        assert!(!flag.get(), "cleared once the guard drops");
+    }
+
+    #[test]
+    fn reentry_guard_clears_even_when_the_scope_panics() {
+        let flag = std::cell::Cell::new(false);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = ReentryGuard::enter(&flag);
+            assert!(flag.get());
+            panic!("boom inside the guarded region");
+        }));
+        assert!(caught.is_err(), "the panic propagated");
+        assert!(!flag.get(), "Drop ran on unwind, so the flag isn't wedged on");
     }
 }

@@ -36,7 +36,7 @@ use unseamless_core::notifications::{DEFAULT_TOAST_SECS, Severity};
 use unseamless_core::peer::{
     CONFIG_SYNCED_MESSAGE, Peer, Session, lost_contact_message, version_mismatch_message,
 };
-use unseamless_core::protocol::PROTOCOL_VERSION;
+use unseamless_core::protocol::{PROTOCOL_VERSION, SharedSettings};
 use unseamless_core::transport::{PeerId, Transport};
 
 use crate::steam::{self, Networking};
@@ -168,14 +168,16 @@ fn run(peer_id: PeerId, is_host: bool, forward: bool) {
             last_maintain = Instant::now();
         }
 
-        // Client adopts the host's authoritative shared settings: mirror them into the live config so
-        // the game-thread features pick them up (the same apply path the dev bridge exercises). The
-        // host has nothing to adopt — its own config is authoritative.
+        // Client adopts the host's authoritative shared settings: apply *only* the shared subset into
+        // the live config (a narrowed [`crate::state::update`], not a whole-config `set`), so a
+        // concurrent menu write to a machine-local field isn't clobbered by the sync. The host has
+        // nothing to adopt — its own config is authoritative.
         if !is_host {
             let cfg = session.peer().config();
             if *cfg != mirrored {
                 mirrored = cfg.clone();
-                crate::state::set(mirrored.clone());
+                let shared = SharedSettings::from(&mirrored);
+                crate::state::update(move |c| shared.apply_to(c));
                 toast(Severity::Info, CONFIG_SYNCED_MESSAGE);
             }
         }
