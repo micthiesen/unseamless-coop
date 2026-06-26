@@ -5,10 +5,11 @@ one another's worlds" problem from [ARCHITECTURE.md](ARCHITECTURE.md), planned o
 today, what's reverse-engineering-gated, the incremental build order, and the decided approach for
 talking to Steam.
 
-> **Status: design + research, nothing here is built.** The mod loads, configures, and observes a
-> session today; it does **not** connect players yet. This doc is the spec for building that, written
-> for session handoff. Everything game-internal is grounded in the pinned `fromsoftware-rs` SDK or
-> flagged as inference to confirm on the rig (per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
+> **Status: rung 1 shipped; rungs 2-4 are design + research.** The mod loads, configures, observes a
+> session, and now reads our own SteamID (rung 1, `coop/steam.rs`) — but it does **not** connect
+> players yet. This doc is the spec for the rest, written for session handoff. Everything game-internal
+> is grounded in the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the rig (per
+> [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
 
 ## The one fact that makes a native path viable: "offline" ≠ no network
 
@@ -66,11 +67,17 @@ Grounded in [SDK-COVERAGE.md](SDK-COVERAGE.md) (pin `fromsoftware-rs` rev `8c67a
 Each rung is independently testable and de-risks the next. Rungs 1-2 need no game-session RE; rung 3
 is the one genuinely hard step; rung 4 is deferred.
 
-### Rung 1 — Identity + copy button (small, safe, solo-testable)
+### Rung 1 — Identity + copy button (small, safe, solo-testable) — **DONE**
 - Bind the Steamworks flat API (below), read our own SteamID.
-- Overlay: show the SteamID with a copy-to-clipboard button; also log it.
+- Overlay: show the SteamID with a copy-to-clipboard button; also log it + surface it in the diag
+  report's `steam` section (live in the debug panel, captured in every log dump).
 - Establishes the Steam integration the later rungs need. Lets two players exchange IDs out of band
-  (Discord). Test: does the button copy your real SteamID, solo.
+  (Discord).
+- **Shipped** as [`coop/steam.rs`](../crates/unseamless-coop/src/steam.rs). Rig-confirmed: resolves our
+  SteamID via the `SteamAPI_SteamUser_v021` accessor on `windows-gnu` (the link/resolve question is
+  settled — runtime `GetProcAddress`, nothing new to link), on the second poll (~0.5 s after our early
+  `dinput8` load). The Copy button uses imgui's built-in Win32 clipboard. **Still to eyeball on the
+  rig:** that the Copy button actually populates the OS clipboard (needs opening the overlay in-game).
 
 ### Rung 2 — Private Steam P2P side-channel (the real unblock)
 - Implement a `SteamP2PTransport` satisfying the existing
@@ -131,12 +138,14 @@ Why hand-binding is small for our needs:
   session. This sidesteps the dispatch conflict entirely.
 - **Don't manage Steam lifecycle.** The game already called `SteamAPI_Init`; we **never** call
   `SteamAPI_Init`/`Shutdown`. We just call the interface accessor + a handful of functions.
-- Net surface for rungs 1-3 is ~10-15 flat functions, e.g. (names are versioned — resolve by exact
-  exported name, re-resolve after a Steam client update):
-  - identity: `SteamAPI_SteamUser_v0__` accessor + `SteamAPI_ISteamUser_GetSteamID`
-  - networking: `SteamAPI_SteamNetworkingMessages_SteamAPI_v002` accessor +
-    `SteamAPI_ISteamNetworkingMessages_SendMessageToUser` / `_ReceiveMessagesOnChannel` /
-    `_AcceptSessionWithUser` / `_CloseSessionWithUser`
+- Net surface for rungs 1-3 is ~10-15 flat functions, e.g. (accessor names are versioned — resolve by
+  exact exported name, re-resolve after a Steam client update). The names below were dumped from ELDEN
+  RING's own `steam_api64.dll` on 2026-06-25 (`x86_64-w64-mingw32-objdump -p … | grep SteamAPI_…`):
+  - identity (rung 1, **confirmed live**): `SteamAPI_SteamUser_v021` accessor (rung 1 probes a
+    descending version window so a bump self-heals) + `SteamAPI_ISteamUser_GetSteamID` (unversioned).
+  - networking (rung 2, **export-confirmed, not yet called**): `SteamAPI_SteamNetworkingMessages_SteamAPI_v002`
+    accessor + `SteamAPI_ISteamNetworkingMessages_SendMessageToUser` / `_ReceiveMessagesOnChannel` /
+    `_AcceptSessionWithUser` / `_CloseSessionWithUser` (all present in the dump).
   - `SteamNetworkingIdentity` setup (set the peer's SteamID).
 
 Where the crate still earns its keep:
@@ -179,9 +188,14 @@ transport); once it lands, the host aggregates everyone's logs and the manual st
 
 ## Concrete next step
 
-Build **rung 1**: the Steamworks flat-API binding (`coop/steam.rs`) reading our own SteamID, plus the
-overlay copy button — and as part of it, do the `windows-gnu` link/resolve check for the flat-API
-approach. Small, safe, solo-testable, and it bootstraps everything above.
+Rung 1 is shipped (`coop/steam.rs`). Build **rung 2**: a `SteamP2PTransport` satisfying the existing
+[`Transport`](../crates/unseamless-core/src/transport.rs) trait over poll-based
+`ISteamNetworkingMessages` (the v002 accessor + send/receive/accept flat fns already confirmed present
+in the DLL), to a manually-entered peer SteamID, then run the host-tested `Peer`/`Session` over it.
+This is the real unblock: two real games' mods handshake, the host pushes config, and log-forwarding
+starts working. Extend `coop/steam.rs` with the networking bindings; the rung-1 identity + the
+`Transport` seam (`BridgeTransport`/`Loopback` were the rehearsal) are already in place. Watch the
+NAT/auth open question above (the peers may need to be Steam friends) — verify early.
 
 ## Cross-references
 
