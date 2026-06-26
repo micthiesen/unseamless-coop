@@ -22,6 +22,12 @@ strip = true
 # when chasing a crash; the shipping build stays lean (stripped). Not for release.
 [profile.diag]
 inherits = "release"
+# Override the inherited `panic = "abort"`: the diag build is for chasing rig crashes, and the
+# per-feature `catch_unwind` firewall in app.rs (the "a feature panics -> it's disabled, the game
+# keeps running" guarantee) is a NO-OP under abort. With unwind, a panicking feature/probe is caught
+# and disabled instead of aborting the whole game — so a batched multi-probe rig run survives one bad
+# probe. (Found on the first rig run: a scaling-probe panic aborted the game under the inherited abort.)
+panic = "unwind"
 opt-level = 1
 debug = true
 strip = false
