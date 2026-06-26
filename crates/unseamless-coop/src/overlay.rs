@@ -716,8 +716,8 @@ fn draw_cursor_marker(ui: &Ui) {
 /// Uses the foreground draw list because inside the build closure the window draw list is clipped to
 /// the content region (the title bar is excluded), so a window-draw-list call there wouldn't show. Must
 /// be called before the menu font is pushed so the hint matches the title's font. One foreground draw
-/// list, dropped at function end — never alive at the same time as `draw_ghost_box`'s or
-/// `draw_cursor_marker`'s (all sequential).
+/// list, dropped at function end — never alive at the same time as `draw_cursor_marker`'s (the other
+/// foreground-list user; sequential). `draw_ghost_box` uses the *background* list, so it never clashes.
 fn draw_title_hint(ui: &Ui) {
     let pos = ui.window_pos();
     let size = ui.window_size();
@@ -734,12 +734,14 @@ fn point_in_rect(p: [f32; 2], pos: [f32; 2], size: [f32; 2]) -> bool {
 }
 
 /// Draw the home-snap ghost box — a faint white fill under a white outline — over the home rectangle,
-/// on the foreground draw list (above the dragged window) so it reads as a "drop here" target. Binds
-/// one foreground draw list and drops it at function end; safe because `draw_cursor_marker` (the only
-/// other foreground-list user) runs later, after the window has closed — never with this one alive.
+/// on the **background** draw list (behind every imgui window) so the dragged window stays on top of
+/// it: it reads as a "drop here" target the window sinks toward, not a box painted over the window.
+/// Still above the game, since the background list draws after the game frame. Binds one background
+/// draw list (a different list from the foreground one `draw_title_hint`/`draw_cursor_marker` use, so
+/// no mutual-exclusion concern) and drops it at function end.
 fn draw_ghost_box(ui: &Ui, pos: [f32; 2], size: [f32; 2]) {
     let max = [pos[0] + size[0], pos[1] + size[1]];
-    let dl = ui.get_foreground_draw_list();
+    let dl = ui.get_background_draw_list();
     dl.add_rect(pos, max, GHOST_FILL).filled(true).build();
     dl.add_rect(pos, max, GHOST_LINE).thickness(GHOST_LINE_THICKNESS).build();
 }
