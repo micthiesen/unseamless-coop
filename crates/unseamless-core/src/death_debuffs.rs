@@ -148,10 +148,83 @@ impl SpEffectRates {
         defence_rate: 1.0,
         attack_rate: 1.0,
     };
+
+    /// Whether this row touches item discovery (`item_drop_rate` ≠ neutral). When true the cdylib must
+    /// also set [`ITEM_DROP_STATE_INFO`] on the row — `item_drop_rate` is inert without that gate
+    /// (DEATH-DEBUFFS.md §B). Only the Decay tier returns true today.
+    pub fn affects_item_drop(&self) -> bool {
+        self.item_drop_rate != Self::NEUTRAL.item_drop_rate
+    }
 }
 
 /// The absolute number of distinct tiers (the cap on [`DeathDebuffTuning::max_tiers`]).
 pub const MAX_TIERS: u8 = DebuffTier::ALL.len() as u8;
+
+/// `dont_sync` argument the cdylib passes to `apply_speffect` for a death debuff. Death debuffs are
+/// **per-player** — each peer accrues its own stack from its own deaths — so the effect is applied
+/// locally and **not** networked to co-op partners (DEATH-DEBUFFS.md §A). Pinned here so the
+/// (rig-confirmable) per-player decision lives with the model, not as a bare literal in the binding.
+pub const APPLY_DONT_SYNC: bool = true;
+
+/// `effect_endurance` for a death-debuff `SpEffectParam` row: `-1` = **permanent**, so the debuff
+/// persists through deaths/respawns and is removed only by the grace cure (DEATH-DEBUFFS.md §B).
+pub const PERMANENT_ENDURANCE: f32 = -1.0;
+
+/// `state_info` value that *enables* `item_drop_rate` on a `SpEffectParam` row (the modding-wiki gate,
+/// DEATH-DEBUFFS.md §B). The cdylib stamps it on any row whose [`SpEffectRates::affects_item_drop`].
+pub const ITEM_DROP_STATE_INFO: u16 = 66;
+
+/// Default consecutive `hp<=0` frames before a death is *confirmed* (~0.5s at 60fps). A real death
+/// holds at 0 HP through the death/respawn flow; a scripted/cutscene HP dip recovers well before this,
+/// so the [`DeathDebounce`] filters it. Rig-tunable (DEATH-DEBUFFS.md §C, the scripted-dip caveat).
+pub const DEFAULT_DEATH_CONFIRM_FRAMES: u32 = 30;
+
+/// Debounces the raw per-frame `hp<=0` read into **one confirmed death per death episode**, filtering
+/// the transient HP≤0 dips scripted/cutscene moments can produce (DEATH-DEBUFFS.md §C). Pure and
+/// host-tested; the cdylib feeds it `is_dead` each frame and advances the stack when it fires.
+///
+/// A death is confirmed only once the player has been dead for `confirm_frames` consecutive frames,
+/// and at most once per episode: the detector **re-arms only when the player is seen alive again**. So
+/// a brief scripted dip never fires, holding at 0 HP for a whole death fires exactly once, and a fresh
+/// death after a revive fires again.
+#[derive(Debug, Clone)]
+pub struct DeathDebounce {
+    /// Consecutive dead frames required to confirm (`>= 1`).
+    confirm_frames: u32,
+    /// Consecutive dead frames seen so far in the current run (reset whenever the player is alive).
+    dead_run: u32,
+    /// `true` while a new death *can* still be confirmed this episode; cleared on fire, set on revive.
+    armed: bool,
+}
+
+impl Default for DeathDebounce {
+    fn default() -> Self {
+        Self::new(DEFAULT_DEATH_CONFIRM_FRAMES)
+    }
+}
+
+impl DeathDebounce {
+    /// `confirm_frames` is floored at 1 (0 would confirm before the player is ever seen dead).
+    pub fn new(confirm_frames: u32) -> Self {
+        Self { confirm_frames: confirm_frames.max(1), dead_run: 0, armed: true }
+    }
+
+    /// Feed this frame's "is the player dead (`hp<=0`)" read. Returns `true` on the single frame a
+    /// death is confirmed, then `false` until the player revives (an alive frame) and dies again.
+    pub fn update(&mut self, is_dead: bool) -> bool {
+        if !is_dead {
+            self.dead_run = 0;
+            self.armed = true;
+            return false;
+        }
+        self.dead_run = self.dead_run.saturating_add(1);
+        if self.armed && self.dead_run >= self.confirm_frames {
+            self.armed = false;
+            return true;
+        }
+        false
+    }
+}
 
 /// Tunable knobs for the stacking algorithm. All have reasonable defaults; the config file's
 /// `[death_debuffs]` section is this struct (the on/off toggle is the separate, synced
@@ -420,6 +493,68 @@ mod tests {
         assert_eq!(only(DebuffTier::Decay), ["have_soul_rate", "item_drop_rate"]); // both, not just one
         assert_eq!(only(DebuffTier::Vulnerability), ["defence_rate"]);
         assert_eq!(only(DebuffTier::Despair), ["attack_rate"]);
+    }
+
+    #[test]
+    fn only_decay_affects_item_drop() {
+        // Drives the cdylib's "set state_info=66 on this row" decision — exactly the Decay tier.
+        for t in DebuffTier::ALL {
+            assert_eq!(
+                t.rates(1.0).affects_item_drop(),
+                t == DebuffTier::Decay,
+                "{t:?} affects_item_drop"
+            );
+        }
+        assert!(!SpEffectRates::NEUTRAL.affects_item_drop());
+    }
+
+    #[test]
+    fn dont_sync_is_per_player() {
+        // Death debuffs are local, never networked — pin the per-player decision (DEATH-DEBUFFS.md §A).
+        assert!(APPLY_DONT_SYNC);
+    }
+
+    #[test]
+    fn debounce_ignores_a_transient_dip() {
+        // A scripted/cutscene HP≤0 blip that recovers before the confirm window must not count.
+        let mut d = DeathDebounce::new(3);
+        assert!(!d.update(true)); // dip frame 1
+        assert!(!d.update(true)); // dip frame 2 (still under 3)
+        assert!(!d.update(false)); // recovered — run resets, re-armed
+        for _ in 0..10 {
+            assert!(!d.update(false), "no death while alive");
+        }
+    }
+
+    #[test]
+    fn debounce_confirms_a_sustained_death_exactly_once() {
+        let mut d = DeathDebounce::new(3);
+        assert!(!d.update(true)); // 1
+        assert!(!d.update(true)); // 2
+        assert!(d.update(true), "confirmed on the 3rd consecutive dead frame");
+        for _ in 0..50 {
+            assert!(!d.update(true), "stays fired — one death per episode, not per frame");
+        }
+    }
+
+    #[test]
+    fn debounce_re_arms_after_a_revive() {
+        let mut d = DeathDebounce::new(2);
+        assert!(!d.update(true));
+        assert!(d.update(true)); // first death
+        assert!(!d.update(false)); // revive (re-arm)
+        assert!(!d.update(true));
+        assert!(d.update(true), "second death confirmed after revival");
+    }
+
+    #[test]
+    fn debounce_confirm_frames_is_floored_at_one() {
+        // 0 would be degenerate (confirm before ever seen dead); floored to fire on the first dead frame.
+        let mut d = DeathDebounce::new(0);
+        assert!(d.update(true), "fires immediately at confirm=1");
+        assert!(!d.update(true));
+        assert!(!d.update(false));
+        assert!(d.update(true), "and again after revive");
     }
 
     #[test]
