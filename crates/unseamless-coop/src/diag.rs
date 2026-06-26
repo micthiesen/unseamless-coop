@@ -41,6 +41,15 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         .field("version", env!("CARGO_PKG_VERSION"))
         .field("build_id", env!("UNSEAMLESS_BUILD_ID"));
 
+    // Our own Steam identity (the connection plan's rung 1) — live in the panel, and captured in every
+    // boot/panic/periodic log dump, so a friend's report shows whose machine it is and whether the ID
+    // resolved (a blank here is the first thing to check if a future rung-2 connect fails). Non-blocking
+    // atomic read, safe from this game-thread caller; "(resolving)" until the off-thread query lands.
+    r.section("steam").field(
+        "own_id",
+        crate::steam::self_steam_id().map_or_else(|| "(resolving)".to_string(), |id| id.to_string()),
+    );
+
     let sec = r.section("session");
     match session {
         Some(v) => {

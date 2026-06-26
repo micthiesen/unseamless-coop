@@ -42,6 +42,7 @@ mod saves;
 mod sdk;
 mod session;
 mod state;
+mod steam;
 
 /// Our own module handle, captured in `DllMain`, so the init thread can find the game folder (and
 /// the `mods/` dir next to it) regardless of the process working directory.

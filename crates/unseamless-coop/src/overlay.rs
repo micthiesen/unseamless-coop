@@ -543,6 +543,8 @@ impl Overlay {
     fn draw_settings_tab(&mut self, ui: &Ui) {
         self.draw_password_row(ui);
         ui.separator();
+        draw_steam_id_row(ui);
+        ui.separator();
         ui.text_disabled("Read-only. Edit in unseamless_coop.toml, then relaunch.");
         ui.text_colored(rgba(BLUE, 1.0), "synced");
         ui.same_line();
@@ -740,6 +742,30 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
             ui.text_disabled(format!("  {k} = {v}"));
         }
     }
+}
+
+/// Your own Steam ID + a Copy button. This is the identity a friend needs to connect once the private
+/// side-channel lands (the connection plan's rung 2); for now it's exchanged out of band (Discord).
+/// Read non-blocking from [`crate::steam`] — blank until Steam resolves it shortly after launch. Copy
+/// goes through imgui's built-in Win32 clipboard (no Rust clipboard backend is registered, so
+/// `set_clipboard_text` calls Dear ImGui's default Windows impl). Teal so it reads as connection info,
+/// distinct from the amber password above.
+fn draw_steam_id_row(ui: &Ui) {
+    ui.text_colored(rgba(TEAL, 1.0), "Your Steam ID:");
+    ui.same_line();
+    match crate::steam::self_steam_id() {
+        Some(id) => {
+            let text = id.to_string();
+            ui.text_colored(rgba(TEAL, 1.0), &text);
+            ui.same_line();
+            // Unique label doubles as the imgui id; stable across frames since the text is fixed.
+            if ui.small_button("Copy") {
+                ui.set_clipboard_text(&text);
+            }
+        }
+        None => ui.text_disabled("resolving from Steam..."),
+    }
+    ui.text_disabled("Share this with friends to connect (co-op connection coming soon).");
 }
 
 fn draw_banners(ui: &Ui, banners: &[Banner]) {

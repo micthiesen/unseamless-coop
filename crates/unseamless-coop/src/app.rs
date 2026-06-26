@@ -95,6 +95,11 @@ pub fn install() {
     // the bridge writes it when it applies a received ConfigSync. Do this before anything reads it.
     crate::state::init(config.clone());
 
+    // Resolve our own SteamID off-thread (the identity rung of the co-op connection plan). Steam comes
+    // up after our early dinput8 load, so this polls until ready, then publishes the ID for the overlay
+    // and logs it. Independent of the overlay kill-switch and of the task system below.
+    crate::steam::start();
+
     // Co-op save isolation, installed as early as possible — before the game opens its save (the
     // title/load screen is the first read). Redirects ER0000.sl2 -> ER0000.<ext> so co-op never
     // touches the player's single-player save. This is **safety-critical**: if the user wants
