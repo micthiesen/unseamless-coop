@@ -172,7 +172,15 @@ async function run() {
 
   const { call, connect } = makeClient(sock);
   const timeout = setTimeout(() => { console.error("_inject: timeout"); process.exit(4); }, 12000);
-  await connect();
+  // A connect failure here means the socket FILE exists (the caller checked) but nothing
+  // is accepting on it -- a stale/orphaned inspector socket, typically because the target
+  // session restarted (or its socket was clobbered by an un-scrubbed BUN_INSPECT child;
+  // see msg). It can't be healed on demand -- the live process holds a now-unlinked socket
+  // inode and only it can rebind the path -- so exit with a DISTINCT code (8) the caller
+  // maps to actionable "restart the session" guidance, rather than the generic rc=7 that
+  // reads as a transient "retry shortly".
+  try { await connect(); }
+  catch (e) { console.error("_inject: cannot reach inspector socket (stale/orphaned): " + (e?.message ?? e)); process.exit(8); }
   await call("Runtime.enable");
   const fn = pageRoutine();
   const probeOnly = a.mode === "selftest";

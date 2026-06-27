@@ -40,10 +40,27 @@ fi
 
 # _inject does the work: connect, locate the prompt UI in the live React tree, submit
 # the message as a turn, preserve any draft. Its exit code is the delivery result.
-if bun "$SELF/_inject" --sock "$sock" -- "$text"; then
+#
+# Scrub BUN_INSPECT from the child's env. This script runs *inside* a fleet Claude
+# whose own env carries BUN_INSPECT=ws+unix://.../<that session>.sock (worker-new /
+# orch-start set it so the session exposes its inspector). bun honors BUN_INSPECT in
+# EVERY child process, so an un-scrubbed `bun _inject` re-binds the caller's own
+# inspector path on startup -- unlinking the caller's live socket and leaving a dead
+# orphan file, after which nobody can `msg` the caller until it restarts. The injector
+# only ever *connects* to the target's socket (--sock); it never needs its own
+# inspector, so dropping BUN_INSPECT is free and stops the self-clobber. (Re-derive:
+# `BUN_INSPECT=ws+unix:///tmp/x.sock bun -e 0` creates /tmp/x.sock -- bun binds it in
+# any child.)
+if env -u BUN_INSPECT bun "$SELF/_inject" --sock "$sock" -- "$text"; then
   echo "msg: delivered to $sess (live turn)"
 else
   rc=$?
-  echo "msg: delivery to $sess failed (rc=$rc); is it mid-restart? retry shortly" >&2
+  if [ "$rc" -eq 8 ]; then
+    echo "msg: $sess has a stale inspector socket -- the file exists but nothing is accepting on it." >&2
+    echo "msg: the session restarted (or its socket was clobbered) and can't be reached on demand;" >&2
+    echo "msg: restart it via orch-start / worker-open to rebind a fresh socket." >&2
+  else
+    echo "msg: delivery to $sess failed (rc=$rc); is it mid-restart? retry shortly" >&2
+  fi
   exit "$rc"
 fi

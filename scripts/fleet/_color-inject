@@ -28,8 +28,12 @@ command -v bun >/dev/null 2>&1 || exit 0
 maxwait="${UNSEAMLESS_COLOR_IDLE_MAXWAIT:-300}"
 i=0
 ready=0
+# `env -u BUN_INSPECT`: this runs inside a fleet Claude whose env binds its inspector
+# socket, and bun honors BUN_INSPECT in every child -- an un-scrubbed `bun _inject`
+# would re-bind (clobber) the caller's own socket. The injector only connects to the
+# target's --sock, never needs its own inspector. (Same guard as scripts/fleet/msg.)
 while [ "$i" -lt "$maxwait" ]; do
-  if [ -S "$sock" ] && bun "$SELF/_inject" --selftest --sock "$sock" >/dev/null 2>&1; then
+  if [ -S "$sock" ] && env -u BUN_INSPECT bun "$SELF/_inject" --selftest --sock "$sock" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -40,5 +44,5 @@ done
 
 # Submit the command once. onSubmit queues it if the worker is busy, so it applies
 # when the current turn ends; a draft in the box is preserved by _inject either way.
-bun "$SELF/_inject" --sock "$sock" -- "/color $color" >/dev/null 2>&1 || exit 0
+env -u BUN_INSPECT bun "$SELF/_inject" --sock "$sock" -- "/color $color" >/dev/null 2>&1 || exit 0
 exit 0
