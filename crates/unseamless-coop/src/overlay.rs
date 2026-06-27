@@ -168,11 +168,10 @@ struct Overlay {
     /// A position to snap the window to next frame, set when it drifts out of the ER viewport so it
     /// stays "locked" inside the game window. `None` when it's in bounds (normal dragging).
     clamp_pos: Option<[f32; 2]>,
-    /// Whether the Settings tab reveals the session password / Steam ID (vs. masking them). Both default
-    /// masked — see [`draw_secret_row`]'s streamer-mode note — and are toggled by their own Reveal/Hide
-    /// button. Present-thread only.
+    /// Whether the Settings tab reveals the session password (vs. masking it). Defaults masked — see
+    /// [`draw_secret_row`]'s streamer-mode note — and is toggled by its own Reveal/Hide button.
+    /// Present-thread only.
     password_revealed: bool,
-    steam_id_revealed: bool,
     /// Controller→menu edge state: turns the raw pad snapshot into per-frame nav/activate/toggle edges.
     /// Updated once per frame in `render_inner`; Present-thread only (see [`crate::input::PadNav`]).
     pad: crate::input::PadNav,
@@ -214,7 +213,6 @@ impl Overlay {
             tab: 0,
             clamp_pos: None,
             password_revealed: false,
-            steam_id_revealed: false,
             pad: crate::input::PadNav::new(),
             // On by default in debug builds (the `diag` profile keeps debug-assertions); off in the
             // stripped release, where it's an opt-in toggled from the Actions tab.
@@ -679,8 +677,6 @@ impl Overlay {
         scroll_pane(ui, pad);
         self.draw_password_row(ui);
         ui.separator();
-        self.draw_steam_id_row(ui);
-        ui.separator();
         ui.text_disabled("Read-only. Edit in unseamless_coop.toml, then relaunch.");
         ui.text_colored(rgba(BLUE, 1.0), "synced");
         ui.same_line();
@@ -707,25 +703,6 @@ impl Overlay {
         let pw = self.config.session.password.clone();
         draw_secret_row(ui, "Session password:", "session password", &pw, &mut self.password_revealed, AMBER);
         ui.text_disabled("Everyone in your party must match this.");
-    }
-
-    /// Your own Steam ID — the identity a friend needs to connect once the private side-channel lands
-    /// (the connection plan's rung 2); for now exchanged out of band (Discord). Read non-blocking from
-    /// [`crate::steam`]; "resolving" until Steam hands it back shortly after launch. Once resolved it's
-    /// drawn through [`draw_secret_row`] (masked by default, Reveal + Copy), the same treatment as the
-    /// password. Teal so it reads as connection info, distinct from the amber password above.
-    fn draw_steam_id_row(&mut self, ui: &Ui) {
-        match crate::steam::self_steam_id() {
-            Some(id) => {
-                draw_secret_row(ui, "Your Steam ID:", "Steam ID", &id.to_string(), &mut self.steam_id_revealed, TEAL);
-            }
-            None => {
-                ui.text_colored(rgba(TEAL, 1.0), "Your Steam ID:");
-                ui.same_line();
-                ui.text_disabled("resolving from Steam...");
-            }
-        }
-        ui.text_disabled("Share this with friends to connect (co-op connection coming soon).");
     }
 
     /// Hand an activated action to the game thread (via [`crate::actionq`]), retrying any the queue
