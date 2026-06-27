@@ -23,6 +23,10 @@ use crate::settings::{Setting, SettingId, registry};
 pub struct SessionContext {
     pub in_session: bool,
     pub is_host: bool,
+    /// Steam is initialized and ready to host/join a lobby.
+    pub steam_ready: bool,
+    /// The player is loaded into the game world (not at the title/menu).
+    pub in_game: bool,
 }
 
 /// One row in the menu.
@@ -44,14 +48,17 @@ fn action_items() -> Vec<MenuItem> {
 
     // Sensible default gating. These are first-pass rules; the rig run may refine exactly when each
     // action is legal (see RIG-RUNBOOK.md), but the shape is right.
-    let not_in_session = |c: &SessionContext| !c.in_session;
+    //
+    // Open/Join move the player from solo into a lobby, so they require Steam to be up and the
+    // player to be in-game (not at the title/menu) — and only out of an existing session.
+    let can_connect = |c: &SessionContext| c.steam_ready && c.in_game && !c.in_session;
     let in_session = |c: &SessionContext| c.in_session;
     let host_in_session = |c: &SessionContext| c.in_session && c.is_host;
 
     let action = |action, enabled: fn(&SessionContext) -> bool| MenuItem::Action { action, enabled };
     vec![
-        action(OpenWorld, not_in_session),
-        action(JoinWorld, not_in_session),
+        action(OpenWorld, can_connect),
+        action(JoinWorld, can_connect),
         action(LeaveWorld, in_session),
         action(LockWorld, host_in_session),
         action(UnlockWorld, host_in_session),
@@ -176,7 +183,9 @@ impl Menu {
 
     /// Home the cursor onto the first enabled row for `ctx`. Call this when the menu opens or the
     /// session context changes, otherwise the initial selection (`OpenWorld`) can be a disabled
-    /// row when opened mid-session — a dead first keypress and a highlighted-but-unusable row.
+    /// row — when opened mid-session, or out of session before Steam is ready / while not in-game,
+    /// since Open/Join are gated on both. A disabled first row is a dead first keypress and a
+    /// highlighted-but-unusable row.
     pub fn home(&mut self, ctx: &SessionContext) {
         if self.is_enabled(self.selected, ctx) {
             return;
@@ -314,10 +323,11 @@ mod tests {
         assert_eq!(rows.len(), 8, "actions-only menu shows just the 8 session actions");
         assert!(rows.iter().all(|r| r.value.is_none()), "no setting rows (those carry a value)");
 
-        // Navigation + activation still work; the homed cursor (out of session) lands on OpenWorld.
+        // Navigation + activation still work; the homed cursor (ready, out of session) lands on
+        // OpenWorld — which needs Steam up and the player in-game.
         let mut menu = Menu::actions_only();
         let mut cfg = Config::default();
-        let ctx = SessionContext::default();
+        let ctx = SessionContext { steam_ready: true, in_game: true, ..Default::default() };
         menu.home(&ctx);
         assert_eq!(menu.activate(&mut cfg, &ctx), MenuOutcome::Action(SessionAction::OpenWorld));
     }
@@ -348,8 +358,8 @@ mod tests {
     #[test]
     fn navigation_skips_disabled_actions() {
         let mut menu = Menu::new();
-        let ctx = SessionContext { in_session: false, is_host: false };
-        // From row 0 (Host, enabled), next-enabled skips Leave/Lock/etc (need a session) until
+        let ctx = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true };
+        // From row 0 (Open world, enabled), next-enabled skips Leave/Lock/etc (need a session) until
         // the first action that's valid out of session or the first setting.
         menu.select_next(&ctx);
         let rows = menu.rows(&Config::default(), &ctx);
@@ -363,7 +373,7 @@ mod tests {
     fn activating_disabled_action_is_noop() {
         let mut menu = Menu::new();
         let mut cfg = Config::default();
-        let out_of_session = SessionContext { in_session: false, is_host: false };
+        let out_of_session = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true };
 
         // Point directly at "Leave world", which requires being in a session.
         menu.selected = menu
@@ -384,30 +394,62 @@ mod tests {
     #[test]
     fn home_moves_off_a_disabled_first_row_when_opened_in_session() {
         let mut menu = Menu::new();
-        let in_session = SessionContext { in_session: true, is_host: false };
+        let in_session = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true };
         // Row 0 (OpenWorld) is disabled in-session; without home() the cursor sits on it.
         assert!(!menu.rows(&Config::default(), &in_session)[0].enabled);
         menu.home(&in_session);
         let rows = menu.rows(&Config::default(), &in_session);
         let sel = rows.iter().position(|r| r.selected).unwrap();
         assert!(rows[sel].enabled, "home() must land on an enabled row");
-        // Out of session, the first row is already enabled, so home() is a no-op.
+        // Ready and out of session, the first row (Open world) is already enabled, so home() is a no-op.
         let mut menu2 = Menu::new();
-        menu2.home(&SessionContext::default());
+        menu2.home(&SessionContext { steam_ready: true, in_game: true, ..Default::default() });
         assert_eq!(menu2.selected(), 0);
     }
 
     #[test]
     fn host_only_actions_gated_by_context() {
         let menu = Menu::new();
-        let guest = SessionContext { in_session: true, is_host: false };
-        let host = SessionContext { in_session: true, is_host: true };
+        let guest = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true };
+        let host = SessionContext { in_session: true, is_host: true, steam_ready: true, in_game: true };
         let guest_rows = menu.rows(&Config::default(), &guest);
         let host_rows = menu.rows(&Config::default(), &host);
         let lock_guest = guest_rows.iter().find(|r| r.label == "Lock world").unwrap();
         let lock_host = host_rows.iter().find(|r| r.label == "Lock world").unwrap();
         assert!(!lock_guest.enabled, "guests can't lock the world");
         assert!(lock_host.enabled, "host can lock the world");
+    }
+
+    #[test]
+    fn open_and_join_gated_on_steam_and_in_game() {
+        let menu = Menu::new();
+        let cfg = Config::default();
+
+        let open_join_enabled = |ctx: &SessionContext| {
+            let rows = menu.rows(&cfg, ctx);
+            let open = rows.iter().find(|r| r.label == "Open world").unwrap();
+            let join = rows.iter().find(|r| r.label == "Join world").unwrap();
+            (open.enabled, join.enabled)
+        };
+
+        // Ready out of session: both enabled.
+        let ready = SessionContext { steam_ready: true, in_game: true, ..Default::default() };
+        assert_eq!(open_join_enabled(&ready), (true, true), "enabled when steam_ready && in_game && !in_session");
+
+        // Steam not ready: both disabled even though in-game and out of session.
+        let no_steam = SessionContext { steam_ready: false, in_game: true, ..Default::default() };
+        assert_eq!(open_join_enabled(&no_steam), (false, false), "disabled when steam_ready is false");
+
+        // Not in-game (at the title/menu): both disabled even with Steam up.
+        let not_in_game = SessionContext { steam_ready: true, in_game: false, ..Default::default() };
+        assert_eq!(open_join_enabled(&not_in_game), (false, false), "disabled when in_game is false");
+
+        // Already in a session: both disabled even when ready.
+        let in_session = SessionContext { steam_ready: true, in_game: true, in_session: true, is_host: true };
+        assert_eq!(open_join_enabled(&in_session), (false, false), "disabled when already in a session");
+
+        // The fully-default context (nothing ready) also disables both.
+        assert_eq!(open_join_enabled(&SessionContext::default()), (false, false));
     }
 
     #[test]

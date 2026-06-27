@@ -155,7 +155,7 @@ impl SessionAction {
     pub fn label(self) -> &'static str {
         use SessionAction::*;
         match self {
-            OpenWorld => "Host / open world",
+            OpenWorld => "Open world",
             JoinWorld => "Join world",
             LeaveWorld => "Leave world",
             LockWorld => "Lock world",
