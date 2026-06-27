@@ -300,6 +300,178 @@ diagnostic report is already built ASCII-only for the same reason (`crate::diag:
   RVA bundle (ER 2.6.2.0 WW / 2.6.2.1 JP); confirm before relying on it. (We decided **not** to ship it
   as a notification fallback — see [ROADMAP.md](ROADMAP.md) > Won't-do; this is RE record only.)
 
+## Native-Windows Crash (First Friend Test, 2026-06-27)
+
+> **Status: investigated blind, no Windows box. Root-cause *anatomy* below is solid; the exact fatal
+> instruction and any fix are UNVALIDATED on native Windows.** The overlay works on our rig
+> (vkd3d/Proton) and is fatal on the friend's native machine. This section is the analysis + a
+> validation plan that needs no Windows box for the baseline.
+
+### What happened
+
+The mod loaded and ran perfectly on the friend's machine through Steam init, the session probe,
+scaling, every feature — then died the instant the overlay's present hook activated. (The friend's
+environment, reported **out-of-band, not derivable from the logs**: native Windows, NVIDIA RTX 3080,
+driver 32.0.15.9649, DX12 / WDDM 2.7. The unusual WDDM-2.7-with-a-2024-driver pairing is worth a
+re-confirm, since hypotheses #1/#2 below lean on the native stack being characterized correctly.)
+
+All four crash logs (`unseamless_coop-*.log`, build `0f1c99f` = v0.8.0, **older than current
+`7c8c746`**, so no breadcrumbs) share the same fatal *neighbourhood* but **do not end identically**:
+
+```
+[INFO]  overlay: DX12 present-hook installed; waiting for the swapchain   <- all 4
+[INFO]  input: hooked XInput GetState ...                                 <- all 4
+[INFO]  input: hooked DirectInput GetDeviceState for overlay capture      <- all 4, then 3/4 END here
+[ERROR] Initialization context incomplete                                 <- hudhook dx12.rs:176 (1/4 only)
+[ERROR] Render error: Error { code: HRESULT(0xFFFFFFFF), message: "" }    <- hudhook dx12.rs:235 (1/4 only)
+                                                                          <- log ENDS; process dies
+```
+
+**Only one of the four runs (`…764-9676`) captured the two hudhook `[ERROR]` lines; the other three
+end after the input-hook install with no hudhook present output at all.** Two readings, both pointing
+the same way:
+
+- **Buffering:** our `simplelog` file sink isn't flushed per record, so a hard crash drops unflushed
+  tail lines — the errors were emitted in all four but only survived to disk in one.
+- **Died-even-earlier:** in three runs the first hooked Present faulted *before* hudhook's `render()`
+  logged anything (the detour entry / MinHook itself), and the one survivor got one frame further.
+
+Either way: **the file tail is not a reliable last-line death oracle**, the crash clusters tightly at
+first-present activation, and the trace diagnostic below must force per-record flushing to be trusted.
+
+### What the log proves — and what it does *not*
+
+- **Both `[ERROR]` lines are hudhook's, not ours** (`dx12.rs:176`, `:235`), and they are *the exact
+  two lines our rig prints harmlessly on the first frame or two* before the command queue is captured.
+  So **they are not the crash** — they're the last buffered lines before it. The old `install()`
+  comment calling them a "known-harmless startup artifact, confirmed on the rig" was right *for
+  vkd3d* and dangerously misleading for native; it's now corrected to point here.
+- **"Initialization context incomplete"** = hudhook's state machine is still `WithSwapChain` (it has
+  the swapchain but hasn't matched a command queue to it yet). This is the *expected* state on the
+  first hooked Present — see the gap analysis below.
+- **The CQ scan did not *fail* — it simply hadn't run yet.** hudhook logs `Couldn't find command
+  queue pointer …` at **`warn`** (≥ info, so it *would* be in this log) when `check_command_queue`
+  rejects a queue. It is **absent**, so on native the scan never even rejected a queue before death.
+  This is pure first-frame ordering, identical to the rig — not a layout/offset mismatch.
+- **We cannot yet tell whether our code ran.** The `initialize() reached` / `first render frame
+  reached` breadcrumbs (added in `7c8c746`) aren't in these older logs. Since the context never
+  completed, our `initialize`/`render` almost certainly never ran — a fresh native run on the current
+  build will confirm.
+
+### Anatomy of the fatal frame
+
+hudhook's `dxgi_swap_chain_present_impl` (`dx12.rs:220`) does, every present:
+
+1. `INIT_STATE.insert_swap_chain(&swap_chain)` → state becomes `WithSwapChain`.
+2. `render(&swap_chain)` → `init_pipeline()` → `INIT_STATE.get()` returns `None` (not `Complete`) →
+   logs **"Initialization context incomplete"**, returns `Err(HRESULT(-1))`.
+3. `render` returns `Err` → `util::print_dxgi_debug_messages()` → logs **"Render error …
+   0xFFFFFFFF"**. (Our render did *nothing* — it bailed before any GPU work.)
+4. `trace!("Call IDXGISwapChain::Present trampoline")` then **calls the original Present**.
+5. `<process dies here on native; survives on vkd3d>`.
+
+**The structural 1-frame gap (why the error always appears, even on the rig):** the swapchain only
+becomes known to hudhook *at Present time*, by which point that same frame's `ExecuteCommandLists`
+(where the queue is captured) has already passed. So frame 1 is *always* incomplete; frame 2's
+`ExecuteCommandLists` runs with state `WithSwapChain`, matches the queue → `Complete`, and frame 2's
+Present renders. This is inherent to hudhook 0.9.x and **cannot be closed from our side**. It is why
+Michael's rig logs the same two errors and recovers — and why removing those errors is not a fix.
+
+**Therefore the native crash is not the incomplete context.** It is whatever runs *after* it on the
+first hooked present — overwhelmingly likely **the call into the game's original Present trampoline**
+(step 4→5) on native NVIDIA DXGI, where our detour did nothing but `AddRef` the swapchain.
+
+### Why native NVIDIA dies where vkd3d tolerates it (ranked hypotheses)
+
+1. **First hooked Present faults under MinHook on native (most likely).** The detour is applied to a
+   live swapchain vtable while presents are in flight; native NVIDIA's frames-in-flight / present
+   threading hits a window vkd3d's different scheduling dodges. Consistent with "dies on the very
+   first hooked present, our code never ran."
+2. **A swapchain proxy on native shifts the present target / CQ layout.** Anything interposing a DXGI
+   swapchain proxy (NVIDIA App / GeForce overlay, an FPS/RTSS overlay, DLSS Streamline) would diverge
+   the detour target or the CQ scan. ER ships DLSS *super-resolution* (no swapchain proxy), not
+   frame-gen, so rank this below #1 — but **ruling out other in-game overlays on the friend's machine
+   is a cheap test.**
+3. **The fault is later than the log suggests** (CQ eventually completes, our `initialize`/render runs,
+   imgui's DX12 font upload faults on native). The friend's log shows context never completed before
+   death, so this is lower — the breadcrumb build will confirm or kill it.
+
+### Version reality (no bump available)
+
+- We are on **hudhook 0.9.1 — the latest release** (0.9.1 May 2024; no 0.9.2/0.10). Its `dx12.rs` is
+  **byte-identical to 0.9.0**, so the command-queue-capture logic is unchanged across the only two
+  candidate revs. **A "vetted hudhook bump" is not an available fix.**
+- *Correction to the brief:* the dep does **not** resolve to a git checkout (`53bbf50`). `Cargo.toml`
+  pins `hudhook = { version = "0.9", … }` and `Cargo.lock` resolves it to **crates.io 0.9.1**. The
+  git checkout in `~/.cargo` is just an old artifact. (Source is identical, so the analysis holds —
+  but there's no git override to hunt for.)
+
+### The diagnostic lever we already have
+
+hudhook's `tracing` dep is `features = ["log"]`, and we install **no** tracing subscriber, so its
+events forward straight to the `log` crate — that's how its `error!` lines reached our file. But its
+**localizing** breadcrumbs sit below `info` and were suppressed (the friend ran at `info`):
+
+| hudhook line | level | what it tells us |
+|---|---|---|
+| `ID3D12CommandQueue::ExecuteCommandLists(...) invoked` | trace | the CQ hook is firing at all |
+| `Found command queue pointer in swap chain struct at offset +0x…` | debug | CQ matched → context will complete; gives the native offset |
+| `Couldn't find command queue pointer …` | warn | CQ scan rejected a queue (would already show at info) |
+| `Call IDXGISwapChain::Present trampoline` | trace | **the decisive line** — see below |
+
+A single run at `[debug] enabled = true, level = "trace"` should surface all of these in our shareable
+log: our `simplelog` sinks set no target filter, `CombinedLogger` raises `log::max_level` to `Trace`,
+and `tracing`'s `log` feature honours it (the `error`-level bridge is *verified* — those lines reached
+our file; the trace-level path is *expected*, exercised for the first time by this very run, as
+hudhook sets no static `max_level` feature). **Caveat from "What happened":** the tail is
+buffering-dependent — 3 of 4 runs lost the last lines — so this run is only trustworthy with
+per-record flushing forced (otherwise the decisive line can be dropped exactly as before). **The
+decisive observation:** if `Call IDXGISwapChain::Present trampoline` is the *last* line before death,
+the crash is in the game's original Present (hypothesis #1). If it's *absent* (and flushing is on),
+the crash is just after the Render-error log — in the `trace!` eval or detour glue — *before* the
+trampoline call. (`print_dxgi_debug_messages` runs at `dx12.rs:234`, *before* the Render-error line,
+so its survival is already implied whenever that line is present.) Either way it pinpoints the step.
+
+### Validation plan (baseline needs no Windows box)
+
+Michael's key insight: **the rig prints the same two errors, it just doesn't crash** — so most of the
+loop is runnable here.
+
+1. **Rig baseline (orchestrator, vkd3d).** Run the rig at `level = "trace"` and record the *healthy*
+   sequence: `ExecuteCommandLists invoked` → `Found command queue pointer … at offset +0x…` →
+   (context Complete) → render, and confirm `Call … Present trampoline` prints on *every* present.
+   This is the vkd3d reference to diff native against.
+2. **Friend native run (current build `7c8c746`, breadcrumbs on), `level = "trace"`, once — with
+   per-record log flushing forced** (else the decisive tail line is lost, as in 3/4 of the first
+   logs). Capture: do `initialize() reached` / `first render frame reached` appear? Is `Call … Present
+   trampoline` the last line? Does `Found command queue pointer` ever appear on native? Diff against
+   the baseline → localizes the divergence.
+3. **Any code fix stays UNVALIDATED on native until a subsequent friend session.** Flag it as such.
+
+### Candidate fixes (ranked)
+
+1. **Immediate mitigation — no code, shippable now: `[debug] overlay = false`.** The logs prove the
+   *entire* mod runs perfectly without the overlay; only the in-game menu is lost. Co-op host/join can
+   be driven headless via `auto_session` / the rig-guide actions (`7c8c746`) for the next test.
+   Zero vkd3d impact. **Recommended so the friend can play + we can still exercise co-op.**
+2. **Diagnostic trace run — no code (the §"validation plan" runs).** Cheapest path to an actual fix;
+   do this before changing any render/hook code.
+3. **Install-timing change — small, low-risk, but a guess (needs sign-off).** Defer overlay install
+   from `frontend_ready` to `in_game()` (the `spawn_overlay` comment already names this as the
+   rig-validated floor, so it's vkd3d-safe). It does **not** change the first-hooked-present dynamic,
+   so it's a long shot — only worth trying if the breadcrumbs show the death is title-screen-specific.
+4. **Fork hudhook with a defensive `dx12.rs` — judgment call (needs sign-off), only after breadcrumbs
+   implicate a specific step.** If the original-Present call is the faulting step, options are thin
+   (it's the game's own present). If the CQ scan ever matches a *wrong* queue (false positive in the
+   512-pointer scan), tighten `check_command_queue`. **Risk: forking the render path can regress the
+   working vkd3d overlay — must re-run the rig baseline after.** Do not do this blind.
+5. **Not a fix:** a version bump (none newer exists); "removing the incomplete-context error" (it's
+   structural and harmless, and present on the rig too).
+
+**Recommendation:** don't touch render/hook code blind. Ship mitigation #1 so the friend can play and
+we can still drive co-op headless; gather the §"validation plan" data (rig baseline + one friend trace
+run); decide #3/#4 with Michael from that data.
+
 ## Status & Next Steps
 
 - [ ] Rig milestone #1: add hudhook to the cdylib, install the DX12 hook, draw a static text box over
@@ -323,6 +495,11 @@ diagnostic report is already built ASCII-only for the same reason (`crate::diag:
 - [x] Decided egui vs imgui: **imgui via hudhook** (egui is hudhook-roadmap-only). Shipped on imgui;
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.
+- [ ] ⚠️ **Native-Windows overlay crash** (friend test 2026-06-27, RTX 3080): fatal on the first hooked
+      Present on native NVIDIA DX12; works on our vkd3d rig. Investigated blind — see "Native-Windows
+      Crash" above. **Next:** rig trace-level baseline + one friend trace-level run on build `7c8c746`
+      to localize the fatal step; mitigate now with `[debug] overlay = false`. No safe fix identified
+      blind; a hudhook fork or install-timing change needs Michael's sign-off + the breadcrumb data.
 
 ## Sources
 

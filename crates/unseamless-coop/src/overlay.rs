@@ -1703,8 +1703,14 @@ pub fn install(module: usize) {
     }
     let hmodule = HINSTANCE(module as *mut c_void);
     // NB: hudhook logs `Render error HRESULT(0xFFFFFFFF)` / `Initialization context incomplete` on the
-    // first frame or two before the swapchain is fully wired — a known-harmless hudhook/imgui startup
-    // artifact (confirmed on the rig), not a real failure. Don't chase it; the overlay renders fine after.
+    // first frame or two before the swapchain is fully wired (its CQ is matched a frame after the first
+    // Present — a structural 1-frame gap). On vkd3d/Proton (our rig) this is a harmless startup artifact
+    // and the overlay renders fine after. On NATIVE Windows NVIDIA DX12 the process dies at the first
+    // hooked Present (first friend test, RTX 3080); one of the four crash logs caught these same two
+    // lines just before the end, the other three died at the same point with the tail unflushed. The
+    // error lines are not the crash, just what precedes it — full anatomy, hypotheses, and the trace-level
+    // diagnostic recipe are in docs/OVERLAY-RENDERING.md > "Native-Windows Crash". Mitigate on native
+    // with `[debug] overlay = false` until localized.
     match Hudhook::builder().with::<ImguiDx12Hooks>(Overlay::new(module)).with_hmodule(hmodule).build().apply() {
         Ok(()) => log::info!("overlay: DX12 present-hook installed; waiting for the swapchain"),
         Err(e) => log::error!("overlay: hook install failed ({e:?}); no overlay this session"),
