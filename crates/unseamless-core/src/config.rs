@@ -189,9 +189,9 @@ pub struct DebugProbes {
     pub session_probe: bool,
     /// Run the rung-4 `RunCallbacks` probe (`coop/steam::run_lobby_callback_probe`): register one
     /// harmless private `CreateLobby` call-result at startup and log (under the `lobby-probe:` prefix)
-    /// whether it fires under ELDEN RING's own Steam pump. The single empirical gate on flipping
-    /// `LOBBY_DISCOVERY_ENABLED` — fires → ER uses `RunCallbacks`, lobby discovery is viable; never
-    /// fires → likely `ManualDispatch`, rung 4 blocked. Solo, single-player. Off by default.
+    /// whether it fires under ELDEN RING's own Steam pump. Answered the rung-4 design question — fires →
+    /// ER uses `RunCallbacks`, lobby discovery is viable; never fires → likely `ManualDispatch`, rung 4
+    /// blocked. Solo, single-player. Off by default. (Kept as the fast re-derive after a game update.)
     pub lobby_callback_probe: bool,
 }
 

@@ -189,14 +189,6 @@ pub(crate) fn note_lobby_failure(why: impl Into<String>) {
     record_failure(why);
 }
 
-/// RIG-VERIFY gate (rung 4): password-keyed Steam-lobby discovery stays **dormant** until a two-player
-/// rig run validates the full joiner-finds-host flow end to end. The mechanism is already rig-proven
-/// (an in-process `CreateLobby` succeeds and its handle resolves when polled via `ISteamUtils` — see
-/// `steam::run_lobby_callback_probe`); what remains is confirming a joiner's filtered list actually
-/// finds the host's freshly-tagged lobby across two machines. With the manual peer-entry path removed,
-/// `false` simply means co-op is inactive — no fallback. See docs/COOP-CONNECTION.md rung-4.
-const LOBBY_DISCOVERY_ENABLED: bool = false;
-
 /// How long the rung-4 discovery driver waits for a partner before giving up (a lobby create/join and a
 /// member appearing should be near-instant; this is generous headroom for a slow Steam round-trip).
 const LOBBY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -204,13 +196,16 @@ const LOBBY_DISCOVERY_POLL: Duration = Duration::from_millis(250);
 
 /// Start the side-channel. Pairing is **password-keyed lobby discovery** (rung 4) and nothing else: with
 /// a session password configured, discovery finds-or-creates a lobby tagged by that password, derives
-/// our host/client role, and seeds the rung-2 driver with the resolved partner. Gated off
-/// ([`LOBBY_DISCOVERY_ENABLED`]) until the two-player rig run lands, so today this is a no-op (a solo
-/// session pays nothing). Spawns one detached driver thread; reads the few config values it needs up
-/// front.
+/// our host/client role, and seeds the rung-2 driver with the resolved partner. The **password is the
+/// sole trigger** — a session with none set is a no-op (a solo session pays nothing). Spawns one
+/// detached driver thread; reads the few config values it needs up front.
+///
+/// The create + poll mechanism is rig-proven (`steam::run_lobby_callback_probe`), but the
+/// joiner-finds-host leg across two machines is still validated by the two-player friend test
+/// (RIG-VERIFY in `steam.rs`) — a release shouldn't advertise working co-op until that lands.
 pub fn start(config: &Config) {
-    if !LOBBY_DISCOVERY_ENABLED || config.session.password.is_empty() {
-        return; // co-op inactive: discovery is gated off, or there's no password to key a lobby on
+    if config.session.password.is_empty() {
+        return; // co-op inactive: no password to key a lobby on (the sole trigger)
     }
     let password = config.session.password.clone();
     // Whether *this* instance forwards its debug log depends on the role discovery derives (only a
@@ -228,8 +223,8 @@ fn spawn_driver(name: &str, body: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// Rung-4 driver (dormant — see [`LOBBY_DISCOVERY_ENABLED`]): resolve the partner **and our derived
-/// host/client role** via password-keyed Steam-lobby discovery, then hand off to the normal rung-2
+/// Rung-4 driver: resolve the partner **and our derived host/client role** via password-keyed
+/// Steam-lobby discovery, then hand off to the normal rung-2
 /// [`run`] with that peer + role. The role-dependent forward decision is applied here (only a client
 /// forwards). Every failure degrades to a `failed` phase with a recorded reason, like [`run`].
 fn run_discovery(password: String, forward_pref: bool) {

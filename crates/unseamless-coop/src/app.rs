@@ -194,15 +194,15 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
 
     // The real side-channel: a private Steam P2P link to the partner resolved by password-keyed lobby
     // discovery (rung 2+4 of docs/COOP-CONNECTION.md). Runs the same host-tested `Session` the bridge
-    // does, but over `ISteamNetworkingMessages` instead of loopback. Gated off until the friend test
-    // (LOBBY_DISCOVERY_ENABLED), so a normal solo session pays nothing. Best-effort: a failure to
+    // does, but over `ISteamNetworkingMessages` instead of loopback. Inactive unless a co-op password
+    // is set (the sole trigger), so a normal solo session pays nothing. Best-effort: a failure to
     // connect degrades, never aborts.
     crate::coop::start(config);
 
     // Rung-4 RunCallbacks probe (gated by `[debug.probes] lobby_callback_probe`, off by default):
-    // register one harmless private `CreateLobby` call-result and log whether it fires under ER's own
-    // Steam pump — the single empirical gate on flipping `LOBBY_DISCOVERY_ENABLED`. Pure diagnostic;
-    // runs on its own thread and degrades (logs) on any binding miss. See docs/COOP-CONNECTION.md rung 4.
+    // register one harmless private `CreateLobby` and poll whether it completes under ER's own Steam
+    // pump — the probe that settled the rung-4 design question. Pure diagnostic; runs on its own thread
+    // and degrades (logs) on any binding miss. See docs/COOP-CONNECTION.md rung 4.
     if config.debug.probes.lobby_callback_probe {
         crate::steam::run_lobby_callback_probe();
     }

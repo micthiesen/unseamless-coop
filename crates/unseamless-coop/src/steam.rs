@@ -449,10 +449,11 @@ fn resolve_net_accessor(module: HMODULE) -> Option<(NetMessagesAccessor, u32)> {
 // ===================================================================================================
 // Rung 4: Steam matchmaking lobbies — password-keyed discovery, POLL-BASED.
 //
-//   *** DORMANT — gated in `crate::coop::start` on `LOBBY_DISCOVERY_ENABLED`, off until a two-player
-//       rig run validates the full joiner-finds-host flow. The rig already PROVED the mechanism: an
-//       in-process `CreateLobby` succeeds, and its `SteamAPICall_t` resolves cleanly when *polled*
-//       via `ISteamUtils` (see `run_lobby_callback_probe`). See docs/COOP-CONNECTION.md rung-4. ***
+//   *** Active whenever a co-op password is set (`crate::coop::start`). The rig PROVED the mechanism:
+//       an in-process `CreateLobby` succeeds and its `SteamAPICall_t` resolves cleanly when *polled*
+//       via `ISteamUtils` (see `run_lobby_callback_probe`). RIG-VERIFY still open: the joiner-finds-host
+//       leg across two machines (the `GetLobbyByIndex`/`GetLobbyOwner` pre-join reads below), confirmed
+//       by the two-player friend test. See docs/COOP-CONNECTION.md rung-4. ***
 //
 // This is the ONLY way two players pair — the manual peer-SteamID entry is gone. The role is
 // **derived, not configured**: list lobbies filtered by `hash(password)`; if a match exists, JOIN it
@@ -934,7 +935,7 @@ impl LobbyDiscovery {
 /// ([`LobbyDiscovery`]) is built on: that an in-process `CreateLobby` succeeds and its `SteamAPICall_t`
 /// resolves cleanly when **polled** via `ISteamUtils` (`IsAPICallCompleted`/`GetAPICallResult`).
 ///
-/// This already settled the design question that gated [`LOBBY_DISCOVERY_ENABLED`](crate::coop): ELDEN
+/// This settled the rung-4 design question: ELDEN
 /// RING pumps Steam via `RunCallbacks` and consumes a handle before we could poll it *if* we also
 /// register a call-result on it — so registering is the trap and poll-only is the path. Kept as the
 /// fast re-derive after a game/Steam update: it issues one harmless private `CreateLobby` and logs
