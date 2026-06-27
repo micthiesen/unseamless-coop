@@ -489,8 +489,6 @@ const E_RESULT_OK: i32 = 1;
 
 /// `ELobbyType::k_ELobbyTypePublic` — listed in `RequestLobbyList`, so the password filter can find it.
 const ELOBBY_TYPE_PUBLIC: i32 = 2;
-/// `ELobbyType::k_ELobbyTypePrivate` — never listed; used only by the RunCallbacks probe's throwaway lobby.
-const ELOBBY_TYPE_PRIVATE: i32 = 0;
 /// `ELobbyComparison::k_ELobbyComparisonEqual` — exact-match the password-hash filter.
 const ELOBBY_CMP_EQUAL: i32 = 0;
 /// Two players per co-op lobby.
@@ -950,12 +948,10 @@ pub fn run_lobby_callback_probe() {
     });
 }
 
-/// Body of [`run_lobby_callback_probe`], on its own thread. Resolves the binding, issues a private
-/// `CreateLobby`, registers the call-result, then waits — logging whether it fired.
+/// Body of [`run_lobby_callback_probe`], on its own thread. Resolves the binding, then retries
+/// `CreateLobby` over ~a minute — polling each attempt via `ISteamUtils` (and registering a call-result
+/// alongside) — logging whether the call succeeds, IO-fails, and whether the dispatch fires.
 fn issue_probe_create_lobby() {
-    // Set by the call-result thunk (on the game's pump thread); read by the watcher loop below.
-    static FIRED: AtomicBool = AtomicBool::new(false);
-
     // SAFETY: borrow the already-loaded module handle (same as rung 1/2); not-found = Steam not up.
     let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
         Ok(m) => m,
@@ -964,13 +960,6 @@ fn issue_probe_create_lobby() {
             return;
         }
     };
-    let Some(addr) = resolve_required(module, "SteamAPI_RegisterCallResult", s!("SteamAPI_RegisterCallResult"))
-    else {
-        log::warn!("lobby-probe: SteamAPI_RegisterCallResult not exported — rung-4 binding unavailable");
-        return;
-    };
-    // SAFETY: documented flat-API signature on its fn type — the GetProcAddress binding used throughout.
-    let register: RegisterCallResultFn = unsafe { std::mem::transmute::<usize, RegisterCallResultFn>(addr) };
     let Some(mm) = Matchmaking::resolve(module) else {
         log::warn!("lobby-probe: ISteamMatchmaking unavailable (Steam not initialized?); cannot probe");
         return;
@@ -981,39 +970,133 @@ fn issue_probe_create_lobby() {
         return;
     };
 
-    // A private 1-seat lobby: never listed, carries no data, auto-closes when we exit — harmless.
-    // SAFETY: resolved flat method; us → Steam.
-    let call = unsafe { (mm.create_lobby)(mm.iface, ELOBBY_TYPE_PRIVATE, 1) };
-    if call == API_CALL_INVALID {
-        log::warn!("lobby-probe: CreateLobby returned no API call (Steam refused it); inconclusive");
+    let Some(utils) = Utils::resolve(module) else {
+        log::warn!("lobby-probe: ISteamUtils poll unavailable; cannot run the retry/poll probe");
         return;
-    }
-    let handler = Box::new(move |param: *const c_void, io_failure: bool| {
-        FIRED.store(true, Ordering::Release);
-        // Either branch, the headline is identical: a call-result we registered came BACK, so ER pumps
-        // via RunCallbacks and rung-4 dispatch is viable. (An io_failure flag is benign for the probe.)
-        if io_failure || param.is_null() {
-            log::info!("lobby-probe: call-result FIRED (io_failure) → ELDEN RING pumps Steam via RunCallbacks; rung-4 lobby discovery is VIABLE — safe to flip LOBBY_DISCOVERY_ENABLED");
-            return;
-        }
-        // SAFETY: for CB_LOBBY_CREATED Steam hands us a LobbyCreated_t; read as POD.
-        let res = unsafe { &*(param as *const LobbyCreated) };
-        log::info!("lobby-probe: CreateLobby call-result FIRED (EResult {}) → ELDEN RING pumps Steam via RunCallbacks; rung-4 lobby discovery is VIABLE — safe to flip LOBBY_DISCOVERY_ENABLED", res.result);
-    });
-    register_call_result(register, call, CB_LOBBY_CREATED, size_of::<LobbyCreated>() as i32, handler);
-    log::info!("lobby-probe: registered a private CreateLobby call-result; awaiting it under ER's Steam pump…");
+    };
 
-    // Make a non-firing result legible: nothing back ⇒ ER likely pumps via ManualDispatch (rung-4 blocked).
-    for (wait, total) in [(10u64, 10u64), (20, 30), (30, 60)] {
-        std::thread::sleep(Duration::from_secs(wait));
-        if FIRED.load(Ordering::Acquire) {
+    // Is THIS game session actually logged on to Steam's backend? Matchmaking (CreateLobby) needs it, but
+    // identity resolves from cache even when it isn't — so a `false` here would directly explain the IO
+    // failures (our offline/non-EAC launch may not bring up the Steam logon ER would for online play).
+    if let Some((user_acc, _v)) = resolve_user_accessor(module) {
+        // SAFETY: resolved accessor, no args; null = Steam not up.
+        let user = unsafe { user_acc() };
+        if !user.is_null()
+            && let Some(addr) = resolve_required(module, "SteamAPI_ISteamUser_BLoggedOn", s!("SteamAPI_ISteamUser_BLoggedOn"))
+        {
+            type BLoggedOnFn = unsafe extern "C" fn(*mut c_void) -> bool;
+            // SAFETY: documented flat-API signature declared on its fn type.
+            let blogged_on: BLoggedOnFn = unsafe { std::mem::transmute::<usize, BLoggedOnFn>(addr) };
+            let on = unsafe { blogged_on(user) };
+            log::info!("lobby-probe: ISteamUser::BLoggedOn = {on} (is this game session connected to Steam's backend?)");
+        }
+    }
+
+    // Retry CreateLobby over ~a minute, POLLING each attempt via ISteamUtils — and crucially NOT
+    // registering a call-result on the handle. Registering lets ER's RunCallbacks consume/dispatch the
+    // result first, so our poll then sees an expired handle (that was the earlier "InvalidHandle" IO
+    // failures — an artifact, not a real CreateLobby failure). A public 2-seat lobby matches the proven
+    // path (the harness on appid 480 and the real discovery code use public). A success here means
+    // CreateLobby works and a poll-based rung 4 (no RegisterCallResult) is the path.
+    const ATTEMPTS: u32 = 6;
+    for attempt in 1..=ATTEMPTS {
+        // SAFETY: resolved flat method; us → Steam.
+        let call = unsafe { (mm.create_lobby)(mm.iface, ELOBBY_TYPE_PUBLIC, LOBBY_MAX_MEMBERS) };
+        if call == API_CALL_INVALID {
+            log::warn!("lobby-probe: attempt {attempt}/{ATTEMPTS}: CreateLobby returned no API call (Steam refused it)");
+            std::thread::sleep(Duration::from_secs(8));
+            continue;
+        }
+
+        // Poll this attempt's handle to completion (up to ~8s) — no call-result registered on it.
+        let mut completed = false;
+        let mut failed = false;
+        for _ in 0..16 {
+            std::thread::sleep(Duration::from_millis(500));
+            let mut f = false;
+            // SAFETY: resolved flat method; `iface` from the accessor; `f` is a valid out-param.
+            if unsafe { (utils.is_completed)(utils.iface, call, &mut f) } {
+                completed = true;
+                failed = f;
+                break;
+            }
+        }
+        if completed && !failed {
+            let mut buf = LobbyCreated { result: 0, lobby: 0 };
+            let mut gf = false;
+            // SAFETY: 16-byte LobbyCreated buffer matching CB_LOBBY_CREATED's expected size/id.
+            let ok = unsafe {
+                (utils.get_result)(utils.iface, call, (&mut buf as *mut LobbyCreated).cast(), size_of::<LobbyCreated>() as i32, CB_LOBBY_CREATED, &mut gf)
+            };
+            log::info!(
+                "lobby-probe: VERDICT — CreateLobby SUCCEEDED on attempt {attempt}/{ATTEMPTS} (ok={ok} EResult={} lobby={}). The earlier IO failures were the register+poll conflict (RunCallbacks consumed the handle first), NOT a real failure. A POLL-BASED rung 4 (IsAPICallCompleted/GetAPICallResult, no RegisterCallResult) is the path.",
+                buf.result, buf.lobby
+            );
             return;
         }
-        if total < 60 {
-            log::warn!("lobby-probe: still no call-result after {total}s — if it never fires, ER pumps via ManualDispatch (rung-4 blocked)");
-        } else {
-            log::warn!("lobby-probe: 60s elapsed with NO call-result — provisional verdict: ManualDispatch, rung-4 NOT viable via registered call-results. Confirm by Frida-hooking SteamAPI_RunCallbacks before concluding");
+        // SAFETY: resolved flat method; querying the just-completed call's failure reason.
+        let reason = unsafe { (utils.get_failure_reason)(utils.iface, call) };
+        log::warn!("lobby-probe: attempt {attempt}/{ATTEMPTS}: completed={completed} failed={failed} reason={reason} ({}) — retrying in 8s…", failure_reason_str(reason));
+        std::thread::sleep(Duration::from_secs(8));
+    }
+    log::warn!("lobby-probe: VERDICT — CreateLobby IO-failed on all {ATTEMPTS} attempts over ~a minute while Steam is online and running ELDEN RING → not a timing issue. Our in-process CreateLobby is being rejected; next: compare how ERSC issues it (lobby type/params, Steam user/pipe context, whether a SteamAPI re-init / RunCallbacks priming is needed)");
+}
+
+// --- ISteamUtils manual call-result poll (the poll path that may replace RegisterCallResult for rung 4) ---
+type UtilsAccessor = unsafe extern "C" fn() -> *mut c_void;
+type IsAPICallCompletedFn = unsafe extern "C" fn(*mut c_void, SteamAPICall, *mut bool) -> bool;
+type GetAPICallResultFn =
+    unsafe extern "C" fn(*mut c_void, SteamAPICall, *mut c_void, i32, i32, *mut bool) -> bool;
+type GetFailureReasonFn = unsafe extern "C" fn(*mut c_void, SteamAPICall) -> i32;
+
+/// `ISteamUtils` + the manual call-result methods. Lets us POLL a `SteamAPICall_t` for completion and
+/// read its result/failure without the `CCallbackBase`/`RunCallbacks` dispatch — the same poll-not-pump
+/// approach rung 1/2 use for networking. Raw `iface` makes this `!Send`; the methods are thread-safe and
+/// we only read `iface`, so we assert `Send`/`Sync` (cf. [`Matchmaking`]).
+struct Utils {
+    iface: *mut c_void,
+    is_completed: IsAPICallCompletedFn,
+    get_result: GetAPICallResultFn,
+    get_failure_reason: GetFailureReasonFn,
+}
+// SAFETY: Steam's ISteamUtils flat methods are thread-safe; we only read `iface`. (cf. `Matchmaking`.)
+unsafe impl Send for Utils {}
+unsafe impl Sync for Utils {}
+
+impl Utils {
+    fn resolve(module: HMODULE) -> Option<Utils> {
+        // SAFETY: resolved accessor taking no args; null = Steam not initialized.
+        let accessor: UtilsAccessor = unsafe {
+            std::mem::transmute::<usize, UtilsAccessor>(resolve_required(module, "SteamAPI_SteamUtils_v010", s!("SteamAPI_SteamUtils_v010"))?)
+        };
+        let iface = unsafe { accessor() };
+        if iface.is_null() {
+            log::warn!("lobby-probe: ISteamUtils accessor returned null (Steam not initialized?)");
+            return None;
         }
+        // SAFETY (each transmute): documented flat-API signature declared on its fn type.
+        let is_completed: IsAPICallCompletedFn = unsafe {
+            std::mem::transmute::<usize, IsAPICallCompletedFn>(resolve_required(module, "SteamAPI_ISteamUtils_IsAPICallCompleted", s!("SteamAPI_ISteamUtils_IsAPICallCompleted"))?)
+        };
+        let get_result: GetAPICallResultFn = unsafe {
+            std::mem::transmute::<usize, GetAPICallResultFn>(resolve_required(module, "SteamAPI_ISteamUtils_GetAPICallResult", s!("SteamAPI_ISteamUtils_GetAPICallResult"))?)
+        };
+        let get_failure_reason: GetFailureReasonFn = unsafe {
+            std::mem::transmute::<usize, GetFailureReasonFn>(resolve_required(module, "SteamAPI_ISteamUtils_GetAPICallFailureReason", s!("SteamAPI_ISteamUtils_GetAPICallFailureReason"))?)
+        };
+        Some(Utils { iface, is_completed, get_result, get_failure_reason })
+    }
+}
+
+/// `ESteamAPICallFailure` → a short name. The reason a poll-completed call reports `failed=true`.
+fn failure_reason_str(reason: i32) -> &'static str {
+    match reason {
+        -1 => "None",
+        0 => "SteamGone (Steam client shut down)",
+        1 => "NetworkFailure (lost connection to Steam backend)",
+        2 => "InvalidHandle (call handle expired / already consumed)",
+        3 => "MismatchedCallback (expected callback id doesn't match the result)",
+        _ => "unknown",
     }
 }
 
