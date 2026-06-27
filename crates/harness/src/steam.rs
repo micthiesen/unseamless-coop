@@ -13,8 +13,9 @@
 //!        -> RequestLobbyList -> LobbyMatchList -> GetLobbyByIndex -> JoinLobby -> LobbyEnter
 //!        -> read the host SteamID from lobby_owner()
 //! ```
-//! In the DLL this seeds the rung-2 side-channel (`[coop] peer_steam_id` + `is_host`) instead of the
-//! manual SteamID copy-paste; the harness just prints what it resolved.
+//! In the DLL this resolved peer + derived host/client role seeds the rung-2 side-channel (lobby
+//! discovery is the only pairing path; there is no manual SteamID entry); the harness just prints
+//! what it resolved.
 //!
 //! Subcommands (driven from `main.rs`, mirroring the tcp-* modes):
 //! ```text

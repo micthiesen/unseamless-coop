@@ -42,7 +42,7 @@ entry points.
 | session create/join probe detours | `session_probe.rs` | ilhook trampoline (`extern "win64"`) | **yes** (in `log_initiation`) — gated, currently inert |
 | code patch (`apply`) | `patch.rs` | — (not an entry point) | n/a |
 | Steam networking send/receive/methods | `steam.rs` | — (us → Steam) | n/a |
-| Steam lobby call-result thunks | `steam.rs` | Steam dispatch via the game's `RunCallbacks` (`extern "C"`) | **yes** (in `cr_firewall`) — gated (rung 4), dormant; being removed for the poll-based path |
+| Steam lobby discovery (rung 4) | `steam.rs` | — (us → Steam; poll via `ISteamUtils`) | n/a (poll-based — no foreign→us boundary; see note) |
 | overlay `render` | `overlay.rs` | hudhook present hook (`extern "system"`) | **yes** — pre-existing |
 | overlay `initialize` / `before_render` / `message_filter` | `overlay.rs` | hudhook present / WndProc hook | **added** |
 | co-op driver loop | `coop.rs` | — (our own thread) | n/a (see note) |
@@ -146,21 +146,17 @@ a panic in our surrounding code can't unwind through them. `receive()` runs on t
 not a Steam-invoked callback (we deliberately never pump Steam's callback dispatch — the game owns it).
 No FFI-unwind boundary for that path.
 
-**Rung 4 today has a firewalled foreign→us boundary that the poll-based rewrite removes.** The current
-(dormant, `LOBBY_DISCOVERY_ENABLED = false`) lobby-discovery code registers C++-ABI **call-result**
-objects (`CCallbackBase`) via `SteamAPI_RegisterCallResult`, and Steam would invoke their vtable thunks
-(`cr_run`, `cr_run_call_result`, `cr_size`) from **the game's own `RunCallbacks` pump** across
-`extern "C"` — a real foreign→us boundary, so each thunk wraps its body in `cr_firewall` (`catch_unwind`
-+ one-shot `error_contained`, mirroring `input.rs`/`saves.rs`), and `cr_run_call_result` reclaims its
-heap object *after* the firewalled handler returns (a caught panic still frees it — no leak, no
-double-free). **This register-based design is being replaced by a poll-based one** (decided after the
-rig probe): the async lobby calls return a `SteamAPICall_t` we read by **polling** via `ISteamUtils`
-`IsAPICallCompleted` + `GetAPICallResult` on the co-op driver thread — the same poll-not-pump shape as
-rungs 1-2 (registering *and* polling the same handle conflicts: the game's `RunCallbacks` consumes it
-first and our poll sees `InvalidHandle`; see [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4). Once
-that rewrite lands and the `cr_*` thunks are removed, Steam never invokes a vtable of ours and rung 4
-carries **no** `extern "C"` foreign→us entry point — this row drops to `n/a`. Until then the firewall
-stays in place so the gate can't be flipped onto an unguarded boundary.
+**Rung 4 carries no foreign→us boundary — it is poll-based.** An earlier design registered C++-ABI
+**call-result** objects (`CCallbackBase`) via `SteamAPI_RegisterCallResult`, which Steam would have
+invoked across `extern "C"` from the game's own `RunCallbacks` pump — a real foreign→us boundary that
+needed a `cr_firewall`. The rig probe showed that path is unworkable anyway: registering *and* reading
+the same handle conflicts, because the game's `RunCallbacks` consumes it first and our poll then sees
+`InvalidHandle` (see [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4). So lobby discovery was rewritten
+**poll-based** — the async lobby calls return a `SteamAPICall_t` we read by **polling** `ISteamUtils`
+`IsAPICallCompleted` + `GetAPICallResult` on the co-op driver thread, the same poll-not-pump shape as
+rungs 1-2. The `CCallbackBase` objects and their `cr_*` vtable thunks are **deleted**; Steam never
+invokes a vtable of ours, so rung 4 has no `extern "C"` entry point and nothing here to firewall. (The
+`ISteamUtils` re-derivation probe `run_lobby_callback_probe` is also us → Steam polling, no boundary.)
 
 ### `overlay.rs` — hudhook render loop (firewall added on the remaining methods)
 hudhook drives our `Overlay: ImguiRenderLoop` from its `extern "system"` present hook with no catch of

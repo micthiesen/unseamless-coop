@@ -192,10 +192,11 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
         crate::bridge::start(config.debug.bridge_port);
     }
 
-    // The real side-channel: a private Steam P2P link to a manually-entered partner SteamID (rung 2
-    // of docs/COOP-CONNECTION.md). Runs the same host-tested `Session` the bridge does, but over
-    // `ISteamNetworkingMessages` instead of loopback. No-op unless `[coop] peer_steam_id` is set, so
-    // a normal solo session pays nothing. Best-effort: a failure to connect degrades, never aborts.
+    // The real side-channel: a private Steam P2P link to the partner resolved by password-keyed lobby
+    // discovery (rung 2+4 of docs/COOP-CONNECTION.md). Runs the same host-tested `Session` the bridge
+    // does, but over `ISteamNetworkingMessages` instead of loopback. Gated off until the friend test
+    // (LOBBY_DISCOVERY_ENABLED), so a normal solo session pays nothing. Best-effort: a failure to
+    // connect degrades, never aborts.
     crate::coop::start(config);
 
     // Rung-4 RunCallbacks probe (gated by `[debug.probes] lobby_callback_probe`, off by default):

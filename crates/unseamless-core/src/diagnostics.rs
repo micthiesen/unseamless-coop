@@ -398,8 +398,8 @@ impl LobbyRole {
     }
 }
 
-/// Rung-4 lobby-discovery progress, when that path drove the attempt (else the [`ConnectReport`]'s
-/// `lobby` is `None` — manual `[coop] peer_steam_id` entry). The joiner's `candidates` is the key
+/// Rung-4 lobby-discovery progress for a connection attempt (the [`ConnectReport`]'s `lobby` is
+/// `None` only before any attempt this session). The joiner's `candidates` is the key
 /// signal for an **empty-lobby-filter** failure: `Some(0)` means the password filter matched no lobby
 /// (wrong password / host not up / different version tag), as distinct from "the list never returned".
 #[derive(Debug, Clone, PartialEq, Eq)]
