@@ -87,7 +87,13 @@ fn serve(stream: TcpStream) {
     };
     // Seed from the current live config; the host's ConfigSync then overrides the shared subset.
     let mut session = Session::new(
-        Peer::new(BRIDGE_CLIENT_ID, BRIDGE_HOST_ID, PROTOCOL_VERSION, crate::state::snapshot()),
+        Peer::new(
+            BRIDGE_CLIENT_ID,
+            BRIDGE_HOST_ID,
+            PROTOCOL_VERSION,
+            crate::state::snapshot(),
+            crate::config::fresh_auth_nonce(),
+        ),
         transport,
     );
     session.connect();

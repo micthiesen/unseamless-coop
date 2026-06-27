@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::config::Config;
 use crate::diagnostics::{LogBundle, LogLevel, LogRecord, peer_tag};
 use crate::notifications::{Notifications, Severity};
-use crate::protocol::{ModMessage, SessionAction, SharedSettings};
+use crate::protocol::{AuthNonce, ModMessage, SessionAction, SharedSettings, auth_proof, proofs_match};
 use crate::transport::{PeerId, Transport};
 use crate::util::{RateLimiter, Version};
 
@@ -61,6 +61,27 @@ pub fn lost_contact_message(peer: PeerId) -> String {
     format!("Lost contact with {}", peer_tag(peer))
 }
 
+/// User-facing message for a peer whose authentication proof didn't verify — i.e. it presented the
+/// wrong co-op password (or isn't actually running our mod with our key). Plain/diagnostic voice,
+/// shared like [`version_mismatch_message`] so the `Peer`'s notification and the cdylib's overlay
+/// can't drift. A failed peer is **not linked**: its `ConfigSync`/actions are never applied.
+pub fn auth_failed_message(peer: PeerId) -> String {
+    format!("Authentication failed with {} (wrong co-op password)", peer_tag(peer))
+}
+
+// Per-peer banner keys. Single-sourced because each is now set and cleared from *different* methods
+// (auth/version in `verify_auth`, cleared in `sweep_liveness`; liveness set+cleared in the sweep), so
+// an inline `format!` at each site could drift the prefix and leave a banner that never clears.
+fn auth_banner_key(peer: PeerId) -> String {
+    format!("auth:{peer}")
+}
+fn version_banner_key(peer: PeerId) -> String {
+    format!("version:{peer}")
+}
+fn liveness_banner_key(peer: PeerId) -> String {
+    format!("liveness:{peer}")
+}
+
 /// User-facing toast when a client adopts the host's pushed settings. Shared like
 /// [`version_mismatch_message`].
 pub const CONFIG_SYNCED_MESSAGE: &str = "Session settings synced from host";
@@ -94,8 +115,26 @@ pub struct Peer {
     host_id: PeerId,
     version: Version,
     config: Config,
+    /// Our per-session authentication nonce, advertised in every `Hello`. Random per session
+    /// (supplied at construction by the binding layer, which owns the entropy source); it makes our
+    /// outbound [`ModMessage::Auth`] proofs non-replayable. See [`Peer::new`].
+    auth_nonce: AuthNonce,
     /// Versions advertised by other peers (from their `Hello`).
     peers: BTreeMap<PeerId, Version>,
+    /// Nonces advertised by other peers (from their `Hello`), needed to verify their `Auth` proof and
+    /// to build our proof *to* them.
+    peer_nonces: BTreeMap<PeerId, AuthNonce>,
+    /// Peers whose [`ModMessage::Auth`] proof we've verified against our shared co-op password. Only
+    /// a linked peer's `ConfigSync` is applied and only a linked peer's session actions are accepted —
+    /// a stranger who merely discovered the lobby never clears this bar. This distinguishes a `peers`
+    /// entry (merely discovered/known) from a linked one (authenticated).
+    ///
+    /// Like `peers`/`peer_nonces`/`last_seen`, this is keyed by the transport [`PeerId`] (the stable
+    /// Steam id in production) and is **never pruned** here: re-linking a peer after a transient
+    /// liveness blip is a no-op, which is what makes the handshake self-heal. Eviction on a real
+    /// session-*leave* is deferred to the binding layer (Layer 2), which owns the game's session FSM —
+    /// the same boundary the `applied_config_gen` host-restart note (below) defers to.
+    linked: BTreeSet<PeerId>,
     notifications: Notifications,
     /// Host-side aggregation of forwarded debug logs.
     log_bundle: LogBundle,
@@ -139,13 +178,33 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(id: PeerId, host_id: PeerId, version: Version, config: Config) -> Self {
+    /// Build a peer.
+    ///
+    /// `auth_nonce` is this session's random authentication nonce — the binding layer (cdylib) must
+    /// supply **fresh, unpredictable** bytes per session from its CSPRNG (the same entropy source it
+    /// uses to generate the default password); core has none. Freshness is what makes a captured proof
+    /// non-replayable across sessions, and core can't verify it, so it's a binding-layer obligation.
+    /// The shared co-op password is read from `config.session.password` (it is never sent over the
+    /// wire and `ConfigSync` never overwrites it), so it is the secret both sides key their
+    /// [`auth_proof`]s with — no separate password arg. The password is assumed already validated for
+    /// length by the startup guard (`Config::password_is_valid`, enforced in the cdylib before
+    /// install); core imposes no floor, so an empty password would link other empty-password peers.
+    pub fn new(
+        id: PeerId,
+        host_id: PeerId,
+        version: Version,
+        config: Config,
+        auth_nonce: AuthNonce,
+    ) -> Self {
         Self {
             id,
             host_id,
             version,
             config,
+            auth_nonce,
             peers: BTreeMap::new(),
+            peer_nonces: BTreeMap::new(),
+            linked: BTreeSet::new(),
             notifications: Notifications::new(),
             log_bundle: LogBundle::new(),
             config_generation: 1,
@@ -168,9 +227,33 @@ impl Peer {
         self.id == self.host_id
     }
 
-    /// Messages to send on joining the session: announce our mod version.
+    /// Messages to send on joining the session: announce our mod version + our auth nonce so peers
+    /// can verify the [`ModMessage::Auth`] proof we send them in reply to their `Hello`.
     pub fn connect(&mut self) -> Vec<ModMessage> {
-        vec![ModMessage::Hello { mod_version: self.version.to_u32() }]
+        vec![self.hello()]
+    }
+
+    /// Our `Hello` (version + this session's auth nonce). Sent at [`connect`](Peer::connect) and
+    /// re-asserted each [`maintain`](Peer::maintain) so a peer eventually learns our nonce even over a
+    /// lossy channel (the handshake self-heals like `ConfigSync` does).
+    fn hello(&self) -> ModMessage {
+        ModMessage::Hello { mod_version: self.version.to_u32(), nonce: self.auth_nonce }
+    }
+
+    /// The proof we present to `peer` (we are the prover, `peer` is the verifier): keyed by the shared
+    /// password and bound to both nonces. `None` until we've heard `peer`'s `Hello` (we need its
+    /// nonce). See [`auth_proof`].
+    fn proof_for(&self, peer: PeerId) -> Option<ModMessage> {
+        let peer_nonce = self.peer_nonces.get(&peer)?;
+        // We are the prover, `peer` the verifier — same (verifier, prover) ordering both sides use.
+        let proof = auth_proof(
+            peer,
+            self.id,
+            peer_nonce,
+            &self.auth_nonce,
+            &self.config.session.password,
+        );
+        Some(ModMessage::Auth { to: peer, proof })
     }
 
     /// Process one inbound message; return any outbound responses to broadcast.
@@ -186,21 +269,36 @@ impl Peer {
         self.last_seen.insert(from, self.local_tick);
 
         match msg {
-            ModMessage::Hello { mod_version } => {
-                let theirs = Version::from_u32(mod_version);
-                self.peers.insert(from, theirs);
-                if !self.version.compatible_with(theirs) {
-                    self.notifications.set_banner(
-                        format!("version:{from}"),
-                        Severity::Warning,
-                        version_mismatch_message(from, theirs, self.version),
-                    );
+            ModMessage::Hello { mod_version, nonce } => {
+                self.peers.insert(from, Version::from_u32(mod_version));
+                self.peer_nonces.insert(from, nonce);
+                // The version-mismatch banner is deferred to `verify_auth` (raised once the peer
+                // authenticates), so an unauthenticated stranger who merely discovered the lobby can't
+                // plant a banner on a real player's overlay.
+                //
+                // Reply with our password-keyed proof so the peer can authenticate us. We do NOT echo
+                // a `Hello` here (that would ping-pong forever between two peers); our nonce reaches
+                // the peer via `connect`'s `Hello` and `maintain`'s periodic re-assert. We hold off on
+                // the host's `ConfigSync` until the peer is *linked* — an unauthenticated peer gets no
+                // settings. `proof_for` is `Some` since we just recorded the peer's nonce.
+                self.proof_for(from).into_iter().collect()
+            }
+            ModMessage::Auth { to, proof } => {
+                // Ignore a proof addressed to another peer (a broadcast frame meant for someone else):
+                // it's keyed to *their* nonce, so verifying it here would spuriously fail.
+                if to != self.id {
+                    return vec![];
                 }
-                // The host brings a newcomer in sync with the current shared settings.
-                self.broadcast_config()
+                self.verify_auth(from, proof)
             }
             ModMessage::ConfigSync { generation, settings } => {
-                if from != self.host_id {
+                if !self.is_linked(from) {
+                    // Unauthenticated sender — a stranger, or the host before its proof verifies. Drop
+                    // quietly: no warn toast (a stranger could otherwise spam toasts and evict
+                    // legitimate ones), and the host's `maintain` re-assert re-delivers the sync once
+                    // the handshake completes. This check is first so an unlinked peer never reaches
+                    // the non-host warn below.
+                } else if from != self.host_id {
                     self.notifications
                         .warn(format!("Ignored ConfigSync from non-host {}", peer_tag(from)));
                 } else if generation > self.applied_config_gen.unwrap_or(0) {
@@ -213,6 +311,13 @@ impl Peer {
                 vec![]
             }
             ModMessage::SessionAction { seq, action } => {
+                // Reject actions from an unauthenticated peer before anything else — a stranger who
+                // discovered the lobby must not be able to drive the session (grab a seat, lock the
+                // world, etc.). Drop quietly (no banner: a stranger could otherwise spam banners) and
+                // without touching the dedup gate (so it can't desync a later linked sender's seq).
+                if !self.is_linked(from) {
+                    return vec![];
+                }
                 // Drop duplicate/reordered-old action frames (apply each exactly once).
                 if !self.action_gate.accept(from, seq) {
                     return vec![];
@@ -231,13 +336,70 @@ impl Peer {
             // Ping is liveness-only; `last_seen` was already refreshed above.
             ModMessage::Ping { .. } => vec![],
             ModMessage::Log(record) => {
-                // Only the host aggregates forwarded logs, and only newer records per sender.
-                if self.is_host() && self.log_gate.accept(from, record.seq) {
+                // Only the host aggregates forwarded logs, only from linked peers (so a stranger can't
+                // inject lines into the host's shareable diagnostic bundle), and only newer records.
+                if self.is_host() && self.is_linked(from) && self.log_gate.accept(from, record.seq) {
                     self.log_bundle.add(peer_tag(from), record);
                 }
                 vec![]
             }
         }
+    }
+
+    /// Verify a peer's `Auth` proof (it is addressed to us). On success we mark it **linked** and the
+    /// host brings the freshly-authenticated newcomer in sync with the current shared settings. On
+    /// mismatch we banner (plain/diagnostic voice) and leave it unlinked, so its `ConfigSync`/actions
+    /// are never applied.
+    fn verify_auth(&mut self, from: PeerId, proof: crate::protocol::AuthProofBytes) -> Vec<ModMessage> {
+        // We need the peer's nonce (from its `Hello`) to recompute the expected proof. If its `Auth`
+        // raced ahead of its `Hello`, drop quietly — the peer's re-asserted `Hello` heals it.
+        let Some(&peer_nonce) = self.peer_nonces.get(&from) else {
+            return vec![];
+        };
+        // We are the verifier, `from` the prover: same (verifier, prover) ordering both sides use, with
+        // the id pair taken from the transport (not the wire) so a reflected proof fails (see
+        // `auth_proof`).
+        let expected = auth_proof(
+            self.id,
+            from,
+            &self.auth_nonce,
+            &peer_nonce,
+            &self.config.session.password,
+        );
+        if proofs_match(&expected, &proof) {
+            let newly_linked = self.linked.insert(from);
+            self.notifications.clear_banner(&auth_banner_key(from));
+            if newly_linked {
+                // Now that the peer is a verified party member, surface a version-incompatibility
+                // banner (deferred from the `Hello` so a stranger can't plant one). The peer's
+                // version was recorded when its `Hello` arrived.
+                if let Some(&theirs) = self.peers.get(&from)
+                    && !self.version.compatible_with(theirs)
+                {
+                    self.notifications.set_banner(
+                        version_banner_key(from),
+                        Severity::Warning,
+                        version_mismatch_message(from, theirs, self.version),
+                    );
+                }
+                // Host: a newly-linked peer gets the current settings now (don't wait for the next
+                // `maintain` re-assert). A re-verified already-linked peer needs nothing new.
+                if self.is_host() {
+                    return self.broadcast_config();
+                }
+            }
+            return vec![];
+        }
+        // Wrong password (or not our mod). Don't un-link an already-linked peer — that would let a
+        // forged bad proof spoofing its id evict a legitimately-authenticated peer.
+        if !self.is_linked(from) {
+            self.notifications.set_banner(
+                auth_banner_key(from),
+                Severity::Warning,
+                auth_failed_message(from),
+            );
+        }
+        vec![]
     }
 
     /// Host: the current authoritative shared settings, tagged with the live generation. Non-host
@@ -301,6 +463,9 @@ impl Peer {
         let mut out = Vec::new();
         self.ping_frame = self.ping_frame.wrapping_add(1);
         out.push(ModMessage::Ping { frame: self.ping_frame });
+        // Re-assert our `Hello` so a peer eventually learns our nonce (and re-triggers our proof
+        // reply) even over a lossy channel — the handshake self-heals like `ConfigSync` does.
+        out.push(self.hello());
         out.extend(self.broadcast_config()); // host-only; self-heals dropped ConfigSync
 
         self.sweep_liveness();
@@ -323,15 +488,23 @@ impl Peer {
         }
         for pid in newly_stale {
             self.stale_peers.insert(pid);
-            self.notifications.set_banner(
-                format!("liveness:{pid}"),
-                Severity::Warning,
-                lost_contact_message(pid),
-            );
+            // A departed peer's handshake banners are no longer actionable — tear them down so a
+            // wrong-password or version-mismatched peer that leaves doesn't strand a stuck banner.
+            self.notifications.clear_banner(&auth_banner_key(pid));
+            self.notifications.clear_banner(&version_banner_key(pid));
+            // Only warn about losing a peer we actually authenticated; an unlinked stranger that
+            // pinged once and vanished is not a party member worth a "Lost contact" banner.
+            if self.is_linked(pid) {
+                self.notifications.set_banner(
+                    liveness_banner_key(pid),
+                    Severity::Warning,
+                    lost_contact_message(pid),
+                );
+            }
         }
         for pid in recovered {
             self.stale_peers.remove(&pid);
-            self.notifications.clear_banner(&format!("liveness:{pid}"));
+            self.notifications.clear_banner(&liveness_banner_key(pid));
         }
     }
 
@@ -349,6 +522,12 @@ impl Peer {
     }
     pub fn known_peers(&self) -> &BTreeMap<PeerId, Version> {
         &self.peers
+    }
+    /// Whether `peer` has authenticated (its `Auth` proof verified against our co-op password). Only
+    /// a linked peer's `ConfigSync` is applied and only a linked peer's actions are accepted — the
+    /// overlay roster can show this to distinguish a discovered-but-unverified peer from a real one.
+    pub fn is_linked(&self, peer: PeerId) -> bool {
+        self.linked.contains(&peer)
     }
     pub fn last_action(&self) -> Option<(PeerId, SessionAction)> {
         self.last_action
@@ -433,12 +612,25 @@ impl<T: Transport> Session<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::AUTH_NONCE_LEN;
     use crate::transport::{FaultModel, Loopback, Transport};
 
     const HOST: PeerId = 1;
     const CLIENT: PeerId = 2;
+    /// Distinct per-session nonces so the two peers' proofs differ on the wire.
+    const HOST_NONCE: AuthNonce = [0x11; AUTH_NONCE_LEN];
+    const CLIENT_NONCE: AuthNonce = [0x22; AUTH_NONCE_LEN];
+    /// Default matching co-op password for a pair, so the handshake links by default.
+    const PW: &str = "co-op-password";
 
-    /// Build a host+client pair over a shared loopback, each at the given version.
+    /// A [`Config`] with the given co-op password (the shared key the auth proof is keyed by).
+    fn config_with_pw(password: &str) -> Config {
+        let mut c = Config::default();
+        c.session.password = password.into();
+        c
+    }
+
+    /// Build a host+client pair over a shared loopback, each at the given version, sharing [`PW`].
     fn pair(host_v: Version, client_v: Version) -> (Session<Loopback>, Session<Loopback>) {
         pair_over(Loopback::mesh(&[HOST, CLIENT]), host_v, client_v)
     }
@@ -448,11 +640,50 @@ mod tests {
         host_v: Version,
         client_v: Version,
     ) -> (Session<Loopback>, Session<Loopback>) {
+        pair_over_with_pw(ends, host_v, client_v, PW, PW)
+    }
+
+    /// Like [`pair_over`] but with explicit (possibly mismatched) passwords — for auth tests.
+    fn pair_over_with_pw(
+        ends: Vec<Loopback>,
+        host_v: Version,
+        client_v: Version,
+        host_pw: &str,
+        client_pw: &str,
+    ) -> (Session<Loopback>, Session<Loopback>) {
         let mut it = ends.into_iter();
-        let host = Session::new(Peer::new(HOST, HOST, host_v, Config::default()), it.next().unwrap());
-        let client =
-            Session::new(Peer::new(CLIENT, HOST, client_v, Config::default()), it.next().unwrap());
+        let host = Session::new(
+            Peer::new(HOST, HOST, host_v, config_with_pw(host_pw), HOST_NONCE),
+            it.next().unwrap(),
+        );
+        let client = Session::new(
+            Peer::new(CLIENT, HOST, client_v, config_with_pw(client_pw), CLIENT_NONCE),
+            it.next().unwrap(),
+        );
         (host, client)
+    }
+
+    /// Build a bare host [`Peer`] (no transport) and drive it to *link* `CLIENT` by feeding the
+    /// client's `Hello` + a valid `Auth` proof, so the isolated host-side tests below (which inject
+    /// gated frames directly) operate on an authenticated peer.
+    fn linked_host(v: Version) -> Peer {
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        // CLIENT is the prover, HOST the verifier.
+        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(CLIENT), "test setup: CLIENT should be linked");
+        host
+    }
+
+    /// Like [`linked_host`] but a bare client [`Peer`] that has linked `HOST`.
+    fn linked_client(v: Version) -> Peer {
+        let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        client.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
+        let proof = crate::protocol::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &HOST_NONCE, PW);
+        client.handle(HOST, ModMessage::Auth { to: CLIENT, proof });
+        assert!(client.is_linked(HOST), "test setup: HOST should be linked");
+        client
     }
 
     /// Drive both sessions to convergence on a perfect channel (no frames left in flight).
@@ -491,6 +722,221 @@ mod tests {
         let banners = client.peer().notifications().banners();
         assert_eq!(banners.len(), 1);
         assert!(banners[0].message.contains("version mismatch"));
+    }
+
+    #[test]
+    fn matching_password_authenticates_both_peers() {
+        // The happy path: a shared password makes each side's Auth proof verify, so both link.
+        let v = Version::new(0, 1, 0);
+        let (mut host, mut client) = pair(v, v); // both share PW
+        host.connect();
+        client.connect();
+        run(&mut [&mut host, &mut client]);
+        assert!(host.peer().is_linked(CLIENT), "host authenticated the client");
+        assert!(client.peer().is_linked(HOST), "client authenticated the host");
+        // No auth banner on either side.
+        assert!(!client.peer().notifications().banners().iter().any(|b| b.message.contains("Authentication failed")));
+        assert!(!host.peer().notifications().banners().iter().any(|b| b.message.contains("Authentication failed")));
+    }
+
+    #[test]
+    fn mismatched_password_is_rejected_and_never_links_or_applies_config() {
+        // A peer that found the lobby but has the WRONG password must never be treated as linked, and
+        // a ConfigSync it (or a real host) sends must never apply to the other side.
+        let v = Version::new(0, 1, 0);
+        let (mut host, mut client) = pair_over_with_pw(
+            Loopback::mesh(&[HOST, CLIENT]),
+            v,
+            v,
+            "host-password",
+            "different-password",
+        );
+        // Host has a non-default shared setting it would push *if* the client authenticated.
+        host.peer_mut().config_mut().scaling.boss_health = 250;
+        host.peer_mut().mark_config_changed();
+        // Drive maintain rounds (no faults): the host re-asserts its ConfigSync onto the wire every
+        // tick regardless of links, so the client's *linked-gate* — not merely the absence of a sync —
+        // is what must reject it. 25 < LIVENESS_TIMEOUT_TICKS, so no liveness banner confounds this.
+        run_lossy(&mut host, &mut client, 25, |_| false);
+
+        assert!(!client.peer().is_linked(HOST), "wrong password must not authenticate the host");
+        assert!(!host.peer().is_linked(CLIENT), "wrong password must not authenticate the client");
+        // The host's settings never reach the unauthenticated client.
+        assert_eq!(
+            client.peer().config().scaling.boss_health,
+            Config::default().scaling.boss_health,
+            "no ConfigSync is applied across a failed handshake"
+        );
+        // Plain/diagnostic banner on the failure, mirroring the version-mismatch path.
+        let banners = client.peer().notifications().banners();
+        assert!(
+            banners.iter().any(|b| b.message.contains("Authentication failed")),
+            "an auth-failure banner should be raised: {banners:?}"
+        );
+    }
+
+    #[test]
+    fn reflection_attack_does_not_link_a_passwordless_peer() {
+        // An attacker with NO password mirrors the victim's advertised nonce, then reflects the
+        // victim's own outgoing Auth proof straight back, hoping it verifies as inbound. Identity
+        // binding in the proof must defeat this — the attacker never knows the password yet must not
+        // become linked. (Without the id pair this test fails: the reflected proof would verify.)
+        let v = Version::new(0, 1, 0);
+        const ATTACKER: PeerId = 99;
+        let mut victim = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        // The attacker advertises a Hello whose nonce equals the victim's own nonce.
+        let reply =
+            victim.handle(ATTACKER, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
+        // Grab the proof the victim handed out (its Auth reply addressed to the attacker).
+        let leaked = match reply.as_slice() {
+            [ModMessage::Auth { to, proof }] if *to == ATTACKER => *proof,
+            other => panic!("expected an Auth reply to the attacker, got {other:?}"),
+        };
+        // The attacker reflects it back unchanged.
+        victim.handle(ATTACKER, ModMessage::Auth { to: HOST, proof: leaked });
+        assert!(!victim.is_linked(ATTACKER), "a reflected proof must never authenticate a peer");
+    }
+
+    #[test]
+    fn config_sync_from_unauthenticated_host_is_dropped() {
+        // The gate in isolation: an un-linked client must ignore a ConfigSync even from its host_id.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        let mut s = SharedSettings::from(&Config::default());
+        s.scaling.boss_health = 250;
+        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: s });
+        assert_eq!(
+            client.config().scaling.boss_health,
+            Config::default().scaling.boss_health,
+            "ConfigSync before authentication must not apply"
+        );
+        // And it does NOT banner (transient race, self-heals once linked).
+        assert!(client.notifications().banners().is_empty());
+    }
+
+    #[test]
+    fn session_action_from_unauthenticated_peer_is_dropped() {
+        // A stranger who discovered the lobby can't drive the session before authenticating.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        assert_eq!(host.last_action(), None, "unauthenticated action ignored");
+        // The seq gate is untouched, so a later *authenticated* action at the same seq still applies.
+        let mut host = linked_host(v);
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::JoinWorld)));
+    }
+
+    #[test]
+    fn auth_addressed_to_another_peer_is_ignored() {
+        // A broadcast Auth carries `to`; a peer it isn't addressed to must drop it (it's keyed to the
+        // addressee's id+nonce, so verifying it here would spuriously fail and banner). No link, no
+        // banner. This pins the `to != self.id` routing gate.
+        let v = Version::new(0, 1, 0);
+        const OTHER: PeerId = 3;
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        // A well-formed proof, but addressed to OTHER rather than to us.
+        let proof = crate::protocol::auth_proof(OTHER, CLIENT, &[0u8; AUTH_NONCE_LEN], &CLIENT_NONCE, PW);
+        let out = host.handle(CLIENT, ModMessage::Auth { to: OTHER, proof });
+        assert!(out.is_empty());
+        assert!(!host.is_linked(CLIENT), "a proof addressed to another peer must not link us");
+        assert!(host.notifications().banners().is_empty(), "and must not banner");
+    }
+
+    #[test]
+    fn forwarded_log_from_unauthenticated_peer_is_dropped() {
+        // A stranger must not be able to inject lines into the host's shareable diagnostic bundle.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(
+            CLIENT,
+            ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: "spam".into() }),
+        );
+        assert_eq!(host.log_bundle().len(), 0, "an unauthenticated peer's logs are not aggregated");
+    }
+
+    #[test]
+    fn auth_before_hello_is_dropped_then_heals() {
+        // An Auth that races ahead of the peer's Hello (so we don't yet know its nonce) must drop
+        // quietly — no link, no auth-failure banner — and then verify once Hello + a re-sent Auth
+        // arrive. This pins the missing-nonce early-out and its self-heal.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(!host.is_linked(CLIENT), "can't verify before the peer's Hello/nonce arrives");
+        assert!(host.notifications().banners().is_empty(), "drops quietly, no premature auth banner");
+
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(CLIENT), "handshake heals once Hello + Auth both arrive");
+    }
+
+    #[test]
+    fn a_captured_proof_does_not_replay_against_a_fresh_session_nonce() {
+        // Replay resistance: a proof captured from a past session (bound to that session's verifier
+        // nonce) must not link when replayed at a peer that has since drawn a fresh nonce.
+        let v = Version::new(0, 1, 0);
+        let stale_host_nonce = [0xAB; AUTH_NONCE_LEN]; // the host's nonce in the *previous* session
+        let captured = crate::protocol::auth_proof(HOST, CLIENT, &stale_host_nonce, &CLIENT_NONCE, PW);
+        // New session: the host's nonce is different (HOST_NONCE != stale_host_nonce).
+        assert_ne!(HOST_NONCE, stale_host_nonce, "test premise: the session nonce rotated");
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: captured });
+        assert!(!host.is_linked(CLIENT), "a proof bound to a previous session's nonce must not link");
+    }
+
+    #[test]
+    fn empty_passwords_link_only_via_the_matching_secret() {
+        // Documents the core-level boundary: core imposes no password-length floor, so two empty
+        // password peers DO link (matching secret). Production prevents this via the startup guard
+        // (`Config::password_is_valid`, enforced in the cdylib), which is therefore load-bearing.
+        let v = Version::new(0, 1, 0);
+        let mut a = Peer::new(HOST, HOST, v, Config::default(), HOST_NONCE); // empty password
+        a.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "");
+        a.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(a.is_linked(CLIENT), "matching (empty) secret links — guarded only at startup");
+    }
+
+    #[test]
+    fn a_stranger_in_the_mesh_cannot_link_or_disrupt_the_authenticated_pair() {
+        // The realistic adversarial topology: a third peer with the wrong password shares the mesh.
+        // The honest pair must still authenticate each other and converge on config, and the stranger
+        // must never link nor receive the host's settings.
+        let v = Version::new(0, 1, 0);
+        const STRANGER: PeerId = 3;
+        let mut ends = Loopback::mesh(&[HOST, CLIENT, STRANGER]).into_iter();
+        let mut host =
+            Session::new(Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE), ends.next().unwrap());
+        let mut client = Session::new(
+            Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE),
+            ends.next().unwrap(),
+        );
+        let mut stranger = Session::new(
+            Peer::new(STRANGER, HOST, v, config_with_pw("wrong-password"), [0x33; AUTH_NONCE_LEN]),
+            ends.next().unwrap(),
+        );
+        host.peer_mut().config_mut().scaling.boss_health = 250;
+        host.peer_mut().mark_config_changed();
+        host.connect();
+        client.connect();
+        stranger.connect();
+        run(&mut [&mut host, &mut client, &mut stranger]);
+
+        assert!(host.peer().is_linked(CLIENT), "honest pair authenticates");
+        assert!(client.peer().is_linked(HOST));
+        assert!(!host.peer().is_linked(STRANGER), "stranger with wrong password never links to host");
+        assert!(!client.peer().is_linked(STRANGER));
+        assert!(!stranger.peer().is_linked(HOST), "stranger can't authenticate the host either");
+        assert_eq!(client.peer().config().scaling.boss_health, 250, "honest pair still converges");
+        assert_ne!(
+            stranger.peer().config().scaling.boss_health,
+            250,
+            "the stranger never receives the host's settings"
+        );
     }
 
     #[test]
@@ -598,7 +1044,7 @@ mod tests {
         // no-op even if its payload differs (which is what a stale duplicate looks like). This bites
         // the `generation > applied` guard directly — flip it to `>=` and the second clobbers.
         let v = Version::new(0, 1, 0);
-        let mut client = Peer::new(CLIENT, HOST, v, Config::default());
+        let mut client = linked_client(v); // HOST authenticated; ConfigSync from it now applies
         let mut first = SharedSettings::from(&Config::default());
         first.scaling.boss_health = 175;
         client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: first });
@@ -614,7 +1060,7 @@ mod tests {
     fn stale_reordered_config_does_not_roll_back() {
         // A newer generation already applied; a late, lower-generation sync must be ignored.
         let v = Version::new(0, 1, 0);
-        let mut client = Peer::new(CLIENT, HOST, v, Config::default());
+        let mut client = linked_client(v); // HOST authenticated; ConfigSync from it now applies
         let mut newer = SharedSettings::from(&Config::default());
         newer.scaling.boss_health = 300;
         let mut older = SharedSettings::from(&Config::default());
@@ -629,7 +1075,7 @@ mod tests {
     #[test]
     fn duplicate_action_is_applied_once() {
         let v = Version::new(0, 1, 0);
-        let mut host = Peer::new(HOST, HOST, v, Config::default());
+        let mut host = linked_host(v); // CLIENT authenticated; its actions are now accepted
         let frame = ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld };
         host.handle(CLIENT, frame.clone());
         host.handle(CLIENT, frame); // duplicate delivery
@@ -642,7 +1088,7 @@ mod tests {
     #[test]
     fn duplicate_forwarded_log_is_deduped_on_the_host() {
         let v = Version::new(0, 1, 0);
-        let mut host = Peer::new(HOST, HOST, v, Config::default());
+        let mut host = linked_host(v); // CLIENT authenticated; its logs are now aggregated
         let rec = LogRecord { seq: 4, level: LogLevel::Info, message: "once".into() };
         host.handle(CLIENT, ModMessage::Log(rec.clone()));
         host.handle(CLIENT, ModMessage::Log(rec)); // duplicate
@@ -652,8 +1098,9 @@ mod tests {
     #[test]
     fn liveness_flags_a_silent_peer_then_clears_on_return() {
         let v = Version::new(0, 1, 0);
-        let mut host = Peer::new(HOST, HOST, v, Config::default());
-        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32() }); // seen at tick 0
+        // CLIENT must be linked for the "Lost contact" banner to fire (we don't banner about
+        // unauthenticated strangers). linked_host feeds CLIENT's Hello+Auth, so it's seen at tick 0.
+        let mut host = linked_host(v);
 
         // Pin the boundary: tolerated through exactly LIVENESS_TIMEOUT_TICKS of silence...
         for _ in 0..LIVENESS_TIMEOUT_TICKS {
@@ -673,7 +1120,7 @@ mod tests {
     #[test]
     fn forward_log_is_rate_limited() {
         let v = Version::new(0, 1, 0);
-        let mut client = Peer::new(CLIENT, HOST, v, Config::default());
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default(), CLIENT_NONCE);
         client.config_mut().debug.forward_to_host = true;
 
         // Drain the initial burst, then everything beyond it is dropped until a refill.
@@ -701,8 +1148,8 @@ mod tests {
         // If the transport ever echoes our own broadcast back, it must not enter the roster or
         // liveness as a phantom peer.
         let v = Version::new(0, 1, 0);
-        let mut host = Peer::new(HOST, HOST, v, Config::default());
-        let out = host.handle(HOST, ModMessage::Hello { mod_version: v.to_u32() });
+        let mut host = Peer::new(HOST, HOST, v, Config::default(), HOST_NONCE);
+        let out = host.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
         assert!(out.is_empty());
         assert!(host.known_peers().is_empty(), "self must not be added to the roster");
         assert!(!host.is_stale(HOST));
@@ -714,7 +1161,7 @@ mod tests {
         let mut ends = Loopback::mesh(&[HOST, CLIENT]);
         let mut raw = ends.pop().unwrap(); // CLIENT raw endpoint
         let host_end = ends.pop().unwrap(); // HOST endpoint
-        let mut host = Session::new(Peer::new(HOST, HOST, v, Config::default()), host_end);
+        let mut host = Session::new(Peer::new(HOST, HOST, v, Config::default(), HOST_NONCE), host_end);
 
         raw.send(b"not a UC frame at all");
         host.pump();

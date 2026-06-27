@@ -503,7 +503,10 @@ fn run_session(
 
     let transport = SteamP2PTransport { net, local_id: self_id, peer_id };
     let mut session =
-        Session::new(Peer::new(self_id, host_id, PROTOCOL_VERSION, crate::state::snapshot()), transport);
+        Session::new(
+            Peer::new(self_id, host_id, PROTOCOL_VERSION, crate::state::snapshot(), crate::config::fresh_auth_nonce()),
+            transport,
+        );
     session.connect();
 
     // Enable client log-forwarding for the session behind an RAII guard, so it's reset on *every* exit —

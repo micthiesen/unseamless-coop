@@ -26,7 +26,7 @@ use std::time::Duration;
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::LogLevel;
 use unseamless_core::peer::{Peer, Session};
-use unseamless_core::protocol::SessionAction;
+use unseamless_core::protocol::{AUTH_NONCE_LEN, AuthNonce, SessionAction};
 use unseamless_core::transport::{FaultModel, Loopback, PeerId};
 use unseamless_core::util::Version;
 
@@ -34,6 +34,11 @@ use crate::tcp::TcpTransport;
 
 const HOST: PeerId = 1;
 const CLIENT: PeerId = 2;
+// Fixed, distinct per-peer handshake nonces. The harness is a single-shot driver, so replay-freshness
+// (which a real session gets from the CSPRNG) doesn't matter here — only that the two peers use
+// distinct nonces and matching passwords, so the auth proof links.
+const HOST_NONCE: AuthNonce = [0x11; AUTH_NONCE_LEN];
+const CLIENT_NONCE: AuthNonce = [0x22; AUTH_NONCE_LEN];
 /// The mod wire version both peers run — the canonical one, so the harness and the live mod's bridge
 /// can't drift apart and spuriously fail the handshake's version-compat check.
 const V: Version = unseamless_core::protocol::PROTOCOL_VERSION;
@@ -110,8 +115,8 @@ fn pair_on(
     client_cfg: Config,
 ) -> (Session<Loopback>, Session<Loopback>) {
     let mut it = ends.into_iter();
-    let host = Session::new(Peer::new(HOST, HOST, host_v, host_cfg), it.next().unwrap());
-    let client = Session::new(Peer::new(CLIENT, HOST, client_v, client_cfg), it.next().unwrap());
+    let host = Session::new(Peer::new(HOST, HOST, host_v, host_cfg, HOST_NONCE), it.next().unwrap());
+    let client = Session::new(Peer::new(CLIENT, HOST, client_v, client_cfg, CLIENT_NONCE), it.next().unwrap());
     (host, client)
 }
 
@@ -298,7 +303,7 @@ fn run_tcp_host(addr: &str) {
     let mut host_cfg = Config::default();
     host_cfg.scaling.boss_health = 250;
     host_cfg.gameplay.crit_coop = false;
-    let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg), transport);
+    let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg, HOST_NONCE), transport);
     host.connect();
     let changed = host.peer_mut().mark_config_changed();
     host.broadcast(changed);
@@ -328,7 +333,11 @@ fn run_bridge_host(addr: &str) {
     host_cfg.session.max_players = 4;
     host_cfg.gameplay.crit_coop = true;
     host_cfg.scaling.boss_health = 250;
-    let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg), transport);
+    // Match the rig's seed-config password so the peer auth proof links against the live mod (the
+    // bridge now authenticates like the real side-channel). `scripts/rig/seed-config.toml` seeds
+    // `coop-test`; if you re-seed with a different password, set it here too.
+    host_cfg.session.password = "coop-test".to_string();
+    let mut host = Session::new(Peer::new(HOST, HOST, V, host_cfg, HOST_NONCE), transport);
     host.connect();
     let changed = host.peer_mut().mark_config_changed();
     host.broadcast(changed);
@@ -348,7 +357,7 @@ fn run_bridge_host(addr: &str) {
 fn run_tcp_client(addr: &str) {
     let transport = TcpTransport::connect(addr, CLIENT).expect("connect to host");
     println!("[client] connected to {addr}");
-    let mut client = Session::new(Peer::new(CLIENT, HOST, V, Config::default()), transport);
+    let mut client = Session::new(Peer::new(CLIENT, HOST, V, Config::default(), CLIENT_NONCE), transport);
     println!("[client] boss_health BEFORE = {}", client.peer().config().scaling.boss_health);
     client.connect();
 

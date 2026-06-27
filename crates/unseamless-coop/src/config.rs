@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::Level;
 use unseamless_core::config::{Config, DEFAULT_PASSWORD_LEN, generate_password};
+use unseamless_core::protocol::{AUTH_NONCE_LEN, AuthNonce};
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 
 /// Config path relative to the install dir (the folder our DLL lives in).
@@ -73,6 +74,16 @@ pub fn load(base: &Path) -> (Config, Vec<Note>) {
 /// Cryptographically-random bytes from the OS CSPRNG (for the generated default password). Falls
 /// back to a weak time/pid-derived seed only if BCrypt somehow fails, so we never end up writing an
 /// empty password.
+/// A fresh per-session handshake nonce from the OS CSPRNG — the same entropy source as the default
+/// password. The peer auth proof ([`unseamless_core::peer`]) binds to this nonce, so its **freshness**
+/// is what makes a captured `Auth` non-replayable; generate a new one for each session (every
+/// `Peer::new`), never reuse one. Core can't do this (no entropy source), so the binding layer supplies it.
+pub(crate) fn fresh_auth_nonce() -> AuthNonce {
+    random_bytes(AUTH_NONCE_LEN)
+        .try_into()
+        .expect("random_bytes(AUTH_NONCE_LEN) returns exactly AUTH_NONCE_LEN bytes")
+}
+
 fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
     // No algorithm handle: the system-preferred-RNG flag selects the OS CSPRNG.
