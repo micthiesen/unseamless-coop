@@ -99,6 +99,13 @@ scripts/fleet/inbox pop              # non-blocking: pop whatever's there now (e
 file. Don't sit in a hand-rolled `sleep`/`grep` poll loop; `inbox wait` *is* that loop, with clean
 exit codes.
 
+**Operator visibility (you won't see it, Michael does).** A `_ux` hook renders user-only
+`[fleet …]` notices to whoever's watching a session — sends, waits, receives, and worker lifecycle —
+shown in the terminal but kept out of *your* context on purpose. Nothing for you to manage; just know
+each fleet CLI call surfaces a clean one-liner for the operator (the full message body shows only on
+a receive). Keep `msg`/`inbox wait`/`inbox pop` as their own commands rather than burying them deep
+in a compound pipeline, so those notices stay legible.
+
 **Answering a worker's serial request is your core job.** When a worker messages you (it arrives in
 your `usc-orch` session as `[worker:<name>] ...`) asking for a rig run, an RE probe, or in-game
 validation: run it yourself, serialized against the single rig (see the `/test-loop` and

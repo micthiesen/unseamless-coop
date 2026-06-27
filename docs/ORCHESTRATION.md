@@ -212,13 +212,22 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 - **Orchestrator-only** (launch flag, kept OUT of settings files so workers stay isolated):
   `--add-dir ~/Code/.rifts/unseamless-coop` so the orchestrator can reach worker repos to
   integrate. Workers must not see each other's workspaces.
-- **Fleet message hooks** (launch flag on *both* orch and workers): `--settings
-  scripts/fleet/hooks.settings.json` registers the inbox-drain hooks, and `env
-  UNSEAMLESS_FLEET_SESSION=<session>` tags the session so the hook knows whose inbox to drain.
-  Deliberately loaded via `--settings`, **not** the checked-in `.claude/settings.json`, so ordinary
-  (non-fleet) Claude sessions in this repo never run them; the hook command is also self-gated on the
-  env var. `$CLAUDE_PROJECT_DIR` in the hook command resolves to each session's own workspace copy of
-  `_hook`.
+- **Fleet hooks** (launch flag on *both* orch and workers): `--settings
+  scripts/fleet/hooks.settings.json` registers two hooks, and `env UNSEAMLESS_FLEET_SESSION=<session>`
+  tags the session so they know whose inbox they belong to. Deliberately loaded via `--settings`,
+  **not** the checked-in `.claude/settings.json`, so ordinary (non-fleet) Claude sessions in this repo
+  never run them; both are also self-gated on the env var. `$CLAUDE_PROJECT_DIR` resolves to each
+  session's own workspace copy.
+  - `_hook` — the message **transport**: drains the inbox into the model's context
+    (`additionalContext`) at turn boundaries and stamps busy/idle state.
+  - `_ux` — the user-facing **visibility** layer (`PreToolUse`/`PostToolUse` on Bash): renders
+    user-only `systemMessage` notices for fleet sends/receives/waits and worker lifecycle. These are
+    shown in the terminal but **never enter the model's context**, so the operator can watch what a
+    session is doing without that text feeding back into the model. The full message body is shown
+    only on a *receive*; everything else is a one-liner. Receives have two paths that each render
+    once: the manual CLI receive (`inbox pop`/`wait`) is rendered by `_ux`; the auto receive (a
+    message drained at a turn boundary) is rendered by `_hook` (which adds a `systemMessage` next to
+    its `additionalContext`). A message is drained exactly once, so it renders exactly once.
 
 ## Scripts (`scripts/fleet/`)
 
@@ -227,7 +236,8 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
 | `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): never types into `usc-orch`, wakes a parked-idle worker with the sentinel, queues for a busy one. Target restricted to `usc-*` sessions. |
 | `inbox {pop\|wait [timeout]\|ls\|state}` | `pop`/`wait` take messages off **your own** inbox (read-and-remove in one step — the only receive path; `wait` blocks until mail arrives, then pops); `ls` (pending counts) and `state` (busy/idle) are read-only. No command reads another session's bodies. |
-| `_hook <EVENT>` / `_inbox` | internal: the hook dispatcher (drains inbox → `additionalContext`, stamps state) and the sourced primitives. `_hook` is registered via `hooks.settings.json`; both are inert outside a fleet session. |
+| `_hook <EVENT>` / `_inbox` | internal: the transport hook (drains inbox → `additionalContext` for the model + a user-only `systemMessage` on receive, stamps state) and the sourced primitives. Registered via `hooks.settings.json`; inert outside a fleet session. |
+| `_ux <pre\|post>` | internal: the user-facing visibility hook (`PreToolUse`/`PostToolUse` on Bash). Emits user-only `systemMessage` notices for fleet sends/receives/waits/lifecycle — never seen by the model. Silent for any non-fleet command; inert outside a fleet session. |
 | `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. |
 | `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
 | `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |

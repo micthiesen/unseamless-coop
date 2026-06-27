@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# _ux <pre|post>   (Claude Code hook JSON on stdin)
+#
+# User-FACING visibility layer for fleet orchestration. Renders short `systemMessage`
+# notices to the human watching a fleet session -- shown in the terminal but NEVER
+# added to the model's context (unlike _hook's `additionalContext`). So the operator
+# sees what the orchestrator is doing -- sends, receives, waits, worker lifecycle --
+# inline, without that text feeding back into the model and bloating/derailing it.
+#
+# Wired for fleet sessions only (hooks.settings.json): PreToolUse -> `_ux pre`,
+# PostToolUse -> `_ux post`, both matched to Bash. It inspects the Bash command (and,
+# post, its output) and speaks up ONLY for the fleet CLI; every other command is a
+# silent exit 0. Inert outside a fleet session or without jq.
+#
+# Division of labour with _hook: this renders the *manual* CLI receive (inbox
+# pop/wait) and all sends/lifecycle; _hook renders the *auto* receive (a message
+# drained into the model at a turn boundary). A given message is drained exactly
+# once, by exactly one of those paths, so it renders exactly once.
+#
+# Hard rule: ALWAYS exit 0 with at most a JSON object on stdout. A blocking exit from
+# a PreToolUse hook would cancel the tool call; this hook must never do that.
+set -uo pipefail
+
+phase="${1:-}"
+[ -n "${UNSEAMLESS_FLEET_SESSION:-}" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+input="$(cat 2>/dev/null || true)"
+cmd="$(jq -r '.tool_input.command // ""' <<<"$input" 2>/dev/null || true)"
+# Only fleet CLI calls are interesting; bail silently on everything else (no spam).
+case "$cmd" in
+  *scripts/fleet/*) ;;
+  *) exit 0 ;;
+esac
+
+emit() { jq -nc --arg m "$1" '{systemMessage:$m}'; exit 0; }
+
+# First session-name token after a subcommand keyword (the msg target / a worker
+# name), tolerant of an optional -f/--force before a worker-rm name.
+name_after() {  # <subcommand-regex>
+  grep -oE "$1"'[[:space:]]+(-f[[:space:]]+|--force[[:space:]]+)*(usc-)?[a-z0-9][a-z0-9_-]*' <<<"$cmd" \
+    | head -1 | awk '{print $NF}'
+}
+
+if [ "$phase" = "pre" ]; then
+  # Only the *blocking* receive earns a "before" notice -- it can sit a while, so
+  # the operator should see we're parked on it. Everything else announces on post.
+  grep -qE 'scripts/fleet/inbox[[:space:]]+wait\b' <<<"$cmd" \
+    && emit "[fleet …] waiting for a message"
+  exit 0
+fi
+
+# --- post: pull the command's output to enrich/extract -----------------------
+out="$(jq -r 'if (.tool_response|type)=="object" then (.tool_response.stdout // "") else (.tool_response // "") end' <<<"$input" 2>/dev/null || true)"
+err="$(jq -r 'if (.tool_response|type)=="object" then (.tool_response.stderr // "") else "" end' <<<"$input" 2>/dev/null || true)"
+
+# --- send (msg) -> one-liner with delivery status, never the body ------------
+if grep -qE 'scripts/fleet/msg[[:space:]]' <<<"$cmd"; then
+  target="$(name_after 'scripts/fleet/msg')"
+  status="sent"
+  case "$out" in
+    *"+ woke it"*)            status="delivered (woke it)" ;;
+    *"worker busy"*)          status="queued (busy)" ;;
+    *"someone is typing"*)    status="queued (in use)" ;;
+    *"session offline"*)      status="queued (offline)" ;;
+    *"wake-poke failed"*)     status="queued" ;;
+    *"delivers on its next"*) status="queued" ;;
+  esac
+  if [ -n "$target" ]; then emit "[fleet →] $target · $status"; else emit "[fleet →] $status"; fi
+fi
+
+# --- receive (inbox pop / wait) -> FULL message (the one place we show it) ----
+if grep -qE 'scripts/fleet/inbox[[:space:]]+(pop|wait)\b' <<<"$cmd"; then
+  grep -qiE 'timed out' <<<"$err" && emit "[fleet ←] wait timed out — no message"
+  # Strip our own scaffolding: trailing `(exit N)` echoes, the empty marker, the
+  # wait-timeout line -- whatever survives is the message body.
+  body="$(printf '%s\n' "$out" | grep -vE '^\(exit [0-9]+\)[[:space:]]*$|^\(inbox empty|^inbox wait:' | sed '/^[[:space:]]*$/d')"
+  [ -n "$body" ] && emit "[fleet ←] received"$'\n'"$body"
+  exit 0   # empty pop: stay silent (an idle check isn't news)
+fi
+
+# --- worker lifecycle -> one-liners ------------------------------------------
+if grep -qE 'scripts/fleet/worker-new[[:space:]]' <<<"$cmd"; then
+  n="$(name_after 'scripts/fleet/worker-new')"; [ -n "$n" ] && emit "[fleet +] spawned worker $n"
+fi
+if grep -qE 'scripts/fleet/worker-integrate[[:space:]]' <<<"$cmd"; then
+  n="$(name_after 'scripts/fleet/worker-integrate')"
+  tag="integrated"
+  case "$out$err" in
+    *"Staged (not committed)"*)   tag="integrated (staged)" ;;
+    *"Canonical tree is dirty"*)  tag="fetched (tree dirty — commit then merge)" ;;
+    *"Conflicts during"*)         tag="CONFLICTS — resolve before commit" ;;
+  esac
+  [ -n "$n" ] && emit "[fleet ⇄] $n · $tag"
+fi
+if grep -qE 'scripts/fleet/worker-rm[[:space:]]' <<<"$cmd"; then
+  n="$(name_after 'scripts/fleet/worker-rm')"
+  case "$out$err" in
+    *"REFUSING to remove"*) [ -n "$n" ] && emit "[fleet ×] $n · refused (unintegrated — needs -f)" ;;
+  esac
+  [ -n "$n" ] && emit "[fleet ×] removed worker $n"
+fi
+
+exit 0

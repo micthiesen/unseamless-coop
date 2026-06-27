@@ -30,9 +30,17 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 sess="$UNSEAMLESS_FLEET_SESSION"
 
-emit_context() {  # <event> <text>
-  jq -nc --arg ev "$1" --arg ctx "$2" \
-    '{hookSpecificOutput:{hookEventName:$ev, additionalContext:$ctx}}'
+# Deliver a drained message on BOTH channels of a single hook result:
+#   - additionalContext (framed) -> into the MODEL's context, so it acts on the mail.
+#   - systemMessage              -> a user-only notice the model never sees, so the
+#                                   human watching the session sees the receive too.
+# Used on the AUTO drain (a message delivered at a turn boundary, no `inbox` CLI
+# call). The "[fleet ←] received" line mirrors what _ux prints for the manual CLI
+# receive, so both receive paths look identical to the user. (framed is defined
+# below; bash resolves it at call time, which is fine.)
+emit_inbound() {  # <event> <raw-drained>
+  jq -nc --arg ev "$1" --arg ctx "$(framed "$2")" --arg um "[fleet ←] received"$'\n'"$2" \
+    '{hookSpecificOutput:{hookEventName:$ev, additionalContext:$ctx}, systemMessage:$um}'
 }
 
 # Frame drained messages as inbound fleet mail. Conversational, not an out-of-band imperative
@@ -52,7 +60,7 @@ case "$event" in
   UserPromptSubmit)
     fleet_state_write "$sess" busy
     if drained="$(fleet_inbox_drain "$sess")"; then
-      emit_context UserPromptSubmit "$(framed "$drained")"
+      emit_inbound UserPromptSubmit "$drained"
     else
       # No mail. If this prompt is a stray wake sentinel (a poke that raced a
       # Stop which already drained), swallow it so it doesn't start an empty turn.
@@ -72,7 +80,7 @@ case "$event" in
     # normally. Loop-safe because the drain removes the mail: the continuation's next Stop sees
     # an empty inbox and stops.
     if drained="$(fleet_inbox_drain "$sess")"; then
-      emit_context Stop "$(framed "$drained")"
+      emit_inbound Stop "$drained"
     fi
     exit 0
     ;;
@@ -80,7 +88,7 @@ case "$event" in
   SessionStart)
     fleet_state_write "$sess" idle
     if drained="$(fleet_inbox_drain "$sess")"; then
-      emit_context SessionStart "$(framed "$drained")"
+      emit_inbound SessionStart "$drained"
     fi
     exit 0
     ;;

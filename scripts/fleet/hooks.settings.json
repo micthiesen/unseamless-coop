@@ -1,11 +1,15 @@
 {
-  "//": "Fleet message-transport hooks. Loaded only by fleet sessions via `claude --settings scripts/fleet/hooks.settings.json` (worker-new / orch-start / worker-open), so ordinary Claude sessions in this repo are unaffected. The hook command is also inert unless $UNSEAMLESS_FLEET_SESSION is set. $CLAUDE_PROJECT_DIR resolves to each session's own workspace, so a worker runs its own copy of _hook. See scripts/fleet/_hook and docs/ORCHESTRATION.md.",
+  "//": "Fleet hooks. Loaded only by fleet sessions via `claude --settings scripts/fleet/hooks.settings.json` (worker-new / orch-start / worker-open), so ordinary Claude sessions in this repo are unaffected. Both hook commands are inert unless $UNSEAMLESS_FLEET_SESSION is set. $CLAUDE_PROJECT_DIR resolves to each session's own workspace, so a worker runs its own copy. _hook is the message TRANSPORT (drains the inbox into the model's context, stamps busy/idle); _ux is the user-facing VISIBILITY layer (renders user-only `systemMessage` notices for fleet sends/receives/waits/lifecycle, never seen by the model). See scripts/fleet/_hook, scripts/fleet/_ux, and docs/ORCHESTRATION.md.",
   "hooks": {
     "UserPromptSubmit": [
       { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" UserPromptSubmit" } ] }
     ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_ux\" pre" } ] }
+    ],
     "PostToolUse": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" PostToolUse" } ] }
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" PostToolUse" } ] },
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_ux\" post" } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" Stop" } ] }
