@@ -673,7 +673,7 @@ resolve_password() {
 }
 
 cmd_package() {
-  local profile=diag do_apply=0 pw_arg=""
+  local profile=diag do_apply=0 pw_arg="" guide_arg="" probe=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)    profile=release ;;
@@ -681,6 +681,9 @@ cmd_package() {
       --apply)      do_apply=1 ;;
       --password)   pw_arg="${2:-}"; shift ;;
       --password=*) pw_arg="${1#*=}" ;;
+      --guide)      guide_arg="${2:-}"; shift ;;   # bake a rig-guide name into the bundle config
+      --guide=*)    guide_arg="${1#*=}" ;;
+      --session-probe) probe=1 ;;                  # bake [debug.probes] session_probe = true
       *) die "package: unknown option '$1'" ;;
     esac
     shift
@@ -726,6 +729,13 @@ file_extension = "$FRIEND_SAVE_EXT"
 enabled = true          # capture verbose logs for this test build
 forward_to_host = true  # send your logs to the host so they land in one place
 EOF
+  # Optional: bake a rig-guide name (--guide) so every machine runs the same on-screen test flow, and
+  # the rung-3 FSM probe (--session-probe) so create/join transitions land in the log. rig_role is left
+  # at the default (solo) — two-player-join derives each machine's role from its Open/Join action.
+  [[ -n "$guide_arg" ]] && printf 'guide = "%s"\n' "$guide_arg" >> "$stage/unseamless_coop.toml"
+  if [[ $probe -eq 1 ]]; then
+    printf '\n[debug.probes]\nsession_probe = true\n' >> "$stage/unseamless_coop.toml"
+  fi
 
   # MANIFEST: build id + sha256 of each binary, for the installer's post-copy verification.
   {
