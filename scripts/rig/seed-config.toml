@@ -74,6 +74,9 @@ event_flag_scan_count = 0  # ...and how many flags to watch (0 = off). Finds the
 session_probe = false      # rung-3 RE: log every session lobby/protocol FSM transition + (once charted)
                            # hook the create/join initiation, all under the `session-probe:` log prefix.
                            # Flip true for a two-player create/join RE run — see docs/SESSION-RE-RUNBOOK.md.
+lobby_callback_probe = true # rung-4 gate: register one private CreateLobby call-result and log (under
+                           # `lobby-probe:`) whether it fires under ER's Steam pump. FIRED => RunCallbacks,
+                           # lobby discovery viable; never fires => ManualDispatch, rung-4 blocked. Solo.
 
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at

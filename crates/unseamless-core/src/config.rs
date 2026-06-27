@@ -206,6 +206,12 @@ pub struct DebugProbes {
     /// TODO — see `docs/SESSION-RE-RUNBOOK.md`). Enable for a two-player rig run that captures the
     /// `None -> TryToCreateSession -> Host` / `None -> TryToJoinSession -> Client` transition.
     pub session_probe: bool,
+    /// Run the rung-4 `RunCallbacks` probe (`coop/steam::run_lobby_callback_probe`): register one
+    /// harmless private `CreateLobby` call-result at startup and log (under the `lobby-probe:` prefix)
+    /// whether it fires under ELDEN RING's own Steam pump. The single empirical gate on flipping
+    /// `LOBBY_DISCOVERY_ENABLED` — fires → ER uses `RunCallbacks`, lobby discovery is viable; never
+    /// fires → likely `ManualDispatch`, rung 4 blocked. Solo, single-player. Off by default.
+    pub lobby_callback_probe: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

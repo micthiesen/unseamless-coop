@@ -198,6 +198,14 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
     // a normal solo session pays nothing. Best-effort: a failure to connect degrades, never aborts.
     crate::coop::start(config);
 
+    // Rung-4 RunCallbacks probe (gated by `[debug.probes] lobby_callback_probe`, off by default):
+    // register one harmless private `CreateLobby` call-result and log whether it fires under ER's own
+    // Steam pump — the single empirical gate on flipping `LOBBY_DISCOVERY_ENABLED`. Pure diagnostic;
+    // runs on its own thread and degrades (logs) on any binding miss. See docs/COOP-CONNECTION.md rung 4.
+    if config.debug.probes.lobby_callback_probe {
+        crate::steam::run_lobby_callback_probe();
+    }
+
     // Rung-3 RE prep: install the session create/join logging hooks (gated by `[debug.probes]
     // session_probe`, off by default). Inert when off, and inert-but-announced when on until the
     // create/join AOBs are charted on the rig — see `coop/session_probe` + docs/SESSION-RE-RUNBOOK.md.

@@ -489,6 +489,8 @@ const E_RESULT_OK: i32 = 1;
 
 /// `ELobbyType::k_ELobbyTypePublic` — listed in `RequestLobbyList`, so the password filter can find it.
 const ELOBBY_TYPE_PUBLIC: i32 = 2;
+/// `ELobbyType::k_ELobbyTypePrivate` — never listed; used only by the RunCallbacks probe's throwaway lobby.
+const ELOBBY_TYPE_PRIVATE: i32 = 0;
 /// `ELobbyComparison::k_ELobbyComparisonEqual` — exact-match the password-hash filter.
 const ELOBBY_CMP_EQUAL: i32 = 0;
 /// Two players per co-op lobby.
@@ -925,6 +927,94 @@ fn register_lobby_created(register: RegisterCallResultFn, mm: &'static Matchmaki
         crate::coop::note_lobby_host_resolved(); // the host id is our own — trivially known
     });
     register_call_result(register, call, CB_LOBBY_CREATED, size_of::<LobbyCreated>() as i32, handler);
+}
+
+/// **Rung-4 `RunCallbacks` probe** — gated by `[debug.probes] lobby_callback_probe` (off by default),
+/// wired in [`crate::app`]. Answers the one empirical question gating
+/// [`LOBBY_DISCOVERY_ENABLED`](crate::coop): does ELDEN RING pump Steam via the legacy
+/// `SteamAPI_RunCallbacks` — so the call-results we register actually fire — or via `ManualDispatch`
+/// internally, which would never deliver to us and block rung 4?
+///
+/// Registers ONE harmless private `CreateLobby` call-result and logs (info, `lobby-probe:` prefix) the
+/// instant it fires; a watcher makes "never fired" legible too, so a negative (ManualDispatch) verdict
+/// reads just as clearly. Deliberately isolated from the discovery flow — no password, no join, no
+/// joiner-wait — so the log says exactly "a registered call-result came back" or it didn't. Solo.
+///
+/// Re-derive after a game/Steam update: docs/COOP-CONNECTION.md rung-4 build order, step 1.
+pub fn run_lobby_callback_probe() {
+    // Off the loader path, after a short settle so Steam matchmaking is up (rung 1 resolves the
+    // SteamID ~0.5s after load; matchmaking is ready well before this fires).
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(5));
+        issue_probe_create_lobby();
+    });
+}
+
+/// Body of [`run_lobby_callback_probe`], on its own thread. Resolves the binding, issues a private
+/// `CreateLobby`, registers the call-result, then waits — logging whether it fired.
+fn issue_probe_create_lobby() {
+    // Set by the call-result thunk (on the game's pump thread); read by the watcher loop below.
+    static FIRED: AtomicBool = AtomicBool::new(false);
+
+    // SAFETY: borrow the already-loaded module handle (same as rung 1/2); not-found = Steam not up.
+    let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("lobby-probe: steam_api64.dll not loaded ({e}); cannot probe");
+            return;
+        }
+    };
+    let Some(addr) = resolve_required(module, "SteamAPI_RegisterCallResult", s!("SteamAPI_RegisterCallResult"))
+    else {
+        log::warn!("lobby-probe: SteamAPI_RegisterCallResult not exported — rung-4 binding unavailable");
+        return;
+    };
+    // SAFETY: documented flat-API signature on its fn type — the GetProcAddress binding used throughout.
+    let register: RegisterCallResultFn = unsafe { std::mem::transmute::<usize, RegisterCallResultFn>(addr) };
+    let Some(mm) = Matchmaking::resolve(module) else {
+        log::warn!("lobby-probe: ISteamMatchmaking unavailable (Steam not initialized?); cannot probe");
+        return;
+    };
+    let _ = MATCHMAKING.set(mm);
+    let Some(mm) = MATCHMAKING.get() else {
+        log::warn!("lobby-probe: matchmaking binding unexpectedly unset; cannot probe");
+        return;
+    };
+
+    // A private 1-seat lobby: never listed, carries no data, auto-closes when we exit — harmless.
+    // SAFETY: resolved flat method; us → Steam.
+    let call = unsafe { (mm.create_lobby)(mm.iface, ELOBBY_TYPE_PRIVATE, 1) };
+    if call == API_CALL_INVALID {
+        log::warn!("lobby-probe: CreateLobby returned no API call (Steam refused it); inconclusive");
+        return;
+    }
+    let handler = Box::new(move |param: *const c_void, io_failure: bool| {
+        FIRED.store(true, Ordering::Release);
+        // Either branch, the headline is identical: a call-result we registered came BACK, so ER pumps
+        // via RunCallbacks and rung-4 dispatch is viable. (An io_failure flag is benign for the probe.)
+        if io_failure || param.is_null() {
+            log::info!("lobby-probe: call-result FIRED (io_failure) → ELDEN RING pumps Steam via RunCallbacks; rung-4 lobby discovery is VIABLE — safe to flip LOBBY_DISCOVERY_ENABLED");
+            return;
+        }
+        // SAFETY: for CB_LOBBY_CREATED Steam hands us a LobbyCreated_t; read as POD.
+        let res = unsafe { &*(param as *const LobbyCreated) };
+        log::info!("lobby-probe: CreateLobby call-result FIRED (EResult {}) → ELDEN RING pumps Steam via RunCallbacks; rung-4 lobby discovery is VIABLE — safe to flip LOBBY_DISCOVERY_ENABLED", res.result);
+    });
+    register_call_result(register, call, CB_LOBBY_CREATED, size_of::<LobbyCreated>() as i32, handler);
+    log::info!("lobby-probe: registered a private CreateLobby call-result; awaiting it under ER's Steam pump…");
+
+    // Make a non-firing result legible: nothing back ⇒ ER likely pumps via ManualDispatch (rung-4 blocked).
+    for (wait, total) in [(10u64, 10u64), (20, 30), (30, 60)] {
+        std::thread::sleep(Duration::from_secs(wait));
+        if FIRED.load(Ordering::Acquire) {
+            return;
+        }
+        if total < 60 {
+            log::warn!("lobby-probe: still no call-result after {total}s — if it never fires, ER pumps via ManualDispatch (rung-4 blocked)");
+        } else {
+            log::warn!("lobby-probe: 60s elapsed with NO call-result — provisional verdict: ManualDispatch, rung-4 NOT viable via registered call-results. Confirm by Frida-hooking SteamAPI_RunCallbacks before concluding");
+        }
+    }
 }
 
 /// Joiner: apply the password filter and request the lobby list, registering the `LobbyMatchList_t`
