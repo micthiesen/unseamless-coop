@@ -166,6 +166,26 @@ which is why the overlay tells workers to consolidate to a single clean commit b
 warns on uncommitted/untracked working-tree changes, which are usually just the inherited
 orchestrator tree. Workers live until you remove them.
 
+## Prune Abandoned Solo Workers
+
+Michael spins up **solo** workers himself and often `ctrl+d`-exits them without cleaning up. To sweep
+those up:
+
+```
+scripts/fleet/worker-prune            # trash every abandoned (dead-session) solo worker
+scripts/fleet/worker-prune --dry-run  # show what it'd prune, change nothing
+scripts/fleet/worker-prune --all      # also prune solo workers whose session is still LIVE
+```
+
+It only ever touches **solo** workers (the `.role` marker), so orchestrator-driven lanes are never
+swept — those go through `worker-rm`. By default it spares a solo worker whose session is **still
+alive** (it's open/in use), pruning only the dead ones; `--all` includes the live ones too. For each
+it trashes the rift workspace, kills any tmux session, and drops the registry (assignment + `.role` +
+inbox + state), then `rift gc`s; it also kills orphan `usc-worker-*` sessions whose workspace is gone.
+This is the **low-safety bulk** path — it force-discards (no unintegrated-commit check), by design, so
+use `worker-rm <name>` for a single real lane you care about. `worker-ls`'s **ROLE** column shows which
+workers are `solo`.
+
 ## Start A Fresh Orchestrator Session
 
 If you need the orchestrator in its own tmux session (so workers can reach `usc-orch`), Michael runs:

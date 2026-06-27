@@ -7,6 +7,7 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
 cd "$REPO"
 
@@ -14,7 +15,9 @@ cd "$REPO"
 # (the create point) -- the at-a-glance "has this worker produced anything yet?"
 # signal. Worker branches live in the independent workspace clones, not here, so
 # this is computed per-workspace (`git -C "$ws"`), not from the orchestrator repo.
-printf '%-20s %-5s %-26s %-6s %-6s %s\n' NAME TMUX BRANCH DIRTY AHEAD WORKSPACE
+# ROLE (worker|solo|-) comes from the `.role` marker; solo workers are the ones
+# `worker-prune` sweeps up.
+printf '%-20s %-5s %-6s %-26s %-6s %-6s %s\n' NAME TMUX ROLE BRANCH DIRTY AHEAD WORKSPACE
 found=0
 while IFS= read -r ws; do
   [ -n "$ws" ] || continue
@@ -22,6 +25,7 @@ while IFS= read -r ws; do
   name="$(basename "$ws")"
   sess="usc-worker-$name"
   if tmux has-session -t "$sess" 2>/dev/null; then tstate="live"; else tstate="-"; fi
+  role="-"; [ -f "$FLEET_DIR/assignments/$name.role" ] && role="$(cat "$FLEET_DIR/assignments/$name.role")"
   branch="$(git -C "$ws" branch --show-current 2>/dev/null || true)"
   [ -n "$branch" ] || branch="(detached)"
   if git -C "$ws" diff --quiet 2>/dev/null && git -C "$ws" diff --cached --quiet 2>/dev/null; then
@@ -30,7 +34,7 @@ while IFS= read -r ws; do
     dirty="dirty"
   fi
   ahead="$(git -C "$ws" rev-list --count main..HEAD 2>/dev/null || echo '?')"
-  printf '%-20s %-5s %-26s %-6s %-6s %s\n' "$name" "$tstate" "$branch" "$dirty" "$ahead" "$ws"
+  printf '%-20s %-5s %-6s %-26s %-6s %-6s %s\n' "$name" "$tstate" "$role" "$branch" "$dirty" "$ahead" "$ws"
 done < <(rift list 2>/dev/null)
 
 if [ "$found" -eq 0 ]; then

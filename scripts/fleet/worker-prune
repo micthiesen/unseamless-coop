@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# worker-prune [--all] [-n|--dry-run]
+#
+# Bulk-clean SOLO (user-driven) workers you ctrl+d-exited and forgot about: trash
+# the rift workspace, kill any lingering tmux session, and drop the fleet registry
+# (assignment + .role marker + inbox + state). By default it only touches solo
+# workers whose tmux session is NOT alive -- the abandoned ones -- so an actively
+# open solo session, and EVERY orchestrator-driven worker, is left alone. It also
+# kills orphan usc-worker-* tmux sessions whose workspace is already gone.
+#
+# This is the low-safety bulk counterpart to `worker-rm`: it force-discards with no
+# unintegrated-commit check, by design (a ctrl+d'd solo session is throwaway). For a
+# single, safety-checked teardown of a real lane, use `worker-rm <name>`.
+#
+#   --all          also prune solo workers whose session is still LIVE (kills it too)
+#   -n, --dry-run  print what would be pruned; change nothing
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+# Pin + reuse the inbox/state path contract so this can't drift from msg/_hook/rm.
+export UNSEAMLESS_FLEET_DIR="$FLEET_DIR"
+# shellcheck source=/dev/null
+. "$SELF/_inbox"
+
+all=0
+dry=0
+for a in "$@"; do
+  case "$a" in
+    --all) all=1 ;;
+    -n|--dry-run) dry=1 ;;
+    -*) echo "worker-prune: unknown flag '$a'" >&2; exit 2 ;;
+    *) echo "worker-prune: unexpected arg '$a'" >&2; exit 2 ;;
+  esac
+done
+
+rroot="$HOME/Code/.rifts/$(basename "$REPO")"
+
+role_of() { local f="$FLEET_DIR/assignments/$1.role"; if [ -f "$f" ]; then cat "$f"; fi; }
+
+# Candidate names from BOTH live workspaces and lingering registry markers, so we
+# catch a solo worker whose workspace is already gone but whose tmux/registry remains.
+names=()
+while IFS= read -r ws; do [ -n "$ws" ] && names+=("$(basename "$ws")"); done < <(rift list 2>/dev/null || true)
+if [ -d "$FLEET_DIR/assignments" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    base="$(basename "$f")"
+    names+=("${base%.role}")
+  done < <(find "$FLEET_DIR/assignments" -maxdepth 1 -name '*.role' 2>/dev/null || true)
+fi
+mapfile -t names < <(printf '%s\n' "${names[@]:-}" | sed '/^$/d' | sort -u)
+
+pruned=0
+skipped_live=0
+solo_seen=0
+
+prune_one() {  # <name>
+  local name="$1" sess="usc-worker-$name" ws="$rroot/$name" alive=no
+  tmux has-session -t "$sess" 2>/dev/null && alive=yes
+  if [ "$dry" -eq 1 ]; then
+    local wstate=gone; [ -d "$ws" ] && wstate=present
+    echo "would prune solo '$name' (session $alive, workspace $wstate)"
+    return 0
+  fi
+  # Informational only -- we discard regardless (this is the low-safety bulk path).
+  if [ -d "$ws" ] && git -C "$ws" rev-parse --verify --quiet refs/heads/worker/"$name" >/dev/null 2>&1; then
+    local ahead; ahead="$(git -C "$ws" rev-list --count main..HEAD 2>/dev/null || echo '?')"
+    if [ "$ahead" != "0" ] && [ "$ahead" != "?" ]; then
+      echo "  note: discarding $ahead commit(s) on worker/$name"
+    fi
+  fi
+  if [ "$alive" = yes ]; then
+    tmux kill-session -t "$sess" 2>/dev/null || true
+    echo "  killed tmux $sess"
+  fi
+  if [ -d "$ws" ]; then
+    (cd "$REPO" && rift remove --force "$ws" >/dev/null 2>&1) || echo "  WARNING: rift remove failed for $ws" >&2
+    echo "  trashed workspace $ws"
+  fi
+  local pending; pending="$(fleet_inbox_files "$sess" | wc -l | tr -d ' ')"
+  if [ "$pending" -gt 0 ]; then
+    echo "  WARNING: discarding $pending undelivered message(s) from $sess" >&2
+  fi
+  rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
+  rm -rf "$(fleet_inbox_dir "$sess")"
+  rm -f "$(fleet_state_file "$sess")"
+  git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true
+  echo "pruned solo '$name'"
+  pruned=$((pruned + 1))
+}
+
+for name in "${names[@]:-}"; do
+  [ -n "$name" ] || continue
+  [ "$(role_of "$name")" = "solo" ] || continue   # only solo; orchestrator-driven workers are spared
+  solo_seen=$((solo_seen + 1))
+  if tmux has-session -t "usc-worker-$name" 2>/dev/null && [ "$all" -eq 0 ]; then
+    echo "skipping live solo '$name' (open; --all to prune it too)"
+    skipped_live=$((skipped_live + 1))
+    continue
+  fi
+  prune_one "$name"
+done
+
+# Orphan tmux sessions: a usc-worker-* session with no workspace is pure cruft -- kill it.
+while IFS= read -r sess; do
+  [ -n "$sess" ] || continue
+  name="${sess#usc-worker-}"
+  [ -d "$rroot/$name" ] && continue
+  if [ "$dry" -eq 1 ]; then
+    echo "would kill orphan tmux session $sess"
+  else
+    tmux kill-session -t "$sess" 2>/dev/null && echo "killed orphan tmux session $sess" || true
+  fi
+done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^usc-worker-' || true)
+
+if [ "$solo_seen" -eq 0 ]; then
+  echo "no solo workers found (orchestrator-driven workers are pruned via worker-rm)."
+elif [ "$dry" -eq 0 ]; then
+  rift gc >/dev/null 2>&1 || true
+  msg="done: pruned $pruned solo worker(s)"
+  [ "$skipped_live" -gt 0 ] && msg="$msg, skipped $skipped_live live (--all to include)"
+  echo "$msg."
+fi
