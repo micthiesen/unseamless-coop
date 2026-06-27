@@ -116,13 +116,59 @@ is the one genuinely hard step; rung 4 is deferred.
   [RIG-RUNBOOK.md](RIG-RUNBOOK.md) "observation run" becomes executable *with our mod*), and the
   side-channel can optionally migrate in-band to `broadcast_packet`.
 
-### Rung 4 — Discovery / lobby (deferred)
+### Rung 4 — Discovery / lobby (deferred, but a path is mapped)
 - Replace manual SteamID exchange with password-keyed **Steam lobby** discovery (host sets lobby data
   = password hash; joiner filters the lobby list by it). Steam's matchmaking lobby API makes this
   largely turnkey *at the API level*.
-- Deferred on purpose, and not only for scope: lobbies are the part that genuinely needs Steam
-  **callbacks/call-results**, which is the one piece with a real in-process hazard (see "Steam
-  integration"). Revisit the integration choice when we get here.
+- Deferred on purpose: lobbies are the part that genuinely needs Steam **callbacks/call-results**, the
+  one piece with a real in-process hazard (see "Steam integration"). But the hazard is **navigable** —
+  the analysis + plan below (2026-06-27) is the spec for whoever builds it.
+
+> **Scope reality first.** Rung 4 is *discovery polish*, **independent of rung 3**. It makes two modded
+> games with the same password auto-link their **side-channels** (handshake, config-sync, log-forward)
+> instead of hand-copying a SteamID — but they still won't see each other *in the world* until rung 3
+> (the session-FSM RE) lands. So it's a real UX win + a much nicer two-player test loop, not the gating
+> co-op piece. Build it for the convenience, not expecting in-world presence from it.
+
+**Why lobbies can't reuse the rung-1/2 trick.** Rungs 1-2 are deliberately *poll-based* (own SteamID +
+`ISteamNetworkingMessages`), so they never touch Steam dispatch. Lobbies can't be polled out of:
+`CreateLobby`, `RequestLobbyList`, and `JoinLobby` are **async** — each returns a `SteamAPICall_t` and
+delivers via a **call-result**. So rung 4 must actually *receive* a Steam callback.
+
+**The crux — don't own dispatch, piggyback the game's.** The hazard in "Steam integration" is
+`SteamAPI_ManualDispatch_*` (pumping the queue ourselves → stealing the game's events). The way around
+it: **register call-result handlers via the flat `SteamAPI_RegisterCallResult` / `SteamAPI_RegisterCallback`
+and let the game's existing per-frame pump deliver them to us.** We never pump → nothing is stolen. That
+reframes rung 4 from "blocked on a dispatch conflict" to "bind a gnarlier FFI surface."
+
+**The one real unknown (cheap rig probe — do this FIRST).** Does ELDEN RING drive its Steam dispatch via
+the legacy `SteamAPI_RunCallbacks` (then our registered handlers fire) or via `ManualDispatch` internally
+(then they *wouldn't*, and this path is blocked)? Almost every game uses `RunCallbacks`; ER very likely
+does, but it's an empirical assumption. Probe: register one harmless call-result (e.g. `CreateLobby` a
+private lobby) and watch for our handler firing under ER's pump (or Frida-hook `SteamAPI_RunCallbacks` to
+confirm it's called). One small rig experiment answers the whole feasibility question.
+
+**The new FFI cost vs. rungs 1-2.** `RegisterCallResult` takes a `CCallbackBase*` — a **C++ object** with
+a 3-entry vtable (`Run(void*)`, `Run(void*, bool, SteamAPICall_t)`, `GetICallback()`) plus id/flags fields
+at fixed offsets. So it's C++-ABI FFI (build the vtable struct + three `extern "C"` thunks in Rust),
+version-sensitive but bounded — not the simple flat-function binding `steam.rs` does today.
+
+**The flow (feeds the existing side-channel).**
+- Host: `CreateLobby` → on `LobbyCreated_t`, `SetLobbyData("usc_pw", hash(password))` + a version tag so
+  it's findable + identifiable as ours.
+- Joiner: `AddRequestLobbyListStringFilter("usc_pw", hash(password))` → `RequestLobbyList` →
+  `LobbyMatchList_t` → `GetLobbyByIndex` → `JoinLobby` → `LobbyEnter_t` → read the host's SteamID from the
+  lobby owner/members.
+- Then **seed the rung-2 side-channel** (`[coop] peer_steam_id` + `is_host`) from that — lobbies *replace*
+  the manual copy-paste, they don't add a new transport.
+
+**Build order (de-risks the awkward part last).**
+1. **Cheap rig probe** — confirm a flat-registered call-result fires under ER's pump (the only hard
+   unknown). Gate everything on this.
+2. **Harness prototype** — the [`harness`](../crates/harness) crate is a normal exe and *can* link
+   `steamworks-rs`; prove create/list/filter/join + the password-data scheme off the rig.
+3. **DLL hand-bind** — only then bind the `RegisterCallResult` C++-ABI in `coop/steam.rs` and wire the
+   resolved host SteamID into the side-channel seed.
 
 ## Steam integration: hand-bind the flat C API at runtime (do NOT take the crate)
 
@@ -199,8 +245,11 @@ path now exists and lights up the moment two modded games link.
   next to the binding per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results").
 - **Rung 3 is the real gate.** In-world co-op blocks on the create/join RE. Rungs 1-2 work *around* it
   but don't eliminate it.
-- **Lobby callbacks (rung 4).** When we need lobbies, we either accept manual-dispatch on a dedicated
-  pipe, prototype/validate it in the harness with the crate, or keep manual SteamID exchange.
+- **Lobby callbacks (rung 4).** Now mapped — see the rung-4 section above. The path is **not**
+  manual-dispatch (which would steal the game's events); it's `RegisterCallResult` piggybacking the
+  game's own `RunCallbacks` pump. The single open risk is empirical: confirm ER pumps via legacy
+  `RunCallbacks` (not `ManualDispatch`) so our registered handlers fire — a cheap rig probe, step 1 of
+  the rung-4 build order.
 
 ## Concrete next step
 
