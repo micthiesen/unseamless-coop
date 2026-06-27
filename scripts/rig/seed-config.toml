@@ -6,8 +6,9 @@
 #
 # The one load-bearing choice here is [debug].enabled = true: it drops logging to `level` so a rig
 # run captures the verbose lines (CLAUDE.md's logging rule keeps these silent by default). The
-# password is a throwaway test value — co-op isn't wired up yet, but the mod rejects a password
-# shorter than 5 chars at startup, so it must be set to *something* valid.
+# [session].password is now the co-op trigger: with it set, lobby discovery runs on launch (creates a
+# lobby + becomes host solo, finds + joins a partner's with two players), so a rig run exercises the
+# real connection path. It must be 5+ chars (the mod rejects a shorter one at startup).
 
 [gameplay]
 crit_coop = true
@@ -67,16 +68,18 @@ overlay = true
 # (yourself on the rig, or ask a friend tester to set one, reproduce, and send the log). A full
 # snapshot already logs at boot + on any feature panic regardless of these.
 [debug.probes]
-snapshot_secs = 0          # >0: also log a full diagnostic snapshot every N seconds
+snapshot_secs = 20         # >0: also log a full diagnostic snapshot every N seconds (surfaces the
+                           # `coop_connect` per-stage report so a discovery run is legible in the log)
 event_flag_scan_start = 0  # event-flag scanner window start...
 event_flag_scan_count = 0  # ...and how many flags to watch (0 = off). Finds the flag behind an action
                            # (e.g. set a window, rest at a grace, see which flag flips = the cure flag).
 session_probe = false      # rung-3 RE: log every session lobby/protocol FSM transition + (once charted)
                            # hook the create/join initiation, all under the `session-probe:` log prefix.
                            # Flip true for a two-player create/join RE run — see docs/SESSION-RE-RUNBOOK.md.
-lobby_callback_probe = true # rung-4 gate: register one private CreateLobby call-result and log (under
-                           # `lobby-probe:`) whether it fires under ER's Steam pump. FIRED => RunCallbacks,
-                           # lobby discovery viable; never fires => ManualDispatch, rung-4 blocked. Solo.
+lobby_callback_probe = false # rung-4 re-derivation probe (poll one private CreateLobby via ISteamUtils).
+                           # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
+                           # real discovery driver now runs whenever a password is set, so leave it off
+                           # unless re-deriving after a game/Steam update.
 
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
