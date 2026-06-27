@@ -666,6 +666,14 @@ impl Matchmaking {
 /// is the real deadline.
 const LOBBY_LIST_RETRY: Duration = Duration::from_secs(2);
 
+/// Bounded budget for resolving a `CreateLobby` still in flight at teardown (see
+/// [`LobbyDiscovery::leave_in_flight_create`]). `CreateLobby` normally resolves sub-second, so a few
+/// short polls suffice; we cap the total wait (`CREATE_TEARDOWN_POLLS * CREATE_TEARDOWN_POLL_DELAY` ≈
+/// 2 s) so a stuck call can't hang the exiting driver thread — past it we log and accept the rare
+/// orphan rather than block unbounded.
+const CREATE_TEARDOWN_POLLS: u32 = 20;
+const CREATE_TEARDOWN_POLL_DELAY: Duration = Duration::from_millis(100);
+
 /// Which side of the pairing the user chose. The role is **configured by the menu action** (Open World
 /// ⇒ host, Join world ⇒ joiner), not derived from what discovery finds — so only the host ever creates
 /// a lobby and there is no both-create race to resolve. See [`LobbyDiscovery`].
@@ -787,20 +795,64 @@ impl LobbyDiscovery {
     /// Leave whatever lobby we currently hold, if any. Invoked from [`Drop`] so session teardown — on
     /// *any* driver-thread exit path (Leave, timeout, failure, or a panic unwinding the thread) — drops
     /// the host's lobby / removes the joiner from it, with no call site able to forget. A no-op before a
-    /// lobby is created/entered (`HostChecking`/`Creating`/`JoinSeeking`).
+    /// lobby exists at all (`HostChecking`/`JoinSeeking`).
     ///
-    /// Caveat: a teardown during the `Creating` window can still orphan a lobby — `CreateLobby` is async,
-    /// so Steam may finish creating the (password-tagged, public) lobby *after* we've dropped, and we
-    /// hold no id to leave it. That window is sub-second and not worth blocking teardown to poll out.
+    /// The `Creating` window is the subtle one: `CreateLobby` is an async `SteamAPICall` with no lobby
+    /// id yet, so a naive teardown would leave nothing — but Steam still *finishes* creating the public
+    /// lobby afterward, leaving one we own but never leave (a lobby-slot leak that lingers until Steam
+    /// GCs it). (It's untagged — the `usc_pw` key is only set in [`poll_create`](Self::poll_create) on
+    /// success — so a joiner's filtered list can't actually find it; still, an owned public lobby we
+    /// never leave is a leak worth closing.) We close it by briefly resolving the in-flight handle and
+    /// leaving its result (see [`leave_in_flight_create`](Self::leave_in_flight_create)).
     fn leave(&self) {
-        let lobby = match self.role {
-            Role::Hosting { lobby } | Role::Joined { lobby } | Role::Joining { lobby, .. } => Some(lobby),
-            Role::HostChecking | Role::Creating { .. } | Role::JoinSeeking => None,
-        };
-        if let Some(lobby) = lobby {
-            // SAFETY: resolved flat method; us → Steam.
-            unsafe { (self.mm.leave_lobby)(self.mm.iface, lobby) };
+        match self.role {
+            // `Joining`: LeaveLobby on a lobby whose `JoinLobby` hasn't fully completed is a documented
+            // no-op, so leaving here is safe — we may not yet be a member, and Steam handles that.
+            Role::Hosting { lobby } | Role::Joined { lobby } | Role::Joining { lobby, .. } => {
+                // SAFETY: resolved flat method; us → Steam.
+                unsafe { (self.mm.leave_lobby)(self.mm.iface, lobby) };
+            }
+            // Async create still in flight: resolve it and leave the lobby it produces (below), else
+            // Steam orphans a public lobby we own with no one in it.
+            Role::Creating { call } => self.leave_in_flight_create(call),
+            Role::HostChecking | Role::JoinSeeking => {} // no lobby exists yet — nothing to leave
         }
+    }
+
+    /// Teardown while a `CreateLobby` is still in flight (`Creating { call }`): the call has no lobby id
+    /// yet, but Steam will finish creating the public lobby *after* we drop, leaving one we own but never
+    /// leave. [`leave`](Self::leave) runs on the exiting driver thread, so a **bounded** blocking poll is
+    /// acceptable: poll the handle via [`Utils`] (the same poll-only read path as
+    /// [`poll_create`](Self::poll_create) — never registering a call-result, per the module's
+    /// poll-not-pump rule) for up to [`CREATE_TEARDOWN_POLLS`] short steps and leave the resulting lobby.
+    /// If it doesn't resolve within the budget we log and give up — a rare orphan beats hanging teardown
+    /// unbounded.
+    fn leave_in_flight_create(&self, call: SteamAPICall) {
+        for i in 0..CREATE_TEARDOWN_POLLS {
+            match self.utils.completed(call) {
+                None => {} // still creating — fall through to the inter-poll sleep below
+                Some(true) => return, // completed with an IO failure: no id to leave (the rare residual orphan)
+                Some(false) => {
+                    let mut res = LobbyCreated { result: 0, lobby: 0 };
+                    if self.utils.read_result(call, CB_LOBBY_CREATED, &mut res)
+                        && res.result == E_RESULT_OK
+                        && res.lobby != 0
+                    {
+                        // SAFETY: resolved flat method; us → Steam.
+                        unsafe { (self.mm.leave_lobby)(self.mm.iface, res.lobby) };
+                    }
+                    return; // completed (whether or not a lobby came back) — done either way
+                }
+            }
+            // Pending — wait a beat before the next poll, but not after the final one (no re-poll follows).
+            if i + 1 < CREATE_TEARDOWN_POLLS {
+                std::thread::sleep(CREATE_TEARDOWN_POLL_DELAY);
+            }
+        }
+        log::warn!(
+            "steam: lobby teardown — CreateLobby still in flight after ~{}ms; a public lobby may be orphaned (rare)",
+            (CREATE_TEARDOWN_POLLS - 1) as u128 * CREATE_TEARDOWN_POLL_DELAY.as_millis()
+        );
     }
 
     /// Poll the flow one tick, returning the current [`LobbyResult`]. Called each tick by the co-op
