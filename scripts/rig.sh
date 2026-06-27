@@ -40,16 +40,24 @@ SEED_CONFIG="$ROOT/scripts/rig/seed-config.toml"
 #     at launch and runs gamescope at the rig size via -w/-h (a real lower render res). cmd_launch
 #     writes that flag; the wrapper consumes + deletes it, so manual launches stay fullscreen.
 #   - window placement: reposition_window then nudges that window to the top-left.
-# 1720x720 keeps the 3440x1440 (21:9) aspect. Override any of these via env.
+# Override any of these via env.
 WINDOW_MARGIN="${WINDOW_MARGIN:-24}"
-RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-1720}"
-RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-720}"
+# Rig render size: 0.75x the 3440x1440 native panel, same 21:9 aspect (so no stretch), clean
+# integers. One natural step up from the old 0.5x (1720x720), a bit roomier without going fullscreen.
+RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-2580}"
+RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-1080}"
 # One-shot flag handed to gamescope-wrapper.sh. MUST match the wrapper's FLAG (same env, same default).
 RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
 # Minimize the game window the moment it appears and keep it hidden until reposition_window places it,
 # so you don't see the centered/loading window before it snaps to the corner. Set 0 to disable (e.g.
 # if a minimized window ever throttles the load). The reveal always runs, so this can't strand it.
 RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
+# Re-blank the display after a launch that woke it. If the screen was DPMS-off (blanked via the
+# Blank Screen tool) when a launch started, starting the game forces the monitor back on; this puts
+# it back to sleep RIG_REBLANK_DELAY seconds later so a remote/headless rig run doesn't leave the
+# panel lit. Set RIG_REBLANK=0 to disable. Only fires when the screen was already blanked.
+RIG_REBLANK="${RIG_REBLANK:-1}"
+RIG_REBLANK_DELAY="${RIG_REBLANK_DELAY:-20}"
 # Auto-dismiss the startup popups (the offline-mode / connection-error dialogs we can't suppress in
 # code — they're Arxan-hardened, see docs/OFFLINE-TITLE-SCREEN.md) by injecting key presses via
 # ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
@@ -88,6 +96,11 @@ FRIEND_SAVE_EXT="${FRIEND_SAVE_EXT:-uco}"
 SHARED_PASSWORD_FILE="${SHARED_PASSWORD_FILE:-$DIST_SRC/.shared-password}"
 # GitHub prerelease tag `share` uploads to (a rolling bucket of test builds, not a version release).
 SHARE_TAG="${SHARE_TAG:-friends-test}"
+# Password the friend bundle zip is encrypted with. This is NOT a secret (it's published in the
+# release notes); its only job is to keep browsers/AV from scanning the .exe inside and throwing
+# "unsafe download" false positives. Windows Explorer extracts a ZipCrypto zip with a password
+# prompt, so friends still don't need any extra tool. Surfaced in the share notes by `cmd_share`.
+FRIEND_ZIP_PASSWORD="${FRIEND_ZIP_PASSWORD:-test}"
 
 # Files in the game folder our apply overwrites — i.e. the surface that must be snapshotted to
 # restore the original stack. SeamlessCoop/ is deliberately NOT here: apply never touches it (ERSC
@@ -333,10 +346,42 @@ wait_for_framework() {
   return 1
 }
 
+# ---- re-blank the display after a launch wakes it -----------------------------------------------
+# Is any screen currently DPMS-off (blanked)? Captured BEFORE a launch so we only re-blank a screen
+# the user had already turned off — never one they're actively using. `kscreen-doctor --dpms show`
+# prints "dpms mode for screen <out>: on|off" per output; treat any `off` as blanked. Best-effort:
+# "can't tell" (no kscreen-doctor) reads as not-blanked, so we default to leaving the display alone.
+display_is_blanked() {
+  command -v kscreen-doctor >/dev/null 2>&1 || return 1
+  kscreen-doctor --dpms show 2>/dev/null | grep -qiw off
+}
+
+# The screen was blanked before this launch and starting the game forced it back on. Put it back to
+# sleep after RIG_REBLANK_DELAY seconds. Detached via setsid so it survives this script exiting (the
+# no-wait `launch` path returns immediately); notifies first so a watcher knows why the panel is about
+# to go dark, then `kscreen-doctor --dpms off` (the same call the Blank Screen tool makes).
+schedule_reblank() {
+  [[ "$RIG_REBLANK" == 1 ]] || return 0
+  command -v kscreen-doctor >/dev/null 2>&1 || return 0
+  setsid -f bash -c '
+    sleep "$1"
+    if command -v notify-send >/dev/null 2>&1; then
+      notify-send -a unseamless-rig -u low -t 4000 \
+        "rig: re-blanking display" "Screen was off before launch; the game woke it. Turning it back off." 2>/dev/null || true
+    fi
+    sleep 1                                 # let the toast render before the panel powers off
+    kscreen-doctor --dpms off >/dev/null 2>&1 || true
+  ' _ "$RIG_REBLANK_DELAY" >/dev/null 2>&1 || true
+  say "display was blanked before launch — re-blanking in ${RIG_REBLANK_DELAY}s (RIG_REBLANK=0 to disable)"
+}
+
 cmd_launch() {
   local do_wait=0; [[ "${1:-}" == "--wait" ]] && do_wait=1
   need_game_dir
   applied || warn "our mod isn't applied (no marker) — launching whatever is currently installed."
+  # Capture display-blank state BEFORE handing off to Steam: the launch wakes the panel, so we must
+  # sample it now to know whether to put it back to sleep afterwards (schedule_reblank at the end).
+  local was_blanked=0; display_is_blanked && was_blanked=1
   local before; before="$(latest_log || true)"  # capture BEFORE launch so --wait spots the new run
   # Tell gamescope-wrapper.sh (if it's your launch options) to render at the rig size this launch. The
   # wrapper consumes + deletes the flag; if you haven't switched to the wrapper yet it's just ignored.
@@ -353,6 +398,10 @@ cmd_launch() {
     sleep 1                                    # let gamescope finish mapping its window
     reposition_window                          # reveal (unminimize) + move to top-left
   fi
+  # If the screen was blanked before this launch, put it back to sleep (the game woke it). Anchored
+  # here at the end so the timer starts after the window is up (--wait) and well clear of cycle's
+  # post-launch popup-dismiss key injection, which would otherwise re-wake the panel.
+  [[ $was_blanked -eq 1 ]] && schedule_reblank
 }
 
 latest_log() { ls -1t "$LOG_DIR"/unseamless_coop-*.log 2>/dev/null | head -1; }
@@ -757,9 +806,13 @@ EOF
 
   local zipf="$DIST_DIR/unseamless-coop-$build_id.zip"
   rm -f "$zipf"
-  ( cd "$stage" && zip -qr "$zipf" . )
-  ok "packaged $zipf"
-  say "build_id $build_id · v$version · save ext .$FRIEND_SAVE_EXT · password ${#password} chars"
+  # Encrypt the bundle (ZipCrypto via `zip -P`) so browsers/AV can't scan the .exe inside and flag a
+  # "unsafe download" false positive. Not security — the password is published in the share notes; it
+  # just gates the scanner. Windows Explorer extracts it with a password prompt, so friends need no
+  # extra tool. (-P puts the password on the command line, fine on this single-user host.)
+  ( cd "$stage" && zip -qr -P "$FRIEND_ZIP_PASSWORD" "$zipf" . )
+  ok "packaged $zipf (password-protected: '$FRIEND_ZIP_PASSWORD')"
+  say "build_id $build_id · v$version · save ext .$FRIEND_SAVE_EXT · coop password ${#password} chars · zip password '$FRIEND_ZIP_PASSWORD'"
   [[ "$build_id" == *-dirty ]] && warn "this is a -dirty build (uncommitted changes) — fine for testing; commit first if you want a clean id to share."
 
   # --apply: install the SAME built bits locally (host side) with the shared config, so the host runs
@@ -800,24 +853,30 @@ cmd_share() {
   # it — the source zip is still in dist/, so 'rig.sh share' recreates the release from scratch.
   ( cd "$ROOT" && gh release create "$SHARE_TAG" --prerelease --target main \
       --title "$SHARE_TAG" \
-      --notes "Rolling bucket of test builds for co-op testing. Grab the newest asset; install per README-FRIENDS.txt inside. Not a real release." ) \
+      --notes "Rolling bucket of test builds for co-op testing. Not a real release.
+
+Download the newest asset below, then extract it with the password **\`$FRIEND_ZIP_PASSWORD\`** and follow README-FRIENDS.txt inside. (The zip is password-protected only so browsers and antivirus don't throw a false-positive \"unsafe download\" warning on the .exe; it isn't a secret. Windows Explorer will just prompt you for the password when you extract.)" ) \
     || die "couldn't create prerelease '$SHARE_TAG' (the old one was already deleted; re-run 'rig.sh share' to recreate it — your dist/ zip is intact)"
 
   ( cd "$ROOT" && gh release upload "$SHARE_TAG" "$zipf" --clobber ) || die "upload failed"
   ok "uploaded $(basename "$zipf")"
-  local url; url="$(cd "$ROOT" && gh release view "$SHARE_TAG" --json assets --jq ".assets[] | select(.name==\"$(basename "$zipf")\") | .url" 2>/dev/null || true)"
+  # Share the release *page* URL, not the asset's direct-download link. A direct .zip link trips
+  # browser/AV "unsafe download" false-positives; the release page lets friends download from GitHub's
+  # own UI (and reads the extract-password note in the body). This is the html_url gh reports for the
+  # release, e.g. https://github.com/<owner>/<repo>/releases/tag/$SHARE_TAG.
+  local url; url="$(cd "$ROOT" && gh release view "$SHARE_TAG" --json url --jq .url 2>/dev/null || true)"
   if [[ -n "$url" ]]; then
-    say "Download URL: $url"
-    # Copy the bare URL to the clipboard by default, so it's ready to paste to friends.
-    if clip_copy "$url"; then ok "copied to clipboard"; else warn "no clipboard tool (wl-copy/xclip/xsel) — URL not copied"; fi
+    say "Release page: $url"
+    # Copy the page URL to the clipboard by default, so it's ready to paste to friends.
+    if clip_copy "$url"; then ok "copied release link to clipboard"; else warn "no clipboard tool (wl-copy/xclip/xsel) — URL not copied"; fi
   else
-    say "Release: $(cd "$ROOT" && gh release view "$SHARE_TAG" --json url --jq .url 2>/dev/null || true)"
+    warn "couldn't resolve the release page URL (the release exists; open it with: gh release view $SHARE_TAG --web)"
   fi
 }
 
 # All-in-one friend-test loop: build + package a debug bundle of the current code, install those same
 # bits locally (host) with the shared config, push the zip to the GitHub prerelease (copying the
-# download link to your clipboard — `share` does that by default), then launch the game and clear the
+# release-page link to your clipboard — `share` does that by default), then launch the game and clear the
 # startup popups (like `cycle`, so it lands ready to play instead of stuck behind intros). The host
 # rig and the friend zip run the same co-op password because `package --apply` resolves it once and
 # writes the one seed config to both (cycle's own apply would write a default config and break that,
@@ -888,14 +947,16 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
                          Auto-dismisses the startup popups; pass --no-dismiss to skip that.
   package [opts]         Build + assemble a Windows friend-install zip in dist/. Bundles our binaries,
-                         a shared seed config, a sha256 MANIFEST, and the PowerShell installer.
+                         a shared seed config, a sha256 MANIFEST, and the PowerShell installer. The zip
+                         is password-protected ('$FRIEND_ZIP_PASSWORD') to dodge browser/AV false-positives.
         --release          Ship the lean profile (default: diag — symbols + the build id in-overlay).
         --password X       Shared co-op password (else $UNSEAMLESS_SHARED_PASSWORD, else the file
                            scripts/dist/.shared-password). Must be >= 5 chars.
         --apply            Also install the same build locally (host) with the shared config.
   share [zip]            Upload a packaged zip (default: newest in dist/) to the GitHub prerelease
                          '$SHARE_TAG', recreating it fresh each time so it re-pins to the top of the
-                         Releases list. Prints the download URL and copies it to your clipboard.
+                         Releases list. Copies the release-PAGE URL to your clipboard (not a direct
+                         download link) and publishes the extract password in the release notes.
   friend-test [opts]     All-in-one: package + apply a debug build, share it (link to clipboard), then
                          launch and auto-clear the startup popups (like 'cycle', lands ready to play).
                          Host and bundle share one co-op password (seeds a default 'coop-test' on first

@@ -24,10 +24,10 @@ FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-g
 COMMON=(--immediate-flips)
 
 if [[ -f "$FLAG" ]]; then
-  W=1720 H=720
+  W=2580 H=1080                    # defaults match RIG_WINDOW_WIDTH/HEIGHT in scripts/rig.sh (0.75x of 3440x1440)
   read -r W H < "$FLAG" || true   # "WIDTH HEIGHT"; fall back to defaults if malformed/empty
   rm -f "$FLAG"                    # one-shot: consume it so manual launches stay fullscreen
-  : "${W:=1720}" "${H:=720}"
+  : "${W:=2580}" "${H:=1080}"
   exec gamescope -w "$W" -h "$H" -W "$W" -H "$H" "${COMMON[@]}" "$@"
 fi
 

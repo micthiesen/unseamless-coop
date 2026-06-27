@@ -25,8 +25,20 @@ fi
 
 mkdir -p "$RIFTS"
 
+# Drop the orchestrator's terminal into the next free Alacritty tile-slot, same as
+# the workers. orch-start `exec`s `tmux attach` into the CURRENT terminal rather than
+# popping a new window, so the placer targets that terminal's Alacritty (resolved by
+# _place-inject from the tmux client's parent pid). Detached so the exec below is never
+# delayed; best-effort + no-op without a display / the tiler / an Alacritty host.
+place_self() {
+  [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] || return 0
+  [ -x "$SELF/_place-inject" ] || return 0
+  setsid -f "$SELF/_place-inject" "$sess" >/dev/null 2>&1 || true
+}
+
 if tmux has-session -t "$sess" 2>/dev/null; then
   echo "orchestrator session '$sess' already running; attaching."
+  place_self
   exec tmux attach -t "$sess"
 fi
 
@@ -48,4 +60,5 @@ color="$(fleet_color_name "usc-orch" 2>/dev/null || true)"
 if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
   setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
 fi
+place_self
 exec tmux attach -t "$sess"

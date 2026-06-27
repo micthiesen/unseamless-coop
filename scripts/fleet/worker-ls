@@ -17,7 +17,17 @@ cd "$REPO"
 # this is computed per-workspace (`git -C "$ws"`), not from the orchestrator repo.
 # ROLE (worker|solo|-) comes from the `.role` marker; solo workers are the ones
 # `worker-prune` sweeps up.
-printf '%-20s %-5s %-6s %-26s %-6s %-6s %s\n' NAME TMUX ROLE BRANCH DIRTY AHEAD WORKSPACE
+# SOCK = whether `msg`/`_inject` can reach a live session: its inspector socket
+# (worker-new/orch-start set BUN_INSPECT to $FLEET_DIR/insp/<sess>.sock) is present.
+# This is the cheap mirror of msg's first gate (`[ -S "$sock" ]`); it does NOT prove
+# something is *accepting* on it (a restarted session can leave a stale file -- msg's
+# deeper rc=8 check catches that). `up` = reachable, `off` = live but no socket (msg
+# would fail), `-` = no live session. We don't spawn a per-worker `_inject --selftest`
+# probe here; that'd fork a bun per row and make `ls` slow.
+# LAST_COMMIT = the worker branch tip's subject -- *what* each worker is building, not
+# just that it's ahead. `(no commits yet)` when AHEAD is 0 (tip is still the base), so a
+# base-commit subject never reads as the worker's own work.
+printf '%-18s %-5s %-5s %-6s %-22s %-6s %-6s %s\n' NAME TMUX SOCK ROLE BRANCH DIRTY AHEAD LAST_COMMIT
 found=0
 while IFS= read -r ws; do
   [ -n "$ws" ] || continue
@@ -25,6 +35,11 @@ while IFS= read -r ws; do
   name="$(basename "$ws")"
   sess="usc-worker-$name"
   if tmux has-session -t "$sess" 2>/dev/null; then tstate="live"; else tstate="-"; fi
+  if [ "$tstate" = "live" ]; then
+    [ -S "$FLEET_DIR/insp/$sess.sock" ] && sstate="up" || sstate="off"
+  else
+    sstate="-"
+  fi
   role="-"; [ -f "$FLEET_DIR/assignments/$name.role" ] && role="$(cat "$FLEET_DIR/assignments/$name.role")"
   branch="$(git -C "$ws" branch --show-current 2>/dev/null || true)"
   [ -n "$branch" ] || branch="(detached)"
@@ -34,7 +49,14 @@ while IFS= read -r ws; do
     dirty="dirty"
   fi
   ahead="$(git -C "$ws" rev-list --count main..HEAD 2>/dev/null || echo '?')"
-  printf '%-20s %-5s %-6s %-26s %-6s %-6s %s\n' "$name" "$tstate" "$role" "$branch" "$dirty" "$ahead" "$ws"
+  if [ "$ahead" = "0" ]; then
+    last="(no commits yet)"
+  else
+    last="$(git -C "$ws" log -1 --format=%s HEAD 2>/dev/null || true)"
+    [ -n "$last" ] || last="-"
+  fi
+  [ "${#last}" -gt 50 ] && last="${last:0:49}…"   # keep the free-width tail to one line
+  printf '%-18s %-5s %-5s %-6s %-22s %-6s %-6s %s\n' "$name" "$tstate" "$sstate" "$role" "$branch" "$dirty" "$ahead" "$last"
 done < <(rift list 2>/dev/null)
 
 if [ "$found" -eq 0 ]; then
@@ -52,4 +74,5 @@ done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^usc-worker
 if [ "$found" -eq 1 ]; then
   echo
   echo "tip: reopen/revive a worker window -> scripts/fleet/worker-open <name>"
+  echo "     each worker's workspace is at  $HOME/Code/.rifts/$(basename "$REPO")/<name>"
 fi

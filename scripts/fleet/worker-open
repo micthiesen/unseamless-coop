@@ -35,6 +35,13 @@ pop_window() {
   if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
     setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
     echo "opened Alacritty attached to $sess"
+    # Drop the reopened terminal into the next free Alacritty tile-slot, same as
+    # worker-new does on first spawn. Best-effort + fully decoupled: a DETACHED
+    # injector waits for the window to map and places it; never blocks or breaks
+    # the open, and no-ops without a display / the tiler / the Alacritty host.
+    if [ -x "$SELF/_place-inject" ]; then
+      setsid -f "$SELF/_place-inject" "$sess" >/dev/null 2>&1 || true
+    fi
   else
     echo "no display; attach with:  tmux attach -t $sess"
   fi

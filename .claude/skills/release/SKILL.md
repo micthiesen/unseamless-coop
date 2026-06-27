@@ -43,11 +43,32 @@ Optional argument: an explicit version (e.g. `v0.2.0`). If omitted, propose one.
    commit whose `Cargo.toml` already carries the released version, since CI builds from the tag.
 
 5. **Write the release notes — a clean delta, not a commit dump.** Read
-   `git log <last-tag>..HEAD` for raw material, then write for a user installing the mod:
-   - Lead with what changed in behavior or how you use it.
-   - Group related changes; drop refactors/internal churn that don't affect users.
-   - Keep it tight (a short intro line + a few bullets). No em dashes.
-   - For the first release, describe what the mod does and the one-file install.
+   `git log <last-tag>..HEAD` for raw material, then write for a user installing the mod.
+   **Follow the canonical format below exactly** so every release reads the same.
+
+   **Canonical release-notes format:**
+   ```
+   <lead: 1-2 plain-prose sentences on what this release delivers / why it matters>
+
+   - <grouped change>
+   - <grouped change>
+   - ...
+
+   **Status:** <one line, only when the mod isn't yet full in-world co-op>
+   ```
+
+   Rules:
+   - **No version/title line in the body.** The release title is already `vX.Y.Z`; never
+     open with `unseamless-coop vX.Y.Z`, `vX.Y.Z`, or `vX.Y.Z lands…`. Start with the lead.
+   - **Lead** is plain prose, no bullet, stating the headline change in behavior or usage.
+   - **Bullets** group related changes; drop refactors/internal churn that don't affect users.
+   - **One trailing `**Status:**` line** carries the "not playable yet / what's still ahead"
+     caveat, when there is one. It is the *only* footer.
+   - **No footer cruft.** No per-release install instructions, no legal/affiliation
+     disclaimer, no repeated "co-op only, never on official servers" safety boilerplate.
+     The README owns all of that. The body is lead + bullets + optional Status, nothing else.
+   - **No em dashes** (use commas, periods, or parentheses).
+   - For the first release, the lead describes what the mod is and the bullets what it does.
 
 6. **Create the annotated tag with those notes as the message, and push:**
    ```bash
