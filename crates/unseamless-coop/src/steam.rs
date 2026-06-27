@@ -449,17 +449,19 @@ fn resolve_net_accessor(module: HMODULE) -> Option<(NetMessagesAccessor, u32)> {
 // ===================================================================================================
 // Rung 4: Steam matchmaking lobbies — password-keyed discovery, POLL-BASED.
 //
-//   *** Active whenever a co-op password is set (`crate::coop::start`). The rig PROVED the mechanism:
-//       an in-process `CreateLobby` succeeds and its `SteamAPICall_t` resolves cleanly when *polled*
-//       via `ISteamUtils` (see `run_lobby_callback_probe`). RIG-VERIFY still open: the joiner-finds-host
-//       leg across two machines (the `GetLobbyByIndex`/`GetLobbyOwner` pre-join reads below), confirmed
-//       by the two-player friend test. See docs/COOP-CONNECTION.md rung-4. ***
+//   *** Triggered on demand by the in-overlay Open World / Join world actions (`crate::coop::host` /
+//       `crate::coop::join`), not at launch. The rig PROVED the mechanism: an in-process `CreateLobby`
+//       succeeds and its `SteamAPICall_t` resolves cleanly when *polled* via `ISteamUtils` (see
+//       `run_lobby_callback_probe`). RIG-VERIFY still open: the joiner-finds-host leg across two
+//       machines (the `GetLobbyByIndex`/`GetLobbyOwner` pre-join reads below), confirmed by the
+//       two-player friend test. See docs/COOP-CONNECTION.md rung-4. ***
 //
-// This is the ONLY way two players pair — the manual peer-SteamID entry is gone. The role is
-// **derived, not configured**: list lobbies filtered by `hash(password)`; if a match exists, JOIN it
-// (we're the client) and read the host from the lobby owner; if none exists, CREATE one + publish the
-// password/version data (we're the host). The resolved peer + derived `is_host` seed the rung-2
-// side-channel (`crate::coop`) unchanged — lobbies are *discovery*, not a new transport.
+// This is the ONLY way two players pair — the manual peer-SteamID entry is gone. The role is the
+// user's **choice** ([`LobbyIntent`]), not derived: a host CREATEs the one lobby (after a best-effort
+// list to confirm none exists) + publishes the password/version data; a joiner LISTs lobbies filtered
+// by `hash(password)`, JOINs a match, and reads the host from the lobby owner. The resolved peer +
+// chosen `is_host` seed the rung-2 side-channel (`crate::coop`) — lobbies are *discovery*, not a new
+// transport.
 //
 // ## Why poll-based, not call-results (the rig-proven lesson)
 // Lobbies are inherently **async**: `CreateLobby`/`RequestLobbyList`/`JoinLobby` each return a
@@ -632,45 +634,66 @@ impl Matchmaking {
 /// `run_discovery` timeout is the real deadline.
 const LOBBY_LIST_RETRY: Duration = Duration::from_secs(2);
 
-/// Which side of the pairing we've settled into. **Derived** from what discovery finds (not configured):
-/// an existing matching lobby ⇒ we join it as the client; none ⇒ we create one as the host. The
-/// both-create race is resolved by a deterministic owner-SteamID tiebreak (see [`LobbyDiscovery`]).
+/// Which side of the pairing the user chose. The role is **configured by the menu action** (Open World
+/// ⇒ host, Join world ⇒ joiner), not derived from what discovery finds — so only the host ever creates
+/// a lobby and there is no both-create race to resolve. See [`LobbyDiscovery`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyIntent {
+    /// Open World: confirm no lobby with this password exists, create one, and wait for a friend.
+    Host,
+    /// Join world: search for an existing lobby keyed on the password and enter it.
+    Join,
+}
+
+/// One tick of [`LobbyDiscovery::poll`]. The co-op driver toasts/banners off these and seeds rung 2 on
+/// `Resolved`.
+pub enum LobbyResult {
+    /// Still working toward a stable state (subject to the driver's setup timeout).
+    Pending,
+    /// Host only: the lobby is open and we're waiting for a friend to join. No timeout — a host stays
+    /// open as long as the user leaves the world open.
+    Hosting,
+    /// The partner is resolved (with the role we played); hand it to the rung-2 side-channel.
+    Resolved { peer: u64, is_host: bool },
+    /// Discovery failed terminally; the plain-words reason is for the toast/log.
+    Failed(String),
+}
+
+/// The internal pairing state machine. The entry state is set by [`LobbyIntent`]: a host confirms no
+/// lobby exists then creates one; a joiner lists on a cadence until it finds one.
 enum Role {
-    /// Haven't created or joined yet — waiting on a filtered list to decide.
-    Undecided,
-    /// Our `CreateLobby` is in flight (polled via [`Utils`]).
+    /// Host: one filtered list out to confirm no lobby with this password already exists (a host that
+    /// finds one errors out and tells the user to Join instead).
+    HostChecking,
+    /// Host: our `CreateLobby` is in flight (polled via [`Utils`]).
     Creating { call: SteamAPICall },
-    /// We own a lobby (host). Poll its members for the joiner; keep re-listing to catch a competing
-    /// lobby we'd lose the tiebreak to.
+    /// Host: we own the lobby. Poll its members for the joiner.
     Hosting { lobby: u64 },
-    /// Our `JoinLobby` is in flight; `lobby` is the one we're entering.
+    /// Joiner: listing on a cadence for a matching lobby.
+    JoinSeeking,
+    /// Joiner: our `JoinLobby` is in flight; `lobby` is the one we're entering.
     Joining { call: SteamAPICall, lobby: u64 },
-    /// We entered a lobby (client). Poll `GetLobbyOwner` until the host id is populated.
+    /// Joiner: we entered a lobby. Poll `GetLobbyOwner` until the host id is populated.
     Joined { lobby: u64 },
 }
 
-/// Drives password-keyed lobby discovery to resolve the rung-2 peer **and** our derived host/client
-/// role. Construct with [`start`](LobbyDiscovery::start); the co-op driver calls
-/// [`poll`](LobbyDiscovery::poll) each tick until it yields `(peer, is_host)`.
+/// Drives password-keyed lobby discovery to resolve the rung-2 peer, playing the role the user chose
+/// ([`LobbyIntent`]). Construct with [`start`](LobbyDiscovery::start); the co-op driver calls
+/// [`poll`](LobbyDiscovery::poll) each tick until it yields a terminal [`LobbyResult`].
 ///
 /// Entirely poll-based and single-threaded (the co-op driver thread): each async lobby call returns a
 /// `SteamAPICall_t` we poll via [`Utils`] (`IsAPICallCompleted`/`GetAPICallResult`), never registering a
 /// `CCallbackBase` call-result — ELDEN RING's own `RunCallbacks` pump would consume the handle first and
 /// leave our poll seeing `InvalidHandle` (the rig-proven lesson; see the rung-4 module comment).
 ///
-/// ## Both-create race
-/// If both players' first list comes back empty (Valve indexing lag), both create a lobby. Each then
-/// keeps re-listing while hosting; once a host sees a competing lobby whose **lobby SteamID** is lower
-/// than its own it loses the tiebreak — it leaves its own lobby and joins the winner's. The lower-id
-/// host stays put and finds the joiner via its member poll. The rule is deterministic and symmetric
-/// (both sides see the same lobby ids and compute the same global minimum), so both converge on the
-/// same lobby.
-///
-/// The tiebreak keys on the **lobby** SteamID, not the lobby *owner*, on purpose: `GetLobbyOwner`
-/// (like the member accessors) requires us to be a *member* of the lobby and returns nil for a
-/// listed-but-unjoined one, so an owner is only readable post-join (see [`poll_owner`]). A lobby's own
-/// SteamID, in contrast, comes straight from `GetLobbyByIndex` pre-join. RIG-VERIFY: confirm
-/// `GetLobbyOwner`/`GetLobbyByIndex` pre-join behavior on the two-player rig before flipping the gate.
+/// ## Explicit roles (no both-create race)
+/// The role is the user's choice, not derived: a host (Open World) creates the only lobby and a joiner
+/// (Join world) enters it, so the two never both create. A host first issues a single best-effort list
+/// to detect a friend who already hosted on this password (Valve indexing lag can miss a very recent
+/// one — acceptable for that edge case); finding one is reported as a failure so the UI can say "Join
+/// instead". The joiner reads the host from `GetLobbyOwner` post-join (owner metadata is only readable
+/// once we are a member — see [`poll_owner`]). RIG-VERIFY: the joiner-finds-host leg on the two-player
+/// rig (`GetLobbyByIndex`/`GetLobbyOwner` across machines).
 pub struct LobbyDiscovery {
     mm: Matchmaking,
     utils: Utils,
@@ -689,9 +712,10 @@ pub struct LobbyDiscovery {
 
 impl LobbyDiscovery {
     /// Bind matchmaking + utils against the already-loaded `steam_api64.dll` and start discovery in the
-    /// `Undecided` state. `None` (logged) if the Steam binding isn't available — the caller degrades.
-    /// `self_id` is our own resolved SteamID (rung 1), which the caller has already waited for.
-    pub fn start(self_id: u64, password: &str) -> Option<LobbyDiscovery> {
+    /// entry state for `intent` (host ⇒ `HostChecking`, joiner ⇒ `JoinSeeking`). `None` (logged) if the
+    /// Steam binding isn't available — the caller degrades. `self_id` is our own resolved SteamID (rung
+    /// 1), which the caller has already waited for.
+    pub fn start(self_id: u64, password: &str, intent: LobbyIntent) -> Option<LobbyDiscovery> {
         // SAFETY: borrow the already-loaded module handle (same as rung 1/2); not-found means Steam
         // hasn't loaded yet.
         let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
@@ -703,68 +727,94 @@ impl LobbyDiscovery {
         };
         let mm = Matchmaking::resolve(module)?;
         let utils = Utils::resolve(module)?;
+        let role = match intent {
+            LobbyIntent::Host => Role::HostChecking,
+            LobbyIntent::Join => Role::JoinSeeking,
+        };
         Some(LobbyDiscovery {
             mm,
             utils,
             self_id,
             key: password_lobby_key(password),
-            role: Role::Undecided,
+            role,
             list_call: None,
             last_request: None,
         })
     }
 
-    /// Poll the flow one tick. Returns `Some((peer, is_host))` once the partner is resolved (and which
-    /// role we derived), else `None`. Called each tick by the co-op driver until it yields.
-    pub fn poll(&mut self) -> Option<(u64, bool)> {
-        // Service any outstanding filtered-list result first — it can move us out of `Undecided`
-        // (decide create-vs-join) or, while `Hosting`, trigger the race tiebreak.
-        self.poll_list();
-
-        match self.role {
-            Role::Undecided => {
-                // Need a list to decide; (re)issue one on the retry cadence.
-                self.maybe_request_list();
-                None
-            }
-            Role::Creating { call } => {
-                self.poll_create(call);
-                None
-            }
-            Role::Hosting { lobby } => {
-                // Keep re-listing to catch the both-create race, then scan members for the joiner.
-                self.maybe_request_list();
-                self.poll_host_members(lobby)
-            }
-            Role::Joining { call, lobby } => {
-                self.poll_join(call, lobby);
-                None
-            }
-            Role::Joined { lobby } => self.poll_owner(lobby),
+    /// Leave whatever lobby we currently hold, if any — called on session teardown (Leave World) so a
+    /// host's lobby disappears and a joiner exits cleanly. A no-op before a lobby is created/entered.
+    pub fn leave(&self) {
+        let lobby = match self.role {
+            Role::Hosting { lobby } | Role::Joined { lobby } | Role::Joining { lobby, .. } => Some(lobby),
+            Role::HostChecking | Role::Creating { .. } | Role::JoinSeeking => None,
+        };
+        if let Some(lobby) = lobby {
+            // SAFETY: resolved flat method; us → Steam.
+            unsafe { (self.mm.leave_lobby)(self.mm.iface, lobby) };
         }
     }
 
-    /// Poll a pending `RequestLobbyList`; on completion, hand the match count to [`handle_list`].
-    fn poll_list(&mut self) {
-        let Some(call) = self.list_call else { return };
+    /// Poll the flow one tick, returning the current [`LobbyResult`]. Called each tick by the co-op
+    /// driver until it yields a terminal result (`Resolved`/`Failed`).
+    pub fn poll(&mut self) -> LobbyResult {
+        // Service any outstanding filtered-list result first — it drives the create-vs-fail (host) or
+        // join (joiner) decision and can yield a terminal failure (a host finding an existing lobby).
+        if let Some(result) = self.service_list() {
+            return result;
+        }
+
+        match self.role {
+            Role::HostChecking => {
+                // Issue the single existence-check list on the retry cadence until it returns.
+                self.maybe_request_list();
+                LobbyResult::Pending
+            }
+            Role::Creating { call } => self.poll_create(call),
+            Role::Hosting { lobby } => match self.poll_host_members(lobby) {
+                Some((peer, is_host)) => LobbyResult::Resolved { peer, is_host },
+                None => LobbyResult::Hosting,
+            },
+            Role::JoinSeeking => {
+                self.maybe_request_list();
+                LobbyResult::Pending
+            }
+            Role::Joining { call, lobby } => self.poll_join(call, lobby),
+            Role::Joined { lobby } => match self.poll_owner(lobby) {
+                Some((peer, is_host)) => LobbyResult::Resolved { peer, is_host },
+                None => LobbyResult::Pending,
+            },
+        }
+    }
+
+    /// Poll a pending `RequestLobbyList`; on completion, act on the match count per our role. Returns
+    /// `Some(Failed)` only when a host's existence check finds a lobby (terminal); otherwise `None`
+    /// (state may have advanced to `Creating`/`Joining`).
+    fn service_list(&mut self) -> Option<LobbyResult> {
+        let call = self.list_call?;
         match self.utils.completed(call) {
-            None => {}                            // still pending
-            Some(true) => self.list_call = None, // IO failure — drop it; the cadence re-issues
+            None => None,                                     // still pending
+            Some(true) => {
+                self.list_call = None; // IO failure — drop it; the cadence re-issues
+                None
+            }
             Some(false) => {
                 self.list_call = None;
                 let mut res = LobbyMatchList { matching: 0 };
                 if self.utils.read_result(call, CB_LOBBY_MATCH_LIST, &mut res) {
-                    self.handle_list(res.matching);
+                    self.handle_list(res.matching)
+                } else {
+                    None
                 }
             }
         }
     }
 
-    /// Decide what to do with a returned filtered list. Collects the matching **lobby SteamIDs** (the
-    /// only deterministic key readable pre-join — see the [`LobbyDiscovery`] race note), then:
-    /// `Undecided` ⇒ join the lowest-id lobby if any (else create); `Hosting` ⇒ if a competing lobby has
-    /// a strictly-lower id than ours, we lose the tiebreak — leave ours and join it.
-    fn handle_list(&mut self, matching: u32) {
+    /// Act on a returned filtered list per the role we're playing. Collects the matching **lobby
+    /// SteamIDs** (the only key readable pre-join), then: `HostChecking` ⇒ any match means a lobby
+    /// already exists (terminal failure, "Join instead"), none ⇒ create ours; `JoinSeeking` ⇒ join the
+    /// lowest-id match if any, else keep seeking. Returns `Some(Failed)` only for the host-exists case.
+    fn handle_list(&mut self, matching: u32) -> Option<LobbyResult> {
         crate::coop::note_lobby_list(matching);
         // Lobby SteamIDs of each match. `get_by_index` indexes the *last* list (the one we just
         // completed) and returns the id pre-join; the owner/members are NOT readable until we join.
@@ -778,39 +828,40 @@ impl LobbyDiscovery {
         }
 
         match self.role {
-            Role::Undecided => {
-                // Existing lobby ⇒ join the lowest-id one (deterministic if several match); none ⇒
-                // create our own and become the host.
-                match lobbies.iter().copied().min() {
-                    Some(lobby) => self.start_join(lobby),
-                    None => self.start_create(),
+            Role::HostChecking => {
+                if lobbies.is_empty() {
+                    // No one is hosting on this password — create our own and become the host.
+                    self.start_create();
+                    None
+                } else {
+                    // A friend already opened a world on this password; tell the user to Join instead.
+                    let why = "A world with this password is already open — use Join world instead.";
+                    crate::coop::note_lobby_failure(why);
+                    Some(LobbyResult::Failed(why.to_string()))
                 }
             }
-            Role::Hosting { lobby: mine } => {
-                // Both-create race: a competing lobby with an id below ours wins; we leave + join it.
-                let winner = lobbies.iter().copied().filter(|&lobby| lobby < mine).min();
-                if let Some(winner_lobby) = winner {
-                    log::info!(
-                        "steam: lost the lobby tiebreak (our lobby {mine:#x} > {winner_lobby:#x}); leaving ours to join theirs"
-                    );
-                    // SAFETY: resolved flat method; us → Steam.
-                    unsafe { (self.mm.leave_lobby)(self.mm.iface, mine) };
-                    self.start_join(winner_lobby);
+            Role::JoinSeeking => {
+                // Existing lobby ⇒ join the lowest-id one (deterministic if several match); none ⇒ keep
+                // listing on the cadence until one appears or the driver's join timeout fires.
+                if let Some(lobby) = lobbies.iter().copied().min() {
+                    self.start_join(lobby);
                 }
+                None
             }
             // A stray list result while a create/join is in flight or already joined — ignore it.
-            _ => {}
+            _ => None,
         }
     }
 
     /// Poll our in-flight `CreateLobby`. On success, publish the password/version data and become the
-    /// host; on failure, drop back to `Undecided` so the retry cadence tries again.
-    fn poll_create(&mut self, call: SteamAPICall) {
+    /// host (`Hosting`); a create failure is terminal (a host can't proceed without its lobby).
+    fn poll_create(&mut self, call: SteamAPICall) -> LobbyResult {
         match self.utils.completed(call) {
-            None => {} // pending
+            None => LobbyResult::Pending,
             Some(true) => {
-                crate::coop::note_lobby_failure("CreateLobby reported an IO failure");
-                self.role = Role::Undecided;
+                let why = "Couldn't open the world (Steam reported an IO failure creating the lobby).";
+                crate::coop::note_lobby_failure(why);
+                LobbyResult::Failed(why.to_string())
             }
             Some(false) => {
                 let mut res = LobbyCreated { result: 0, lobby: 0 };
@@ -821,22 +872,26 @@ impl LobbyDiscovery {
                     set_lobby_data(&self.mm, res.lobby, LOBBY_KEY_VERSION, &PROTOCOL_VERSION.to_string());
                     crate::coop::note_lobby_created();
                     self.role = Role::Hosting { lobby: res.lobby };
+                    LobbyResult::Hosting
                 } else {
-                    crate::coop::note_lobby_failure(format!("CreateLobby failed (EResult {})", res.result));
-                    self.role = Role::Undecided;
+                    let why = format!("Couldn't open the world (CreateLobby failed, EResult {}).", res.result);
+                    crate::coop::note_lobby_failure(why.clone());
+                    LobbyResult::Failed(why)
                 }
             }
         }
     }
 
     /// Poll our in-flight `JoinLobby`. On success, move to `Joined` (the owner read is deferred to
-    /// [`poll_owner`], to tolerate owner metadata lagging the enter); on failure, retry from scratch.
-    fn poll_join(&mut self, call: SteamAPICall, lobby: u64) {
+    /// [`poll_owner`], to tolerate owner metadata lagging the enter); a join failure drops back to
+    /// `JoinSeeking` so the cadence retries (the host's lobby may still be coming up) until the driver's
+    /// join timeout fires. Always returns `Pending` — joining is never terminal here.
+    fn poll_join(&mut self, call: SteamAPICall, lobby: u64) -> LobbyResult {
         match self.utils.completed(call) {
             None => {} // pending
             Some(true) => {
                 crate::coop::note_lobby_failure("JoinLobby reported an IO failure");
-                self.role = Role::Undecided;
+                self.role = Role::JoinSeeking;
             }
             Some(false) => {
                 let mut res =
@@ -846,10 +901,11 @@ impl LobbyDiscovery {
                     self.role = Role::Joined { lobby };
                 } else {
                     crate::coop::note_lobby_failure("JoinLobby failed");
-                    self.role = Role::Undecided;
+                    self.role = Role::JoinSeeking;
                 }
             }
         }
+        LobbyResult::Pending
     }
 
     /// Host: scan our lobby's members for the non-self entry — that's the joiner, our rung-2 peer.
@@ -879,7 +935,8 @@ impl LobbyDiscovery {
         }
     }
 
-    /// Issue `CreateLobby` and enter the `Creating` state. A refused call leaves us `Undecided` to retry.
+    /// Issue `CreateLobby` and enter the `Creating` state. A refused call leaves us in `HostChecking`,
+    /// where the retry cadence re-lists and tries to create again (the driver's setup timeout bounds it).
     fn start_create(&mut self) {
         crate::coop::note_lobby_role(LobbyRole::Host);
         // SAFETY: resolved flat method; us → Steam.
@@ -887,19 +944,20 @@ impl LobbyDiscovery {
             unsafe { (self.mm.create_lobby)(self.mm.iface, ELOBBY_TYPE_PUBLIC, LOBBY_MAX_MEMBERS) };
         if call == API_CALL_INVALID {
             crate::coop::note_lobby_failure("CreateLobby returned no API call (Steam refused it)");
-            return; // stay Undecided; the retry cadence tries again
+            return; // stay in HostChecking; the retry cadence tries again
         }
         self.role = Role::Creating { call };
     }
 
-    /// Issue `JoinLobby` for `lobby` and enter the `Joining` state. A refused call leaves us `Undecided`.
+    /// Issue `JoinLobby` for `lobby` and enter the `Joining` state. A refused call drops back to
+    /// `JoinSeeking` so the cadence retries.
     fn start_join(&mut self, lobby: u64) {
         crate::coop::note_lobby_role(LobbyRole::Joiner);
         // SAFETY: resolved flat method; us → Steam.
         let call = unsafe { (self.mm.join_lobby)(self.mm.iface, lobby) };
         if call == API_CALL_INVALID {
             crate::coop::note_lobby_failure("JoinLobby returned no API call (Steam refused it)");
-            self.role = Role::Undecided;
+            self.role = Role::JoinSeeking;
             return;
         }
         self.role = Role::Joining { call, lobby };
