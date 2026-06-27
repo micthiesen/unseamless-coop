@@ -32,11 +32,20 @@ branch="worker/$name"
 if [ -d "$ws" ]; then
   # Unintegrated COMMITS are the unrecoverable-loss signal (the working-tree dirt
   # a worker inherits from the orchestrator is noise, not its own work). Refuse
-  # unless forced.
-  unintegrated="$(git -C "$ws" log --oneline "main..$branch" 2>/dev/null || true)"
-  if [ -n "$unintegrated" ] && [ "$force" -ne 1 ]; then
+  # unless forced. Use `git cherry` (patch-id equivalence), NOT `git log main..`:
+  # after a normal squash-integrate the worker's pre-squash commit is patch-equal
+  # to the squashed commit on main, so cherry marks it '-' (already applied) and
+  # we don't demand a spurious -f for a worker whose work is safely on main. Only
+  # a commit with no patch-equivalent on main ('+') counts as unintegrated.
+  # (Caveat: several worker commits squashed into ONE main commit won't patch-
+  # match individually -- which is why a worker consolidates to a single clean
+  # commit on top of its base before reporting done; see docs/roles/worker.md.)
+  unmerged="$(git -C "$ws" cherry main "$branch" 2>/dev/null | sed -n 's/^+ //p' || true)"
+  if [ -n "$unmerged" ] && [ "$force" -ne 1 ]; then
     echo "REFUSING to remove '$name': it has unintegrated commits on $branch:" >&2
-    echo "$unintegrated" >&2
+    while IFS= read -r sha; do
+      [ -n "$sha" ] && git -C "$ws" log --oneline -1 "$sha" >&2
+    done <<<"$unmerged"
     echo "Integrate first (scripts/fleet/worker-integrate $name), or re-run with -f to discard." >&2
     exit 1
   fi

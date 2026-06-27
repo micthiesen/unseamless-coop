@@ -12,9 +12,16 @@ your workspace path, and your branch `worker/<name>`.
 - Build and test on the host as you go: `cargo build` / `cargo check` /
   `cargo clippy --release -- -D warnings`, and `scripts/test-core.sh` for the core crate. Keep it
   green.
-- **Commit freely to your branch `worker/<name>`.** WIP commits are expected and wanted: they are
-  what lets the orchestrator integrate your work with `git merge` (and `rerere`). Messy history on
-  your branch is fine; the orchestrator squashes it on the way to `main`.
+- **Commit to your branch `worker/<name>` as new commits *on top of* the commit you started from —
+  never folded into it.** WIP commits while you work are fine and wanted. The commit your branch
+  forked from (`git merge-base main HEAD`) is your shared base with `main`: never `amend`, `reset`,
+  or `rebase` *into or past* it. Rewriting that base makes the orchestrator's integration conflict
+  and trips the teardown safety check.
+- **Before you report done, consolidate your branch to a single clean commit on that base** — e.g.
+  `git reset --soft "$(git merge-base main HEAD)" && git commit`, or an interactive squash down to
+  one. Messy WIP is for *while* you work; hand off exactly one commit. One clean commit on top keeps
+  the orchestrator's squash-merge trivial and lets it tear you down without a force flag (it
+  recognizes your patch as already landed on `main`).
 - **Stage only the files your task changed.** Your workspace is a copy of the orchestrator's working
   tree, so it may already contain its unrelated in-flight edits. Avoid `git add -A` / `git add .`;
   add the specific paths you touched, so you don't commit the orchestrator's work onto your branch.
@@ -56,9 +63,9 @@ cleaner the recipe, the sooner your values come back.
 filter while you still have full context, **not** a full `/ultracheck` swarm (the orchestrator runs
 that at integration). Note in your done message that you self-checked.
 
-Then commit your branch and message the orchestrator: done (with a one-line summary) or blocked (with
-why). Do **not** tear yourself down; the orchestrator manages your lifecycle and integrates your
-branch.
+Then **consolidate your branch to one clean commit on your base** (above) and message the
+orchestrator: done (with a one-line summary) or blocked (with why). Do **not** tear yourself down;
+the orchestrator manages your lifecycle and integrates your branch.
 
 Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
 hygiene, the build/test commands — **except** its "ultracheck after each holistic chunk" rule: in the

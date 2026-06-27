@@ -77,10 +77,27 @@ scripts/fleet/msg usc-worker-<name> "[orchestrator] <text>"
 - Always prefix `[orchestrator]` so the worker knows it's you and not Michael typing.
 - Just use the CLI; `msg` handles delivery itself (you never manage waking a session). A message to
   an idle worker arrives right away; to a busy worker it lands at the end of its current turn.
-- Inspect what's queued / who's busy: `scripts/fleet/inbox ls`, `inbox peek usc-worker-<name>`,
-  `inbox state`.
+- Overview / who's busy: `scripts/fleet/inbox ls` (pending counts) and `inbox state` (busy/idle).
+  Both are read-only; there is no command to read *another* session's message bodies (that would
+  steal its undelivered mail).
 - Don't *interrupt/redirect* a busy worker by message. For a hard redirect, attach
   (`tmux attach -t usc-worker-<name>`) and do it by hand.
+
+**Receiving a worker's reply.** Your `usc-orch` session is itself a fleet session, so its lifecycle
+hooks **pop your inbox automatically** at every turn boundary: a worker's `[worker:<name>] ...`
+message is delivered into your conversation as soon as you next take a turn. So the normal flow is
+just *end your turn* — don't poll. The catch: `msg` never wakes `usc-orch` (it's human-attended), so
+if you're running **autonomously and want to block** on a reply mid-turn (no human, no Stop hook
+firing), use:
+
+```
+scripts/fleet/inbox wait [timeout]   # blocks until your inbox has mail, pops it, prints it (exit 3 = timed out)
+scripts/fleet/inbox pop              # non-blocking: pop whatever's there now (exit 1 = empty)
+```
+
+`pop` is read-and-remove in one step (the only way to take a message) — never hand-delete a `.msg`
+file. Don't sit in a hand-rolled `sleep`/`grep` poll loop; `inbox wait` *is* that loop, with clean
+exit codes.
 
 **Answering a worker's serial request is your core job.** When a worker messages you (it arrives in
 your `usc-orch` session as `[worker:<name>] ...`) asking for a rig run, an RE probe, or in-game
@@ -112,10 +129,14 @@ scripts/fleet/worker-rm <name>
 ```
 
 Kills the tmux/Claude session, trashes the rift workspace, `gc`s, and removes the assignment file.
-It **refuses** (exit 1) if the worker has commits on `worker/<name>` that were never integrated,
-since the workspace is the only copy of that branch; pass `-f` to discard them anyway. (It also warns
-on uncommitted/untracked working-tree changes, which are usually just the inherited orchestrator
-tree.) Workers live until you remove them.
+It **refuses** (exit 1) only if the worker has commits whose patch isn't already on `main` (a
+`git cherry` check), since the workspace is the only copy of that branch; pass `-f` to discard them
+anyway. A worker you just integrated normally tears down **without `-f`**: its squash-integrated
+commit is patch-equal to what's now on `main`, so the check sees it as landed. (`-f` is only needed
+when you abandon unintegrated work, or when a worker handed off several commits squashed into one —
+which is why the overlay tells workers to consolidate to a single clean commit before done.) It also
+warns on uncommitted/untracked working-tree changes, which are usually just the inherited
+orchestrator tree. Workers live until you remove them.
 
 ## Start A Fresh Orchestrator Session
 

@@ -101,8 +101,13 @@ Two responsibilities, kept separate:
 
 Still true: **prefix every cross-session message** with its source (`[orchestrator] ...` /
 `[worker:<name>] ...`) for attribution, and we don't script *interrupting* a busy worker — for a hard
-redirect, attach and do it by hand. `scripts/fleet/inbox` (`ls` / `peek <session>` / `state`) gives
-read-only visibility into what's queued and each session's busy/idle.
+redirect, attach and do it by hand. `scripts/fleet/inbox` gives `ls` (pending counts) and `state`
+(busy/idle) for read-only visibility, plus `pop` / `wait [timeout]` to take messages off **your own**
+inbox (read-and-remove in one step — the only way to receive; nothing hand-deletes a `.msg`). An
+autonomous `usc-orch` that needs to block on a worker reply mid-turn uses `inbox wait`; a
+human-attended one just lets its drain hook deliver on the next turn (since `msg` never wakes
+`usc-orch`). There is intentionally no command to read *another* session's message bodies — that
+would steal its undelivered mail.
 
 The hooks are **inert outside a fleet session** (gated on `$UNSEAMLESS_FLEET_SESSION`, which the
 launchers set) and loaded only via `--settings`, so they never touch ordinary Claude sessions in the
@@ -221,11 +226,11 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 |--------|------|
 | `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
 | `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): never types into `usc-orch`, wakes a parked-idle worker with the sentinel, queues for a busy one. Target restricted to `usc-*` sessions. |
-| `inbox {ls\|peek <session>\|state}` | read-only visibility into the transport: pending message counts, a non-destructive dump of a session's queued messages, and hook-stamped busy/idle. |
+| `inbox {pop\|wait [timeout]\|ls\|state}` | `pop`/`wait` take messages off **your own** inbox (read-and-remove in one step — the only receive path; `wait` blocks until mail arrives, then pops); `ls` (pending counts) and `state` (busy/idle) are read-only. No command reads another session's bodies. |
 | `_hook <EVENT>` / `_inbox` | internal: the hook dispatcher (drains inbox → `additionalContext`, stamps state) and the sourced primitives. `_hook` is registered via `hooks.settings.json`; both are inert outside a fleet session. |
 | `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. |
 | `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
-| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` if `worker/<name>` has unintegrated commits — but its check uses the worker's *stale* `main`, so a squash-merged (already-landed) lane looks unintegrated. Use `-f` for landed lanes; it's safe once the work is on `main`. |
+| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
 | `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
