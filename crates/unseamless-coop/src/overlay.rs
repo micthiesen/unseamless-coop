@@ -206,6 +206,12 @@ struct Overlay {
     /// (which writes the shareable bundle next to the config/logs). Resolved fresh per export rather
     /// than cached as a path, so it can't go stale. Present-thread only.
     module: usize,
+    /// Cached deep-clone of the last debug-panel snapshot and the [`crate::debug_panel`] publish
+    /// version it came from. The publisher refreshes the report at ~10 Hz, but the Present hook runs
+    /// far faster; caching here lets the panel re-clone only when the version advances rather than every
+    /// frame it's shown. `None` until the first publish lands. Present-thread only.
+    debug_report: Option<DiagnosticReport>,
+    debug_report_version: u64,
 }
 
 impl Overlay {
@@ -232,6 +238,8 @@ impl Overlay {
             last_win_pos: None,
             home_snap: false,
             module,
+            debug_report: None,
+            debug_report_version: 0,
         }
     }
 
@@ -286,13 +294,23 @@ impl Overlay {
         // does work while it's shown; then draw from the snapshot it posts.
         crate::debug_panel::set_visible(self.show_debug);
         if self.show_debug {
-            // One non-blocking snapshot read per frame, shared by both panes: halves the per-frame
-            // clone and guarantees the concise panel and the detail pane render the same published
-            // report (two independent reads could straddle a ~10 Hz publish and disagree by a frame).
-            let report = crate::debug_panel::snapshot();
-            self.draw_debug_panel(ui, report.as_ref());
+            // Re-clone the published report only when its version advances: the publisher refreshes at
+            // ~10 Hz while the Present hook runs far faster, so the same report would otherwise be
+            // deep-cloned dozens of times per published version. A cheap atomic check gates the clone;
+            // a contended read keeps the previous cache and retries next frame (so one busy frame never
+            // blanks the panel). The cached clone is shared by both panes, so they always render the
+            // same report (two independent reads could straddle a publish and disagree by a frame).
+            let version = crate::debug_panel::version();
+            if version != self.debug_report_version
+                && let Some(report) = crate::debug_panel::snapshot()
+            {
+                self.debug_report = Some(report);
+                self.debug_report_version = version;
+            }
+            let report = self.debug_report.as_ref();
+            self.draw_debug_panel(ui, report);
             // Opt-in per-category detail, balanced into the opposite (bottom-right) corner.
-            self.draw_debug_detail_pane(ui, report.as_ref());
+            self.draw_debug_detail_pane(ui, report);
         }
         if self.open {
             self.draw_utility_window(ui, pad);
@@ -1056,6 +1074,16 @@ struct ReportGroup<'a> {
     rows: &'a [(String, String)],
 }
 
+/// A [`ReportGroup`] with its `key = value` rows pre-formatted into the exact display strings drawn.
+/// Built once per frame at the top of [`draw_groups`] so the width-measure pass and the draw pass read
+/// the same buffer — `format!` runs once per row per frame instead of twice (once to measure, once to
+/// draw). Borrows each group's title from the live snapshot, so it's frame-scoped like [`ReportGroup`].
+struct PreparedGroup<'a> {
+    title: &'a str,
+    /// Each row rendered as `"  key = value"`, ready to measure and draw verbatim.
+    lines: Vec<String>,
+}
+
 /// Render a list of [`ReportGroup`]s into the current window as a compact two-column layout. The groups
 /// fill **column-major**: partitioned on group boundaries into a heavier LEFT column (filled first, top
 /// to bottom) and a lighter RIGHT one, each drawn as its own vertical stack — so a group's rows never
@@ -1067,8 +1095,18 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
     if groups.is_empty() {
         return;
     }
+    // Format every row's display string once up front; the measure pass (`pitch`) and the draw pass
+    // (`draw_group_column`) both read these buffers, so `format!` runs once per row per frame, not twice.
+    let prepared: Vec<PreparedGroup> = groups
+        .iter()
+        .map(|g| PreparedGroup {
+            title: g.title,
+            lines: g.rows.iter().map(|(k, v)| format!("  {k} = {v}")).collect(),
+        })
+        .collect();
+
     // A group's vertical extent in text lines: its title plus one per row.
-    let group_lines = |g: &ReportGroup| 1 + g.rows.len();
+    let group_lines = |g: &PreparedGroup| 1 + g.lines.len();
 
     // Per-column rendered height: one line per group title + row, plus one inter-group gap per boundary.
     // Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide by construction.
@@ -1086,7 +1124,7 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
         ui.set_cursor_pos(probe); // undo the probe — measurement only, no layout shift
         advance
     };
-    let column_height = |col: &[ReportGroup]| {
+    let column_height = |col: &[PreparedGroup]| {
         let lines: usize = col.iter().map(group_lines).sum();
         lines as f32 * line_h + col.len().saturating_sub(1) as f32 * gap
     };
@@ -1096,24 +1134,24 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
     // this is the most balanced split with left >= right — left is the heavier column and the pad below
     // is non-negative by construction. Falls back to `split == groups.len()` (everything left, a single
     // column) for one group, or the degenerate case where one group out-measures all the rest.
-    let mut split = groups.len();
-    for k in 1..groups.len() {
-        if column_height(&groups[..k]) >= column_height(&groups[k..]) {
+    let mut split = prepared.len();
+    for k in 1..prepared.len() {
+        if column_height(&prepared[..k]) >= column_height(&prepared[k..]) {
             split = k;
             break;
         }
     }
-    let (left, right) = groups.split_at(split);
+    let (left, right) = prepared.split_at(split);
 
     // Right column's x = widest rendered line (title or `  key = value`) across every group, plus a
     // gap. One pitch measured over all groups keeps the right column clear of the left regardless of
     // which group is widest (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
     let line_width = |text: &str| ui.calc_text_size(text)[0];
     let mut pitch = 0.0_f32;
-    for g in groups {
+    for g in &prepared {
         pitch = pitch.max(line_width(g.title));
-        for (k, v) in g.rows {
-            pitch = pitch.max(line_width(&format!("  {k} = {v}")));
+        for line in &g.lines {
+            pitch = pitch.max(line_width(line));
         }
     }
     pitch += DEBUG_PANEL_COL_GAP;
@@ -1135,14 +1173,14 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
 
 /// Draw one column of the debug layout: each group's title in blue, then its `key = value` lines dimmed
 /// and indented, with a blank gap between groups.
-fn draw_group_column(ui: &Ui, groups: &[ReportGroup]) {
+fn draw_group_column(ui: &Ui, groups: &[PreparedGroup]) {
     for (i, group) in groups.iter().enumerate() {
         if i > 0 {
             ui.spacing();
         }
         ui.text_colored(rgba(BLUE, 1.0), group.title);
-        for (k, v) in group.rows {
-            ui.text_disabled(format!("  {k} = {v}"));
+        for line in &group.lines {
+            ui.text_disabled(line);
         }
     }
 }

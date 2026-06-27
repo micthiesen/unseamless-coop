@@ -10,7 +10,7 @@
 //! When the panel is off it's a single atomic load on the game thread (the publisher early-returns),
 //! so the panel costs nothing when not shown.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 
 use unseamless_core::diagnostics::DiagnosticReport;
@@ -23,6 +23,13 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 /// Latest published snapshot, or `None` before the first publish. A `Mutex` (like [`crate::state`]'s
 /// live config) read non-blocking from the Present thread.
 static SNAPSHOT: OnceLock<Mutex<Option<DiagnosticReport>>> = OnceLock::new();
+
+/// Monotonic publish counter, bumped once per [`publish`] (so it advances at the publisher's ~10 Hz,
+/// not the Present hook's frame rate). The overlay reads it cheaply each frame via [`version`] and only
+/// deep-clones a new [`snapshot`] when it advances — turning a per-frame clone of the whole report into
+/// a per-publish one. Starts at 0 (before any publish); the report is fresh whenever this differs from
+/// the value the overlay last cloned at.
+static VERSION: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the snapshot cell. Called once at install, before any feature ticks or the overlay
 /// renders.
@@ -45,7 +52,19 @@ pub fn visible() -> bool {
 pub fn publish(report: DiagnosticReport) {
     if let Some(m) = SNAPSHOT.get() {
         *m.lock().unwrap_or_else(|p| p.into_inner()) = Some(report);
+        // The synchronizing edge for the report itself is the *mutex*, not this counter: the overlay
+        // always reads the report by re-locking in `snapshot`, and that lock-acquire synchronizes-with
+        // this lock-release, so the clone it gets is never older than the version it then observes. The
+        // counter only needs to signal "changed", so `Relaxed` suffices (no ordering is leaned on here).
+        VERSION.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The current publish version (see [`VERSION`]). A cheap, non-blocking atomic load the overlay checks
+/// each frame to decide whether the report changed since its last clone; if unchanged it reuses its
+/// cached clone and skips [`snapshot`] entirely.
+pub fn version() -> u64 {
+    VERSION.load(Ordering::Relaxed)
 }
 
 /// A **non-blocking** clone of the latest snapshot, for the overlay's Present thread (which must
