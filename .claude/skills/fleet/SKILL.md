@@ -47,24 +47,12 @@ Keep workers in genuinely independent lanes when you can. They *may* touch the s
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
 
-### Solo (User-Driven) Workers
+### Solo Workers
 
-```
-scripts/fleet/worker-new --solo <name> ["initial guidance"]
-```
-
-A **solo** worker is the same isolation, branch, and lifecycle, but **user-driven** instead of
-orchestrator-driven: Michael drives the session interactively, and it **stays silent toward you (the
-orchestrator) until he tells it to hand off** (its overlay is `docs/roles/worker-solo.md`). There's no
-assignment file and no "read your assignment" seed — guidance, if given, is passed as the session's
-first prompt directly; omit it to launch waiting for his first turn.
-
-This is Michael's path to spin up isolated parallel work himself without routing it through you. You
-mostly don't manage these — but when one hands off (it'll `msg` you `[worker:<name>] done: …; branch
-worker/<name> ready to integrate`, or Michael will point you at it), you integrate it **exactly like
-any other worker**: `worker-integrate <name>` → review → commit to `main`. `worker-ls`/`open`/`rm` all
-work on it unchanged (the `assignments/<name>.role` marker keeps `worker-open` reviving it with the
-right overlay).
+Michael sometimes spins up his own **solo** (user-driven) workers alongside yours. You don't manage
+these — they stay silent toward you and just show up in `worker-ls` with ROLE `solo`. Leave them be
+until one hands off (it'll `msg` you that its branch is ready, or Michael will point you at it); then
+integrate it **exactly like any other worker** (`worker-integrate <name>` → review → commit to `main`).
 
 ## See What's Running
 
@@ -165,26 +153,6 @@ when you abandon unintegrated work, or when a worker handed off several commits 
 which is why the overlay tells workers to consolidate to a single clean commit before done.) It also
 warns on uncommitted/untracked working-tree changes, which are usually just the inherited
 orchestrator tree. Workers live until you remove them.
-
-## Prune Abandoned Solo Workers
-
-Michael spins up **solo** workers himself and often `ctrl+d`-exits them without cleaning up. To sweep
-those up:
-
-```
-scripts/fleet/worker-prune            # trash every abandoned (dead-session) solo worker
-scripts/fleet/worker-prune --dry-run  # show what it'd prune, change nothing
-scripts/fleet/worker-prune --all      # also prune solo workers whose session is still LIVE
-```
-
-It only ever touches **solo** workers (the `.role` marker), so orchestrator-driven lanes are never
-swept — those go through `worker-rm`. By default it spares a solo worker whose session is **still
-alive** (it's open/in use), pruning only the dead ones; `--all` includes the live ones too. For each
-it trashes the rift workspace, kills any tmux session, and drops the registry (assignment + `.role` +
-inbox + state), then `rift gc`s; it also kills orphan `usc-worker-*` sessions whose workspace is gone.
-This is the **low-safety bulk** path — it force-discards (no unintegrated-commit check), by design, so
-use `worker-rm <name>` for a single real lane you care about. `worker-ls`'s **ROLE** column shows which
-workers are `solo`.
 
 ## Start A Fresh Orchestrator Session
 

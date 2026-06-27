@@ -14,6 +14,7 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
 name="${1:-}"
 if [ -z "$name" ]; then
@@ -30,6 +31,9 @@ if [ ! -d "$ws" ]; then
 fi
 
 cd "$REPO"
+if [ "$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)" = "solo" ]; then
+  echo "note: '$name' is a solo (user-driven) worker — integrating Michael's own work."
+fi
 echo "==> fetching $branch from $ws into $ref"
 git fetch "$ws" "+$branch:$ref"
 

@@ -44,7 +44,9 @@ if tmux has-session -t "$sess" 2>/dev/null; then
   echo "$sess is live; opening a window."
   pop_window
 elif [ -d "$ws" ]; then
-  echo "$sess is dead; reviving in $ws (claude -c)."
+  # Role from the marker (absent == default orchestrator-driven worker, back-compat).
+  role="$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)"; [ -n "$role" ] || role="worker"
+  echo "$sess is dead; reviving the $role worker in $ws (claude -c)."
   # Re-trust the workspace path so the worker's .claude/settings.json allow rules
   # load (an untrusted path drops them).
   trust_json="$HOME/.claude.json"
@@ -64,11 +66,10 @@ elif [ -d "$ws" ]; then
   hook_settings=()
   [ -f "$ws/scripts/fleet/hooks.settings.json" ] && \
     hook_settings=(--settings "$ws/scripts/fleet/hooks.settings.json")
-  # Re-apply the SAME overlay this worker spawned with. The role marker lives in the
-  # fleet dir (worker-new writes it); a solo (user-driven) worker must not be revived
-  # with the orchestrator-driven overlay. Absent marker == default worker (back-compat).
+  # Re-apply the SAME overlay this worker spawned with (the `$role` read above): a solo
+  # (user-driven) worker must not be revived with the orchestrator-driven overlay.
   overlay_rel="docs/roles/worker.md"
-  if [ "$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)" = "solo" ]; then
+  if [ "$role" = "solo" ]; then
     overlay_rel="docs/roles/worker-solo.md"
   fi
   tmux new-session -d -s "$sess" -c "$ws" \
