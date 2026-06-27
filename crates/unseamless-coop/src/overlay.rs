@@ -31,7 +31,7 @@ use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::DiagnosticReport;
-use unseamless_core::menu::{Menu, MenuOutcome, SessionContext};
+use unseamless_core::menu::SessionContext;
 use unseamless_core::notifications::{Banner, Severity, Toast};
 use unseamless_core::protocol::SessionAction;
 use unseamless_core::settings::{Setting, registry};
@@ -142,9 +142,6 @@ unsafe impl Sync for SyncFontId {}
 
 /// The render loop. Must be `Send + Sync + 'static` (hudhook calls it from the Present thread).
 struct Overlay {
-    /// Session-action menu (actions only; settings are shown read-only). Touched only on the Present
-    /// thread (in `render`).
-    menu: Menu,
     /// The settings registry, built once (instead of per frame) for the read-only Settings tab.
     settings: Vec<Setting>,
     /// Whether the utility window is open. Written in `render`, read in `message_filter` — both run on
@@ -188,10 +185,10 @@ struct Overlay {
     /// [`DEBUG_CATEGORIES`] entry (the detail toggles). Like [`actions_sel`], owns selection so arrow/d-pad
     /// nav spans the list. Present-thread only.
     debug_sel: usize,
-    /// Cursor into the Actions tab's combined list — the menu's action rows followed by a trailing
-    /// always-enabled "Export diagnostics" row (index `== menu rows`). Owns selection across all of them
-    /// (the core `Menu`'s own cursor is only synced to it at activation), so arrow/d-pad nav spans the
-    /// trailing row too.
+    /// Cursor into the Actions tab's session-action rows ([`unseamless_core::menu::action_rows`]). The
+    /// list is *dynamic* — its length and contents change with the session state (paired verbs collapse,
+    /// inapplicable rows are hidden) — so the cursor is repaired onto an enabled row each frame via the
+    /// core's host-tested `first_enabled`/`step_enabled`. Present-thread only.
     actions_sel: usize,
     /// Home-snap affordance state. `home_dragging` latches true once an in-progress window move is
     /// detected (the window position changed while the left button is held) and clears on release —
@@ -217,7 +214,6 @@ struct Overlay {
 impl Overlay {
     fn new(module: usize) -> Self {
         Self {
-            menu: Menu::actions_only(),
             settings: registry(),
             open: false,
             disabled: false,
@@ -256,8 +252,7 @@ impl Overlay {
             self.open = !self.open;
             if self.open {
                 // Home the Actions cursor; `draw_actions_tab` repairs it to the first enabled row (0
-                // can be a disabled action when opened mid-session). It owns nav, syncing the core
-                // `Menu` only at activation, so we reset its cursor rather than the menu's here.
+                // can be a disabled action when opened mid-session, e.g. Open world at the title screen).
                 self.actions_sel = 0;
             }
         }
@@ -637,20 +632,20 @@ impl Overlay {
     /// across the action rows (skipping disabled ones); Enter, the controller A button, or a click
     /// activates the selected row, handing the action to the game thread.
     ///
-    /// The overlay owns the cursor ([`Overlay::actions_sel`]) rather than the core `Menu`'s; the menu's
-    /// own cursor is synced (via `select_index`) only at the moment of activation. (The debug-panel
-    /// toggle and the Export-diagnostics action that used to trail this list now live in the Debug tab.)
+    /// The rows come from [`unseamless_core::menu::action_rows`]: a *dynamic* list whose length and
+    /// contents change with the session state — paired positive/negative verbs collapse into one
+    /// stateful row (Lock⇄Unlock, the PvP toggles) and inapplicable rows are hidden rather than greyed.
+    /// The overlay owns the cursor ([`Overlay::actions_sel`]) and repairs it onto an enabled row each
+    /// frame (the list having shrunk or the selected row having become hidden/disabled) via the core's
+    /// host-tested `first_enabled`/`step_enabled`. (The debug-panel toggle and Export-diagnostics action
+    /// live in the Debug tab, not here.)
     fn draw_actions_tab(&mut self, ui: &Ui, ctx: &SessionContext, pad: crate::input::PadEdges) {
-        // `rows` indices are 1:1 with the menu's items (actions-only, no filtering), so a row index is
-        // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows). The
-        // skip-disabled/wrap stepping reuses the core menu's host-tested helpers so this cursor can't
-        // drift from `Menu`'s own nav.
-        let rows = self.menu.rows(&self.config, ctx);
+        let rows = unseamless_core::menu::action_rows(ctx);
         let total = rows.len();
         let enabled = |i: usize| rows[i].enabled;
 
-        // Repair the cursor if it's out of range or on a now-disabled row (e.g. the session context
-        // changed since last frame), landing it on the first enabled row.
+        // Repair the cursor if it's out of range or on a now-hidden/disabled row (the session context,
+        // and thus the row list, can change between frames), landing it on the first enabled row.
         if self.actions_sel >= total || (total > 0 && !enabled(self.actions_sel)) {
             self.actions_sel = unseamless_core::menu::first_enabled(total, enabled);
         }
@@ -665,8 +660,10 @@ impl Overlay {
         let mut clicked = None;
         for (i, row) in rows.iter().enumerate() {
             if row.enabled {
-                // Action labels are unique, so each doubles as a stable imgui id.
-                if ui.selectable_config(&row.label).selected(i == self.actions_sel).build() {
+                // A stable `###id` keyed by index keeps imgui identity fixed as a collapsed row's label
+                // flips (e.g. "PvP: off" -> "PvP: on"); the selectable strips it from the visible text.
+                let label = format!("{}###action-{i}", row.label);
+                if ui.selectable_config(&label).selected(i == self.actions_sel).build() {
                     clicked = Some(i);
                 }
             } else {
@@ -678,15 +675,10 @@ impl Overlay {
             activate = true;
         }
 
-        if activate && self.actions_sel < total {
-            // Sync the core menu's cursor to the activated action row, then fire it. actions_only never
-            // mutates config on activate; pass a scratch clone (per activation, not per frame) so the
-            // `&mut Config` signature is satisfied without touching our snapshot.
-            self.menu.select_index(self.actions_sel);
-            let mut scratch = self.config.clone();
-            if let MenuOutcome::Action(action) = self.menu.activate(&mut scratch, ctx) {
-                self.request_action(action);
-            }
+        // Fire the selected row's action. Guard on `enabled` so an activate while every row is disabled
+        // (e.g. Open/Join at the title screen) is a no-op rather than firing a greyed row.
+        if activate && self.actions_sel < total && rows[self.actions_sel].enabled {
+            self.request_action(rows[self.actions_sel].action);
         }
     }
 
@@ -971,6 +963,13 @@ fn session_context() -> SessionContext {
         is_host: flags.is_host,
         steam_ready: crate::steam_ready::is_ready(),
         in_game: crate::playstate::in_gameplay(),
+        // The host toggle rows' current state (world lock / PvP / PvP teams / friendly fire) is sourced
+        // by the rung-3 session FSM, which isn't tracked yet — pass `false` for now so the collapsed
+        // rows render in their "off"/"unlocked" form. rung-3 will populate these (not via coop.rs here).
+        world_locked: false,
+        pvp_on: false,
+        pvp_teams_on: false,
+        friendly_fire_on: false,
     }
 }
 

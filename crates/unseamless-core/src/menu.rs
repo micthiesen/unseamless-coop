@@ -1,12 +1,15 @@
-//! The in-game menu model: a flat list of rows (session actions + tunable settings), a cursor,
-//! and the navigation/edit logic. **Pure** — it owns no rendering and no game state, so it's
-//! fully host-tested here. The cdylib's overlay draws [`Menu::rows`] and activates a row via
-//! [`Menu::select_index`] + [`Menu::activate`]. It owns its *own* combined cursor (so it can append
-//! an overlay-local toggle row after the actions) and drives the skip-disabled/wrap stepping through
-//! the shared [`step_enabled`]/[`first_enabled`] helpers here — the same primitives [`Menu`]'s own
-//! [`Menu::select_next`]/`select_prev`/`home` use — so the navigation algorithm stays single-sourced
-//! and host-tested even though the overlay doesn't drive the `Menu` cursor directly. The full
-//! actions+settings layout and `adjust`/setting-edit stay reserved for a future editable menu.
+//! The in-game menu model. **Pure** — it owns no rendering and no game state, so it's fully
+//! host-tested here. Two surfaces live in this module:
+//!
+//! - [`action_rows`] — the **dynamic Actions tab** the cdylib's overlay actually drives. It returns
+//!   the context-appropriate session-action rows (paired verbs collapsed into one stateful row,
+//!   inapplicable rows hidden); the overlay renders them and fires the selected row's
+//!   [`ActionRow::action`]. The overlay owns its own cursor and drives skip-disabled/wrap nav through
+//!   the shared [`step_enabled`]/[`first_enabled`] helpers here, so the navigation algorithm stays
+//!   single-sourced and host-tested even though the overlay doesn't hold a [`Menu`].
+//! - [`Menu`] — the **full static actions+settings layout** (`adjust`/setting-edit, [`Menu::rows`],
+//!   [`Menu::select_index`]/[`Menu::activate`]) with its own cursor and the same shared nav helpers.
+//!   Reserved for a future editable menu; not driven by the overlay today (see [`Menu::new`]).
 //!
 //! ## Divergence from ERSC (intentional)
 //! ERSC drives session actions (host/join/leave/…) through **in-game items** and fixed hotkeys.
@@ -27,6 +30,14 @@ pub struct SessionContext {
     pub steam_ready: bool,
     /// The player is loaded into the game world (not at the title/menu).
     pub in_game: bool,
+    /// Current state of the host's collapsed toggle rows ([`action_rows`]): whether the world is
+    /// locked, and whether PvP / PvP teams / friendly fire are on. These are sourced by the rung-3
+    /// session FSM, which isn't tracked yet, so the overlay passes `false` for all four for now;
+    /// they ride here (defaulting `false`) so the row label/action can flip once rung-3 wires them.
+    pub world_locked: bool,
+    pub pvp_on: bool,
+    pub pvp_teams_on: bool,
+    pub friendly_fire_on: bool,
 }
 
 /// One row in the menu.
@@ -76,6 +87,60 @@ pub struct MenuRow {
     pub value: Option<String>,
     pub enabled: bool,
     pub selected: bool,
+}
+
+/// One row of the **Actions tab**, ready to render and fire. Distinct from [`MenuRow`] (the full
+/// static actions+settings layout): this is the *dynamic* session-action surface. Paired
+/// positive/negative verbs collapse into a single stateful row whose `label` and `action` flip with
+/// the current state (Lock⇄Unlock, the PvP toggles), and rows that don't apply to the current session
+/// are omitted entirely rather than shown greyed. `enabled` then gates a *shown* row on readiness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRow {
+    pub label: String,
+    pub action: SessionAction,
+    pub enabled: bool,
+}
+
+/// The Actions-tab rows for `ctx`, in display order. The UX rule is **HIDE by session state, DISABLE
+/// by readiness**:
+///
+/// - **Out of session** → `Open world` and `Join world`, always shown (so the player sees them even at
+///   the title screen) but enabled only once Steam is up *and* the player is in-game. `Leave world` is
+///   not shown.
+/// - **In a session** → `Leave world` (always enabled); no Open/Join.
+/// - **In a session, as host** → additionally the collapsed stateful toggles: Lock⇄Unlock, PvP, PvP
+///   teams, Friendly fire. A joiner in a session sees only `Leave world`; a solo player sees only
+///   Open/Join.
+///
+/// The toggle rows' label/action flip on their `ctx` state bit (e.g. `world_locked` →
+/// `Unlock world`/[`UnlockWorld`](SessionAction::UnlockWorld)); the emitted action stays one of the
+/// existing [`SessionAction`] variants (PvP rows emit the single `Toggle*` flip).
+pub fn action_rows(ctx: &SessionContext) -> Vec<ActionRow> {
+    use SessionAction::*;
+    let row = |label: String, action, enabled| ActionRow { label, action, enabled };
+    let on_off = |on: bool| if on { "on" } else { "off" };
+
+    if !ctx.in_session {
+        // Shown at the title screen too, but only enabled once Steam is up and we're in-game.
+        let ready = ctx.steam_ready && ctx.in_game;
+        return vec![
+            row("Open world".into(), OpenWorld, ready),
+            row("Join world".into(), JoinWorld, ready),
+        ];
+    }
+
+    let mut rows = vec![row("Leave world".into(), LeaveWorld, true)];
+    if ctx.is_host {
+        rows.push(if ctx.world_locked {
+            row("Unlock world".into(), UnlockWorld, true)
+        } else {
+            row("Lock world".into(), LockWorld, true)
+        });
+        rows.push(row(format!("PvP: {}", on_off(ctx.pvp_on)), TogglePvp, true));
+        rows.push(row(format!("PvP teams: {}", on_off(ctx.pvp_teams_on)), TogglePvpTeams, true));
+        rows.push(row(format!("Friendly fire: {}", on_off(ctx.friendly_fire_on)), ToggleFriendlyFire, true));
+    }
+    rows
 }
 
 /// Result of acting on the selected row.
@@ -130,8 +195,8 @@ impl Default for Menu {
 impl Menu {
     /// Build the default layout: session actions first, then every registered setting. The
     /// settings rows make the registry drive both the config file and the menu (ARCHITECTURE.md >
-    /// Divergences); the cdylib currently uses [`actions_only`](Menu::actions_only) and shows
-    /// settings read-only, but this full layout stays host-tested and ready for an editable menu.
+    /// Divergences). The overlay's Actions tab now drives off [`action_rows`] rather than this
+    /// `Menu`, but this full layout stays host-tested and ready for a future editable menu.
     pub fn new() -> Self {
         let settings = registry();
         let mut items = action_items();
@@ -139,9 +204,11 @@ impl Menu {
         Menu { items, settings, selected: 0 }
     }
 
-    /// Build an **actions-only** menu (no settings rows) — the interactive surface the overlay
-    /// drives. Settings are presented read-only elsewhere, so editing them mid-session (with its
-    /// boot-vs-live and host-enforcement questions) is deliberately out of this menu for now.
+    /// Build an **actions-only** menu (no settings rows). The overlay's Actions tab now renders from
+    /// [`action_rows`] instead, so this is exercised only by this module's own tests today; it stays
+    /// as host-tested scaffolding for a future editable menu that wants the action rows without the
+    /// settings block. Settings are presented read-only elsewhere, so editing them mid-session (with
+    /// its boot-vs-live and host-enforcement questions) is deliberately out of this menu for now.
     pub fn actions_only() -> Self {
         Menu { items: action_items(), settings: Vec::new(), selected: 0 }
     }
@@ -358,7 +425,7 @@ mod tests {
     #[test]
     fn navigation_skips_disabled_actions() {
         let mut menu = Menu::new();
-        let ctx = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true };
+        let ctx = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true, ..Default::default() };
         // From row 0 (Open world, enabled), next-enabled skips Leave/Lock/etc (need a session) until
         // the first action that's valid out of session or the first setting.
         menu.select_next(&ctx);
@@ -373,7 +440,7 @@ mod tests {
     fn activating_disabled_action_is_noop() {
         let mut menu = Menu::new();
         let mut cfg = Config::default();
-        let out_of_session = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true };
+        let out_of_session = SessionContext { in_session: false, is_host: false, steam_ready: true, in_game: true, ..Default::default() };
 
         // Point directly at "Leave world", which requires being in a session.
         menu.selected = menu
@@ -394,7 +461,7 @@ mod tests {
     #[test]
     fn home_moves_off_a_disabled_first_row_when_opened_in_session() {
         let mut menu = Menu::new();
-        let in_session = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true };
+        let in_session = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true, ..Default::default() };
         // Row 0 (OpenWorld) is disabled in-session; without home() the cursor sits on it.
         assert!(!menu.rows(&Config::default(), &in_session)[0].enabled);
         menu.home(&in_session);
@@ -410,8 +477,8 @@ mod tests {
     #[test]
     fn host_only_actions_gated_by_context() {
         let menu = Menu::new();
-        let guest = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true };
-        let host = SessionContext { in_session: true, is_host: true, steam_ready: true, in_game: true };
+        let guest = SessionContext { in_session: true, is_host: false, steam_ready: true, in_game: true, ..Default::default() };
+        let host = SessionContext { in_session: true, is_host: true, steam_ready: true, in_game: true, ..Default::default() };
         let guest_rows = menu.rows(&Config::default(), &guest);
         let host_rows = menu.rows(&Config::default(), &host);
         let lock_guest = guest_rows.iter().find(|r| r.label == "Lock world").unwrap();
@@ -445,7 +512,7 @@ mod tests {
         assert_eq!(open_join_enabled(&not_in_game), (false, false), "disabled when in_game is false");
 
         // Already in a session: both disabled even when ready.
-        let in_session = SessionContext { steam_ready: true, in_game: true, in_session: true, is_host: true };
+        let in_session = SessionContext { steam_ready: true, in_game: true, in_session: true, is_host: true, ..Default::default() };
         assert_eq!(open_join_enabled(&in_session), (false, false), "disabled when already in a session");
 
         // The fully-default context (nothing ready) also disables both.
@@ -529,6 +596,117 @@ mod tests {
         let outcome = menu.activate(&mut cfg, &ctx);
         assert!(matches!(outcome, MenuOutcome::SettingChanged(_)));
         assert_ne!(cfg.gameplay.crit_coop, before);
+    }
+
+    // ----- action_rows: the dynamic Actions-tab surface -----
+
+    /// Collect `(label, action, enabled)` triples for terse assertions.
+    fn triples(ctx: &SessionContext) -> Vec<(String, SessionAction, bool)> {
+        action_rows(ctx).into_iter().map(|r| (r.label, r.action, r.enabled)).collect()
+    }
+
+    #[test]
+    fn action_rows_solo_lists_exactly_open_and_join() {
+        use SessionAction::*;
+        // Solo (out of session), ready: exactly Open/Join, both enabled, no Leave / toggles.
+        let ready = SessionContext { steam_ready: true, in_game: true, ..Default::default() };
+        assert_eq!(
+            triples(&ready),
+            vec![
+                ("Open world".into(), OpenWorld, true),
+                ("Join world".into(), JoinWorld, true),
+            ],
+        );
+    }
+
+    #[test]
+    fn action_rows_open_join_disabled_until_ready_and_in_game() {
+        let labels = |ctx: &SessionContext| {
+            let rows = action_rows(ctx);
+            assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Open world", "Join world"]);
+            (rows[0].enabled, rows[1].enabled)
+        };
+        // Both gates needed: missing either disables both; having both enables both.
+        assert_eq!(labels(&SessionContext::default()), (false, false), "nothing ready");
+        assert_eq!(
+            labels(&SessionContext { steam_ready: true, in_game: false, ..Default::default() }),
+            (false, false),
+            "Steam up but at the title screen",
+        );
+        assert_eq!(
+            labels(&SessionContext { steam_ready: false, in_game: true, ..Default::default() }),
+            (false, false),
+            "in-game but Steam not ready",
+        );
+        assert_eq!(
+            labels(&SessionContext { steam_ready: true, in_game: true, ..Default::default() }),
+            (true, true),
+            "steam_ready && in_game",
+        );
+    }
+
+    #[test]
+    fn action_rows_in_session_host_lists_leave_plus_four_toggles_no_open_join() {
+        use SessionAction::*;
+        let host = SessionContext { in_session: true, is_host: true, steam_ready: true, in_game: true, ..Default::default() };
+        assert_eq!(
+            triples(&host),
+            vec![
+                ("Leave world".into(), LeaveWorld, true),
+                ("Lock world".into(), LockWorld, true),
+                ("PvP: off".into(), TogglePvp, true),
+                ("PvP teams: off".into(), TogglePvpTeams, true),
+                ("Friendly fire: off".into(), ToggleFriendlyFire, true),
+            ],
+        );
+        // No connect verbs are shown while in a session.
+        let labels: Vec<_> = action_rows(&host).into_iter().map(|r| r.label).collect();
+        assert!(!labels.iter().any(|l| l == "Open world" || l == "Join world"));
+    }
+
+    #[test]
+    fn action_rows_in_session_joiner_lists_only_leave() {
+        use SessionAction::*;
+        // Set every host-toggle state bit: a joiner must STILL see only Leave — the toggle block is
+        // gated on `is_host`, not on the state bits, so this pins the host-only guarantee.
+        let joiner = SessionContext {
+            in_session: true,
+            is_host: false,
+            steam_ready: true,
+            in_game: true,
+            world_locked: true,
+            pvp_on: true,
+            pvp_teams_on: true,
+            friendly_fire_on: true,
+        };
+        assert_eq!(triples(&joiner), vec![("Leave world".into(), LeaveWorld, true)]);
+    }
+
+    #[test]
+    fn action_rows_toggle_rows_flip_label_and_action_with_state() {
+        use SessionAction::*;
+        // world_locked flips the Lock/Unlock row's label *and* its emitted action.
+        let locked = SessionContext {
+            in_session: true,
+            is_host: true,
+            world_locked: true,
+            pvp_on: true,
+            pvp_teams_on: true,
+            friendly_fire_on: true,
+            ..Default::default()
+        };
+        let rows = action_rows(&locked);
+        // Leave, then the four toggles reflecting the "on"/locked state.
+        assert_eq!(
+            rows.iter().map(|r| (r.label.as_str(), r.action)).collect::<Vec<_>>(),
+            vec![
+                ("Leave world", LeaveWorld),
+                ("Unlock world", UnlockWorld), // locked -> offers Unlock
+                ("PvP: on", TogglePvp),        // action is the single flip regardless of state
+                ("PvP teams: on", TogglePvpTeams),
+                ("Friendly fire: on", ToggleFriendlyFire),
+            ],
+        );
     }
 
     #[test]
