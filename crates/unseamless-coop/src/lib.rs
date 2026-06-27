@@ -49,6 +49,7 @@ mod session;
 mod session_probe;
 mod state;
 mod steam;
+mod steam_ready;
 
 /// Our own module handle, captured in `DllMain`, so the init thread can find the game folder (and
 /// the `mods/` dir next to it) regardless of the process working directory.
