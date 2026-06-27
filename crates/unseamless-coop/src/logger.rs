@@ -28,6 +28,31 @@ const PROFILE: &str = if cfg!(debug_assertions) {
     "release (stripped)"
 };
 
+/// A log-file writer that forces each record to disk (`sync_all`) right after writing it. A **hard**
+/// crash (the native-Windows overlay DX12 access violation is one — not a Rust panic, so the panic hook
+/// can't flush it) loses whatever the OS write cache hasn't persisted; without this, the log tail before
+/// such a crash is lost (3 of 4 logs from the first friend test died with the tail gone — see
+/// `docs/OVERLAY-RENDERING.md`). `File::flush` is a no-op (writes already go straight to the OS), so
+/// durability needs the fsync. **Debug builds only** (`#[cfg(debug_assertions)]`, on for `dev`/`diag`,
+/// off for `release`): a normal player's log keeps the buffered/no-fsync default with no perf cost, while
+/// a diag crash-diagnosis run captures the death point. The cost is self-limiting — the overlay crash
+/// fires at the *first* hooked Present (early), so only a handful of records get fsync'd before it dies,
+/// not a sustained per-frame tax.
+#[cfg(debug_assertions)]
+struct DurableLog(File);
+
+#[cfg(debug_assertions)]
+impl Write for DurableLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        let _ = self.0.sync_all(); // best-effort durability; logging must never fail loudly
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// Initialize logging from the loaded config. Logs go under `<base>/unseamless-coop/logs/` (the
 /// install dir, so they don't depend on the process cwd). Picks the level (verbose only when
 /// `debug.enabled`), opens a fresh run log with the [`RunInfo`] header, prunes old logs, and
@@ -73,6 +98,13 @@ pub fn init(config: &Config, base: &Path) {
     };
     let _ = file.write_all(info.header_block().as_bytes());
 
+    // Debug builds fsync each record (see [`DurableLog`]) so a hard crash can't lose the log tail;
+    // release keeps the plain buffered `File` (no per-record fsync, no perf cost).
+    #[cfg(debug_assertions)]
+    let file_writer = DurableLog(file);
+    #[cfg(not(debug_assertions))]
+    let file_writer = file;
+
     let log_config = ConfigBuilder::new().set_time_format_rfc3339().build();
     // Tee into three sinks at the same level (so they all agree): the shareable run file, the
     // in-memory ring buffer the overlay's Log tab reads live (`crate::logbuf`), and the co-op
@@ -81,7 +113,7 @@ pub fn init(config: &Config, base: &Path) {
     // `mut` is only exercised by the debug-only push below; release strips that, so allow it there.
     #[cfg_attr(not(debug_assertions), allow(unused_mut))]
     let mut loggers: Vec<Box<dyn SharedLogger>> = vec![
-        WriteLogger::new(level, log_config, file),
+        WriteLogger::new(level, log_config, file_writer),
         crate::logbuf::ring_logger(level),
         crate::forward::forward_logger(level),
     ];

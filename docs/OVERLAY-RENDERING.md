@@ -456,10 +456,12 @@ loop is runnable here.
    Zero vkd3d impact. **Recommended so the friend can play + we can still exercise co-op.**
 2. **Diagnostic trace run — no code (the §"validation plan" runs).** Cheapest path to an actual fix;
    do this before changing any render/hook code.
-3. **Install-timing change — small, low-risk, but a guess (needs sign-off).** Defer overlay install
-   from `frontend_ready` to `in_game()` (the `spawn_overlay` comment already names this as the
-   rig-validated floor, so it's vkd3d-safe). It does **not** change the first-hooked-present dynamic,
-   so it's a long shot — only worth trying if the breadcrumbs show the death is title-screen-specific.
+3. **Install-timing change — RULED OUT (Michael, 2026-06-27): we will NOT do this.** The idea was to
+   defer overlay install from `frontend_ready` to `in_game()`. It does **not** change the
+   first-hooked-present dynamic (the crash is at the first hooked Present whenever that is, title or
+   in-game), so it's a guess that mainly *moves* where it crashes rather than fixing it, and it would
+   make the overlay unavailable at the title/menu (where it's wanted). Don't pursue it; it's recorded
+   here only so it isn't re-proposed.
 4. **Fork hudhook with a defensive `dx12.rs` — judgment call (needs sign-off), only after breadcrumbs
    implicate a specific step.** If the original-Present call is the faulting step, options are thin
    (it's the game's own present). If the CQ scan ever matches a *wrong* queue (false positive in the
