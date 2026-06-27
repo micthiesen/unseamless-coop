@@ -26,23 +26,16 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use unseamless_core::notifications::{DEFAULT_TOAST_SECS, Severity};
+use unseamless_core::notifications::Severity;
 
 /// Stable banner id for the readiness condition. One id, updated in place: the "Connecting…" banner
 /// becomes the error banner on failure, or is cleared on success.
 const BANNER_STEAM_READY: &str = "steam-ready";
 
-/// How long to wait for the rung-1 SteamID before declaring failure. Sized just past rung 1's own
-/// resolver budget (`steam::QUERY_MAX_ATTEMPTS * QUERY_RETRY_DELAY` = 30 s, after which
-/// [`crate::steam::self_steam_id`] can never become non-zero): once that poller gives up there is
-/// nothing left to wait for, so polling longer here would only spin uselessly. Matches
-/// `crate::coop::SELF_ID_TIMEOUT`.
-const SELF_ID_TIMEOUT: Duration = Duration::from_secs(35);
-const SELF_ID_POLL: Duration = Duration::from_millis(250);
-
-/// After the SteamID lands, Steam is up — so [`crate::steam::Networking::resolve`] should succeed
-/// almost immediately. Give it a short retry window anyway in case the accessor is null for a beat
-/// (the same transient rung-1 sees), then call it failed.
+/// After the SteamID lands, Steam is up — so [`crate::steam::Networking::resolve`] and the lobby
+/// interfaces ([`crate::steam::lobby_interfaces_available`]) should resolve almost immediately. Give
+/// them a short retry window anyway in case an accessor is null for a beat (the same transient rung-1
+/// sees), then call it failed.
 const NETWORKING_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORKING_POLL: Duration = Duration::from_millis(500);
 
@@ -55,9 +48,11 @@ pub enum Status {
     /// pre-probe read reads "not yet", never a fabricated ready/failed.
     #[default]
     Connecting = 0,
-    /// SteamID resolved and `ISteamNetworkingMessages` bound — co-op actions can be enabled.
+    /// SteamID resolved, `ISteamNetworkingMessages` bound, and the lobby interfaces
+    /// (`ISteamMatchmaking` + `ISteamUtils`) resolvable — co-op actions can be enabled.
     Ready = 1,
-    /// The probe gave up (no SteamID and/or no networking within the timeout). Co-op stays disabled.
+    /// The probe gave up (no SteamID, no networking, or the lobby interfaces never resolved within the
+    /// timeout). Co-op stays disabled.
     Failed = 2,
 }
 
@@ -98,9 +93,10 @@ pub fn is_ready() -> bool {
 
 /// Spawn the one-shot readiness probe on a short-lived detached thread (mirrors
 /// [`crate::steam::start`]). It posts a "Connecting…" banner, waits for the rung-1 SteamID, then
-/// confirms `ISteamNetworkingMessages` resolves; on both, publishes [`Status::Ready`] (clears the
-/// banner, brief success toast); otherwise publishes [`Status::Failed`] (permanent error banner). The
-/// banner is diagnostic, so it stays in **plain voice** (CLAUDE.md > "Surfacing errors").
+/// confirms `ISteamNetworkingMessages` *and* the lobby interfaces (`ISteamMatchmaking` + `ISteamUtils`)
+/// resolve; on all, publishes [`Status::Ready`] (clears the banner, brief success toast); otherwise
+/// publishes [`Status::Failed`] (permanent error banner). The banner is diagnostic, so it stays in
+/// **plain voice** (CLAUDE.md > "Surfacing errors").
 pub fn start() {
     std::thread::spawn(|| {
         set_banner(Severity::Info, "Connecting to Steam…");
@@ -108,7 +104,7 @@ pub fn start() {
         if probe() {
             set(Status::Ready);
             clear_banner();
-            toast(Severity::Info, "Steam networking ready.");
+            crate::notify::toast(Severity::Info, "Steam networking ready.");
             log::info!("steam-ready: networking is up; co-op actions enabled");
         } else {
             set(Status::Failed);
@@ -121,42 +117,33 @@ pub fn start() {
     });
 }
 
-/// Wait for the rung-1 SteamID, then confirm networking resolves. Returns whether both succeeded
-/// within their timeouts. Runs entirely on the probe thread — the transient
-/// [`crate::steam::Networking`] it resolves (raw pointers, `!Send`) is created and dropped here,
-/// never crossing a thread.
+/// Wait for the rung-1 SteamID, then confirm networking + the lobby interfaces resolve. Returns
+/// whether all succeeded within their timeouts. Runs entirely on the probe thread — the transient
+/// interfaces it resolves (raw pointers, `!Send`) are created and dropped here, never crossing a
+/// thread.
 fn probe() -> bool {
-    if !wait_for_self_id() {
+    if crate::steam::wait_for_self_id(crate::steam::SELF_ID_TIMEOUT).is_none() {
         log::warn!(
             "steam-ready: own SteamID not resolved within {}s; treating Steam as unavailable",
-            SELF_ID_TIMEOUT.as_secs()
+            crate::steam::SELF_ID_TIMEOUT.as_secs()
         );
         return false;
     }
-    wait_for_networking()
+    wait_for_interfaces()
 }
 
-/// Poll [`crate::steam::self_steam_id`] until it resolves or [`SELF_ID_TIMEOUT`] elapses.
-fn wait_for_self_id() -> bool {
-    let deadline = Instant::now() + SELF_ID_TIMEOUT;
-    loop {
-        if crate::steam::self_steam_id().is_some() {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(SELF_ID_POLL);
-    }
-}
-
-/// Poll [`crate::steam::Networking::resolve`] until it succeeds or [`NETWORKING_TIMEOUT`] elapses. The
-/// resolved interface is dropped immediately — this is only a readiness check; the co-op driver
-/// resolves its own when it needs one.
-fn wait_for_networking() -> bool {
+/// Poll until both [`crate::steam::Networking::resolve`] and the lobby interfaces
+/// ([`crate::steam::lobby_interfaces_available`]) succeed, or [`NETWORKING_TIMEOUT`] elapses. The
+/// resolved interfaces are dropped immediately — this is only a readiness check; the co-op driver
+/// resolves its own when it needs them. Requiring the lobby interfaces here (not just networking)
+/// keeps the gate honest: every interface an Open/Join action needs is confirmed before the actions
+/// light up.
+fn wait_for_interfaces() -> bool {
     let deadline = Instant::now() + NETWORKING_TIMEOUT;
     loop {
-        if crate::steam::Networking::resolve().is_some() {
+        if crate::steam::Networking::resolve().is_some()
+            && crate::steam::lobby_interfaces_available()
+        {
             return true;
         }
         if Instant::now() >= deadline {
@@ -166,16 +153,13 @@ fn wait_for_networking() -> bool {
     }
 }
 
-fn toast(severity: Severity, message: impl Into<String>) {
-    crate::notify::with_mut(|n| n.toast(severity, message, DEFAULT_TOAST_SECS));
-}
-
+/// Set (or update) the readiness banner under [`BANNER_STEAM_READY`] — binds the fixed id, delegating
+/// the push to the canonical [`crate::notify::set_banner`].
 fn set_banner(severity: Severity, message: impl Into<String>) {
-    crate::notify::with_mut(|n| n.set_banner(BANNER_STEAM_READY, severity, message));
+    crate::notify::set_banner(BANNER_STEAM_READY, severity, message);
 }
 
+/// Clear the readiness banner under [`BANNER_STEAM_READY`].
 fn clear_banner() {
-    crate::notify::with_mut(|n| {
-        n.clear_banner(BANNER_STEAM_READY);
-    });
+    crate::notify::clear_banner(BANNER_STEAM_READY);
 }

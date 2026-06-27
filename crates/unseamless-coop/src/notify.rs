@@ -12,7 +12,7 @@
 
 use std::sync::{Mutex, OnceLock, TryLockError};
 
-use unseamless_core::notifications::Notifications;
+use unseamless_core::notifications::{DEFAULT_TOAST_SECS, Notifications, Severity};
 
 static NOTIFICATIONS: OnceLock<Mutex<Notifications>> = OnceLock::new();
 
@@ -48,4 +48,28 @@ pub fn try_read<R>(f: impl FnOnce(&Notifications) -> R) -> Option<R> {
         // Contended: the game thread holds it for a brief push/tick — skip this frame.
         Err(TryLockError::WouldBlock) => None,
     }
+}
+
+// ---- Game-thread producer convenience wrappers ----------------------------------------------------
+//
+// The canonical one-liners for the common toast/banner pushes, so the producer modules
+// ([`crate::coop`], [`crate::steam_ready`], …) don't each re-spell the `with_mut(|n| n.…)` body (and
+// the `DEFAULT_TOAST_SECS` default). All are thin [`with_mut`] calls — game-thread / driver-thread
+// only, never the Present thread (which uses [`try_read`]).
+
+/// Push a toast with the standard lifetime.
+pub fn toast(severity: Severity, message: impl Into<String>) {
+    with_mut(|n| n.toast(severity, message, DEFAULT_TOAST_SECS));
+}
+
+/// Set (or update in place) the persistent banner under `id`.
+pub fn set_banner(id: &str, severity: Severity, message: impl Into<String>) {
+    with_mut(|n| n.set_banner(id, severity, message));
+}
+
+/// Clear the persistent banner under `id` (no-op if it isn't set).
+pub fn clear_banner(id: &str) {
+    with_mut(|n| {
+        n.clear_banner(id);
+    });
 }

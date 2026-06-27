@@ -70,6 +70,32 @@ pub fn self_steam_id() -> Option<u64> {
     }
 }
 
+/// How long the dependent waiters (the co-op driver, the readiness probe) should poll for rung 1 to
+/// resolve our own SteamID before giving up. Sized just past rung 1's own resolver budget
+/// (`QUERY_MAX_ATTEMPTS * QUERY_RETRY_DELAY` = 30 s, after which [`SELF_STEAM_ID`] can never become
+/// non-zero): once that poller gives up there's nothing left to wait for, so polling much longer would
+/// only spin uselessly. Single-sourced here so every waiter agrees on the budget + cadence.
+pub const SELF_ID_TIMEOUT: Duration = Duration::from_secs(35);
+/// Poll cadence while waiting for the SteamID — see [`SELF_ID_TIMEOUT`].
+pub const SELF_ID_POLL: Duration = Duration::from_millis(250);
+
+/// Block until rung 1 publishes our own SteamID, or `timeout` elapses (then `None`). Polls
+/// [`self_steam_id`] every [`SELF_ID_POLL`]. The canonical wait loop shared by the readiness probe
+/// ([`crate::steam_ready`]) and the co-op driver ([`crate::coop`]) — the latter wraps it with its own
+/// stale-session early-out, so the loop/constants live here once.
+pub fn wait_for_self_id(timeout: Duration) -> Option<u64> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(id) = self_steam_id() {
+            return Some(id);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(SELF_ID_POLL);
+    }
+}
+
 /// Spawn the one-shot resolver thread. Polls the flat API until Steam is up, then publishes our
 /// SteamID into [`SELF_STEAM_ID`] and logs it. Independent of the overlay kill-switch so the ID is
 /// logged even when the overlay is off. Detached and short-lived (like the init/overlay threads).
@@ -1019,6 +1045,22 @@ impl LobbyDiscovery {
         }
         // A refused request leaves `list_call` None; the next cadence tick retries.
     }
+}
+
+/// Whether the lobby actions' Steam interfaces (`ISteamMatchmaking` + `ISteamUtils`) resolve right
+/// now — the exact binding [`LobbyDiscovery::start`] needs beyond rung-1 identity and rung-2
+/// networking. The readiness probe ([`crate::steam_ready`]) requires this too, so Open/Join aren't
+/// enabled while an interface the lobby flow depends on is still absent (otherwise the player could
+/// trigger Open/Join only to have discovery degrade immediately). Resolves and immediately drops the
+/// transient interfaces — purely a readiness check, like [`Networking::resolve`] in the probe.
+pub fn lobby_interfaces_available() -> bool {
+    // SAFETY: borrow the already-loaded module handle (same as rung 1/2/4); not-found means Steam
+    // hasn't loaded yet, so the interfaces aren't available.
+    let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    Matchmaking::resolve(module).is_some() && Utils::resolve(module).is_some()
 }
 
 /// **Rung-4 lobby probe** (the re-derivation tool) — gated by `[debug.probes] lobby_callback_probe`

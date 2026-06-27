@@ -38,13 +38,14 @@ use std::time::{Duration, Instant};
 
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::{ConnectReport, LobbyProgress, LobbyRole, VersionCheck, peer_tag};
-use unseamless_core::notifications::{DEFAULT_TOAST_SECS, Severity};
+use unseamless_core::notifications::Severity;
 use unseamless_core::peer::{
     CONFIG_SYNCED_MESSAGE, Peer, Session, lost_contact_message, version_mismatch_message,
 };
 use unseamless_core::protocol::{PROTOCOL_VERSION, SharedSettings};
 use unseamless_core::transport::{PeerId, Transport};
 
+use crate::notify::{clear_banner, set_banner, toast};
 use crate::steam::{self, LobbyDiscovery, LobbyIntent, LobbyResult, Networking};
 
 /// Poll the receive side this often (responsive handshake / config sync).
@@ -52,12 +53,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Run `Session::maintain` this often — the heartbeat + host config re-assert + liveness sweep. The
 /// `Peer`'s tick-denominated constants assume ~1 Hz here (see the module note).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(1);
-/// How long to wait for rung 1 to resolve our own SteamID before giving up on the side-channel.
-/// Sized just past rung 1's own resolver budget (`steam::QUERY_MAX_ATTEMPTS * QUERY_RETRY_DELAY` =
-/// 30 s, after which `SELF_STEAM_ID` can never become non-zero): once that poller gives up there's
-/// nothing left to wait for, so polling much longer here would only spin uselessly.
-const SELF_ID_TIMEOUT: Duration = Duration::from_secs(35);
-const SELF_ID_POLL: Duration = Duration::from_millis(250);
 
 /// Banner ids for the persistent connection conditions, so each updates in place / clears cleanly.
 const BANNER_VERSION: &str = "coop-version";
@@ -117,6 +112,11 @@ pub fn session_flags() -> SessionFlags {
 /// `CreateLobby`); past this, Steam matchmaking is wedged. Once the lobby is open the timeout is
 /// dropped (a host then waits for a friend indefinitely).
 const HOST_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a host waits in the open-and-waiting state before showing the one-time "both opened a
+/// world?" nudge. Not a timeout — a legit host may wait far longer for a friend; this only updates the
+/// banner. Sized well past the per-list retry + Valve indexing lag so a joiner who is simply still
+/// searching has had ample time to appear before we suggest the swap.
+const HOST_NUDGE_DELAY: Duration = Duration::from_secs(45);
 /// Join search budget: short retry + give up (we only search for an already-open world). Past this, no
 /// matching world was found — tell the user rather than spin forever.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
@@ -381,6 +381,9 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 LobbyIntent::Join => JOIN_TIMEOUT,
             },
     );
+    // First moment we entered the open-and-waiting state, to time the one-time nudge below.
+    let mut hosting_since: Option<Instant> = None;
+    let mut nudged = false;
     let (peer_id, is_host) = loop {
         if stale(generation) {
             return; // user left (or superseded): dropping `discovery` leaves the lobby (its Drop)
@@ -394,6 +397,23 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 if deadline.take().is_some() && !stale(generation) {
                     SESSION.store(SESSION_HOSTING, Ordering::Relaxed);
                     set_banner(BANNER_SESSION, Severity::Info, "World open — waiting for a friend to join.");
+                    hosting_since = Some(Instant::now());
+                }
+                // Soft one-time nudge: a host with no joiner after a good while may be the both-opened-a-
+                // world case (if two friends both pick Open World, Valve indexing lag can leave both
+                // hosting and waiting forever). Suggest one of them Join instead — but don't tear down (a
+                // legit host may wait a long time). Generation-guarded like the HOSTING store so a stale
+                // driver can't overwrite a newer session's banner.
+                if !nudged
+                    && hosting_since.is_some_and(|t| t.elapsed() >= HOST_NUDGE_DELAY)
+                    && !stale(generation)
+                {
+                    nudged = true;
+                    set_banner(
+                        BANNER_SESSION,
+                        Severity::Info,
+                        "Still no one. If your friend also opened a world, one of you should Leave and Join instead.",
+                    );
                 }
             }
             LobbyResult::Pending => {
@@ -617,7 +637,10 @@ fn update_link_status(
 /// stops a driver from lingering up to the full timeout after a Leave. In practice this returns near-
 /// instantly: Open/Join are gated on Steam being ready, which already requires the SteamID resolved.
 fn wait_self_id(generation: u64) -> Option<PeerId> {
-    let deadline = Instant::now() + SELF_ID_TIMEOUT;
+    // The plain wait loop + its budget/cadence live in [`steam`] (shared with the readiness probe);
+    // here we keep our own loop only to interleave the stale-session early-out, reusing those
+    // constants so the two waiters can't drift.
+    let deadline = Instant::now() + steam::SELF_ID_TIMEOUT;
     loop {
         if stale(generation) {
             return None;
@@ -628,20 +651,8 @@ fn wait_self_id(generation: u64) -> Option<PeerId> {
         if Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(SELF_ID_POLL);
+        std::thread::sleep(steam::SELF_ID_POLL);
     }
-}
-
-fn toast(severity: Severity, message: impl Into<String>) {
-    crate::notify::with_mut(|n| n.toast(severity, message, DEFAULT_TOAST_SECS));
-}
-fn set_banner(id: &str, severity: Severity, message: impl Into<String>) {
-    crate::notify::with_mut(|n| n.set_banner(id, severity, message));
-}
-fn clear_banner(id: &str) {
-    crate::notify::with_mut(|n| {
-        n.clear_banner(id);
-    });
 }
 
 /// A [`Transport`] over Steam's `ISteamNetworkingMessages` to a single, known partner. In a 2-player
