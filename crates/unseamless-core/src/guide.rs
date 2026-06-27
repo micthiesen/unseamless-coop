@@ -42,6 +42,10 @@ const DONE_HOLD_SECS: f32 = 0.75;
 /// a chatty step can't grow it without bound (the shared [`push_capped`] discipline).
 const STEP_LOG_CAP: usize = 256;
 
+/// The fixed step id of the standard connect step appended by [`Guide::connect_step`]. A guide has at
+/// most one, so a stable id is fine (and lets a branch target it if ever needed).
+const CONNECT_STEP_ID: &str = "connect";
+
 /// The **defined** banner colour for a stub (`[PENDING …]`) step — and the neutral fallback. Banner
 /// colours are auto-assigned by the engine, never set in a guide; a regular step gets a deterministic
 /// per-step palette hue ([`step_color`]) so consecutive steps read as visibly distinct, while a stub
@@ -74,9 +78,16 @@ fn fnv1a(s: &str) -> u64 {
 // ---------------------------------------------------------------------------------------------------
 
 /// Which machine a tester is on, so one shared guide runs everywhere and each machine sees only the
-/// steps tagged for its role (an untagged step shows to all). Resolved from the `[debug] rig_role`
-/// config field (default [`Solo`](Role::Solo)). This is what makes two-player testing easy: the host
-/// machine sees host steps, the joiner sees joiner steps, from the same committed guide.
+/// steps tagged for its role (an untagged step shows to all). This is what makes two-player testing
+/// easy: the host machine sees host steps, the joiner sees joiner steps, from the same committed guide.
+///
+/// **A role is normally DERIVED, not hand-set.** The runner starts at [`Solo`](Role::Solo) (unresolved)
+/// and a standard [`connect step`](Guide::connect_step) sets it from what the tester actually does —
+/// Open World ⇒ [`Host`](Role::Host), Join world ⇒ [`Join`](Role::Join) — read off
+/// [`RigState::lobby_intent`]. The `[debug] rig_role` config field is only an **override / solo
+/// fallback**: an explicit non-`Solo` value pins the role and suppresses derivation; left at the
+/// default `Solo`, the connect step derives it. So guide writers compose a connect step instead of
+/// asking each machine to hand-assign a role (which is easy to fat-finger).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -170,6 +181,21 @@ impl ProtocolState {
     }
 }
 
+/// Core mirror of the cdylib's `steam::LobbyIntent` (plus a `None` "not chosen yet" state the SDK enum
+/// doesn't need), so the engine can derive a [`Role`] from the tester's Open/Join action without `core`
+/// taking a game dependency. The binding maps the live session state across (Open World ⇒ `Host`, Join
+/// world ⇒ `Join`, no active session ⇒ `None`), the same pattern as [`LobbyState`]/[`ProtocolState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LobbyIntent {
+    /// No Open/Join action is in flight (solo / pre-session) — the connect step is still waiting.
+    #[default]
+    None,
+    /// The tester chose **Open World** (host).
+    Host,
+    /// The tester chose **Join world** (joiner).
+    Join,
+}
+
 // ---------------------------------------------------------------------------------------------------
 // The per-frame snapshot predicates read
 // ---------------------------------------------------------------------------------------------------
@@ -187,6 +213,10 @@ pub struct RigState {
     pub protocol_state: ProtocolState,
     /// Connected players in the session (`0` solo / pre-session).
     pub players: usize,
+    /// The tester's current Open/Join choice, for the standard [`connect step`](Guide::connect_step) to
+    /// derive this machine's [`Role`] from. [`None`](LobbyIntent::None) until an Open World / Join world
+    /// action is in flight.
+    pub lobby_intent: LobbyIntent,
 }
 
 /// What a [`Predicate`] sees: the frame's [`RigState`], how long the current step has been showing,
@@ -315,6 +345,14 @@ pub struct Step {
     /// Whether a choice step also offers an optional free-form **note** field (keyboard-entered in the
     /// overlay). The captured note rides on the logged [`ChoiceMade`]. Only meaningful with `choice`.
     choice_note: bool,
+    /// `true` marks the standard **connect step** (appended by [`Guide::connect_step`]): shown to every
+    /// machine, it derives the runner's [`Role`] from the tester's Open/Join action
+    /// ([`RigState::lobby_intent`]) and auto-finishes once that intent resolves. Open World ⇒
+    /// [`Role::Host`], Join world ⇒ [`Role::Join`]; an explicit non-`Solo` `rig_role` override
+    /// suppresses the derivation (the override wins). Like any step it's manually finishable (done) and
+    /// skippable, so a solo run with no peer never traps — pick an intent to derive, or skip/finish
+    /// before acting to stay Solo.
+    connect: bool,
 }
 
 impl Step {
@@ -329,6 +367,7 @@ impl Step {
             stub: None,
             choice: None,
             choice_note: false,
+            connect: false,
         }
     }
 }
@@ -365,7 +404,14 @@ impl Guide {
     /// Show this step only on machines whose [`Role`] matches (untagged ⇒ shown to all). Steps that
     /// don't match the active role are skipped over automatically during advancement.
     pub fn role(mut self, role: Role) -> Self {
-        self.last_mut().role = Some(role);
+        let step = self.last_mut();
+        debug_assert!(
+            !step.connect,
+            "step '{}' mixes .role() with the connect step — a connect step is shown to all roles \
+             (it derives the role); don't role-tag it",
+            step.id,
+        );
+        step.role = Some(role);
         self
     }
 
@@ -375,8 +421,8 @@ impl Guide {
     pub fn done_when(mut self, pred: Predicate) -> Self {
         let step = self.last_mut();
         debug_assert!(
-            step.choice.is_none(),
-            "step '{}' mixes .done_when() with .choice() — a choice supersedes the auto-finish path",
+            step.choice.is_none() && !step.connect,
+            "step '{}' mixes .done_when() with .choice()/connect — a choice/connect supersedes the auto-finish path",
             step.id,
         );
         step.done_when = Some(pred);
@@ -388,8 +434,8 @@ impl Guide {
     pub fn branch(mut self, f: impl Fn(&PredicateCtx) -> Advance + Send + 'static) -> Self {
         let step = self.last_mut();
         debug_assert!(
-            step.choice.is_none(),
-            "step '{}' mixes .branch() with .choice() — a choice's options carry their own Advance",
+            step.choice.is_none() && !step.connect,
+            "step '{}' mixes .branch() with .choice()/connect — those carry their own advance",
             step.id,
         );
         step.branch = Some(Box::new(f));
@@ -411,8 +457,8 @@ impl Guide {
     pub fn stub(mut self, reason: &'static str) -> Self {
         let step = self.last_mut();
         debug_assert!(
-            step.choice.is_none(),
-            "step '{}' mixes .stub() with .choice() — a stub isn't an executable choice",
+            step.choice.is_none() && !step.connect,
+            "step '{}' mixes .stub() with .choice()/connect — a stub isn't an executable choice/connect",
             step.id,
         );
         step.stub = Some(reason);
@@ -435,11 +481,34 @@ impl Guide {
         debug_assert!(!options.is_empty(), "a choice step needs at least one option");
         let step = self.last_mut();
         debug_assert!(
-            step.done_when.is_none() && step.branch.is_none() && step.stub.is_none(),
-            "step '{}' mixes .choice() with .done_when()/.branch()/.stub() — a choice supersedes them",
+            step.done_when.is_none() && step.branch.is_none() && step.stub.is_none() && !step.connect,
+            "step '{}' mixes .choice() with .done_when()/.branch()/.stub()/connect — a choice supersedes them",
             step.id,
         );
         step.choice = Some(options.to_vec());
+        self
+    }
+
+    /// Append the standard **connect step**: a composable, shown-to-everyone step that derives this
+    /// machine's [`Role`] from what the tester does — Open World ⇒ [`Role::Host`], Join world ⇒
+    /// [`Role::Join`], read off [`RigState::lobby_intent`] — and auto-finishes the moment that intent
+    /// resolves. Drop it into a two-player guide once, before the role-tagged steps; everything after it
+    /// then filters by the derived role. Guide writers never hand-assign a role.
+    ///
+    /// Precedence: an explicit non-`Solo` `[debug] rig_role` **overrides** the derivation (it pins the
+    /// role and the connect step just auto-finishes without changing it); left at the default `Solo`, the
+    /// connect step derives it. It's manually finishable (done) and skippable like any step, so a solo
+    /// run with no peer degrades sensibly — pick an intent to derive a role, or skip/finish *before
+    /// acting* to stay [`Solo`](Role::Solo) (a manual done *after* an intent resolves derives from it,
+    /// same as the auto path). Role-tagged steps placed *before* it run with the role still unresolved
+    /// (`Solo`), i.e. only untagged (and any `Solo`-tagged) steps show until the connect step resolves.
+    pub fn connect_step(mut self) -> Self {
+        self = self.step(
+            CONNECT_STEP_ID,
+            "This machine's role: open the overlay (Actions tab), then Open World to host or Join \
+             world to join. Your choice sets this guide's role for the steps that follow.",
+        );
+        self.last_mut().connect = true;
         self
     }
 
@@ -544,6 +613,11 @@ pub struct TickResult {
     /// captured answer once — the one source logging alone can't reach (the tester's judgement) turned
     /// into captured, shareable data.
     pub choice_made: Option<ChoiceMade>,
+    /// `Some(role)` on exactly the tick the **connect step derived** this machine's role (Solo ⇒
+    /// Host/Join), so the binding logs *which role this machine took* once — the single most important
+    /// fact in a two-player run, captured in the shareable log rather than relayed. Stays `None` when no
+    /// derivation happened (a `rig_role` override suppressed it, or the step finished still Solo).
+    pub role_derived: Option<Role>,
 }
 
 /// The render model for a **choice modal** — everything the overlay needs to draw it, with no decision
@@ -605,6 +679,9 @@ pub struct GuideRunner {
     /// Set on the tick a choice resolves, surfaced once via [`TickResult::choice_made`] (recomputed
     /// each tick like [`just_finished`](Self::just_finished)).
     just_made_choice: Option<ChoiceMade>,
+    /// Set on the tick the connect step derives the role (Solo ⇒ Host/Join), surfaced once via
+    /// [`TickResult::role_derived`] (recomputed each tick like [`just_made_choice`](Self::just_made_choice)).
+    just_derived_role: Option<Role>,
 }
 
 impl GuideRunner {
@@ -625,6 +702,7 @@ impl GuideRunner {
             just_finished: false,
             choice_sel: 0,
             just_made_choice: None,
+            just_derived_role: None,
         };
         runner.current = runner.first_visible_from(0);
         runner
@@ -638,6 +716,7 @@ impl GuideRunner {
     pub fn tick(&mut self, input: &GuideInput) -> TickResult {
         self.just_finished = false; // one-shot, recomputed each tick
         self.just_made_choice = None; // ditto — only set on the tick a choice resolves
+        self.just_derived_role = None; // ditto — only set on the tick the connect step derives the role
 
         let Some(idx) = self.current else {
             return TickResult::default(); // finished/idle: nothing to draw, no toast
@@ -711,6 +790,46 @@ impl GuideRunner {
             return self.render();
         }
 
+        // Connect step: derive this machine's role from the tester's Open/Join action and auto-finish
+        // once the intent resolves. Same precedence as a normal step (manual done > skip > auto), but the
+        // "auto" trigger is the intent leaving `None` rather than a `done_when` predicate, and finishing
+        // SETS the runner role so every role-tagged step after it filters by the derived role.
+        if self.guide.steps[idx].connect {
+            let skip_to = self.guide.steps[idx].skip_to.clone();
+            let intent = input.state.lobby_intent;
+            let intent_resolved = intent != LobbyIntent::None;
+            let advance: Option<Advance> = if skip_fired && !done_fired {
+                // Skip bails without deriving — stays whatever role it was (Solo or an override).
+                Some(skip_to.unwrap_or(Advance::Next))
+            } else if done_fired || intent_resolved {
+                // Derive from the action UNLESS an explicit non-Solo rig_role is overriding it: a
+                // non-Solo starting role means the override is in force, so leave it untouched. A manual
+                // done before any intent resolved (intent still `None`) leaves the role at Solo — the
+                // solo degrade, never a trap. (A manual done *with* an intent already resolved derives
+                // from it, same as the auto path — only acting-before-finishing keeps you Solo.)
+                if self.role == Role::Solo {
+                    let derived = match intent {
+                        LobbyIntent::Host => Role::Host,
+                        LobbyIntent::Join => Role::Join,
+                        LobbyIntent::None => Role::Solo,
+                    };
+                    // Surface the role only on a real derivation (Solo -> Host/Join) so the binding can
+                    // log which role this machine took; a no-op None stays silent.
+                    if derived != Role::Solo {
+                        self.role = derived;
+                        self.just_derived_role = Some(derived);
+                    }
+                }
+                Some(Advance::Next)
+            } else {
+                None
+            };
+            if let Some(advance) = advance {
+                self.advance(advance, idx);
+            }
+            return self.render();
+        }
+
         let ctx = PredicateCtx {
             state: input.state,
             step_elapsed_secs: self.step_elapsed,
@@ -746,8 +865,10 @@ impl GuideRunner {
     /// Build the [`TickResult`] for the (possibly newly-advanced) current step, including its
     /// auto-assigned colour (a per-step palette hue, or [`PENDING_BANNER_COLOR`] for a stub).
     fn render(&self) -> TickResult {
-        // A resolved choice surfaces once, regardless of where it advanced to (incl. straight to Done).
+        // A resolved choice / a freshly-derived role each surface once, regardless of where the tick
+        // advanced to (incl. straight to Done).
         let choice_made = self.just_made_choice.clone();
+        let role_derived = self.just_derived_role;
         match self.current {
             Some(idx) => {
                 let step = &self.guide.steps[idx];
@@ -771,6 +892,7 @@ impl GuideRunner {
                         stub: false,
                         choice: Some(view),
                         choice_made,
+                        role_derived,
                     };
                 }
                 let stub = step.stub.is_some();
@@ -782,6 +904,7 @@ impl GuideRunner {
                     stub,
                     choice: None,
                     choice_made,
+                    role_derived,
                 }
             }
             None => TickResult {
@@ -791,6 +914,7 @@ impl GuideRunner {
                 stub: false,
                 choice: None,
                 choice_made,
+                role_derived,
             },
         }
     }
@@ -1530,5 +1654,160 @@ mod tests {
         done.done_held = true;
         done.delta = HOLD_FRAME;
         assert!(r.tick(&done).choice.is_some(), "a completed done hold does not resolve a choice step");
+    }
+
+    // --- Connect step / derived role ---------------------------------------------------------------
+
+    /// A guide with the standard connect step and role-tagged steps AFTER it, to exercise derivation +
+    /// post-derivation filtering: boot -> connect -> (host-only | join-only) -> end.
+    fn connect_guide() -> Guide {
+        Guide::new("c")
+            .step("boot", "boot")
+            .connect_step()
+            .step("host-only", "host step")
+            .role(Role::Host)
+            .step("join-only", "join step")
+            .role(Role::Join)
+            .step("end", "end")
+    }
+
+    /// Tick once with a resolved [`LobbyIntent`] in the state (no control input).
+    fn intent_tick(runner: &mut GuideRunner, intent: LobbyIntent) -> TickResult {
+        let state = RigState { lobby_intent: intent, ..Default::default() };
+        runner.tick(&input(&state, &[], 1.0 / 60.0))
+    }
+
+    #[test]
+    fn connect_step_derives_host_from_open_world_and_filters_to_host_steps() {
+        let mut r = GuideRunner::start(connect_guide(), Role::Solo, HINTS);
+        let none = RigState::default();
+        // boot (manual) -> the connect step (shown to everyone, with the standard prompt).
+        assert!(done_tick(&mut r, &none).banner.unwrap().contains("Open World to host or Join"));
+        // Open World resolves the intent -> derive Host, auto-finish -> the host-only step (the
+        // join-only step is filtered out by the now-derived role).
+        let derived = intent_tick(&mut r, LobbyIntent::Host);
+        assert!(derived.banner.unwrap().contains("host step"));
+        // The deriving tick surfaces the role once, so the binding can log which role this machine took.
+        assert_eq!(derived.role_derived, Some(Role::Host), "the deriving tick surfaces the role once");
+        // ...and only on that tick.
+        assert_eq!(idle_tick(&mut r, &none).role_derived, None, "role_derived is one-shot");
+    }
+
+    #[test]
+    fn connect_step_derives_join_from_join_world_and_filters_to_join_steps() {
+        let mut r = GuideRunner::start(connect_guide(), Role::Solo, HINTS);
+        let none = RigState::default();
+        done_tick(&mut r, &none); // boot -> connect
+        // Join world -> derive Join -> the join-only step (host-only filtered out).
+        assert!(intent_tick(&mut r, LobbyIntent::Join).banner.unwrap().contains("join step"));
+    }
+
+    #[test]
+    fn connect_step_in_a_solo_run_still_derives_from_whichever_action_is_picked() {
+        // Even alone (no peer), a solo tester who Opens a world derives Host — the connect step
+        // auto-finishes on the action. The solo degrade is "pick to derive, or skip to stay Solo".
+        let mut r = GuideRunner::start(connect_guide(), Role::Solo, HINTS);
+        done_tick(&mut r, &RigState::default()); // boot -> connect
+        assert!(intent_tick(&mut r, LobbyIntent::Host).banner.unwrap().contains("host step"));
+    }
+
+    #[test]
+    fn connect_step_skipped_in_a_solo_run_stays_solo_and_never_traps() {
+        // No intent + skip the connect step -> role stays Solo, both role-tagged steps are filtered, and
+        // the guide reaches the untagged "end" without trapping.
+        let mut r = GuideRunner::start(connect_guide(), Role::Solo, HINTS);
+        let none = RigState::default();
+        assert!(done_tick(&mut r, &none).banner.unwrap().contains("Open World to host or Join")); // boot -> connect
+        assert!(skip_tick(&mut r, &none).banner.unwrap().contains("end"), "skip stays Solo, lands on end");
+    }
+
+    #[test]
+    fn connect_step_manual_done_without_an_intent_stays_solo() {
+        // A manual done on the connect step before any intent resolves leaves the role at Solo (no
+        // derive) and advances past the role-tagged steps to "end" — the never-trap solo path.
+        let mut r = GuideRunner::start(connect_guide(), Role::Solo, HINTS);
+        let none = RigState::default();
+        done_tick(&mut r, &none); // boot -> connect
+        assert!(done_tick(&mut r, &none).banner.unwrap().contains("end"));
+    }
+
+    #[test]
+    fn an_explicit_rig_role_override_suppresses_derivation() {
+        // Starting with an explicit non-Solo role (the rig_role override) pins it: the connect step
+        // auto-finishes on the intent but does NOT change the role — even a mismatched action can't flip
+        // it. Host override + a (mistaken) Join action -> still the host-only step.
+        let mut r = GuideRunner::start(connect_guide(), Role::Host, HINTS);
+        done_tick(&mut r, &RigState::default()); // boot -> connect
+        let out = intent_tick(&mut r, LobbyIntent::Join);
+        assert!(
+            out.banner.unwrap().contains("host step"),
+            "a non-Solo rig_role override wins over the derived intent",
+        );
+        // No derivation happened (the override was in force), so nothing is surfaced to log.
+        assert_eq!(out.role_derived, None, "an override suppresses the derivation signal too");
+    }
+
+    #[test]
+    fn connect_step_solo_with_only_role_tagged_steps_after_reaches_the_done_toast() {
+        // The sharpest never-trap case: a Solo runner skips the connect step (no intent), and EVERY
+        // remaining step is role-tagged, so `first_visible_from` finds nothing and the guide resolves to
+        // the done toast rather than trapping. (connect_guide ends with an untagged `end`, which would
+        // mask this; here the tail is all role-tagged.)
+        let guide = Guide::new("g")
+            .step("boot", "boot")
+            .connect_step()
+            .step("host-only", "host step")
+            .role(Role::Host)
+            .step("join-only", "join step")
+            .role(Role::Join);
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let none = RigState::default();
+        assert!(done_tick(&mut r, &none).banner.unwrap().contains("Open World to host or Join")); // boot -> connect
+        // Skip the connect step (stays Solo): both remaining steps are role-tagged -> nothing visible ->
+        // the guide finishes cleanly instead of trapping.
+        let end = skip_tick(&mut r, &none);
+        assert_eq!(end.banner, None, "no visible step remains for a Solo runner");
+        assert!(end.finished_now, "the Solo run falls through to the done toast, never trapped");
+    }
+
+    #[test]
+    fn role_tagged_steps_before_the_connect_step_are_hidden_until_the_role_resolves() {
+        // Role-tagged steps placed BEFORE the connect step run with the role unresolved (Solo): only
+        // untagged (and Solo-tagged) steps show until the connect step derives the role.
+        let guide = Guide::new("g")
+            .step("early-host", "early host")
+            .role(Role::Host)
+            .step("boot", "boot")
+            .connect_step()
+            .step("late-host", "late host")
+            .role(Role::Host)
+            .step("end", "end");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let none = RigState::default();
+        // early-host is Host-tagged but the role is still Solo, so it's hidden -> first shown is boot.
+        assert!(
+            idle_tick(&mut r, &none).banner.unwrap().contains("boot"),
+            "a pre-connect host step is hidden while the role is unresolved",
+        );
+        done_tick(&mut r, &none); // boot -> connect
+        // Open World derives Host -> the post-connect host step now shows.
+        assert!(
+            intent_tick(&mut r, LobbyIntent::Host).banner.unwrap().contains("late host"),
+            "a post-connect host step shows once the role is derived",
+        );
+    }
+
+    #[test]
+    fn connect_step_is_shown_to_every_role() {
+        // The connect step is untagged, so it shows regardless of the starting role — including a
+        // Join-override machine (it just won't re-derive). Guards that it isn't accidentally role-gated.
+        for role in [Role::Solo, Role::Host, Role::Join] {
+            let guide = Guide::new("g").connect_step().step("end", "end");
+            let mut r = GuideRunner::start(guide, role, HINTS);
+            assert!(
+                idle_tick(&mut r, &RigState::default()).banner.unwrap().contains("Open World to host or Join"),
+                "connect step must show to role {role:?}",
+            );
+        }
     }
 }

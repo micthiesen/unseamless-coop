@@ -176,7 +176,9 @@ guide** (`crates/unseamless-core/src/guide/guides.rs`), not in a hand-relayed st
 this skill. Set `[debug] guide = "<name>"` in the rig seed config (or hand-add it to each extracted
 config for a friend run — `rig.sh package`/ConfigSync don't carry these debug keys) and the tester is
 walked through the steps on-screen (a pinned banner; advance with `L3 + D-pad Up`, skip with `L3 + D-pad
-Down`) instead of a chat round-trip — and set `[debug] rig_role` per machine for a two-player guide.
+Down`) instead of a chat round-trip. For a two-player guide built around a connect step, each machine's
+role is **derived** from its Open/Join action — leave `[debug] rig_role` at the default `solo`; it's only
+an override/solo fallback.
 
 > **Prefer log/state-driven auto-finish; manual done is the fallback.** The point of a guide is to stop
 > the "do X, read me the result, do Y" loop, so author each step to **self-detect completion from the
@@ -203,7 +205,8 @@ log file.
 
 Two or more real players. Can't be automated, but **ship a role-tagged guide so it isn't hand-driven**:
 `two-player-join` walks both machines through the connect, each step auto-finishing off the run log (set
-`[debug] guide` + `[debug] rig_role` per machine; see the "Ship a guide" box above and FRIEND-TEST-RUNBOOK).
+`[debug] guide`; each machine's role is derived from its Open/Join action, so leave `[debug] rig_role` at
+`solo` — it's just an override/solo fallback; see the "Ship a guide" box above and FRIEND-TEST-RUNBOOK).
 To make it useful to the assistant afterward: set `[debug] enabled = true` and (on clients)
 `forward_to_host = true`, so the host machine aggregates everyone's logs into one `LogBundle`, then hand
 over the host's `unseamless-coop/logs/` folder. (Note: the `coop: linked` / `coop: adopted host config`

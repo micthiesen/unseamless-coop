@@ -10,7 +10,8 @@
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex};
 use unseamless_core::config::Config;
 use unseamless_core::guide::{
-    ChoiceInput, ControlHints, GuideInput, GuideRunner, LobbyState, ProtocolState, RigState, guides,
+    ChoiceInput, ControlHints, GuideInput, GuideRunner, LobbyIntent, LobbyState, ProtocolState,
+    RigState, guides,
 };
 use unseamless_core::notifications::Severity;
 use unseamless_core::pad::{XINPUT_DPAD_DOWN, XINPUT_DPAD_UP, XINPUT_LEFT_THUMB};
@@ -46,8 +47,13 @@ pub fn feature(config: &Config) -> Vec<Box<dyn Feature>> {
             // The log tee is enabled lazily from `on_frame` (only while a step is actually showing),
             // not here — so pre-guide boot lines never reach the first step and a guide that starts
             // with no role-visible steps never leaves the tee on.
+            // Log the *starting* role, not "the" role: with the default `Solo` a connect step derives
+            // the real Host/Join at runtime (logged then via `role_derived`); a non-Solo value here is
+            // an explicit override that pins it. Saying "starting role" avoids claiming a two-player run
+            // is "as role Solo" when it will derive a role mid-run.
             log::info!(
-                "rig-guide: running '{}' as role {:?} ({} steps); done = {}, skip = {}",
+                "rig-guide: running '{}' (starting role {:?}; a connect step derives Host/Join unless \
+                 overridden) ({} steps); done = {}, skip = {}",
                 guide.name(),
                 config.debug.rig_role,
                 guide.len(),
@@ -103,11 +109,31 @@ impl Feature for RigGuideFeature {
             })
             .unwrap_or((LobbyState::None, ProtocolState::None, 0));
 
+        // The tester's Open/Join choice, for the standard connect step to derive this machine's role
+        // from. Read off the same user-facing session flags the overlay's Actions tab drives (Open World
+        // sets host, Join world sets joiner): no active session => `None`; in a session => Host/Join by
+        // `is_host`. The connect step LATCHES on the first non-`None` intent (it derives the role once,
+        // then advances and never re-reads), so a wrong read would stick, not self-correct. It reads
+        // right because the write side stores `IS_HOST` before `SESSION` (coop::start_session) and the
+        // read here goes through `SESSION` first (`in_session`) before `is_host`: on the pinned x86_64
+        // target's TSO, observing `in_session == true` guarantees the matching `is_host` is visible. The
+        // after-leave/fail case is masked too (`SESSION = Off` is stored first, so `in_session == false`
+        // yields `None` regardless of a stale `is_host`).
+        let flags = crate::coop::session_flags();
+        let lobby_intent = if !flags.in_session {
+            LobbyIntent::None
+        } else if flags.is_host {
+            LobbyIntent::Host
+        } else {
+            LobbyIntent::Join
+        };
+
         let state = RigState {
             game_state: crate::playstate::current(),
             lobby_state,
             protocol_state,
             players,
+            lobby_intent,
         };
 
         // Controller chords from the live pad snapshot (an atomic read written by the overlay's XInput
@@ -145,6 +171,13 @@ impl Feature for RigGuideFeature {
             } else {
                 log::info!("rig-guide: '{}' -> '{}' note = \"{}\"", made.step_id, made.label, made.note);
             }
+        }
+
+        // The connect step derived this machine's role: log which role we took. This is the single most
+        // important fact in a two-player run, captured in the shareable/forwarded log instead of relayed
+        // ("which machine is host?"). Fires once, on the deriving tick.
+        if let Some(role) = result.role_derived {
+            log::info!("rig-guide: derived role {role:?} from the Open/Join action");
         }
 
         // Tee log lines into the guide queue only while a step is actually showing (a pinned banner OR

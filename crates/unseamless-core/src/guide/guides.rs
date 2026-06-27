@@ -96,17 +96,20 @@ fn overlay_smoke() -> Guide {
 
 /// The **canonical role-tagged two-player guide** and the best showcase of log/state auto-finish: it
 /// drives the full friend-connect flow (rungs 4 + 2 — password-keyed lobby discovery + the Steam P2P
-/// side-channel) from one committed guide. The host machine sees the host steps, the joiner sees the
-/// joiner steps, both see the shared steps (set `[debug] rig_role` to `host` / `join` on each machine;
-/// see `docs/FRIEND-TEST-RUNBOOK.md`).
+/// side-channel) from one committed guide. Both machines run the same guide; each machine's role is
+/// **derived** from its Open/Join action by the standard [`connect step`](Guide::connect_step) — the
+/// host (Open World) sees the host steps, the joiner (Join world) the joiner steps, both the shared
+/// ones. No per-machine `[debug] rig_role` needed (it's only an override/solo fallback now); see
+/// `docs/FRIEND-TEST-RUNBOOK.md`.
 ///
 /// **Every connect step auto-finishes off the run log**, so the result is captured in the shareable
-/// (and host-forwarded) log instead of relayed as "did it connect?": the lobby-discovery resolve line
-/// (per role), the rung-2 link milestone (`coop: linked`, logged by `coop::update_link_status`), and
-/// the client's config adoption (`coop: adopted host config`, logged by `coop::adopt_host_config`).
-/// The matched substrings are stable fragments those sites pin deliberately. The trailing **stub** is
-/// the one piece not executable yet: verifying the host's settings take *effect* in-world needs the
-/// apply layer + a real game session (rung 3).
+/// (and host-forwarded) log instead of relayed as "did it connect?": the connect step resolves on the
+/// Open/Join action itself, then the rung-2 link milestone (`coop: linked`, logged by
+/// `coop::update_link_status`) and the client's config adoption (`coop: adopted host config`, logged by
+/// `coop::adopt_host_config`) auto-finish the shared/joiner steps. The matched substrings are stable
+/// fragments those sites pin deliberately. The trailing **stub** is the one piece not executable yet:
+/// verifying the host's settings take *effect* in-world needs the apply layer + a real game session
+/// (rung 3).
 fn two_player_join() -> Guide {
     Guide::new("two-player-join")
         // Same area isn't required for the side-channel link, but it sets up the in-world checks the
@@ -116,15 +119,11 @@ fn two_player_join() -> Guide {
         // The shared password is the only pairing input (the startup guard already refused to launch
         // without one >= 8 chars, so by here it's set) — a reminder, not a gate, hence manual.
         .step("both-password", "Both: confirm you set the SAME co-op password before launch.")
-        // HOST opens a world; auto-finish when lobby discovery resolves a joiner on our lobby (the
-        // `coop: lobby discovery resolved partner … (we are the host)` line — the host-only fragment).
-        .step("host-open", "HOST: open the overlay (backtick, or RB+L3+R3), Actions tab -> Open World.")
-        .role(Role::Host)
-        .done_when(log_contains("we are the host"))
-        // JOINER joins; auto-finish when discovery finds the host's lobby (the joiner-only fragment).
-        .step("join-join", "JOINER: open the overlay, Actions tab -> Join world (same password).")
-        .role(Role::Join)
-        .done_when(log_contains("we are the client"))
+        // The standard connect step: each machine opens or joins a world, which DERIVES its role (Open
+        // World -> Host, Join world -> Join) and auto-finishes on the action. Everything role-tagged
+        // after it (config-adopt) then filters by the derived role. This single step replaces the old
+        // hand-role-tagged host-open/join-join pair — guide writers no longer set the role by hand.
+        .connect_step()
         // Shared: the side-channel handshake lands. BOTH machines log `coop: linked …` on the link
         // edge, so both advance off the same captured signal — no "it connected" relay. A version
         // mismatch is named on that same line (and bannered in-game).
@@ -337,19 +336,21 @@ mod tests {
     }
 
     #[test]
-    fn two_player_join_joiner_auto_finishes_the_connect_chain_from_the_log() {
-        // Principle 2 in action: the joiner's connect steps each auto-finish off a captured log line
-        // (discovery resolve -> rung-2 link -> config adoption), so the flow self-detects the connect
-        // rather than waiting on a manual "it connected" relay. Pins the substrings the guide matches
-        // against the lines `coop.rs` actually emits.
-        use crate::guide::{ControlHints, GuideInput, GuideRunner, RigState, Role};
+    fn two_player_join_joiner_derives_join_then_auto_finishes_the_rest_from_the_log() {
+        // The retrofit in action: start UNRESOLVED (Solo), and the standard connect step DERIVES the
+        // joiner role from the Join action (lobby_intent = Join). The role-tagged config-adopt step is
+        // then visible (post-derivation filtering), and the shared/joiner steps auto-finish off captured
+        // log lines (rung-2 link -> config adoption) — the flow self-detects rather than relaying.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
         let hints = ControlHints { done: "D", skip: "S" };
-        let mut r = GuideRunner::start(two_player_join(), Role::Join, hints);
+        let mut r = GuideRunner::start(two_player_join(), Role::Solo, hints);
         let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
-        let tick = |r: &mut GuideRunner, lines: &[String]| {
+        let joining =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Join, ..Default::default() };
+        let tick = |r: &mut GuideRunner, state: &RigState, lines: &[String]| {
             r.tick(&GuideInput {
                 delta: 0.1,
-                state: &ingame,
+                state,
                 new_log_lines: lines,
                 done_held: false,
                 skip_held: false,
@@ -358,25 +359,24 @@ mod tests {
         };
 
         // boot auto-finishes on InGame -> both-password.
-        assert!(tick(&mut r, &[]).banner.unwrap().contains("SAME co-op password"), "boot -> password");
-        // both-password is a manual reminder; skip it -> join-join.
-        tick(&mut r, &[]); // release (prev_skip = false)
+        assert!(tick(&mut r, &ingame, &[]).banner.unwrap().contains("SAME co-op password"), "boot -> password");
+        // both-password is a manual reminder; skip it -> the connect step.
+        tick(&mut r, &ingame, &[]); // release (prev_skip = false)
         let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
-        assert!(r.tick(&skip).banner.unwrap().contains("Join world"), "skip password -> join-join");
-        // join-join auto-finishes on the joiner-only discovery line -> linked.
-        let disc = ["coop: lobby discovery resolved partner peer-7 (we are the client); seeding rung 2".to_string()];
-        assert!(tick(&mut r, &disc).banner.unwrap().contains("Steam P2P link"), "join-join -> linked");
-        // linked auto-finishes on the rung-2 link milestone -> config-adopt.
+        assert!(r.tick(&skip).banner.unwrap().contains("Open World to host or Join"), "skip password -> connect step");
+        // The Join action resolves the intent -> connect derives Join and advances to linked.
+        assert!(tick(&mut r, &joining, &[]).banner.unwrap().contains("Steam P2P link"), "connect (Join) -> linked");
+        // linked auto-finishes on the rung-2 link milestone -> config-adopt (visible: role derived Join).
         let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
-        assert!(tick(&mut r, &linked).banner.unwrap().contains("settings synced"), "linked -> config-adopt");
+        assert!(tick(&mut r, &joining, &linked).banner.unwrap().contains("settings synced"), "linked -> config-adopt");
         // config-adopt auto-finishes on the adoption line -> export.
         let adopt = ["coop: adopted host config (settings synced)".to_string()];
-        assert!(tick(&mut r, &adopt).banner.unwrap().contains("Export diagnostics"), "config-adopt -> export");
+        assert!(tick(&mut r, &joining, &adopt).banner.unwrap().contains("Export diagnostics"), "config-adopt -> export");
         // export is a manual step and sync-check is a stub; skip both to confirm the auto-finished run
         // actually TERMINATES (reaches the done toast), not just advances to export.
         let skip = |r: &mut GuideRunner| {
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() })
+            r.tick(&GuideInput { delta: 0.1, state: &joining, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+            r.tick(&GuideInput { delta: 0.1, state: &joining, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() })
         };
         assert!(skip(&mut r).stub, "skip export -> the sync-check stub");
         assert!(skip(&mut r).finished_now, "the auto-finished joiner run reaches the done toast");
@@ -404,34 +404,37 @@ mod tests {
     }
 
     #[test]
-    fn two_player_join_host_open_keys_on_the_host_only_discovery_fragment() {
-        // The host/joiner discovery steps must key on role-distinct substrings: the host's `host-open`
-        // must NOT advance on the joiner's line, only on its own. Guards the substring choice so a
-        // host can't false-finish off the joiner's discovery line.
-        use crate::guide::{ControlHints, GuideInput, GuideRunner, RigState, Role};
+    fn two_player_join_derives_host_and_skips_the_joiner_only_config_adopt() {
+        // The host machine: starting UNRESOLVED, the Open World action (lobby_intent = Host) derives Host
+        // via the connect step, and the joiner-only config-adopt step is then filtered out — the host
+        // goes linked -> export directly. Guards both derivation and post-derivation role filtering on
+        // the real guide. (The connect step finishes on the action itself, not a discovery log line.)
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
         let hints = ControlHints { done: "D", skip: "S" };
-        let mut r = GuideRunner::start(two_player_join(), Role::Host, hints);
+        let mut r = GuideRunner::start(two_player_join(), Role::Solo, hints);
         let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
+        let hosting =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Host, ..Default::default() };
 
-        // boot -> both-password; skip the manual reminder -> host-open.
+        // boot -> both-password; release, then skip the manual reminder -> the connect step.
         r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
         r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
         let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
-        assert!(r.tick(&skip).banner.unwrap().contains("Open World"), "skip password -> host-open");
+        assert!(r.tick(&skip).banner.unwrap().contains("Open World to host or Join"), "skip password -> connect step");
 
-        // The joiner's line must NOT finish the host step...
-        let joiner_line = ["coop: lobby discovery resolved partner peer-7 (we are the client); seeding rung 2".to_string()];
+        // The Open World action resolves the intent -> connect derives Host and advances to linked.
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &joiner_line, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
-                .banner.unwrap().contains("Open World"),
-            "host-open must ignore the joiner's discovery line",
-        );
-        // ...but the host's own line does, advancing to the shared linked step.
-        let host_line = ["coop: lobby discovery resolved partner peer-7 (we are the host); seeding rung 2".to_string()];
-        assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &host_line, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
+            r.tick(&GuideInput { delta: 0.1, state: &hosting, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
                 .banner.unwrap().contains("Steam P2P link"),
-            "host-open -> linked on the host's own discovery line",
+            "connect (Open World) -> linked, role derived Host",
+        );
+        // linked auto-finishes on the rung-2 link milestone; config-adopt is Join-only, so the host
+        // skips straight to export.
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        assert!(
+            r.tick(&GuideInput { delta: 0.1, state: &hosting, new_log_lines: &linked, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
+                .banner.unwrap().contains("Export diagnostics"),
+            "host skips the joiner-only config-adopt -> export",
         );
     }
 

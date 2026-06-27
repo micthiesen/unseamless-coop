@@ -355,6 +355,10 @@ pub fn join(config: &Config) {
 fn start_session(config: &Config, intent: LobbyIntent) {
     let generation = SESSION_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     let is_host = matches!(intent, LobbyIntent::Host);
+    // Store IS_HOST *before* SESSION goes non-Off: a reader that checks `in_session` (SESSION) first and
+    // then `is_host` (as `session_flags` and the rig-guide intent read do) must never see "in a session"
+    // with a stale `is_host`. On x86_64 TSO this store order makes the flag/data handoff correct without
+    // explicit Acquire/Release. Keep this order (and the SESSION-first order in `leave`/`fail_session`).
     IS_HOST.store(is_host, Ordering::Relaxed);
     SESSION.store(SessionState::Connecting.as_u8(), Ordering::Relaxed);
     set_banner(
@@ -499,8 +503,9 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
     };
 
     let forward = !is_host && forward_pref;
-    // rig-guide `two-player-join` auto-finishes host-open / join-join on the role-distinct substrings
-    // `we are the host` / `we are the client` below — keep those fragments if you reword the rest.
+    // Human-readable discovery-resolve milestone for the run log / diagnostics. (The rig-guide
+    // `two-player-join` no longer keys off this line — its connect step derives the role from the
+    // Open/Join action and finishes on `coop: linked` next; this stays for log legibility.)
     log::info!(
         "coop: lobby discovery resolved partner {} (we are the {}); seeding rung 2",
         peer_tag(peer_id),

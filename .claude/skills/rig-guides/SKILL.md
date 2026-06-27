@@ -119,15 +119,25 @@ unknown `To` id ends the guide cleanly rather than panicking — but keep ids co
 
 ## Roles (two-player guides)
 
-Tag steps so one committed guide drives both machines. Set `[debug] rig_role` to `host` / `join` on
-each machine (default `solo`); each sees only its own steps plus the untagged shared ones.
+Tag steps so one committed guide drives both machines; each sees only its own steps plus the untagged
+shared ones. **The role is normally DERIVED, not hand-set** — drop in the standard `.connect_step()`
+and it sets this machine's role from what the tester does (Open World ⇒ `Host`, Join world ⇒ `Join`),
+auto-finishing on the action. Place it once, before the role-tagged steps; everything after filters by
+the derived role.
 
 ```rust
 .step("both-boot", "Both: load a save in the same area.").done_when(game_state_is(GameState::InGame))
-.step("host-open", "HOST: Open World and place your sign.").role(Role::Host).done_when(lobby_is(LobbyState::Host))
-.step("join-join", "JOINER: Join World.").role(Role::Join).done_when(lobby_is(LobbyState::Client))
-.step("confirm", "Both: confirm you see each other.").done_when(players_at_least(2))
+.connect_step()                                  // derives Host/Join from the Open/Join action
+.step("linked", "Both: wait for the link.").done_when(log_contains("coop: linked"))
+.step("config-adopt", "JOINER: confirm settings synced.").role(Role::Join).done_when(log_contains("coop: adopted host config"))
 ```
+
+`[debug] rig_role` is only an **override / solo fallback**: an explicit non-`solo` value (`host` /
+`join`) pins the role and suppresses derivation (use it for a guide *without* a connect step, or to run
+one leg solo); left at the default `solo`, the connect step derives it. A solo run with no peer never
+traps — pick an intent to derive a role, or skip/finish before acting to stay `Solo`. Role-tagged steps placed
+*before* the connect step run with the role unresolved (`Solo`), so only untagged steps show until it
+resolves.
 
 ## Stub steps (commit a guide before it's executable)
 

@@ -69,14 +69,16 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
   exact same sequence (advance with `L3 + D-pad Up`, skip with `L3 + D-pad Down`), instead of a chat
   round-trip. Add it **by hand** to each machine's `unseamless-coop/unseamless_coop.toml` after
   extracting (the `rig.sh package` step doesn't emit these debug keys, and ConfigSync doesn't carry
-  them), and set each machine's `[debug] rig_role` (`host` on the hoster, `join` on the joiner) so a
-  role-tagged guide shows the right steps per machine. For this connect test, `two-player-join` fits;
-  for the create RE, `rung3-create-chart`. Their connect steps **auto-finish off the run log** (the
-  lobby-discovery resolve line, `coop: linked`, `coop: adopted host config`, the `session-probe:` FSM
-  lines), so the result lands in the shareable/forwarded log and the tester is never asked "did it
-  connect?" — that's the whole point of staging a guide over a chat round-trip. The whole subsystem is
-  debug-only, so **every machine must run a diag build** (release strips it entirely). Authoring + the
-  committed list: [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
+  them). For `two-player-join` each machine's **role is derived** from its Open/Join action by the
+  guide's connect step, so **leave `[debug] rig_role` at the default `solo`** — you no longer set it per
+  machine. (It remains an override/solo fallback: set it `host` / `join` only to force a role for a
+  guide without a connect step, or to run one leg solo.) For this connect test, `two-player-join` fits;
+  for the create RE, `rung3-create-chart`. Their steps **auto-finish off the run log** (`coop: linked`,
+  `coop: adopted host config`, the `session-probe:` FSM lines), so the result lands in the
+  shareable/forwarded log and the tester is never asked "did it connect?" — that's the whole point of
+  staging a guide over a chat round-trip. The whole subsystem is debug-only, so **every machine must
+  run a diag build** (release strips it entirely). Authoring + the committed list:
+  [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
 
 > The `lobby_callback_probe` (rung-4 gate) has already served its purpose solo — it confirmed ER pumps
 > via `RunCallbacks` and `CreateLobby` succeeds. It can stay off for the friend test; the live
@@ -93,11 +95,12 @@ attempt can be retried (Leave, then Open/Join again), and each Open/Join **reset
 report** so the per-stage diagnostics reflect only the latest attempt, not a stale earlier one.
 
 **The in-game procedure is the `two-player-join` guide — don't hand-relay it.** Stage `[debug] guide =
-"two-player-join"` and `[debug] rig_role` per machine (above), and both machines are walked through the
-connect on-screen, each step **auto-finishing off the run log** so the result is captured, not relayed:
-the lobby-discovery resolve line (per role), the rung-2 link milestone (`coop: linked`), and the
-client's config adoption (`coop: adopted host config`). The host sees the host steps, the joiner the
-joiner steps, both the shared ones — set the role on each machine. Just watch the rig side with
+"two-player-join"` (no per-machine `rig_role` — the connect step derives each machine's role from its
+Open/Join action), and both machines are walked through the connect on-screen, each step
+**auto-finishing off the run log** so the result is captured, not relayed: the connect step resolves on
+the Open/Join action itself, then the rung-2 link milestone (`coop: linked`) and the client's config
+adoption (`coop: adopted host config`). The host (Open World) sees the host steps, the joiner (Join
+world) the joiner steps, both the shared ones — derived per machine. Just watch the rig side with
 `scripts/rig.sh log -f` and have the friend hit Export at the end; the guide drives the rest. The
 ordered steps live only in the guide (`crates/unseamless-core/src/guide/guides.rs`), never duplicated
 here.

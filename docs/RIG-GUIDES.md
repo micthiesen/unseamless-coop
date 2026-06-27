@@ -4,8 +4,9 @@ A **guide** is an ordered series of on-screen test steps that walks a tester thr
 without the orchestrator having to round-trip "do X, tell me the result, now do Y" over the wire.
 The current step shows as a pinned banner until its finish signal fires; the engine then advances
 (optionally branching on a log/state result), and the guide ends with a hardcoded "done testing"
-toast. One shared guide runs on every machine; each shows only the steps tagged for its role, so
-two-player testing is "set a role, both follow the same guide."
+toast. One shared guide runs on every machine; each shows only the steps tagged for its role, and a
+machine's role is **derived** from what the tester does (Open World ⇒ host, Join world ⇒ join) via a
+standard connect step — so two-player testing is "both run the same guide; each just opens or joins."
 
 This is the design + how it's wired. **Authoring** a guide (the API you actually write) is its own
 short skill: `.claude/skills/rig-guides/SKILL.md`. The engine is host-tested in
@@ -84,7 +85,8 @@ logic is *verified* in core, the binding just samples and renders.
 
 - **Step** — instruction text + defaults `{manual-finish, serial-next, all-roles, executable}`.
   Opt-in modifiers: `.role(...)`, `.done_when(predicate)`, `.branch(|ctx| …)`,
-  `.default_branch(advance)`, `.stub(reason)`.
+  `.default_branch(advance)`, `.stub(reason)`. Plus the composable `.connect_step()` (below) that
+  appends a standard role-deriving step.
 - **Predicate** — a closure over a read-only `PredicateCtx` (the snapshot + per-step elapsed time +
   the log lines seen since the step started). Ready-made composable ones: `log_contains`,
   `lobby_is` / `protocol_is`, `game_state_is`, `players_at_least`, `after_secs`, plus `.and`/`.or`.
@@ -93,9 +95,21 @@ logic is *verified* in core, the binding just samples and renders.
   **skip** takes its `.default_branch` (default: `Next`, which becomes `Done` past the last step).
   Skip is best-effort per the brief: serial → next, branching → its declared default, dead-end →
   done. Unknown `To(id)` targets degrade to `Done` rather than panicking.
-- **Roles** — `Host` / `Join` / `Solo`, resolved from `[debug] rig_role` (default `Solo`). An
-  untagged step shows to all; a tagged step shows only to its role, and the engine skips over
-  non-matching steps when advancing. This is what makes two-player testing easy.
+- **Roles** — `Host` / `Join` / `Solo`. An untagged step shows to all; a tagged step shows only to
+  its role, and the engine skips over non-matching steps when advancing. This is what makes two-player
+  testing easy. **A role is normally DERIVED, not hand-set** (see *Connect step* below): the runner
+  starts unresolved (`Solo`) and the connect step sets it from the tester's Open/Join action. The
+  `[debug] rig_role` field is only an **override / solo fallback** — an explicit non-`Solo` value pins
+  the role and suppresses derivation; left at the default `Solo`, the connect step derives it.
+- **Connect step** — `.connect_step()` appends a standard, shown-to-everyone step that **derives this
+  machine's role from what the tester does**: Open World ⇒ `Host`, Join world ⇒ `Join` (read off
+  `RigState::lobby_intent`, mapped in the binding from the live session flags). It auto-finishes the
+  moment the intent resolves, and every role-tagged step *after* it then filters by the derived role.
+  Drop it into a two-player guide once, before the role-tagged steps; guide writers never hand-assign
+  a role. Role-tagged steps placed *before* it run with the role still unresolved (`Solo`) — only
+  untagged steps show until it resolves. It's manually finishable + skippable like any step, so a solo
+  run with no peer degrades sensibly (pick an intent to derive, or skip/finish before acting to stay `Solo`) and an
+  explicit non-`Solo` `rig_role` override wins over the derived intent.
 - **Stub steps** — `.stub(reason)` marks a not-yet-executable step that renders as committed
   documentation (a `[PENDING: reason]` banner) until the work behind it lands. A stub has no auto
   finish; it advances on done/skip like any manual step, so a partially-built (or all-stub) guide
@@ -173,14 +187,16 @@ one-line `by_name`/`NAMES` entry in `guide/guides.rs`.
 |---|---|
 | `rung3-create-chart` | **Flagship / dogfood** for the rung-3 create-session RE (`docs/SESSION-RE-FINDINGS.md`). Boot to a loaded save → host via a multiplayer item; auto-finishes on `lobby = TryToCreateSession` (or the `session-probe:` transition line) and **branches**: transition seen → a "captured" terminal, else → a "try a summon sign" retry step. Drives the human steps + auto-detects the log signal; the orchestrator-side ptrace write-watch is separate. Run it with `[debug.probes] session_probe = true`. |
 | `overlay-smoke` | A tiny self-test of the guide system: banner renders, controls work, an `after_secs(3)` auto-advance fires, the **choice modal** renders + captures an answer (with a free-form note), the done toast shows. Needs no session/RE state — the worked example of the choice capability. |
-| `two-player-join` | **The canonical role-tagged two-player guide** and the showcase of log-driven auto-finish: it drives the full friend-connect flow (rungs 4 + 2) and every connect step **auto-finishes off the run log** — the lobby-discovery resolve line (per role), the rung-2 link milestone (`coop: linked`), the client's `coop: adopted host config` — so the result is captured in the (forwarded) log, not relayed. Host/joiner/shared steps from one guide (set `[debug] rig_role` per machine). Ends with a committed **stub** (settings take *effect* in-world, pending the apply layer + rung 3). The driving doc is `docs/FRIEND-TEST-RUNBOOK.md`. |
+| `two-player-join` | **The canonical role-tagged two-player guide** and the showcase of log-driven auto-finish: it drives the full friend-connect flow (rungs 4 + 2). The standard **connect step** derives each machine's role from its Open/Join action (no per-machine `rig_role` needed), then the rest **auto-finishes off the run log** — the rung-2 link milestone (`coop: linked`) and the client's `coop: adopted host config` — so the result is captured in the (forwarded) log, not relayed. Host/joiner/shared steps come from one guide. Ends with a committed **stub** (settings take *effect* in-world, pending the apply layer + rung 3). The driving doc is `docs/FRIEND-TEST-RUNBOOK.md`. |
 | `rig-observation` | The **rig observation run** (`docs/RIG-RUNBOOK.md`): drive the session observer through the states to chart and read the `session change @frame …` snapshots. Solo legs auto-finish off the observer log line / live FSM where a fresh signal lands in-window (else the manual advance covers it — the first `session change` may fire at the title, and `TryToCreateSession` is transient; run with `[debug.probes] session_probe = true` for the FSM log signals); the 2-player legs (player count, in-combat scaling, area-boundary persistence) are committed **stubs**, revived during the friend test. Points at `rung3-create-chart` for the FSM capture rather than duplicating it. |
 
 ## How to run one
 
 1. Set `[debug] guide = "<name>"` in the install's `unseamless-coop/unseamless_coop.toml` (or the rig
-   seed at `scripts/rig/seed-config.toml`). For a two-player guide, set `[debug] rig_role` to `host`
-   on the hosting machine and `join` on the joiner (default `solo`).
+   seed at `scripts/rig/seed-config.toml`). For a two-player guide built around a connect step (e.g.
+   `two-player-join`), the role is **derived** from each machine's Open/Join action — leave `[debug]
+   rig_role` at the default `solo`. Only set it (`host` / `join`) to **force** a role for a guide
+   without a connect step, or to run one leg solo.
 2. If the guide's predicates read probe output (the flagship reads `session-probe:` lines), enable
    the matching probe (e.g. `[debug.probes] session_probe = true`).
 3. Launch (diag/dev build only). The pinned banner appears top-center; follow it, using the DONE
@@ -190,9 +206,10 @@ one-line `by_name`/`NAMES` entry in `guide/guides.rs`.
 
 When a friend or prerelease session is meant to validate **something specific**, ship a guide in the
 shared bundle config so the friend(s) **and** you are walked through the same on-screen steps — set
-`[debug] guide = "<name>"` in the bundle's `unseamless_coop.toml`, and set each machine's `[debug]
-rig_role`. The guide is debug-only, so this only takes effect on a diag/prerelease build. See
-`docs/FRIEND-TEST-RUNBOOK.md` > "Stage it up front".
+`[debug] guide = "<name>"` in the bundle's `unseamless_coop.toml`. A connect-step guide derives each
+machine's role from its Open/Join action, so no per-machine `[debug] rig_role` is needed (it's only an
+override/solo fallback). The guide is debug-only, so this only takes effect on a diag/prerelease build.
+See `docs/FRIEND-TEST-RUNBOOK.md` > "Stage it up front".
 
 ## Extending
 
