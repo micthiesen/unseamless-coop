@@ -265,8 +265,10 @@ impl Overlay {
         self.draw_nameplates(ui);
         // Branded corner stamp — only off the playfield (title/main menu, character select, loading),
         // never a persistent in-play banner. The game-thread probe (`crate::features::playstate`)
-        // publishes the flag; we read it non-blocking here.
-        if !crate::playstate::in_gameplay() {
+        // publishes the flag; we read it non-blocking here. Suppressed whenever the debug panel is up:
+        // it grows from the bottom-left and the watermark sits top-left, so off the playfield (where
+        // both are visible) a tall panel overlaps the stamp. The panel wins — it's the live surface.
+        if !crate::playstate::in_gameplay() && !self.show_debug {
             self.draw_watermark(ui);
         }
         // Live debug panel (bottom-left): shown whenever toggled on, including during gameplay (unlike
@@ -911,12 +913,12 @@ fn enter_pressed(ui: &Ui) -> bool {
 const DEBUG_PANEL_COL_GAP: f32 = 28.0;
 
 /// Render a [`DiagnosticReport`] into the current window as a compact two-column layout. The sections
-/// fill **column-major**: partitioned on section boundaries into a heavier LEFT column (filled first,
-/// top to bottom) and a lighter RIGHT one, each drawn as its own vertical stack — so a section's fields
-/// never split across columns. Both columns are **bottom-aligned** (the shorter right column is top-
-/// padded), pooling all the unused space in the top-right corner. Halves the height versus one tall
-/// stack while using the wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built
-/// that way in [`crate::diag::build_report`]).
+/// fill **column-major**: partitioned on section boundaries into a LEFT and a RIGHT column at the split
+/// that most evenly balances their heights, each drawn as its own vertical stack — so a section's fields
+/// never split across columns. Both columns are **bottom-aligned** (the shorter one is top-padded),
+/// pooling the unused space in the top corner. Halves the height versus one tall stack while using the
+/// wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built that way in
+/// [`crate::diag::build_report`]).
 fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     let sections = report.sections();
     if sections.is_empty() {
@@ -947,16 +949,20 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
         lines as f32 * line_h + col.len().saturating_sub(1) as f32 * gap
     };
 
-    // Partition on section boundaries by rendered height: the first split where the left column is at
-    // least as tall as the right. Left height grows / right height shrinks as the split moves right, so
-    // this is the most balanced split with left >= right — left is the heavier column and the pad below
-    // is non-negative by construction. Falls back to `split == sections.len()` (everything left, a single
-    // column) for one section, or the degenerate case where one section out-measures all the rest.
+    // Partition on section boundaries by rendered height, choosing the split that **minimizes the
+    // height difference** between the two columns. As the split moves right the left column grows and
+    // the right shrinks, so the difference is a single-valley curve; we just keep the smallest. Unlike
+    // a "first split where left >= right" rule (which always parks the heavier column on the left and
+    // can leave the right one sparse), this lets a small trailing section tip into the right column
+    // whenever doing so balances the two columns better. Either column may end up the taller one, so
+    // the bottom-align below pads whichever is shorter. Single section => `split == len` (one column).
     let mut split = sections.len();
+    let mut best_diff = f32::INFINITY;
     for k in 1..sections.len() {
-        if column_height(&sections[..k]) >= column_height(&sections[k..]) {
+        let diff = (column_height(&sections[..k]) - column_height(&sections[k..])).abs();
+        if diff < best_diff {
+            best_diff = diff;
             split = k;
-            break;
         }
     }
     let (left, right) = sections.split_at(split);
@@ -974,18 +980,20 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
     }
     pitch += DEBUG_PANEL_COL_GAP;
 
-    ui.group(|| draw_report_column(ui, left));
+    // Bottom-align the two columns by top-padding whichever is shorter, pooling the empty space in the
+    // top corner. With the balanced split above either column can be the taller one, so pad each by its
+    // own deficit (one of the two is always zero).
+    let (left_h, right_h) = (column_height(left), column_height(right));
+    let pad_column = |ui: &Ui, sections: &[ReportSection], pad: f32| {
+        if pad > 0.0 {
+            ui.dummy([0.0, pad]);
+        }
+        draw_report_column(ui, sections);
+    };
+    ui.group(|| pad_column(ui, left, (right_h - left_h).max(0.0)));
     if !right.is_empty() {
         ui.same_line_with_pos(pitch);
-        ui.group(|| {
-            // Top-pad the lighter right column by the height difference so its bottom lines up with the
-            // left's — pushing the empty space into the top-right corner.
-            let pad = (column_height(left) - column_height(right)).max(0.0);
-            if pad > 0.0 {
-                ui.dummy([0.0, pad]);
-            }
-            draw_report_column(ui, right);
-        });
+        ui.group(|| pad_column(ui, right, (left_h - right_h).max(0.0)));
     }
 }
 
