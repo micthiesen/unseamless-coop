@@ -23,10 +23,6 @@
 //! initialized when the probe posts its "Connecting…" banner — no ordering care needed beyond keeping
 //! it inside/after `pre_task_startup`.
 
-// Until the orchestrator wires `start()` into `app::install` and `is_ready()`/`status()` into the
-// overlay's action gate, nothing in here is called yet. Drop this allow once that wiring lands.
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 

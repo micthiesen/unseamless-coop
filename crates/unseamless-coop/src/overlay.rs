@@ -830,10 +830,20 @@ impl ImguiRenderLoop for Overlay {
     }
 }
 
-/// The current session context for menu gating. Until the co-op/session layer lands (rig-gated) we
-/// have no live session, so this is the not-in-session default — only Host / Join enabled.
+/// The current session context for menu gating, assembled from the live process state (all reads are
+/// non-blocking atomics, safe from the Present thread): the co-op session lifecycle
+/// ([`crate::coop::session_context`] → `in_session`/`is_host`), Steam readiness
+/// ([`crate::steam_ready::is_ready`]), and whether the player is loaded into the world
+/// ([`crate::playstate::in_gameplay`]). Open World / Join world are enabled only when Steam is up, the
+/// player is in-game, and no session is active; Leave only while in a session.
 fn session_context() -> SessionContext {
-    SessionContext::default()
+    let (in_session, is_host) = crate::coop::session_context();
+    SessionContext {
+        in_session,
+        is_host,
+        steam_ready: crate::steam_ready::is_ready(),
+        in_game: crate::playstate::in_gameplay(),
+    }
 }
 
 /// Draw a nameplate marker dot — a filled colored core ringed by a near-opaque dark outline (the same
