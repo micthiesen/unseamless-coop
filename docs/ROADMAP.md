@@ -29,23 +29,28 @@ Shipped to `main`, rig-verified where applicable:
 
 ### Solo / host-doable (no 2nd player needed)
 
-- **Rung 4 — Steam lobby discovery (password-keyed).** *Independent of rung 3* — lobbies replace the
-  manual SteamID copy-paste that seeds the rung-2 side-channel; they don't put players in one another's
-  world (that's still rung 3). So most of this is buildable off-rig now, ahead of any 2-player RE. The
-  build order (full spec in [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4):
-  - **Harness prototype (fully solo, zero rig).** The [`harness`](../crates/harness) crate is a normal
-    native exe and *can* take `steamworks-rs`; prove `CreateLobby` → `SetLobbyData("usc_pw",
-    hash(password))` + version tag → `AddRequestLobbyListStringFilter` → `RequestLobbyList` →
-    `JoinLobby` → read host SteamID, on the host (appid 480/Spacewar, not the game). Biggest de-risk
-    for the least cost; validates the password-keyed scheme entirely off-rig.
-  - **DLL hand-bind (writable solo, fires on the rig).** Bind the `RegisterCallResult` C++-ABI in
-    `coop/steam.rs` (the `CCallbackBase*` vtable + three `extern "C"` thunks) and seed the rung-2
-    side-channel (`[coop] peer_steam_id` + `is_host`) from the resolved host SteamID. Authorable +
-    `cargo check`/`clippy`-able without the game; only firing needs the rig.
-  - **Cheap rig probe (rig, but *single-player*).** The one hard unknown: does ER pump Steam via legacy
-    `RunCallbacks` (our registered call-results fire) or `ManualDispatch` (path blocked)? A one-machine
-    experiment — register one harmless `CreateLobby` call-result and watch it fire under ER's pump. Gates
-    the hand-bind, so run it early; fits "no 2-player" since it's solo.
+- **Rung 4 — Steam lobby discovery (password-keyed).** *In progress — the chosen connection path,
+  landing this wave.* It **replaces** the manual SteamID copy-paste: both players set the same password,
+  a create-or-join resolves who hosts, and the resolved peer + derived role seed the rung-2 side-channel.
+  (It lands behind a gate; until that flips, the manual path is still what runs.)
+  *Independent of rung 3* — it links the side-channels, it doesn't put players in one another's world
+  (that's still rung 3). Status against the build order (full spec in
+  [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4):
+  - ✅ **Rig probe (done 2026-06-26).** The one hard unknown is answered: ELDEN RING pumps Steam via
+    legacy `RunCallbacks` (its imports carry `RunCallbacks` + `RegisterCallResult`, no `ManualDispatch`),
+    and `CreateLobby` **succeeds in-process** (EResult OK, real lobby id). Key lesson: do **not** register
+    a call-result *and* poll the same handle — ER's pump consumes it first and the poll sees
+    `InvalidHandle`. The path is **poll-based** (`ISteamUtils` `IsAPICallCompleted` + `GetAPICallResult`,
+    accessor `SteamAPI_SteamUtils_v010`), matching rung 1/2's poll-not-pump model.
+  - ✅ **Harness prototype (done).** The [`harness`](../crates/harness) crate (a normal native exe that
+    *can* take `steamworks-rs`) proved `CreateLobby` → `SetLobbyData("usc_pw", hash(password))` + version
+    tag → `AddRequestLobbyListStringFilter` → `RequestLobbyList` → `JoinLobby` → read host SteamID, on
+    Spacewar (appid 480), validating the password-keyed scheme off-rig.
+  - **DLL hand-bind (in progress).** Bind the **poll-based** `ISteamUtils`/`ISteamMatchmaking` path in
+    `coop/steam.rs` (replacing the dormant register-based `CCallbackBase` machinery) and seed the rung-2
+    side-channel from the resolved host SteamID + derived role. Solo `CreateLobby` is rig-proven; the
+    **joiner-finds-host leg + the host/client flip** land with the two-player friend test (see
+    [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)), then flip on lobby discovery.
 - **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
   `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
@@ -60,7 +65,10 @@ Shipped to `main`, rig-verified where applicable:
 ### 2-player-gated (the co-op core + everything riding on it)
 
 - **Rung 2 verification** — confirm the private Steam P2P side-channel links across two machines
-  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven.
+  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven. The old
+  manual `[coop] peer_steam_id` + `is_host` pairing path is **being retired** — the side-channel is
+  moving to seeding by rung-4 lobby discovery, so this verification rides the lobby-discovery friend
+  test rather than a hand-entered peer. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 - **Rung 3 — drive the session FSM** to put a peer in your world (the hard RE: the create/join
   functions, the password-derived AES key). This is what unblocks in-world presence.
 - **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password,

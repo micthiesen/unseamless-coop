@@ -42,7 +42,7 @@ entry points.
 | session create/join probe detours | `session_probe.rs` | ilhook trampoline (`extern "win64"`) | **yes** (in `log_initiation`) — gated, currently inert |
 | code patch (`apply`) | `patch.rs` | — (not an entry point) | n/a |
 | Steam networking send/receive/methods | `steam.rs` | — (us → Steam) | n/a |
-| Steam lobby call-result thunks | `steam.rs` | Steam dispatch via the game's `RunCallbacks` (`extern "C"`) | **yes** (in `cr_firewall`) — gated (rung 4), currently dormant |
+| Steam lobby call-result thunks | `steam.rs` | Steam dispatch via the game's `RunCallbacks` (`extern "C"`) | **yes** (in `cr_firewall`) — gated (rung 4), dormant; being removed for the poll-based path |
 | overlay `render` | `overlay.rs` | hudhook present hook (`extern "system"`) | **yes** — pre-existing |
 | overlay `initialize` / `before_render` / `message_filter` | `overlay.rs` | hudhook present / WndProc hook | **added** |
 | co-op driver loop | `coop.rs` | — (our own thread) | n/a (see note) |
@@ -137,7 +137,7 @@ foreign calls *into* this code; it calls *out* to `VirtualProtect` / `FlushInstr
 OS). A panic here unwinds up our own init thread to the thread root, where `std` catches it at the
 thread boundary — not UB. No firewall required.
 
-### `steam.rs` — Steam flat-API binding (rungs 1-3: not an entry point; rung 4: firewalled)
+### `steam.rs` — Steam flat-API binding (rungs 1-3: not an entry point; rung 4: firewalled, being retired)
 Rungs 1-3 are all us → Steam: we resolve exports with `GetProcAddress` and *call* them
 (`SendMessageToUser`, `ReceiveMessagesOnChannel`, the versioned accessors). The
 `m_pfnRelease` / `m_pfnFreeData` fields on a received message are function pointers **Steam** hands us
@@ -146,16 +146,21 @@ a panic in our surrounding code can't unwind through them. `receive()` runs on t
 not a Steam-invoked callback (we deliberately never pump Steam's callback dispatch — the game owns it).
 No FFI-unwind boundary for that path.
 
-**Rung 4 (lobby discovery) adds a real foreign→us boundary.** Password-keyed lobby discovery registers
-C++-ABI **call-result** objects (`CCallbackBase`) via `SteamAPI_RegisterCallResult`, and Steam invokes
-their vtable thunks (`cr_run`, `cr_run_call_result`, `cr_size`) from **the game's own `RunCallbacks`
-pump** across `extern "C"` — exactly the foreign→us shape the loader/ilhook/hudhook boundaries have. So
-each thunk wraps its body in `cr_firewall` (`catch_unwind` + one-shot `error_contained`, mirroring
-`input.rs`/`saves.rs`): a panic in a lobby handler is contained, logged, and degrades discovery rather
-than unwinding into the game's pump thread. `cr_run_call_result` also reclaims its heap object *after*
-the firewalled handler returns, so a caught panic still frees the object (no leak, no double-free). This
-whole path is **gated off** (`LOBBY_DISCOVERY_ENABLED = false`) pending the rung-4 rig probe, but the
-firewall is in place now so flipping the gate doesn't reopen the boundary unguarded.
+**Rung 4 today has a firewalled foreign→us boundary that the poll-based rewrite removes.** The current
+(dormant, `LOBBY_DISCOVERY_ENABLED = false`) lobby-discovery code registers C++-ABI **call-result**
+objects (`CCallbackBase`) via `SteamAPI_RegisterCallResult`, and Steam would invoke their vtable thunks
+(`cr_run`, `cr_run_call_result`, `cr_size`) from **the game's own `RunCallbacks` pump** across
+`extern "C"` — a real foreign→us boundary, so each thunk wraps its body in `cr_firewall` (`catch_unwind`
++ one-shot `error_contained`, mirroring `input.rs`/`saves.rs`), and `cr_run_call_result` reclaims its
+heap object *after* the firewalled handler returns (a caught panic still frees it — no leak, no
+double-free). **This register-based design is being replaced by a poll-based one** (decided after the
+rig probe): the async lobby calls return a `SteamAPICall_t` we read by **polling** via `ISteamUtils`
+`IsAPICallCompleted` + `GetAPICallResult` on the co-op driver thread — the same poll-not-pump shape as
+rungs 1-2 (registering *and* polling the same handle conflicts: the game's `RunCallbacks` consumes it
+first and our poll sees `InvalidHandle`; see [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4). Once
+that rewrite lands and the `cr_*` thunks are removed, Steam never invokes a vtable of ours and rung 4
+carries **no** `extern "C"` foreign→us entry point — this row drops to `n/a`. Until then the firewall
+stays in place so the gate can't be flipped onto an unguarded boundary.
 
 ### `overlay.rs` — hudhook render loop (firewall added on the remaining methods)
 hudhook drives our `Overlay: ImguiRenderLoop` from its `extern "system"` present hook with no catch of
