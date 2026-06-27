@@ -630,8 +630,9 @@ impl Matchmaking {
 
 /// Re-issue `RequestLobbyList` this often. Valve does not index a freshly-published lobby's data
 /// instantly, so the first filtered list is often empty even when a host is already up — re-issue rather
-/// than latch that as failure. A host re-lists on the same beat to catch the both-create race. The
-/// `run_discovery` timeout is the real deadline.
+/// than latch that as failure. The joiner re-lists on this cadence while searching for the host's lobby
+/// (the host issues its one-shot existence-check list on it too). The `run_discovery` per-role timeout
+/// is the real deadline.
 const LOBBY_LIST_RETRY: Duration = Duration::from_secs(2);
 
 /// Which side of the pairing the user chose. The role is **configured by the menu action** (Open World

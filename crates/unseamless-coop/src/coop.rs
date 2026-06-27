@@ -182,11 +182,12 @@ fn record_failure(why: impl Into<String>) {
 
 // Rung-4 lobby-discovery stage notes — called from [`crate::steam`]'s poll-based discovery (on the co-op
 // driver thread). Centralized here so all report mutation + timing stamping lives in one place. These
-// are referenced only by the (currently dormant) rung-4 path; see [`start`].
+// run on the rung-4 lobby-discovery path driven by [`host`]/[`join`].
 
-/// Record which side of lobby discovery we're playing (creates the `lobby` sub-report). Idempotent for a
-/// repeated *same* role (a `CreateLobby` retry re-announces `Host`) so it doesn't wipe earlier stamps; a
-/// genuine role flip (losing the both-create race ⇒ `Host`→`Joiner`) does reset, reflecting the new role.
+/// Record which side of lobby discovery we're playing (creates the `lobby` sub-report). The role is the
+/// user's choice (`Host` for Open World, `Joiner` for Join world), recorded once when discovery acts on
+/// it. Idempotent for a repeated *same* role (a `CreateLobby` retry re-announces `Host`) so it doesn't
+/// wipe earlier stamps.
 pub(crate) fn note_lobby_role(role: LobbyRole) {
     with_report(|r| {
         if r.lobby.as_ref().map(|l| l.role) != Some(role) {
