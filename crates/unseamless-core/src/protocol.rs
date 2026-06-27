@@ -48,92 +48,21 @@ const SETTINGS_BOOL_COUNT: usize = 4;
 pub const MAX_LOG_MSG: usize = 2048;
 
 /// Length of the per-session authentication nonce carried in `Hello` (128 bits). Each peer draws a
-/// fresh random nonce per session; it is what makes an [`auth_proof`] non-replayable (an old proof
-/// captured off the wire won't verify against this session's nonces). The cdylib supplies the random
-/// bytes (core has no entropy source — same split as the generated password).
+/// fresh random nonce per session; it is what makes an [`crate::crypto::auth_proof`] non-replayable
+/// (an old proof captured off the wire won't verify against this session's nonces). The cdylib
+/// supplies the random bytes (core has no entropy source — same split as the generated password).
 pub const AUTH_NONCE_LEN: usize = 16;
-/// Length of an [`auth_proof`] on the wire: the full SHA-256 digest.
+/// Length of an [`crate::crypto::auth_proof`] on the wire: the full SHA-256 digest.
 pub const AUTH_PROOF_LEN: usize = 32;
 /// A per-session random handshake nonce (see [`AUTH_NONCE_LEN`]).
 pub type AuthNonce = [u8; AUTH_NONCE_LEN];
-/// A password-keyed handshake proof (see [`auth_proof`]). The `Bytes` suffix keeps the type name from
-/// colliding with the [`auth_proof`] function.
+/// A password-keyed handshake proof (see [`crate::crypto::auth_proof`]). The `Bytes` suffix keeps the
+/// type name from colliding with the [`crate::crypto::auth_proof`] function.
 pub type AuthProofBytes = [u8; AUTH_PROOF_LEN];
 
-/// Domain separator for the peer-authentication proof. **Deliberately distinct** from the
-/// lobby-discovery token's domain (`unseamless-coop/lobby-discovery/v1\0`, see
-/// [`crate::diagnostics::lobby_discovery_token`]): the discovery token is published world-readable on
-/// a public Steam lobby, so the auth proof must be cryptographically separated from it — even for the
-/// same password the two values must differ, so grabbing the public token tells an attacker nothing
-/// about a valid proof. Ends with a literal NUL before the nonces, matching the discovery token's
-/// framing convention.
-const PEER_AUTH_DOMAIN: &[u8] = b"unseamless-coop/peer-auth/v1\0";
-
-/// The password-keyed handshake proof a **prover** (the peer sending an [`ModMessage::Auth`])
-/// presents to a **verifier** (the recipient), binding both peers' identities and per-session nonces
-/// to the shared co-op password:
-///
-/// `proof = SHA-256(PEER_AUTH_DOMAIN || verifier_id || prover_id || verifier_nonce || prover_nonce || password)`
-///
-/// Both sides feed the **same** `(verifier, prover)` ordering so the value matches: the prover passes
-/// the verifier's id+nonce (learned from its `Hello` / the transport) and its own; the verifier
-/// recomputes with itself as `verifier` and the sender as `prover`. Two properties matter:
-/// - **Replay resistance** — the verifier's fresh nonce is mixed in, so a proof captured from a past
-///   session won't verify against this session's verifier nonce.
-/// - **Reflection resistance** — the *directed pair* `(verifier_id, prover_id)` is part of the hash,
-///   and the ids come from the transport (`from`/`self.id`), **not** from attacker-chosen wire data.
-///   Without the ids, the two handshake directions are symmetric under swapping the two nonces, so an
-///   attacker that has no password could advertise a `Hello` nonce equal to the victim's, capture the
-///   victim's outgoing proof, and reflect it back as a valid-looking inbound proof. Including the
-///   id pair (which an attacker cannot equalize — it can't be both peers) makes the prover→verifier
-///   and verifier→prover inputs differ even when the nonces collide, defeating the reflection.
-///
-/// The ids/nonces are fixed-length so the concatenation is unambiguous; the password is hashed
-/// verbatim (no trim/case-fold), matching the discovery token. SHA-256 keyed by the shared secret is
-/// sufficient here (no length-extension exposure: an attacker has no valid proof to extend, and the
-/// secret is last). Pinned by a known-answer test below.
-///
-/// **Known limits** (acceptable for this threat model, documented so they're a conscious choice):
-/// - *Bounded by password entropy.* This is a hash challenge-response, not a PAKE: an attacker who
-///   sniffs one `Hello` pair + `Auth` (or just reads the world-readable discovery token) can grind a
-///   weak password offline. The auto-generated default password has ample entropy; a user-chosen one
-///   is only as strong as it is long (the startup guard enforces a minimum). This does not regress
-///   relative to the pre-existing discovery token, which is likewise a fast hash of the password.
-/// - *One-shot proof, no session key.* Verifying the proof authenticates the peer's password
-///   knowledge once and marks it linked **by transport id**; subsequent frames are not individually
-///   MAC'd. Ongoing integrity therefore rests on the transport authenticating sender ids (Steam P2P),
-///   which is also what makes the `(verifier_id, prover_id)` binding above unspoofable.
-pub fn auth_proof(
-    verifier_id: crate::transport::PeerId,
-    prover_id: crate::transport::PeerId,
-    verifier_nonce: &AuthNonce,
-    prover_nonce: &AuthNonce,
-    password: &str,
-) -> AuthProofBytes {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(PEER_AUTH_DOMAIN);
-    hasher.update(verifier_id.to_be_bytes());
-    hasher.update(prover_id.to_be_bytes());
-    hasher.update(verifier_nonce);
-    hasher.update(prover_nonce);
-    hasher.update(password.as_bytes());
-    let digest = hasher.finalize();
-    let mut proof = [0u8; AUTH_PROOF_LEN];
-    proof.copy_from_slice(&digest[..AUTH_PROOF_LEN]);
-    proof
-}
-
-/// Constant-time equality for two proofs: compares every byte (no early-out on first mismatch) so a
-/// verifier doesn't leak how many leading bytes matched. Belt-and-suspenders here (the per-session
-/// nonces already stop an attacker from iterating against a fixed challenge), but cheap and correct.
-pub fn proofs_match(a: &AuthProofBytes, b: &AuthProofBytes) -> bool {
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+// The password-keyed handshake proof (`crate::crypto::auth_proof`) and the public lobby-discovery
+// token (`crate::crypto::lobby_discovery_token`) both derive from the shared password and live
+// together in `crate::crypto` so their domain-separation invariant is visible side by side.
 
 /// The mod's semantic version exchanged in the `Hello` handshake. The single source of truth for
 /// every peer the mod stands up (the cdylib bridge and the harness both reference this), so the two
@@ -157,8 +86,9 @@ pub enum ModMessage {
     /// own (and re-asserting it heals a dropped `Hello` over a lossy channel).
     Hello { mod_version: u32, nonce: AuthNonce },
     /// A peer's password-keyed authentication proof, **addressed to** one recipient (`to`) since the
-    /// proof binds that recipient's id and nonce. The recipient verifies it with [`auth_proof`]
-    /// before marking the sender *linked*; a peer this isn't addressed to ignores it. See
+    /// proof binds that recipient's id and nonce. The recipient verifies it with
+    /// [`crate::crypto::auth_proof`] before marking the sender *linked*; a peer this isn't addressed
+    /// to ignores it. See
     /// [`crate::peer::Peer`] for the handshake flow.
     Auth { to: crate::transport::PeerId, proof: AuthProofBytes },
     /// The host's authoritative shared settings, tagged with a monotonic `generation` so a client
@@ -748,55 +678,6 @@ mod tests {
         let mut bytes = ModMessage::Hello { mod_version: 1, nonce: [0; AUTH_NONCE_LEN] }.encode();
         bytes[2] = 5;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(5)));
-    }
-
-    #[test]
-    fn auth_proof_is_deterministic_and_order_sensitive() {
-        // Same inputs -> same proof (so both sides agree); swapping the (id, nonce) roles -> different
-        // proof (the verifier/prover ordering is load-bearing, not symmetric).
-        let (a, b) = (10u64, 20u64);
-        let v = [1u8; AUTH_NONCE_LEN];
-        let p = [2u8; AUTH_NONCE_LEN];
-        assert_eq!(auth_proof(a, b, &v, &p, "pw"), auth_proof(a, b, &v, &p, "pw"));
-        assert_ne!(auth_proof(a, b, &v, &p, "pw"), auth_proof(b, a, &p, &v, "pw"), "role order matters");
-        assert_ne!(auth_proof(a, b, &v, &p, "pw"), auth_proof(a, b, &v, &p, "x"), "password keys it");
-        assert!(proofs_match(&auth_proof(a, b, &v, &p, "pw"), &auth_proof(a, b, &v, &p, "pw")));
-        assert!(!proofs_match(&auth_proof(a, b, &v, &p, "pw"), &auth_proof(a, b, &v, &p, "x")));
-    }
-
-    #[test]
-    fn auth_proof_is_reflection_resistant_under_equal_nonces() {
-        // The attack the id-binding defends against: even when the two nonces are IDENTICAL (an
-        // attacker mirroring the victim's nonce), the directed id pair makes the prover->verifier and
-        // verifier->prover inputs differ, so a victim's outgoing proof is not a valid inbound proof.
-        let (victim, attacker) = (1u64, 99u64);
-        let n = [7u8; AUTH_NONCE_LEN];
-        // What the victim hands the attacker (victim is prover, attacker is verifier).
-        let victim_outgoing = auth_proof(attacker, victim, &n, &n, "pw");
-        // What the victim would accept from the attacker (victim verifier, attacker prover).
-        let victim_expects = auth_proof(victim, attacker, &n, &n, "pw");
-        assert_ne!(victim_outgoing, victim_expects, "a reflected proof must not verify");
-    }
-
-    #[test]
-    fn auth_proof_domain_is_separated_from_the_public_discovery_token() {
-        // The security property is the *domain separation* itself: the proof's domain must never equal
-        // the discovery token's, so the two can't collide for the same password (the discovery token is
-        // published world-readable on the public Steam lobby). Assert that directly — this is what
-        // guards the "don't fix the domain back" regression. (The rendered values also differ, but
-        // that inequality alone is incidental: the proof interposes ids+nonces between domain and
-        // password, so it would differ from the token even if the domains were identical, which is why
-        // the value check below can't stand in for the domain assertion.)
-        assert_ne!(
-            PEER_AUTH_DOMAIN,
-            b"unseamless-coop/lobby-discovery/v1\0".as_slice(),
-            "the auth proof domain must stay distinct from the discovery-token domain"
-        );
-        let pw = "shared-secret";
-        let token = crate::diagnostics::lobby_discovery_token(pw); // 32 lowercase-hex chars (16 bytes)
-        let proof = auth_proof(1, 2, &[0u8; AUTH_NONCE_LEN], &[0u8; AUTH_NONCE_LEN], pw);
-        let proof_hex: String = proof[..16].iter().map(|b| format!("{b:02x}")).collect();
-        assert_ne!(proof_hex, token, "auth proof must not render to the public discovery token");
     }
 
     #[test]

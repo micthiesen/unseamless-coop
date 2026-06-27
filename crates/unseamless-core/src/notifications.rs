@@ -67,6 +67,11 @@ pub const DEFAULT_TOAST_SECS: f32 = 4.0;
 /// Cap on simultaneously-queued toasts; the oldest is dropped when exceeded so a burst can't grow
 /// unbounded or bury the screen.
 const MAX_TOASTS: usize = 8;
+/// Cap on simultaneously-active banners; the oldest is dropped when a *new* id would exceed it.
+/// Banners are keyed by `id` and a peer drives some ids (e.g. a per-peer tag), so a peer cycling
+/// through distinct ids could otherwise grow the banners `Vec` unbounded. Updating an existing id
+/// never grows the `Vec`, so it isn't subject to this cap. Mirrors [`MAX_TOASTS`].
+const MAX_BANNERS: usize = 8;
 
 /// Owns the active notifications. One instance lives in the cdylib's app state; features push to
 /// it and the renderer reads it.
@@ -122,7 +127,9 @@ impl Notifications {
     }
 
     /// Set (or replace, by `id`) a persistent banner. Re-setting the same `id` updates it in place
-    /// rather than adding a duplicate, so a recurring condition shows one banner.
+    /// rather than adding a duplicate, so a recurring condition shows one banner. A *new* id past
+    /// [`MAX_BANNERS`] evicts the oldest banner, so a peer cycling distinct ids can't grow the
+    /// banners unbounded (an in-place update never grows the `Vec`, so it's exempt).
     pub fn set_banner(&mut self, id: impl Into<String>, severity: Severity, message: impl Into<String>) {
         let id = id.into();
         let message = message.into();
@@ -131,6 +138,9 @@ impl Notifications {
             existing.message = message;
         } else {
             self.banners.push(Banner { id, message, severity });
+            if self.banners.len() > MAX_BANNERS {
+                self.banners.remove(0); // drop-oldest; MAX_BANNERS is tiny so the O(n) shift is fine
+            }
         }
     }
 
@@ -282,6 +292,26 @@ mod tests {
         n.set_banner("conn", Severity::Error, "down again");
         n.clear_all_banners();
         assert!(n.banners().is_empty(), "clear_all tears down everything");
+    }
+
+    #[test]
+    fn distinct_banner_ids_past_the_cap_evict_oldest_but_updates_do_not_grow() {
+        let mut n = Notifications::new();
+        for i in 0..(MAX_BANNERS + 3) {
+            n.set_banner(format!("id{i}"), Severity::Info, format!("msg{i}"));
+        }
+        let ids: Vec<&str> = n.banners().iter().map(|b| b.id.as_str()).collect();
+        // The three oldest distinct ids were evicted; survivors are id3..=id10 in insertion order.
+        let expected: Vec<String> = (3..MAX_BANNERS + 3).map(|i| format!("id{i}")).collect();
+        assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
+
+        // Re-setting an existing id updates in place and must NOT grow the Vec past the cap.
+        let before = n.banners().len();
+        n.set_banner("id3", Severity::Error, "updated");
+        assert_eq!(n.banners().len(), before, "updating an existing id never grows the banners");
+        let updated = n.banners().iter().find(|b| b.id == "id3").expect("id3 still present");
+        assert_eq!(updated.severity, Severity::Error);
+        assert_eq!(updated.message, "updated");
     }
 
     #[test]

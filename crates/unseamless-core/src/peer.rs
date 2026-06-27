@@ -22,9 +22,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::Config;
+use crate::crypto::{auth_proof, proofs_match};
 use crate::diagnostics::{LogBundle, LogLevel, LogRecord, peer_tag};
 use crate::notifications::{Notifications, Severity};
-use crate::protocol::{AuthNonce, ModMessage, SessionAction, SharedSettings, auth_proof, proofs_match};
+use crate::protocol::{AuthNonce, ModMessage, SessionAction, SharedSettings};
 use crate::transport::{PeerId, Transport};
 use crate::util::{RateLimiter, Version};
 
@@ -670,7 +671,7 @@ mod tests {
         let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
         host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
         // CLIENT is the prover, HOST the verifier.
-        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
         host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
         assert!(host.is_linked(CLIENT), "test setup: CLIENT should be linked");
         host
@@ -680,7 +681,7 @@ mod tests {
     fn linked_client(v: Version) -> Peer {
         let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
         client.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
-        let proof = crate::protocol::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &HOST_NONCE, PW);
+        let proof = crate::crypto::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &HOST_NONCE, PW);
         client.handle(HOST, ModMessage::Auth { to: CLIENT, proof });
         assert!(client.is_linked(HOST), "test setup: HOST should be linked");
         client
@@ -837,7 +838,7 @@ mod tests {
         let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
         host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
         // A well-formed proof, but addressed to OTHER rather than to us.
-        let proof = crate::protocol::auth_proof(OTHER, CLIENT, &[0u8; AUTH_NONCE_LEN], &CLIENT_NONCE, PW);
+        let proof = crate::crypto::auth_proof(OTHER, CLIENT, &[0u8; AUTH_NONCE_LEN], &CLIENT_NONCE, PW);
         let out = host.handle(CLIENT, ModMessage::Auth { to: OTHER, proof });
         assert!(out.is_empty());
         assert!(!host.is_linked(CLIENT), "a proof addressed to another peer must not link us");
@@ -863,7 +864,7 @@ mod tests {
         // arrive. This pins the missing-nonce early-out and its self-heal.
         let v = Version::new(0, 1, 0);
         let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
-        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
         host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
         assert!(!host.is_linked(CLIENT), "can't verify before the peer's Hello/nonce arrives");
         assert!(host.notifications().banners().is_empty(), "drops quietly, no premature auth banner");
@@ -879,7 +880,7 @@ mod tests {
         // nonce) must not link when replayed at a peer that has since drawn a fresh nonce.
         let v = Version::new(0, 1, 0);
         let stale_host_nonce = [0xAB; AUTH_NONCE_LEN]; // the host's nonce in the *previous* session
-        let captured = crate::protocol::auth_proof(HOST, CLIENT, &stale_host_nonce, &CLIENT_NONCE, PW);
+        let captured = crate::crypto::auth_proof(HOST, CLIENT, &stale_host_nonce, &CLIENT_NONCE, PW);
         // New session: the host's nonce is different (HOST_NONCE != stale_host_nonce).
         assert_ne!(HOST_NONCE, stale_host_nonce, "test premise: the session nonce rotated");
         let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
@@ -896,7 +897,7 @@ mod tests {
         let v = Version::new(0, 1, 0);
         let mut a = Peer::new(HOST, HOST, v, Config::default(), HOST_NONCE); // empty password
         a.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
-        let proof = crate::protocol::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "");
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "");
         a.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
         assert!(a.is_linked(CLIENT), "matching (empty) secret links — guarded only at startup");
     }

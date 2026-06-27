@@ -583,35 +583,10 @@ pub fn peer_tag(steam_id: u64) -> String {
     format!("peer-{:08x}", (hash & 0xffff_ffff) as u32)
 }
 
-/// The rung-4 lobby-discovery **password token** — the value a host publishes as the `usc_pw` lobby
-/// datum and a joiner filters the lobby list by. This is the cross-implementation **contract**: the DLL
-/// hand-bind ([`crate`]'s sibling `coop/steam.rs`) and the `harness` lobby prototype must produce the
-/// **byte-identical** token or two players with the same password never find each other.
-///
-/// `token = lowercase_hex( SHA-256("unseamless-coop/lobby-discovery/v1\0" || password_bytes)[0..16] )`
-///
-/// Load-bearing details, each one a silent-discovery-break if violated:
-/// - the domain-separator prefix ends with a **literal NUL** (`\0`) before the password bytes;
-/// - the password is hashed **verbatim** — the caller must pass the raw configured bytes with **no**
-///   trim, case-fold, or Unicode normalization (a stray normalize in the config layer breaks this);
-/// - only the **first 16 bytes** of the digest are taken, rendered **lowercase** hex (32 chars).
-///
-/// SHA-256 here is for a stable, well-specified, collision-resistant keying of a shared secret into a
-/// public lobby field — not a confidentiality primitive (lobby data is world-readable). Pinned by the
-/// known-answer test below; the harness carries the matching KAT.
-pub fn lobby_discovery_token(password: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(b"unseamless-coop/lobby-discovery/v1\0");
-    hasher.update(password.as_bytes());
-    let digest = hasher.finalize();
-    // First 16 bytes, lowercase hex (no external hex crate — format each byte).
-    let mut token = String::with_capacity(32);
-    for byte in &digest[..16] {
-        token.push_str(&format!("{byte:02x}"));
-    }
-    token
-}
+// The lobby-discovery password token moved to [`crate::crypto`], where it sits beside the peer-auth
+// proof so their domain-separation invariant is visible side by side. Re-exported here because the
+// cdylib's `coop/steam.rs` reaches it through this path (`diagnostics::lobby_discovery_token`).
+pub use crate::crypto::lobby_discovery_token;
 
 /// Rewrite every raw 64-bit SteamID in `text` to its stable [`peer_tag`], so a captured bundle is
 /// safe to share publicly — a raw SteamID64 resolves straight to a person's Steam profile.
@@ -1010,20 +985,6 @@ mod tests {
         assert_eq!(s.changes(&[true]), [(0, true)]);
         // Longer input ignores the tail beyond the watched range.
         assert_eq!(s.changes(&[true, true, false, true]), [(1, true)]);
-    }
-
-    #[test]
-    fn lobby_discovery_token_matches_the_pinned_contract() {
-        // Known-answer test: these must match the harness's KAT byte-for-byte (the DLL hand-bind and
-        // the harness both call this fn, but the values are pinned independently so a future edit to
-        // the domain string / digest slice / hex casing is caught as the discovery-breaking change it
-        // is). Values computed from SHA-256("unseamless-coop/lobby-discovery/v1\0" || password)[0..16].
-        assert_eq!(lobby_discovery_token("swordfish"), "e1ae25ea4eab35799470c31622b014b8");
-        assert_eq!(lobby_discovery_token(""), "997351a38b7ef8eecef4d5c57de65ff4");
-        assert_eq!(lobby_discovery_token("hunter2"), "1ad477bb65bcc83f7235160ee4b63883");
-        // 16 bytes -> 32 lowercase hex chars, and the password is keyed verbatim (case-sensitive).
-        assert_eq!(lobby_discovery_token("hunter2").len(), 32);
-        assert_ne!(lobby_discovery_token("hunter2"), lobby_discovery_token("Hunter2"));
     }
 
     #[test]
