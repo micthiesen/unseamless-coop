@@ -173,9 +173,10 @@ struct Overlay {
     /// state — unlike the watermark, it stays up during play. Mirrored to [`crate::debug_panel`] each frame
     /// so the game-thread publisher only does work while it's shown. Present-thread only.
     show_debug: bool,
-    /// Cursor into the Actions tab's combined list — the menu's action rows followed by the trailing
-    /// debug-overlay toggle (index `== menu rows`). Owns selection across both (the core `Menu`'s own
-    /// cursor is only synced to it at activation), so arrow/d-pad nav spans the toggle row too.
+    /// Cursor into the Actions tab's combined list — the menu's action rows followed by two trailing
+    /// always-enabled rows: the debug-panel toggle (index `== menu rows`) and "Export diagnostics"
+    /// (index `== menu rows + 1`). Owns selection across all of them (the core `Menu`'s own cursor is
+    /// only synced to it at activation), so arrow/d-pad nav spans the trailing rows too.
     actions_sel: usize,
     /// Home-snap affordance state. `home_dragging` latches true once an in-progress window move is
     /// detected (the window position changed while the left button is held) and clears on release —
@@ -186,10 +187,14 @@ struct Overlay {
     home_dragging: bool,
     last_win_pos: Option<[f32; 2]>,
     home_snap: bool,
+    /// Our DLL's module handle, used to locate the install dir for the "Export diagnostics" button
+    /// (which writes the shareable bundle next to the config/logs). Resolved fresh per export rather
+    /// than cached as a path, so it can't go stale. Present-thread only.
+    module: usize,
 }
 
 impl Overlay {
-    fn new() -> Self {
+    fn new(module: usize) -> Self {
         Self {
             menu: Menu::actions_only(),
             settings: registry(),
@@ -210,6 +215,7 @@ impl Overlay {
             home_dragging: false,
             last_win_pos: None,
             home_snap: false,
+            module,
         }
     }
 
@@ -543,10 +549,15 @@ impl Overlay {
         // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows).
         let rows = self.menu.rows(&self.config, ctx);
         let n = rows.len();
-        // Combined list = the `n` action rows, then the debug-panel toggle row at index `n` (always
-        // enabled). The skip-disabled/wrap stepping reuses the core menu's host-tested helpers so this
-        // cursor can't drift from `Menu`'s own nav.
-        let total = n + 1;
+        // Combined list = the `n` action rows, then two always-enabled trailing rows: the debug-panel
+        // toggle at index `n` and the "Export diagnostics" row at index `n + 1`. The skip-disabled/wrap
+        // stepping reuses the core menu's host-tested helpers so this cursor can't drift from `Menu`'s
+        // own nav. Both trailing rows are controller-navigable (unlike the Settings/Log tab buttons), so
+        // a friend on a pad can export with no mouse — the one-action capture must not need a mouse.
+        const TRAILING_ROWS: usize = 2;
+        let toggle_row = n;
+        let export_row = n + 1;
+        let total = n + TRAILING_ROWS;
         let enabled = |i: usize| if i < n { rows[i].enabled } else { true };
 
         // Repair the cursor if it's out of range or on a now-disabled row (e.g. the session context
@@ -573,14 +584,22 @@ impl Overlay {
                 ui.text_disabled(&row.label);
             }
         }
-        // The debug-panel toggle row, last. The on/off state rides in the visible label, but a fixed
-        // `###` id keeps the row's imgui identity stable as that text flips (otherwise the id would
-        // change each toggle). "Debug panel" — not "overlay" — to avoid colliding with the whole-
-        // overlay `[debug] overlay` config switch; this only controls the bottom-left panel.
+        // The two trailing rows, after a separator. The debug-panel toggle's on/off state rides in its
+        // visible label, but a fixed `###` id keeps its imgui identity stable as that text flips
+        // (otherwise the id would change each toggle). "Debug panel" — not "overlay" — to avoid
+        // colliding with the whole-overlay `[debug] overlay` config switch; this only controls the
+        // bottom-left panel.
         ui.separator();
         let toggle_label = format!("Debug panel: {}###debug-panel-toggle", if self.show_debug { "on" } else { "off" });
-        if ui.selectable_config(&toggle_label).selected(self.actions_sel == n).build() {
-            clicked = Some(n);
+        if ui.selectable_config(&toggle_label).selected(self.actions_sel == toggle_row).build() {
+            clicked = Some(toggle_row);
+        }
+        // "Export diagnostics": writes the one-file shareable bundle (report + log tail, SteamIDs
+        // scrubbed) next to the config/logs. The whole point is a single action a non-technical friend
+        // can do — and one that works with NO peer connected, so it captures the failed-to-link case
+        // that log-forwarding (which needs the link up) never can.
+        if ui.selectable_config("Export diagnostics###export-diag").selected(self.actions_sel == export_row).build() {
+            clicked = Some(export_row);
         }
         if let Some(i) = clicked {
             self.actions_sel = i;
@@ -588,8 +607,10 @@ impl Overlay {
         }
 
         if activate {
-            if self.actions_sel == n {
+            if self.actions_sel == toggle_row {
                 self.show_debug = !self.show_debug;
+            } else if self.actions_sel == export_row {
+                self.export_diagnostics();
             } else {
                 // Sync the core menu's cursor to the activated action row, then fire it. actions_only
                 // never mutates config on activate; pass a scratch clone (per activation, not per
@@ -601,6 +622,29 @@ impl Overlay {
                 }
             }
         }
+    }
+
+    /// Write the one-file shareable diagnostics bundle to the install's `unseamless-coop/` folder
+    /// (next to the config and `logs/`), then toast the path. Everything it reads is Present-thread
+    /// safe — the live config snapshot, the last published debug-panel report ([`crate::debug_panel`]),
+    /// and the in-memory log tail ([`crate::logbuf`]) — so it deliberately does **not** read game
+    /// singletons (that's the game thread's job) and does **not** depend on a live co-op transport.
+    /// That's what makes it survive a non-link: the friend test most needs to capture the case where
+    /// the side-channel never came up, which rung-2 log-forwarding (only live once linked) can't.
+    ///
+    /// The gather (config clone + module handle) happens here; the assemble + **disk write** + toast
+    /// run on a short-lived detached thread (like [`crate::steam`]'s resolver), so the Present hook
+    /// never blocks on a `create_dir_all`/`fs::write` (which Defender can stall on a fresh file) or on
+    /// [`crate::notify`]'s blocking lock — the present thread must never block on the game thread (see
+    /// notify.rs). Off the present hook there's no FFI boundary, so a panic in the worker just ends the
+    /// worker (logged by the panic hook); no `catch_unwind` firewall is needed. Plain voice for this
+    /// diagnostic message (per CLAUDE.md), not ER tone.
+    fn export_diagnostics(&self) {
+        // Snapshot the only present-thread-owned inputs, then hand off. `Config` is Clone, `module` is
+        // Copy; everything else the worker reads is a process-global static reachable from any thread.
+        let config = self.config.clone();
+        let module = self.module;
+        std::thread::spawn(move || export_bundle_to_disk(&config, module));
     }
 
     /// Read-only view of every setting and its current value, coloured by whether the host syncs it
@@ -1077,6 +1121,73 @@ fn level_color(level: Level) -> [f32; 3] {
     }
 }
 
+/// Assemble the shareable diagnostics bundle and write it to the install's `unseamless-coop/` folder.
+/// Runs on a detached worker thread off the present hook (see [`Overlay::export_diagnostics`]), so the
+/// blocking disk write and the [`crate::notify`] toast can't hitch rendering. All inputs are either
+/// passed in (`config`, `module`) or read from process-global statics, so this is freely callable from
+/// any thread.
+fn export_bundle_to_disk(config: &Config, module: usize) {
+    use unseamless_core::diagnostics::{RunInfo, export_bundle};
+
+    // Build profile string mirrors logger.rs's PROFILE: keyed on debug-assertions (on for dev/diag,
+    // off for release), so it names the symbol status it can actually detect.
+    const PROFILE: &str = if cfg!(debug_assertions) {
+        "debug-assertions on (symbols)"
+    } else {
+        "release (stripped)"
+    };
+    // Self-describing header from the live config — RunInfo::from_config is the *redacting* path (the
+    // session password never reaches the bundle); the final scrub in export_bundle then also strips the
+    // raw SteamID it carries. `started_at` is wall-clock epoch seconds (core has no clock); run_id
+    // "export" marks this as an on-demand capture, not a fresh process launch.
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    let header = RunInfo::from_config(
+        config,
+        "export".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        PROFILE.to_string(),
+        env!("UNSEAMLESS_BUILD_ID").to_string(),
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        started_at,
+    )
+    .header_block();
+
+    // Latest live snapshot, if the debug panel was ever shown this session (the publisher only runs
+    // while it's visible). `None` is fine — the boot snapshot is always in the log tail below.
+    let live = crate::debug_panel::snapshot().map(|r| r.render());
+
+    // Recent log lines, oldest first, read non-blocking (the same source the Log tab draws). On
+    // momentary contention we still export — just without the in-memory tail (the boot dump and run
+    // header still carry the essentials), rather than failing the whole capture.
+    let tail = crate::logbuf::try_read(|lines| {
+        lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n")
+    })
+    .unwrap_or_default();
+
+    let bundle = export_bundle(&header, live.as_deref(), &tail);
+
+    // The install's unseamless-coop/ folder (config + logs live here too), mirroring app.rs's
+    // self-dir-or-cwd fallback so the file always lands somewhere findable. Create the folder in case
+    // logging never opened it.
+    let dir = crate::mods::self_dir(module)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("unseamless-coop");
+    let path = dir.join("unseamless-coop-diagnostics.txt");
+    match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &bundle)) {
+        Ok(()) => {
+            log::info!("exported diagnostics bundle to {}", path.display());
+            crate::notify::with_mut(|n| n.info(format!("Diagnostics saved to {}", path.display())));
+        }
+        Err(e) => {
+            log::error!("failed to export diagnostics to {}: {e}", path.display());
+            crate::notify::with_mut(|n| n.error(format!("Couldn't save diagnostics: {e}")));
+        }
+    }
+}
+
 /// Install the DX12 present-hook overlay. `module` is our DLL's module handle (the `SELF_MODULE`
 /// `usize`, reinterpreted as an `HINSTANCE`). Logs and returns on failure — the overlay is past the
 /// install-critical path, so a hook failure degrades (no overlay) rather than aborting the game.
@@ -1091,7 +1202,7 @@ pub fn install(module: usize) {
     // NB: hudhook logs `Render error HRESULT(0xFFFFFFFF)` / `Initialization context incomplete` on the
     // first frame or two before the swapchain is fully wired — a known-harmless hudhook/imgui startup
     // artifact (confirmed on the rig), not a real failure. Don't chase it; the overlay renders fine after.
-    match Hudhook::builder().with::<ImguiDx12Hooks>(Overlay::new()).with_hmodule(hmodule).build().apply() {
+    match Hudhook::builder().with::<ImguiDx12Hooks>(Overlay::new(module)).with_hmodule(hmodule).build().apply() {
         Ok(()) => log::info!("overlay: DX12 present-hook installed; waiting for the swapchain"),
         Err(e) => log::error!("overlay: hook install failed ({e:?}); no overlay this session"),
     }

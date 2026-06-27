@@ -581,6 +581,80 @@ pub fn lobby_discovery_token(password: &str) -> String {
     token
 }
 
+/// Rewrite every raw 64-bit SteamID in `text` to its stable [`peer_tag`], so a captured bundle is
+/// safe to share publicly — a raw SteamID64 resolves straight to a person's Steam profile.
+///
+/// Matches a **standalone run of exactly 17 ASCII digits starting `76561`** — the shape of an
+/// individual SteamID64 (`76561197960265728 + account_id`), which is how the ID appears in our log
+/// lines and diagnostic report (e.g. the `own_id` field). Bounded by non-digits on both sides so it
+/// never rewrites a 17-digit slice of a longer number, and other numerics (counts, timestamps,
+/// multipliers) are left untouched. Conservative by construction: a non-SteamID that happened to be
+/// 17 digits *and* started `76561` is astronomically unlikely, and the worst case is one stray number
+/// turned into a harmless tag.
+///
+/// This matches only the **full 17-digit decimal** form, which is how every Steam id currently reaches
+/// a log/report (see `coop/diag.rs`'s `own_id`). It does NOT catch a Steam3 textual id (`[U:1:<acct>]`)
+/// or a bare 32-bit `account_id` (trivially `+ 76561197960265728` back to the full id). When the
+/// rig-gated co-op layer starts logging *peer* ids, emit them in full-decimal form (or extend this) so
+/// they stay scrubbed in a "safe to share" bundle.
+pub fn scrub_steam_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut digits = String::new();
+    let flush = |out: &mut String, digits: &mut String| {
+        if !digits.is_empty() {
+            match steam_id_tag(digits) {
+                Some(tag) => out.push_str(&tag),
+                None => out.push_str(digits),
+            }
+            digits.clear();
+        }
+    };
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            flush(&mut out, &mut digits);
+            out.push(ch);
+        }
+    }
+    flush(&mut out, &mut digits);
+    out
+}
+
+/// If `run` (a maximal digit run) looks like an individual SteamID64, return its [`peer_tag`].
+fn steam_id_tag(run: &str) -> Option<String> {
+    if run.len() == 17 && run.starts_with("76561") {
+        return run.parse::<u64>().ok().map(peer_tag);
+    }
+    None
+}
+
+/// Assemble the **one-file shareable diagnostics bundle** the overlay's "Export diagnostics" button
+/// writes — and scrub every raw SteamID64 to a [`peer_tag`] so the whole thing is safe to post
+/// publicly. Pure (host-tested) so the assembly + scrubbing live where they can be verified; the
+/// cdylib gathers the live pieces and supplies them.
+///
+/// `header` is a [`RunInfo::header_block`] (already password-redacted), `live_report` the latest live
+/// [`DiagnosticReport`] snapshot rendered to text (`None` if none was captured this session — the log
+/// tail still carries the boot snapshot), and `log_tail` the recent log lines, oldest first.
+///
+/// Designed to **survive a non-link**: every input is read locally, so the bundle captures exactly the
+/// failed-to-connect case that log-forwarding (which needs the link up) can't.
+pub fn export_bundle(header: &str, live_report: Option<&str>, log_tail: &str) -> String {
+    let mut out = String::with_capacity(header.len() + log_tail.len() + 256);
+    out.push_str(header.trim_end());
+    out.push_str("\n\n==== live snapshot ====\n");
+    match live_report {
+        Some(report) => out.push_str(report.trim_end()),
+        None => out.push_str("(no live snapshot captured this session; the boot snapshot is in the log tail below)"),
+    }
+    out.push_str("\n\n==== recent log tail (newest last) ====\n");
+    out.push_str(log_tail.trim_end());
+    out.push('\n');
+    // One scrub over the whole assembled bundle so no raw SteamID survives in any section.
+    scrub_steam_ids(&out)
+}
+
 fn level_tag(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Error => "ERROR",
@@ -712,6 +786,79 @@ mod tests {
         // The second line must be indented (not flush-left, where it could look like a new header).
         assert!(out.contains("boom\n        at foo"), "continuation not indented:\n{out}");
         assert_eq!(out.matches("---- peer:").count(), 1);
+    }
+
+    #[test]
+    fn scrub_replaces_steam_ids_and_leaves_other_numbers() {
+        let id = 76561197960287930u64; // a real-shaped individual SteamID64 (17 digits, 76561...)
+        let raw = format!("own_id = {id}\nframe = 12345  players = 2  hp x1.35");
+        let scrubbed = scrub_steam_ids(&raw);
+        // The SteamID is gone, replaced by its stable tag; the tag round-trips with peer_tag.
+        assert!(!scrubbed.contains(&id.to_string()), "raw SteamID leaked:\n{scrubbed}");
+        assert!(scrubbed.contains(&peer_tag(id)), "expected the peer tag:\n{scrubbed}");
+        // Ordinary numbers (frame counter, party size, the multiplier) are untouched.
+        assert!(scrubbed.contains("frame = 12345"));
+        assert!(scrubbed.contains("players = 2"));
+        assert!(scrubbed.contains("hp x1.35"));
+    }
+
+    #[test]
+    fn scrub_only_matches_the_steam_id_shape() {
+        // 17 digits but not a SteamID prefix: left alone.
+        let not_steam = "12345678901234567";
+        assert_eq!(scrub_steam_ids(not_steam), not_steam);
+        // 76561-prefixed but the wrong length (18 digits): not a SteamID64, left alone.
+        let too_long = "765611979602879300";
+        assert_eq!(scrub_steam_ids(too_long), too_long);
+        // A non-ASCII char adjacent to digits must not corrupt the output (char-based scan).
+        assert_eq!(scrub_steam_ids("× 2 ×"), "× 2 ×");
+    }
+
+    #[test]
+    fn export_bundle_has_all_sections_and_scrubs_ids() {
+        let id = 76561197960287930u64;
+        let header = format!("==== unseamless-coop run ====\nown_id = {id}\n");
+        let report = format!("==== unseamless-coop diagnostic: debug ====\nown_id = {id}\n");
+        let tail = format!("00:00:01 connecting to peer {id}\n00:00:02 connect failed");
+        let bundle = export_bundle(&header, Some(&report), &tail);
+        // Every section header is present and in order.
+        let snap = bundle.find("==== live snapshot ====").expect("live snapshot section");
+        let log = bundle.find("==== recent log tail").expect("log tail section");
+        assert!(snap < log, "sections out of order:\n{bundle}");
+        // The failed-connect log line and its surrounding context survive.
+        assert!(bundle.contains("connect failed"));
+        // No raw SteamID anywhere in the assembled bundle — header, report, and tail are all scrubbed.
+        assert!(!bundle.contains(&id.to_string()), "raw SteamID leaked into bundle:\n{bundle}");
+        assert!(bundle.contains(&peer_tag(id)));
+    }
+
+    #[test]
+    fn export_bundle_keeps_the_password_redacted_through_the_real_header_path() {
+        // Defense-in-depth check on the actual composition the cdylib uses: a config with a password,
+        // through RunInfo::from_config (the redacting path) into export_bundle. The password must never
+        // surface in the shareable bundle.
+        let mut cfg = crate::config::Config::default();
+        cfg.session.password = "hunter2-very-secret".into();
+        let header = RunInfo::from_config(
+            &cfg,
+            "export".into(),
+            "0.6.0".into(),
+            "release (stripped)".into(),
+            "nogit".into(),
+            "windows-x86_64".into(),
+            "t".into(),
+        )
+        .header_block();
+        let bundle = export_bundle(&header, None, "00:00:01 a log line");
+        assert!(!bundle.contains("hunter2-very-secret"), "password leaked into bundle:\n{bundle}");
+        assert!(bundle.contains("<redacted>"));
+    }
+
+    #[test]
+    fn export_bundle_notes_a_missing_live_snapshot() {
+        let bundle = export_bundle("header\n", None, "some log line");
+        assert!(bundle.contains("no live snapshot captured this session"));
+        assert!(bundle.contains("some log line"));
     }
 
     #[test]

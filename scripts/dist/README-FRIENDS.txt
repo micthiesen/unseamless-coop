@@ -49,15 +49,29 @@ IF WINDOWS BLOCKS IT
 - If Install.cmd does nothing: right-click Install.ps1 -> "Run with PowerShell".
 
 
-SENDING ME LOGS AFTER A SESSION
--------------------------------
-If something misbehaves, send me the logs. They're here:
+SENDING ME DIAGNOSTICS AFTER A SESSION
+--------------------------------------
+If something misbehaves (especially if we couldn't connect at all), the easiest way to send
+me what I need is the in-game Export button. ONE click makes a single file to send:
 
-   <your ELDEN RING\Game>\unseamless-coop\logs\
+1. In-game, press the  `  key (top-left of the keyboard, above Tab) to open the mod menu.
+   (On a controller: press RB + click both sticks, L3 + R3, together.)
+2. You'll be on the "Actions" tab. Move down to  Export diagnostics  and press Enter
+   (or the A button on a controller).
+3. A message pops up with the exact file it saved. It's here:
 
-Zip that whole "logs" folder and send it. Each log names the exact build you ran at the top
-(a "build_id" line), which is how I confirm we were all on the same version. The logs do NOT
-contain your password (it's redacted) or your Steam account.
+      <your ELDEN RING\Game>\unseamless-coop\unseamless-coop-diagnostics.txt
+
+4. Send me that one file.
+
+That file works even when we never managed to connect (that's the case I most need it for).
+It does NOT contain your password (redacted) or your Steam account (the Steam IDs in it are
+scrubbed), so it's safe to send or paste anywhere.
+
+If the menu won't open or you can't find the file, fallback: there's a logs folder at
+<your ELDEN RING\Game>\unseamless-coop\logs\ — zip the whole "logs" folder and send that
+instead. Each log names the exact build you ran at the top (a "build_id" line), which is how
+I confirm we were all on the same version.
 
 
 WHAT GOT INSTALLED (for the curious)
