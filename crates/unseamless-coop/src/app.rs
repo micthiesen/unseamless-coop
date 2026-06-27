@@ -277,6 +277,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
     // banner, so its tick order doesn't matter.
     #[cfg(debug_assertions)]
     features.extend(crate::features::rig_guide::feature(config));
+    // Auto-start a co-op session (`[debug] auto_session`), or nothing when off — the headless
+    // Open/Join for a machine that can't use the overlay (e.g. native-Windows hudhook DX12 crash).
+    features.extend(crate::features::auto_session::feature(config));
     features
 }
 

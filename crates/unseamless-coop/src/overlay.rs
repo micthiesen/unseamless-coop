@@ -269,6 +269,12 @@ impl Overlay {
 
     /// The actual per-frame work, run inside `render`'s panic firewall.
     fn render_inner(&mut self, ui: &Ui) {
+        // One-time breadcrumb: confirms hudhook got past its DX12 context setup and is calling our
+        // render. If a crash log shows `initialize() reached` but NOT this line, the failure is in
+        // hudhook's own context/swapchain setup (the "Initialization context incomplete" path), before
+        // our imgui draw — the symptom on some native-Windows DX12 GPUs. Cheap (fires once).
+        static FIRST_RENDER: std::sync::Once = std::sync::Once::new();
+        FIRST_RENDER.call_once(|| log::info!("overlay: first render frame reached (render_inner)"));
         // Sample the controller once per frame (drives the toggle chord below and, while open, the menu
         // nav). Computed every frame regardless of open-state so the chord can *open* the menu, not just
         // navigate it. The raw snapshot comes from the XInput hook; the pure edge/repeat logic lives in
@@ -1060,6 +1066,10 @@ impl ImguiRenderLoop for Overlay {
         // under `panic = "unwind"`. Build the fonts inside the catch and only commit on success;
         // a panic disables the overlay for the session rather than risking the boundary.
         let baked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Breadcrumb to localize the native-Windows DX12 crash: this runs during hudhook's context
+            // setup. If a crash log ends after `present-hook installed` with neither this nor the
+            // first-render line, hudhook died before even calling us.
+            log::info!("overlay: hudhook initialize() reached (baking fonts)");
             // Called once before hudhook bakes the font atlas, so fonts added here get rasterized.
             let fonts = ctx.fonts();
             // Keep the compact default (ProggyClean) as the atlas default so the passive toasts stay

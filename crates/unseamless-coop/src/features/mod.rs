@@ -3,6 +3,7 @@
 
 use unseamless_core::util::{Applied, Latch};
 
+pub mod auto_session;
 pub mod boot_volume;
 pub mod crit_coop;
 pub mod death_debuffs;

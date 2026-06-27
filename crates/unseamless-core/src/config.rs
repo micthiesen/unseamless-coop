@@ -127,6 +127,25 @@ impl Default for Loader {
     }
 }
 
+/// What co-op session (if any) to start automatically once Steam is ready and we're in gameplay,
+/// without the in-overlay Open/Join actions. A testing/stopgap aid — chiefly for a machine where the
+/// overlay can't run (e.g. the hudhook DX12 hook crashing on some native-Windows GPUs), so it can still
+/// connect headless. `off` (the default) keeps co-op fully on-demand.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoSession {
+    /// Open a world (host) once ready.
+    Host,
+    /// Join a world (client) once ready.
+    Join,
+    /// No auto-trigger — co-op starts only from the overlay actions (the normal path; the default).
+    /// Also the unknown-value fallback (`#[serde(other)]` must be the last variant), so a typo degrades
+    /// to off rather than a surprise connect.
+    #[default]
+    #[serde(other)]
+    Off,
+}
+
 /// Debugging / diagnostics. Off by default so normal play does no extra disk or network work
 /// (see CLAUDE.md / ARCHITECTURE.md). When `enabled`, logging drops to `level` and, if
 /// `forward_to_host`, this client also ships its records to the host for one-place inspection.
@@ -149,6 +168,11 @@ pub struct Debug {
     /// On-demand diagnostic probes (`[debug.probes]`). All off by default — these are the levers we
     /// ask a tester to flip when chasing a specific issue ("set this, reproduce, send the log").
     pub probes: DebugProbes,
+    /// Auto-start a co-op session (`off` / `host` / `join`) once Steam is ready and we're in gameplay,
+    /// bypassing the overlay Open/Join actions — for a headless or overlay-broken machine. Off by
+    /// default. See [`AutoSession`].
+    #[serde(default)]
+    pub auto_session: AutoSession,
     /// (**debug builds only**) Which committed rig-testing guide to run, by name (empty = off). The
     /// guide engine is gated behind `#[cfg(debug_assertions)]` (zero release cost), so these two
     /// fields are too — a `release` config simply has no such keys, and an old/foreign config that
@@ -173,6 +197,7 @@ impl Default for Debug {
             bridge_port: 0,
             overlay: true,
             probes: DebugProbes::default(),
+            auto_session: AutoSession::default(),
             #[cfg(debug_assertions)]
             guide: String::new(),
             #[cfg(debug_assertions)]
@@ -813,5 +838,18 @@ mod tests {
             Config::from_toml_str(&format!("[save]\nfile_extension = \"{too_long}\"\n")).unwrap();
         assert_eq!(cfg.save.file_extension, "co2");
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn auto_session_parses_and_unknown_degrades_to_off() {
+        let (cfg, _) = Config::from_toml_str("[debug]\nauto_session = \"host\"\n").unwrap();
+        assert_eq!(cfg.debug.auto_session, super::AutoSession::Host);
+        let (cfg, _) = Config::from_toml_str("[debug]\nauto_session = \"join\"\n").unwrap();
+        assert_eq!(cfg.debug.auto_session, super::AutoSession::Join);
+        // Absent -> Off (default); an unknown value -> Off (serde(other)), never a surprise connect.
+        let (cfg, _) = Config::from_toml_str("[debug]\nenabled = true\n").unwrap();
+        assert_eq!(cfg.debug.auto_session, super::AutoSession::Off);
+        let (cfg, _) = Config::from_toml_str("[debug]\nauto_session = \"bogus\"\n").unwrap();
+        assert_eq!(cfg.debug.auto_session, super::AutoSession::Off);
     }
 }
