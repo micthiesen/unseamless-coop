@@ -493,7 +493,8 @@ pub struct ConnectReport {
     pub handshake_at: Option<Duration>,
     /// Protocol-version verdict, once the handshake lands.
     pub version: VersionCheck,
-    /// Rung-4 lobby discovery, if that path drove this attempt (else `None` — manual peer entry).
+    /// Rung-4 lobby-discovery progress (the only pairing path). `None` until discovery picks a role —
+    /// i.e. for an attempt that failed before then (no SteamID, matchmaking unavailable).
     pub lobby: Option<LobbyProgress>,
     /// Terminal failure reason in plain words, set when a stage gives up — the "why" the phase atomic
     /// can't carry. `None` while healthy or still trying.

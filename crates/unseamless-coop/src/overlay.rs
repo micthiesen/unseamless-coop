@@ -946,10 +946,10 @@ impl ImguiRenderLoop for Overlay {
 /// ([`crate::playstate::in_gameplay`]). Open World / Join world are enabled only when Steam is up, the
 /// player is in-game, and no session is active; Leave only while in a session.
 fn session_context() -> SessionContext {
-    let (in_session, is_host) = crate::coop::session_context();
+    let flags = crate::coop::session_flags();
     SessionContext {
-        in_session,
-        is_host,
+        in_session: flags.in_session,
+        is_host: flags.is_host,
         steam_ready: crate::steam_ready::is_ready(),
         in_game: crate::playstate::in_gameplay(),
     }

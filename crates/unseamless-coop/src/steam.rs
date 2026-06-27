@@ -491,6 +491,11 @@ const API_CALL_INVALID: SteamAPICall = 0;
 /// repeated with the lobby-specific name for legibility).
 const E_RESULT_OK: i32 = 1;
 
+/// `k_EChatRoomEnterResponseSuccess` — `LobbyEnter_t::m_EChatRoomEnterResponse` value for a successful
+/// entry. Any other value (full, doesn't-exist, not-allowed, banned, …) means we did not actually join,
+/// even though the call-result read itself succeeded.
+const E_CHAT_ROOM_ENTER_RESPONSE_SUCCESS: u32 = 1;
+
 /// `ELobbyType::k_ELobbyTypePublic` — listed in `RequestLobbyList`, so the password filter can find it.
 const ELOBBY_TYPE_PUBLIC: i32 = 2;
 /// `ELobbyComparison::k_ELobbyComparisonEqual` — exact-match the password-hash filter.
@@ -698,8 +703,8 @@ enum Role {
 pub struct LobbyDiscovery {
     mm: Matchmaking,
     utils: Utils,
-    /// Our own SteamID — excludes us from the host's member scan (the tiebreak keys on lobby ids, not
-    /// this).
+    /// Our own SteamID — excludes us from the host's member scan (so a host resolves the *joiner*, not
+    /// itself).
     self_id: u64,
     /// The `usc_pw` filter value (the password token), re-applied on each list retry (the filter is
     /// consumed per request).
@@ -709,6 +714,16 @@ pub struct LobbyDiscovery {
     list_call: Option<SteamAPICall>,
     /// When we last issued a `RequestLobbyList`, to pace retries to [`LOBBY_LIST_RETRY`].
     last_request: Option<Instant>,
+}
+
+/// Leaving the Steam lobby is tied to the value's lifetime: the co-op driver owns the `LobbyDiscovery`
+/// for the whole session and *every* exit path drops it, so the lobby is left exactly once, on any
+/// teardown, without a call site having to remember. Single-threaded (the driver thread), so no
+/// cross-thread concern.
+impl Drop for LobbyDiscovery {
+    fn drop(&mut self) {
+        self.leave();
+    }
 }
 
 impl LobbyDiscovery {
@@ -743,9 +758,15 @@ impl LobbyDiscovery {
         })
     }
 
-    /// Leave whatever lobby we currently hold, if any — called on session teardown (Leave World) so a
-    /// host's lobby disappears and a joiner exits cleanly. A no-op before a lobby is created/entered.
-    pub fn leave(&self) {
+    /// Leave whatever lobby we currently hold, if any. Invoked from [`Drop`] so session teardown — on
+    /// *any* driver-thread exit path (Leave, timeout, failure, or a panic unwinding the thread) — drops
+    /// the host's lobby / removes the joiner from it, with no call site able to forget. A no-op before a
+    /// lobby is created/entered (`HostChecking`/`Creating`/`JoinSeeking`).
+    ///
+    /// Caveat: a teardown during the `Creating` window can still orphan a lobby — `CreateLobby` is async,
+    /// so Steam may finish creating the (password-tagged, public) lobby *after* we've dropped, and we
+    /// hold no id to leave it. That window is sub-second and not worth blocking teardown to poll out.
+    fn leave(&self) {
         let lobby = match self.role {
             Role::Hosting { lobby } | Role::Joined { lobby } | Role::Joining { lobby, .. } => Some(lobby),
             Role::HostChecking | Role::Creating { .. } | Role::JoinSeeking => None,
@@ -897,11 +918,20 @@ impl LobbyDiscovery {
             Some(false) => {
                 let mut res =
                     LobbyEnter { lobby: 0, chat_permissions: 0, locked: 0, enter_response: 0 };
-                if self.utils.read_result(call, CB_LOBBY_ENTER, &mut res) {
+                if !self.utils.read_result(call, CB_LOBBY_ENTER, &mut res) {
+                    crate::coop::note_lobby_failure("JoinLobby failed");
+                    self.role = Role::JoinSeeking;
+                } else if res.enter_response == E_CHAT_ROOM_ENTER_RESPONSE_SUCCESS {
                     crate::coop::note_lobby_joined();
                     self.role = Role::Joined { lobby };
                 } else {
-                    crate::coop::note_lobby_failure("JoinLobby failed");
+                    // Read succeeded but Steam reports we didn't actually enter (full / gone / not
+                    // allowed). Don't sit in `Joined` waiting on an owner that will never resolve — drop
+                    // back to the search so the cadence retries (or the driver's join timeout fires).
+                    crate::coop::note_lobby_failure(format!(
+                        "JoinLobby rejected (EChatRoomEnterResponse {})",
+                        res.enter_response
+                    ));
                     self.role = Role::JoinSeeking;
                 }
             }
@@ -916,7 +946,9 @@ impl LobbyDiscovery {
         for i in 0..count {
             let member = unsafe { (self.mm.get_member_by_index)(self.mm.iface, lobby, i) };
             if member != 0 && member != self.self_id {
-                crate::coop::note_lobby_host_resolved(); // the host id is our own — trivially known
+                // We are the host, so the host id (ours) is trivially known; stamp it resolved now that
+                // the joiner (`member`, the non-self entry) has appeared — that's our rung-2 peer.
+                crate::coop::note_lobby_host_resolved();
                 return Some((member, true));
             }
         }

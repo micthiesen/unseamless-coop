@@ -453,6 +453,70 @@ mod tests {
     }
 
     #[test]
+    fn activating_open_join_is_noop_when_not_ready() {
+        // The activate() path re-checks the predicate independently of rows(); pin that a disabled
+        // Open/Join (Steam down, or not in-game) yields no action, not just a disabled-looking row.
+        let mut menu = Menu::new();
+        let mut cfg = Config::default();
+        let open_idx = menu
+            .items
+            .iter()
+            .position(|i| matches!(i, MenuItem::Action { action: SessionAction::OpenWorld, .. }))
+            .unwrap();
+        let join_idx = menu
+            .items
+            .iter()
+            .position(|i| matches!(i, MenuItem::Action { action: SessionAction::JoinWorld, .. }))
+            .unwrap();
+
+        // Steam not ready (but in-game, out of session): both are no-ops.
+        let no_steam = SessionContext { steam_ready: false, in_game: true, ..Default::default() };
+        menu.select_index(open_idx);
+        assert_eq!(menu.activate(&mut cfg, &no_steam), MenuOutcome::None, "Open is a no-op when Steam isn't ready");
+        menu.select_index(join_idx);
+        assert_eq!(menu.activate(&mut cfg, &no_steam), MenuOutcome::None, "Join is a no-op when Steam isn't ready");
+
+        // Not in-game (Steam up): still no-ops.
+        let not_in_game = SessionContext { steam_ready: true, in_game: false, ..Default::default() };
+        menu.select_index(open_idx);
+        assert_eq!(menu.activate(&mut cfg, &not_in_game), MenuOutcome::None, "Open is a no-op at the title/menu");
+
+        // Ready + in-game + out of session: Open now fires.
+        let ready = SessionContext { steam_ready: true, in_game: true, ..Default::default() };
+        menu.select_index(open_idx);
+        assert_eq!(menu.activate(&mut cfg, &ready), MenuOutcome::Action(SessionAction::OpenWorld));
+    }
+
+    #[test]
+    fn home_skips_open_join_when_not_ready() {
+        // The home() doc promises it lands on an enabled row even out of session when Open/Join are
+        // gated off (Steam not ready / not in-game). With the full menu, row 0 (Open world) is then
+        // disabled, so home() must skip past all 8 (disabled) actions onto the first setting row.
+        let mut menu = Menu::new();
+        let not_ready = SessionContext::default(); // steam_ready=false, in_game=false, out of session
+        assert!(!menu.rows(&Config::default(), &not_ready)[0].enabled, "Open world is disabled when not ready");
+        menu.home(&not_ready);
+        let rows = menu.rows(&Config::default(), &not_ready);
+        let sel = rows.iter().position(|r| r.selected).unwrap();
+        assert!(rows[sel].enabled, "home() must land on an enabled row");
+        assert!(rows[sel].value.is_some(), "with all 8 actions disabled, home() lands on the first setting");
+    }
+
+    #[test]
+    fn actions_only_degrades_to_disabled_cursor_when_nothing_selectable() {
+        // The real title-screen / Steam-not-up state: an actions-only menu where every row is gated
+        // off. home()/first_enabled fall back to index 0 (a disabled row) and activate() is a no-op —
+        // the same degenerate state the overlay's cursor-repair relies on.
+        let mut menu = Menu::actions_only();
+        let mut cfg = Config::default();
+        let not_ready = SessionContext::default();
+        assert!(menu.rows(&cfg, &not_ready).iter().all(|r| !r.enabled), "all actions disabled when not ready");
+        menu.home(&not_ready);
+        assert_eq!(menu.selected(), 0, "home() falls back to index 0 when no row is enabled");
+        assert_eq!(menu.activate(&mut cfg, &not_ready), MenuOutcome::None, "activating the disabled row is a no-op");
+    }
+
+    #[test]
     fn activating_a_toggle_setting_changes_config_and_reports() {
         let mut menu = Menu::new();
         let mut cfg = Config::default();

@@ -19,9 +19,12 @@
 //! ## Why its own thread (not a game-frame task)
 //! Steam's networking calls are thread-safe and the `Session`/`Peer` are pure core types, so the
 //! driver lives off the game's task scheduler (like the bridge and the init/overlay threads). The
-//! only cross-thread state is the live config ([`crate::state`], a `Mutex`), the notifications
-//! ([`crate::notify`], a `Mutex`), the forward queue ([`crate::forward`]), and one status atomic
-//! ([`PHASE`]) read by the debug panel.
+//! cross-thread state is the live config ([`crate::state`], a `Mutex`), the notifications
+//! ([`crate::notify`], a `Mutex`), the forward queue ([`crate::forward`]), the connect report
+//! ([`REPORT`]/[`EPOCH`], `Mutex`es read by the debug panel), and a handful of relaxed atomics: the
+//! link diagnostic [`PHASE`], and the user-facing session lifecycle [`SESSION`]/[`IS_HOST`] (read each
+//! frame by the overlay's Present thread via [`session_flags`]) coordinated by [`SESSION_GEN`] (the
+//! generation that signals an in-flight driver to tear down — see [`stale`]).
 //!
 //! ## Cadence is load-bearing
 //! `pump` (receive) runs every [`POLL_INTERVAL`] for a responsive handshake; `maintain` runs every
@@ -30,7 +33,7 @@
 //! stable or those wall-clock meanings drift.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use unseamless_core::config::Config;
@@ -90,11 +93,24 @@ fn stale(generation: u64) -> bool {
     SESSION_GEN.load(Ordering::Relaxed) != generation
 }
 
-/// The current `(in_session, is_host)` for the menu's `SessionContext`, read from the overlay's Present
-/// thread. `in_session` gates Open World/Join (off when set) and Leave (on when set).
-pub fn session_context() -> (bool, bool) {
-    let in_session = SESSION.load(Ordering::Relaxed) != SESSION_OFF;
-    (in_session, IS_HOST.load(Ordering::Relaxed))
+/// The co-op session flags the menu gates on. A named struct (not a `(bool, bool)` tuple) so the two
+/// same-typed fields can't be silently swapped at the call site — a swap there would invert every menu
+/// gate (enable Open/Join in a session, Leave out of it).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionFlags {
+    /// In a session (hosting/joining/connected) — gates Open World/Join off and Leave on.
+    pub in_session: bool,
+    /// The active session is ours to host (Open World) vs joined (Join world). Only meaningful when
+    /// `in_session`.
+    pub is_host: bool,
+}
+
+/// The current session flags for the menu's `SessionContext`, read from the overlay's Present thread.
+pub fn session_flags() -> SessionFlags {
+    SessionFlags {
+        in_session: SESSION.load(Ordering::Relaxed) != SESSION_OFF,
+        is_host: IS_HOST.load(Ordering::Relaxed),
+    }
 }
 
 /// Host setup budget: a host should reach an open lobby near-instantly (one existence-check list + a
@@ -104,6 +120,10 @@ const HOST_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 /// Join search budget: short retry + give up (we only search for an already-open world). Past this, no
 /// matching world was found — tell the user rather than spin forever.
 const JOIN_TIMEOUT: Duration = Duration::from_secs(20);
+/// Handshake budget once the partner is resolved: if the peer's `Hello` never arrives (one-way NAT,
+/// peer crashed, P2P never opened), give up rather than sit "Linking…" forever. Generous headroom for a
+/// slow P2P route to open.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Published connection phase for the diagnostic report's `coop` line (read from the game thread).
 /// The driver is on its own thread, so this single relaxed atomic is the whole cross-thread readout.
@@ -140,20 +160,30 @@ static REPORT: Mutex<ConnectReport> = Mutex::new(ConnectReport::new());
 /// `true` once a connection attempt has begun (a peer was configured, or rung-4 discovery started), so
 /// [`connect_report`] stays silent for a solo session that never tried to link.
 static ATTEMPTED: AtomicBool = AtomicBool::new(false);
-/// Epoch the report's `+Ns` stage timings are relative to — set once when the attempt begins. Relative
-/// ordering (which stage came when) is what diagnoses a stuck link; wall-clock isn't needed.
-static EPOCH: OnceLock<Instant> = OnceLock::new();
+/// Epoch the report's `+Ns` stage timings are relative to — re-pinned at the start of *each* attempt.
+/// Relative ordering (which stage came when) is what diagnoses a stuck link; wall-clock isn't needed.
+/// A `Mutex<Option<Instant>>` (not a `OnceLock`) so a second Open/Join after a Leave re-arms it instead
+/// of measuring against the first attempt's epoch.
+static EPOCH: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Mark the start of a connection attempt: arm [`connect_report`] and pin the timing epoch.
+/// Mark the start of a connection attempt: arm [`connect_report`], **reset the report**, and (re-)pin the
+/// timing epoch. Connection is now repeatable per process (Leave → Open/Join), so each attempt starts
+/// from a clean report + a fresh epoch — otherwise a retry's stage stamps read against the first
+/// attempt's epoch and its `messages_sent/received` accumulate across attempts (misleading the one
+/// shareable friend-test artifact).
 fn begin_attempt() {
     ATTEMPTED.store(true, Ordering::Relaxed);
-    let _ = EPOCH.get_or_init(Instant::now);
+    with_report(|r| *r = ConnectReport::new());
+    *EPOCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 }
 
-/// Elapsed since [`begin_attempt`], for stamping a stage. `0` if somehow called before the epoch is set
-/// (the `get_or_init` makes that impossible in practice, but it keeps this total).
+/// Elapsed since [`begin_attempt`], for stamping a stage. `0` if somehow called before an attempt began
+/// (shouldn't happen — every stage note follows `begin_attempt` — but keeps this total).
 fn elapsed() -> Duration {
-    EPOCH.get_or_init(Instant::now).elapsed()
+    EPOCH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map_or(Duration::ZERO, |t| t.elapsed())
 }
 
 /// Mutate the shared report under its lock, recovering a poisoned lock rather than wedging diagnostics
@@ -291,9 +321,17 @@ pub fn leave() {
 /// Reset the published session state to "off" after a *failed* host/join attempt, toast the plain-words
 /// reason, and clear the setup banner — so the menu re-enables Open World/Join for a retry. Distinct from
 /// [`leave`] (a user-initiated end): this is the driver giving up. Does **not** bump the generation (the
-/// driver is already exiting) — and the caller must not call it when [`stale`] (a superseding session
-/// owns the state).
-fn fail_session(why: impl Into<String>) {
+/// driver is already exiting).
+///
+/// **No-op when [`stale`]:** if the session that captured `generation` was already ended (Leave) or
+/// superseded (a new Open/Join), that newer session owns the published state, so a dying driver must not
+/// clobber it back to "off". The guard lives here (not at each call site) so no caller can forget it —
+/// the time-of-check/time-of-use gap between a caller's own `stale` check and these stores is what let a
+/// timed-out driver reset a freshly-started session.
+fn fail_session(generation: u64, why: impl Into<String>) {
+    if stale(generation) {
+        return;
+    }
     let why = why.into();
     record_failure(why.clone());
     PHASE.store(PHASE_FAILED, Ordering::Relaxed);
@@ -319,25 +357,18 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
     begin_attempt();
     PHASE.store(PHASE_LINKING, Ordering::Relaxed);
 
-    let Some(self_id) = wait_self_id() else {
-        if stale(generation) {
-            return; // user already left; nothing to report
-        }
-        log::warn!("coop: own SteamID never resolved; lobby discovery not started");
-        fail_session("Steam isn't ready (own SteamID never resolved) — is Steam running and logged in?");
+    let Some(self_id) = wait_self_id(generation) else {
+        // `None` means either we went stale (user left — `fail_session` then no-ops) or the SteamID
+        // genuinely never resolved; the toast is correct only in the latter, which the guard handles.
+        log::warn!("coop: own SteamID never resolved (or session left); lobby discovery not started");
+        fail_session(generation, "Steam isn't ready (own SteamID never resolved) — is Steam running and logged in?");
         return;
     };
-    if stale(generation) {
-        return; // user left while we waited on the SteamID
-    }
     with_report(|r| r.self_id_at = Some(elapsed()));
 
     let Some(mut discovery) = LobbyDiscovery::start(self_id, &password, intent) else {
-        if stale(generation) {
-            return;
-        }
         log::warn!("coop: Steam matchmaking unavailable; lobby discovery not started");
-        fail_session("Steam matchmaking unavailable (Steam not up or an export is missing).");
+        fail_session(generation, "Steam matchmaking unavailable (Steam not up or an export is missing).");
         return;
     };
 
@@ -352,21 +383,22 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
     );
     let (peer_id, is_host) = loop {
         if stale(generation) {
-            discovery.leave(); // user left (or a new session superseded us): drop our lobby and exit
-            return;
+            return; // user left (or superseded): dropping `discovery` leaves the lobby (its Drop)
         }
         match discovery.poll() {
             LobbyResult::Resolved { peer, is_host } => break (peer, is_host),
             LobbyResult::Hosting => {
                 // Lobby is open: stop the setup timeout and switch the banner to the waiting state, once.
-                if deadline.take().is_some() {
+                // Guard the store on the generation so a driver that went stale between the loop-top check
+                // and here can't publish HOSTING over a newer session's state.
+                if deadline.take().is_some() && !stale(generation) {
                     SESSION.store(SESSION_HOSTING, Ordering::Relaxed);
                     set_banner(BANNER_SESSION, Severity::Info, "World open — waiting for a friend to join.");
                 }
             }
             LobbyResult::Pending => {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
-                    fail_session(match intent {
+                    fail_session(generation, match intent {
                         LobbyIntent::Host => "Couldn't open the world — Steam matchmaking timed out.",
                         LobbyIntent::Join => "No open world found with this password.",
                     });
@@ -374,7 +406,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 }
             }
             LobbyResult::Failed(why) => {
-                fail_session(why);
+                fail_session(generation, why);
                 return;
             }
         }
@@ -392,24 +424,36 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
     run_session(self_id, peer_id, is_host, forward, generation, discovery);
 }
 
+/// RAII reset for client log-forwarding: created (set on) only for a forwarding client, it turns
+/// forwarding back off on drop, so no run_session exit path — Leave, failure, or a panic unwinding the
+/// driver thread — can leave the forward queue capturing with nothing to drain it.
+struct ForwardGuard;
+impl Drop for ForwardGuard {
+    fn drop(&mut self) {
+        crate::forward::set_enabled(false);
+    }
+}
+
 /// The rung-2 driver: stand up a `Session` over Steam P2P to the resolved partner, then pump/maintain
-/// it until the user Leaves (the captured `generation` goes [`stale`]). Owns `discovery` so teardown can leave
-/// the Steam lobby. A failure to *start* the transport degrades via [`fail_session`] (toast + reset),
-/// never aborts.
+/// it until the user Leaves (the captured `generation` goes [`stale`]). Holds `_discovery` purely for its
+/// scope: its [`Drop`] leaves the Steam lobby on every exit path. A failure to *start* the transport
+/// degrades via [`fail_session`] (toast + reset), never aborts.
 fn run_session(
     self_id: PeerId,
     peer_id: PeerId,
     is_host: bool,
     forward: bool,
     generation: u64,
-    discovery: LobbyDiscovery,
+    // Retained (not referenced) only for its `Drop`, which leaves the Steam lobby on any exit below.
+    _discovery: LobbyDiscovery,
 ) {
+    // Every early return / loop exit below drops `_discovery`, whose `Drop` leaves the Steam lobby — so
+    // teardown can't forget to leave it on any path (timeout, failure, Leave, or a panic unwinding the
+    // driver thread). `fail_session` no-ops when the generation is stale, so these are safe to call
+    // unconditionally.
     if self_id == peer_id {
         log::error!("coop: resolved partner is our own SteamID; nothing to connect to");
-        discovery.leave();
-        if !stale(generation) {
-            fail_session("Resolved partner is our own SteamID — nothing to connect to.");
-        }
+        fail_session(generation, "Resolved partner is our own SteamID — nothing to connect to.");
         return;
     }
     // The host (the lobby creator) is authoritative for the shared settings; the client adopts them.
@@ -417,10 +461,7 @@ fn run_session(
 
     let Some(net) = Networking::resolve() else {
         log::warn!("coop: ISteamNetworkingMessages unavailable; side-channel not started");
-        discovery.leave();
-        if !stale(generation) {
-            fail_session("Steam networking unavailable — couldn't open the co-op channel.");
-        }
+        fail_session(generation, "Steam networking unavailable — couldn't open the co-op channel.");
         return;
     };
     // We know the peer out of band, so accept its session up front rather than waiting on the
@@ -445,25 +486,29 @@ fn run_session(
         Session::new(Peer::new(self_id, host_id, PROTOCOL_VERSION, crate::state::snapshot()), transport);
     session.connect();
 
-    if forward {
+    // Enable client log-forwarding for the session behind an RAII guard, so it's reset on *every* exit —
+    // Leave, a panic unwinding the loop, anything — never left stuck on for the rest of the process.
+    let _forward_guard = forward.then(|| {
         crate::forward::set_enabled(true);
         log::info!("coop: forwarding this client's debug log to the host");
-    }
+        ForwardGuard
+    });
 
     // Seed the change-detector with the config we started from, so only a *received* host ConfigSync
     // (which differs) drives a live-config write + "synced" toast — not the no-op initial seed.
     let mut mirrored = session.peer().config().clone();
     let mut last_maintain = Instant::now();
+    // Bound the handshake: once the partner is resolved we expect its `Hello` promptly. If it never
+    // arrives (one-way NAT, peer crashed, P2P never opened), don't sit "Linking…"/"waiting" forever —
+    // give up with a plain-words toast so the user can retry instead of being stuck until they Leave.
+    let connect_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let mut linked = false;
     let mut lost = false;
 
     loop {
-        // Teardown: the user Left (or a new session superseded us). Leave the lobby and exit the thread.
+        // Teardown: the user Left (or a new session superseded us). Dropping `discovery` leaves the lobby
+        // and `_forward_guard` resets forwarding; nothing else to undo.
         if stale(generation) {
-            discovery.leave();
-            if forward {
-                crate::forward::set_enabled(false);
-            }
             return;
         }
 
@@ -499,11 +544,20 @@ fn run_session(
 
         let was_linked = linked;
         update_link_status(&session, peer_id, &mut linked, &mut lost);
-        if linked && !was_linked {
+        if linked && !was_linked && !stale(generation) {
             // Handshake landed: mark the session connected and drop the setup banner (the connected
-            // toast from `update_link_status` is the user-facing confirmation).
+            // toast from `update_link_status` is the user-facing confirmation). Guarded on the generation
+            // so a superseded driver can't publish CONNECTED over a newer session's state.
             SESSION.store(SESSION_CONNECTED, Ordering::Relaxed);
             clear_banner(BANNER_SESSION);
+        }
+
+        // Handshake never landed within budget: give up rather than hang. (Once linked, liveness — not
+        // this deadline — governs; a transient drop is handled by the "lost contact" banner.)
+        if !linked && Instant::now() >= connect_deadline {
+            log::warn!("coop: partner {} never completed the handshake; giving up", peer_tag(peer_id));
+            fail_session(generation, "Couldn't reach your friend — no response. Try again.");
+            return;
         }
 
         std::thread::sleep(POLL_INTERVAL);
@@ -558,10 +612,16 @@ fn update_link_status(
     }
 }
 
-/// Block until rung 1 publishes our own SteamID, or [`SELF_ID_TIMEOUT`] elapses (`None`).
-fn wait_self_id() -> Option<PeerId> {
+/// Block until rung 1 publishes our own SteamID, or [`SELF_ID_TIMEOUT`] elapses, or the session goes
+/// [`stale`] (the user Left / superseded while we waited) — all three return `None`. The stale check
+/// stops a driver from lingering up to the full timeout after a Leave. In practice this returns near-
+/// instantly: Open/Join are gated on Steam being ready, which already requires the SteamID resolved.
+fn wait_self_id(generation: u64) -> Option<PeerId> {
     let deadline = Instant::now() + SELF_ID_TIMEOUT;
     loop {
+        if stale(generation) {
+            return None;
+        }
         if let Some(id) = steam::self_steam_id() {
             return Some(id);
         }
