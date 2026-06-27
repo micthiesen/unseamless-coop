@@ -264,6 +264,12 @@ Once that's confirmed, build **rung 3** — drive the *game's* session (`CSSessi
 `Host`/`Client`) so players see each other in-world. Rung 2 gives us the coordination channel ("both
 call join now") and two instances we control to RE the create/join functions against.
 
+**In parallel, without waiting on either:** rung 4's off-rig slices can proceed now, since rung 4 is
+independent of rung 3. The **harness lobby prototype** (build-order step 2) needs no rig at all, and the
+**DLL hand-bind** (step 3) is authorable solo; only the **cheap call-result probe** (step 1) touches the
+rig, and it's *single-player*. So the password-keyed discovery work doesn't block on the two-player run
+above — it's the natural solo batch to run alongside it.
+
 ## Cross-references
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the two layers, "drive the game's networking" decision, the
