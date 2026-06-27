@@ -44,9 +44,10 @@ Until then the **user is your sole point of contact.**
 
 When the user tells you you're done / to integrate / to hand off to the orchestrator:
 
-1. **Self-check your lane.** Spawn **one** fresh-context reviewer (a single `check` agent) over your
-   branch diff and fix what it finds. Keep it light — a first-pass filter while you still have full
-   context, **not** a full `/ultracheck` swarm (that runs at integration).
+1. **Review your lane.** By default, spawn **one** fresh-context reviewer (a single `check` agent)
+   over your branch diff and fix what it finds — a light first-pass filter while you still have full
+   context. **But if the user (or your assignment) explicitly asked for a full `/ultracheck`, run that
+   instead**, apply the surviving findings, and say which you ran. An explicit ask overrides the default.
 2. **Consolidate your branch to one clean commit on your base** — e.g.
    `git reset --soft "$(git merge-base main HEAD)" && git commit`, or squash down to one. One clean
    commit on top keeps the orchestrator's squash-merge trivial and lets it tear you down without a
@@ -62,6 +63,7 @@ When the user tells you you're done / to integrate / to hand off to the orchestr
 ## Everything Else in `CLAUDE.md` Still Applies
 
 The safety invariants, the logging rule, clean-room hygiene, the build/test commands, and "preserve
-other sessions' work" all hold — **except** its "ultracheck after each holistic chunk" rule: you do
-the lighter one-shot `check` self-check at handoff instead (full `/ultracheck` happens once, at the
-orchestrator, at integration). Stay in your lane and preserve other sessions' work.
+other sessions' work" all hold — **except** its "ultracheck after each holistic chunk" rule: your
+default at handoff is the lighter one-shot `check`, and a full `/ultracheck` runs only when explicitly
+asked for (otherwise the orchestrator covers the deeper review at integration). Stay in your lane and
+preserve other sessions' work.

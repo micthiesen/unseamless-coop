@@ -34,8 +34,11 @@ your workspace path, and your branch `worker/<name>`.
   reading a live game log, no in-game validation. There is one game install and one rig, serialized
   through the orchestrator.
 - **Never spawn or remove workers**, and never touch another worker's workspace.
-- **Never run `/ultracheck`.** The orchestrator runs it once, per lane, when integrating your branch
-  to `main` (against the final merged tree). You do a *lighter* self-check instead — see below.
+- **Review depth: a single `check` by default; a full `/ultracheck` only when your assignment
+  explicitly asks for one.** Default to the lighter self-check below. If the orchestrator's brief
+  explicitly requests a full `/ultracheck`, run that instead before handing off — an explicit ask
+  overrides the default. The orchestrator still reviews at integration, but its heaviest pass is best
+  spent on *cross-lane* merge issues; a single lane's deep review is yours to do when asked.
 
 ## When You Need Something Serial
 
@@ -58,10 +61,11 @@ cleaner the recipe, the sooner your values come back.
 
 ## When You Finish Or Get Blocked
 
-**Before you report done, self-check your lane.** Spawn **one** fresh-context reviewer (a single
-`check` agent) over your branch diff and fix what it finds. Keep it light and fast — a first-pass
-filter while you still have full context, **not** a full `/ultracheck` swarm (the orchestrator runs
-that at integration). Note in your done message that you self-checked.
+**Before you report done, review your lane.** By default, spawn **one** fresh-context reviewer (a
+single `check` agent) over your branch diff and fix what it finds — a light, fast first-pass filter
+while you still have full context. **But if your assignment explicitly asked for a full
+`/ultracheck`, run that instead** (the heavier swarm), apply the surviving findings, and say so. State
+in your done message which one you ran.
 
 Then **consolidate your branch to one clean commit on your base** (above) and message the
 orchestrator: done (with a one-line summary) or blocked (with why). Do **not** tear yourself down;
@@ -69,5 +73,6 @@ the orchestrator manages your lifecycle and integrates your branch.
 
 Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
 hygiene, the build/test commands — **except** its "ultracheck after each holistic chunk" rule: in the
-fleet that happens once, at the orchestrator, per lane (see above). Stay in your lane and preserve
-other sessions' work.
+fleet your default is the lighter `check`, and a full `/ultracheck` runs only when your assignment
+asks for it (otherwise the orchestrator covers the deeper review at integration — see above). Stay in
+your lane and preserve other sessions' work.
