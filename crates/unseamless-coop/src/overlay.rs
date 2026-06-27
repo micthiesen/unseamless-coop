@@ -455,7 +455,7 @@ impl Overlay {
             .flags(passive_window_flags())
             .build(|| {
                 match report {
-                    Some(report) => draw_groups(ui, &concise_groups(report)),
+                    Some(report) => draw_groups(ui, &concise_groups(report), HeavyColumn::Left),
                     None => ui.text_disabled("debug panel: gathering..."),
                 }
             });
@@ -487,7 +487,7 @@ impl Overlay {
             .position_pivot([1.0, 1.0])
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
-            .build(|| draw_groups(ui, &groups));
+            .build(|| draw_groups(ui, &groups, HeavyColumn::Right));
     }
 
     /// Keep the window fully inside the ER viewport ("lock it to the game window"). Reads the current
@@ -1043,11 +1043,22 @@ fn enter_pressed(ui: &Ui) -> bool {
     ui.is_key_pressed_no_repeat(Key::Enter) || ui.is_key_pressed_no_repeat(Key::KeypadEnter)
 }
 
-/// Horizontal gap, in pixels, added past the widest rendered line to set the right column's x, so it
-/// starts at a fixed offset regardless of content width. Comfortably larger than the window padding
-/// (~8px at the default style) that offsets the left column's content origin, so the columns stay clear
-/// of each other — the effective inter-column gap is this minus that padding.
-const DEBUG_PANEL_COL_GAP: f32 = 28.0;
+/// Horizontal gap, in pixels, between the two debug columns: the right column's x is the LEFT column's
+/// own widest rendered line plus this pad (see [`draw_groups`]). Since the pitch is measured over the
+/// left column only, this is the *exact* inter-column gap — both columns are drawn from the same line
+/// start, so the right one sits this many pixels past where the left actually ends. Kept small so the
+/// columns sit close together and the panel width tracks content.
+const DEBUG_PANEL_COL_GAP: f32 = 20.0;
+
+/// Which of the two debug columns [`draw_groups`] fills heaviest. Set it to the side that hugs the
+/// surface's screen anchor so the fuller column sits toward the corner the window grows from, and the
+/// unused space pools in the opposite (far) top corner: `Left` for the bottom-left concise panel,
+/// `Right` for the bottom-right detail pane.
+#[derive(Clone, Copy)]
+enum HeavyColumn {
+    Left,
+    Right,
+}
 
 /// A debug **detail category**: a label for the Debug tab's toggle list, and the report section titles
 /// whose full `fields` it reveals in the bottom-right detail pane when enabled. Each named section is
@@ -1085,13 +1096,14 @@ struct PreparedGroup<'a> {
 }
 
 /// Render a list of [`ReportGroup`]s into the current window as a compact two-column layout. The groups
-/// fill **column-major**: partitioned on group boundaries into a heavier LEFT column (filled first, top
-/// to bottom) and a lighter RIGHT one, each drawn as its own vertical stack — so a group's rows never
-/// split across columns. Both columns are **bottom-aligned** (the shorter right column is top-padded),
-/// pooling all the unused space in the top-right corner. Halves the height versus one tall stack while
-/// using the wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built that way in
-/// [`crate::diag::build_report`]). Shared by the concise panel and the detail pane.
-fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
+/// fill **column-major**: partitioned on group boundaries into a heavier and a lighter column, each drawn
+/// as its own vertical stack — so a group's rows never split across columns. `heavy` picks which side is
+/// the fuller column so it can hug the surface's screen anchor: [`HeavyColumn::Left`] for the bottom-left
+/// concise panel, [`HeavyColumn::Right`] for the bottom-right detail pane. Both columns are
+/// **bottom-aligned** (the lighter one is top-padded), pooling the unused space in the top corner opposite
+/// the heavy side. Halves the height versus one tall stack. Keys/values stay left-aligned; values are
+/// ASCII (built that way in [`crate::diag::build_report`]). Shared by the concise panel and the detail pane.
+fn draw_groups(ui: &Ui, groups: &[ReportGroup], heavy: HeavyColumn) {
     if groups.is_empty() {
         return;
     }
@@ -1129,26 +1141,46 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
         lines as f32 * line_h + col.len().saturating_sub(1) as f32 * gap
     };
 
-    // Partition on group boundaries by rendered height: the first split where the left column is at
-    // least as tall as the right. Left height grows / right height shrinks as the split moves right, so
-    // this is the most balanced split with left >= right — left is the heavier column and the pad below
-    // is non-negative by construction. Falls back to `split == groups.len()` (everything left, a single
-    // column) for one group, or the degenerate case where one group out-measures all the rest.
-    let mut split = prepared.len();
+    // Partition on group boundaries by rendered height into a heavier and a lighter column. As the split
+    // k moves right the left column gains groups and the right loses them, so `H(left) - H(right)` grows
+    // monotonically and changes sign exactly once — the most balanced split sits at that boundary. `heavy`
+    // picks which side of it we land on:
+    //   - `Left`  -> the first k where left >= right: left is the heavier column (extra/tie to left).
+    //   - `Right` -> the last  k where right >= left: right is the heavier column (extra/tie to right).
+    // Fallback puts the whole report in the heavy column (one group, or one group out-measuring the rest).
+    let mut split = match heavy {
+        HeavyColumn::Left => prepared.len(),
+        HeavyColumn::Right => 0,
+    };
     for k in 1..prepared.len() {
-        if column_height(&prepared[..k]) >= column_height(&prepared[k..]) {
-            split = k;
-            break;
+        let (lh, rh) = (column_height(&prepared[..k]), column_height(&prepared[k..]));
+        match heavy {
+            HeavyColumn::Left if lh >= rh => {
+                split = k;
+                break;
+            }
+            HeavyColumn::Right if lh <= rh => split = k, // keep the last such k (most-filled left)
+            HeavyColumn::Right => break,                 // right no longer covers left; monotone, so stop
+            HeavyColumn::Left => {}
         }
     }
     let (left, right) = prepared.split_at(split);
 
-    // Right column's x = widest rendered line (title or `  key = value`) across every group, plus a
-    // gap. One pitch measured over all groups keeps the right column clear of the left regardless of
-    // which group is widest (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
+    // Degenerate (heavy == Right, one dominant group): the whole report landed in the right column. Draw
+    // it as a single column at the origin — there's no left content to offset the second column from.
+    if left.is_empty() {
+        draw_group_column(ui, right);
+        return;
+    }
+
+    // Right column's x = the LEFT column's own widest rendered line (title or `  key = value`), plus a
+    // small fixed gap. Measuring only the left groups (not all groups) sizes the left column to its own
+    // content, so the right column sits a fixed pad past where the left actually ends — a wide line in the
+    // *right* column no longer shoves the right column rightward and opens a big center gap. The panel
+    // width then tracks content: left-width + gap + right-width.
     let line_width = |text: &str| ui.calc_text_size(text)[0];
     let mut pitch = 0.0_f32;
-    for g in &prepared {
+    for g in left {
         pitch = pitch.max(line_width(g.title));
         for line in &g.lines {
             pitch = pitch.max(line_width(line));
@@ -1156,13 +1188,21 @@ fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
     }
     pitch += DEBUG_PANEL_COL_GAP;
 
-    ui.group(|| draw_group_column(ui, left));
+    // Bottom-align: top-pad the lighter column by the height difference so both share a bottom edge,
+    // pooling the unused space in the top corner opposite the heavy side (top-right for a Left-heavy
+    // bottom-left panel, top-left for a Right-heavy bottom-right pane). One of these pads is always 0.
+    let (lh, rh) = (column_height(left), column_height(right));
+    ui.group(|| {
+        let pad = (rh - lh).max(0.0); // > 0 only when the right column is the heavier one
+        if pad > 0.0 {
+            ui.dummy([0.0, pad]);
+        }
+        draw_group_column(ui, left);
+    });
     if !right.is_empty() {
         ui.same_line_with_pos(pitch);
         ui.group(|| {
-            // Top-pad the lighter right column by the height difference so its bottom lines up with the
-            // left's — pushing the empty space into the top-right corner.
-            let pad = (column_height(left) - column_height(right)).max(0.0);
+            let pad = (lh - rh).max(0.0); // > 0 only when the left column is the heavier one
             if pad > 0.0 {
                 ui.dummy([0.0, pad]);
             }

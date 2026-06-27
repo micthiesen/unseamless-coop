@@ -38,9 +38,12 @@ struct Vitals {
     hp: (u32, u32),
     fp: (u32, u32),
     stamina: (u32, u32),
-    /// Current status-ailment buildup per ailment (indexed by [`AILMENTS`]).
+    /// Status-ailment resistance *remaining* per ailment (indexed by [`AILMENTS`]) — `PlayerGameData`'s
+    /// `resistance_gauges`. RIG-INFERRED (not yet confirmed): this reads as the resistance LEFT, full at
+    /// rest and depleting as buildup accrues (procs near 0), NOT the accrued buildup. So accrued buildup =
+    /// `gauge_max - gauge`. See the open RIG-CONFIRM note in [`build_report`]'s status section.
     gauges: [u32; 7],
-    /// Proc threshold (max buildup) per ailment.
+    /// Proc threshold (full resistance / max buildup) per ailment.
     gauge_max: [u32; 7],
     /// Active-proc timer per ailment (nonzero while the ailment is procced).
     proc_timers: [f32; 7],
@@ -219,24 +222,33 @@ pub fn build_report(title: &str) -> DiagnosticReport {
                 .field("fp", format!("{}/{}", v.fp.0, v.fp.1))
                 .field("stamina", format!("{}/{}", v.stamina.0, v.stamina.1));
 
-            // Status ailments (poison, rot, bleed, ...): current buildup / proc threshold, plus the
+            // Status ailments (poison, rot, bleed, ...): accrued buildup / proc threshold, plus the
             // active-proc timer while one is ticking. Only ailments that are building or active are
             // listed, so the panel stays quiet when you're clean and spotlights what's accumulating
             // during a test.
             //
-            // ORDER ASSUMED, rig-confirmable: the 7 `resistance_gauges` are labeled in the common ER
-            // status order ([`AILMENTS`]). To verify/fix, apply ONE known ailment in-game (e.g. stand in
-            // Scarlet Rot) and watch which index climbs in the live panel — relabel AILMENTS if it's off.
+            // BUILDUP vs RESISTANCE-REMAINING, RIG-CONFIRM: `resistance_gauges[i]` is the resistance
+            // *remaining* (full at rest, depleting toward 0 as buildup accrues), NOT the accrued buildup —
+            // inferred from the rig observation that a clean player reads "312/312" on every ailment. So we
+            // display the accrued buildup `gauge_max - gauge` and only list an ailment once it's actually
+            // building (`buildup > 0`) or procced. To confirm on the rig: apply ONE ailment (e.g. stand in
+            // Scarlet Rot) and watch `buildup` climb 0 -> max. If it instead counts DOWN from max, the field
+            // is buildup-not-remaining and this `saturating_sub` must be inverted back to a raw read.
+            //
+            // ORDER ASSUMED, rig-confirmable: the 7 gauges are labeled in the common ER status order
+            // ([`AILMENTS`]). To verify/fix, watch which index climbs when that one ailment is applied —
+            // relabel AILMENTS if it's off.
             let status = r.section("status");
             let mut active: Vec<&str> = Vec::new();
             for (i, name) in AILMENTS.iter().enumerate() {
-                let (cur, max, timer) = (v.gauges[i], v.gauge_max[i], v.proc_timers[i]);
-                if cur > 0 || timer > 0.0 {
+                let (gauge, max, timer) = (v.gauges[i], v.gauge_max[i], v.proc_timers[i]);
+                let buildup = max.saturating_sub(gauge);
+                if buildup > 0 || timer > 0.0 {
                     active.push(*name);
                     if timer > 0.0 {
-                        status.field(*name, format!("{cur}/{max} (proc {timer:.1}s)"));
+                        status.field(*name, format!("{buildup}/{max} (proc {timer:.1}s)"));
                     } else {
-                        status.field(*name, format!("{cur}/{max}"));
+                        status.field(*name, format!("{buildup}/{max}"));
                     }
                 }
             }
