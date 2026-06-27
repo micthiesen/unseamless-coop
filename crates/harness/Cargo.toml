@@ -11,3 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 unseamless-core = { path = "../unseamless-core" }
+# Lobby-discovery prototype (rung 4) only — a normal native exe can link steamworks-rs (the cdylib
+# can NOT; see docs/COOP-CONNECTION.md "Steam integration"). Used to prove the password-keyed lobby
+# flow off the rig before the DLL hand-binds the flat C API.
+steamworks = "0.13"
+# Discovery-token hash for the lobby data scheme. Pure Rust, so the same hash is reusable verbatim by
+# the windows-gnu cdylib hand-bind later (the contract lives in src/steam.rs::token).
+sha2 = "0.10"

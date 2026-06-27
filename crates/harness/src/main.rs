@@ -17,6 +17,7 @@
 //!                                      # session-action | log-forward | lossy | all (default)
 //!   scripts/harness-tcp.sh             # spawns tcp-listen + tcp-connect over localhost
 
+mod steam;
 mod tcp;
 
 use std::net::TcpListener;
@@ -39,6 +40,22 @@ const V: Version = unseamless_core::protocol::PROTOCOL_VERSION;
 
 fn main() {
     let which = std::env::args().nth(1).unwrap_or_else(|| "all".into());
+
+    // Steam lobby-discovery prototype (rung 4) — off-rig, links steamworks-rs (the cdylib can't).
+    // `steam-init` is the gate (prove init on this host); the others take an optional password.
+    if which.starts_with("steam-") {
+        match which.as_str() {
+            "steam-init" => steam::run_init(),
+            "steam-lobby" => steam::run_lobby(&steam::password_or_default(std::env::args().nth(2))),
+            "steam-host" => steam::run_host(&steam::password_or_default(std::env::args().nth(2))),
+            "steam-join" => steam::run_join(&steam::password_or_default(std::env::args().nth(2))),
+            other => {
+                eprintln!("unknown steam mode '{other}'. options: steam-init, steam-lobby, steam-host, steam-join");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
 
     // TCP modes take a port and run as one end of a two-process exchange. `bridge-host` points the
     // host end at a live mod's debug bridge (layer 3): the mod is the client, we push it config.
