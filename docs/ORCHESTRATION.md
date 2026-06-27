@@ -84,36 +84,39 @@ Two responsibilities, kept separate:
   its next turn end (`Stop`), next prompt submit (`UserPromptSubmit`), or next start
   (`SessionStart`). So a message is delivered the next time *any* lifecycle event fires — nothing is
   lost if a wake is skipped.
-- **Wake latency = a single fixed sentinel.** A *parked-idle* worker (which no hook would otherwise
+- **Wake latency = a single fixed sentinel.** A *parked-idle* session (which no hook would otherwise
   fire on) is the only case needing a nudge: `msg` types one fixed wake sentinel (`$FLEET_WAKE_SENTINEL`,
   the *only* thing ever sent over the TTY) to start a turn, whose `UserPromptSubmit` hook then drains
   the inbox. A stray sentinel that races an already-drained inbox is recognised and swallowed
   (`UserPromptSubmit` → `decision:block`), so it never starts an empty turn.
 
-`msg` decides whether to wake, keyed off the target and its hook-stamped `state/`:
+`msg` decides whether to wake with **one rule for every session — worker and the human-attended
+orchestrator alike** — keyed off the hook-stamped `state/` plus a read of the target's input box:
 
-- **`usc-orch` → never typed into.** It's the human-attended pane, so it's inbox-only; it drains on
-  its next turn end or your next prompt. That's what removes the clobber entirely.
-- **`usc-worker-<name>` busy** (fresh `busy` stamp) → queued; the `Stop` hook delivers at turn end.
-- **`usc-worker-<name>` parked idle** → woken with the sentinel — unless a human is actively typing
-  in it (a deliberate hand-redirect), which `msg` detects (recent activity + a changing pane) and
-  declines to interrupt, letting that human's next submit drain the inbox.
+- **Busy** (fresh `busy` stamp) → queued; the session's own `Stop` hook delivers at turn end.
+- **Parked idle (or a stale busy stamp)** → woken with the sentinel **unless the target's input box
+  holds draft text**. `msg` reads the box (`fleet_input_empty`, anchored on the `❯` prompt glyph): a
+  non-empty box means a human is typing *or* left a draft sitting, so we don't type into it and let
+  their next submit drain the inbox. An empty box is the one signal that's safe for both a worker and
+  `usc-orch`, which is why the orchestrator is no longer a special "never type into it" case — it gets
+  woken too, so a worker's reply no longer strands when you step away from an idle orchestrator. If the
+  box can't be read (mid-repaint / atypical TUI state) we conservatively treat it as non-empty and fall
+  back to inbox-only.
 
 Still true: **prefix every cross-session message** with its source (`[orchestrator] ...` /
-`[worker:<name>] ...`) for attribution, and we don't script *interrupting* a busy worker — for a hard
+`[worker:<name>] ...`) for attribution, and we don't script *interrupting* a busy session — for a hard
 redirect, attach and do it by hand. `scripts/fleet/inbox` gives `ls` (pending counts) and `state`
 (busy/idle) for read-only visibility, plus `pop` / `wait [timeout]` to take messages off **your own**
 inbox (read-and-remove in one step — the only way to receive; nothing hand-deletes a `.msg`). An
-autonomous `usc-orch` that needs to block on a worker reply mid-turn uses `inbox wait`; a
-human-attended one just lets its drain hook deliver on the next turn (since `msg` never wakes
-`usc-orch`). There is intentionally no command to read *another* session's message bodies — that
-would steal its undelivered mail.
+autonomous `usc-orch` that needs to block on a worker reply mid-turn can still use `inbox wait`; an
+idle one now just gets woken by the wake-poke like any other session. There is intentionally no command
+to read *another* session's message bodies — that would steal its undelivered mail.
 
 The hooks are **inert outside a fleet session** (gated on `$UNSEAMLESS_FLEET_SESSION`, which the
 launchers set) and loaded only via `--settings`, so they never touch ordinary Claude sessions in the
-repo. Edge: stale draft text a human left sitting in a worker's input box isn't detected by the
-activity check (only *live* typing is), so a wake-poke would append to it — the same rare
-"human is hand-driving a worker" case, recoverable by clearing the box.
+repo. The input-box read closes the old "stale draft" edge (a draft left sitting used to be invisible
+to the activity-only check): a wake-poke now never lands on draft text, in a worker *or* the
+orchestrator — if the box isn't empty, `msg` just queues.
 
 ## Writing a worker assignment
 
@@ -234,7 +237,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | Script | Does |
 |--------|------|
 | `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
-| `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): never types into `usc-orch`, wakes a parked-idle worker with the sentinel, queues for a busy one. Target restricted to `usc-*` sessions. |
+| `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): wakes any parked-idle session (worker or `usc-orch`) with the sentinel when its input box is empty, queues for a busy one or one with a draft in its box. Target restricted to `usc-*` sessions. |
 | `inbox {pop\|wait [timeout]\|ls\|state}` | `pop`/`wait` take messages off **your own** inbox (read-and-remove in one step — the only receive path; `wait` blocks until mail arrives, then pops); `ls` (pending counts) and `state` (busy/idle) are read-only. No command reads another session's bodies. |
 | `_hook <EVENT>` / `_inbox` | internal: the transport hook (drains inbox → `additionalContext` for the model + a user-only `systemMessage` on receive, stamps state) and the sourced primitives. Registered via `hooks.settings.json`; inert outside a fleet session. |
 | `_ux <pre\|post>` | internal: the user-facing visibility hook (`PreToolUse`/`PostToolUse` on Bash). Emits user-only `systemMessage` notices for fleet sends/receives/waits/lifecycle — never seen by the model. Silent for any non-fleet command; inert outside a fleet session. |

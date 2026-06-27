@@ -4,9 +4,11 @@
 # The transport is a per-session **inbox** (a maildir-style directory of message
 # files) drained by Claude Code lifecycle hooks (`_hook`), instead of typing the
 # message into the target's TTY. This is what stops a worker message from
-# clobbering what you're typing into the orchestrator: message *content* never
-# goes through stdin -- only a fixed one-line wake sentinel ever does, and only to
-# a parked-idle worker (never to the human-attended orchestrator).
+# clobbering what you're typing: message *content* never goes through stdin -- only
+# a fixed one-line wake sentinel ever does, only to a parked-idle session, and only
+# when that session's input box is empty (so the sentinel can't land on a draft you
+# left sitting -- see `fleet_input_empty`). This holds for workers AND the
+# human-attended orchestrator alike.
 #
 # Delivery correctness lives in the inbox: `msg` appends here first, and every
 # Stop / UserPromptSubmit / SessionStart hook drains it. The wake sentinel is a
@@ -89,31 +91,33 @@ fleet_state_read() {
   if [ -s "$f" ]; then cat "$f"; else printf 'idle 0\n'; fi
 }
 
-# fleet_session_composing <sess>  ->  0 if a human appears to be typing into it
-# Used by `msg` to avoid waking (typing into) a session someone is composing in.
-# It declares "composing" only when the session was active very recently AND its
-# pane is still changing between two samples. A long-idle session has stale
-# activity -> not composing.
+# fleet_input_empty <sess>  ->  0 if the session's Claude input box is EMPTY (no draft to
+# clobber, so a wake-poke is safe), 1 if it holds draft text OR we can't determine it.
+# Deliberately conservative: "unknown" maps to not-empty, so a caller only ever wakes on a
+# POSITIVE empty reading.
 #
-# Caveat this CANNOT see on its own: a session that just ended a turn is *also*
-# recently-active with a changing pane -- it's repainting its response and
-# blinking the input cursor, not being typed into. So this returns a false
-# "composing" right after a turn. `msg` compensates with the authoritative hook
-# state (SETTLE_GRACE): it skips this heuristic for a worker whose idle stamp is
-# only seconds old. Don't rely on this function alone to mean "a human is typing."
-fleet_session_composing() {
-  local sess="$1" last now delta a b
+# This is the single safety gate for waking ANY fleet session -- worker or the human-attended
+# orchestrator. The rule is just "wake unless the human left text in the box": the input prompt
+# is the last line bearing the '❯' glyph (U+276F), and any non-space text after the glyph is a
+# draft. Reading the box directly (rather than a timing heuristic) catches both live typing and a
+# *stale* draft someone typed and walked away from -- the case a "recent activity" check is blind
+# to, and exactly what a blind wake-poke would append the sentinel to and submit. No glyph visible
+# (atypical/mid-repaint TUI state) -> unknown -> not-empty -> don't wake (it drains on the next
+# lifecycle event instead).
+fleet_input_empty() {
+  local sess="$1" pane prompt try glyph=$'\xe2\x9d\xaf' nbsp=$'\xc2\xa0'
   command -v tmux >/dev/null 2>&1 || return 1
   tmux has-session -t "$sess" 2>/dev/null || return 1
-  last="$(tmux display-message -p -t "$sess" '#{session_activity}' 2>/dev/null || echo 0)"
-  [[ "$last" =~ ^[0-9]+$ ]] || last=0
-  # Normalise to epoch seconds (tmux reports ms on some builds, s on others).
-  [ "$last" -gt 100000000000 ] && last=$((last / 1000))
-  now="$(date +%s)"
-  delta=$((now - last))
-  [ "$delta" -lt 2 ] || return 1   # not active in the last ~2s -> not composing
-  a="$(tmux capture-pane -p -t "$sess" 2>/dev/null || true)"
-  sleep 0.15
-  b="$(tmux capture-pane -p -t "$sess" 2>/dev/null || true)"
-  [ "$a" != "$b" ]                 # pane still changing -> a human is typing
+  # One retry: a single capture can land on a mid-repaint frame with no prompt line yet.
+  for try in 1 2; do
+    pane="$(tmux capture-pane -p -t "$sess" 2>/dev/null || true)"
+    prompt="$(printf '%s\n' "$pane" | grep -F "$glyph" | tail -1 || true)"
+    [ -n "$prompt" ] && break
+    [ "$try" = 1 ] && sleep 0.1
+  done
+  [ -n "$prompt" ] || return 1            # no prompt glyph in view -> unknown -> not-empty
+  prompt="${prompt#*"$glyph"}"            # drop up to & incl. the first glyph (the prompt marker)
+  prompt="${prompt//"$nbsp"/}"            # strip the nbsp padding the TUI fills the box with
+  prompt="${prompt//[[:space:]]/}"        # strip spaces/tabs
+  [ -z "$prompt" ]                        # nothing left -> empty box -> 0 (safe to wake)
 }

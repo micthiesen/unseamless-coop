@@ -86,9 +86,11 @@ scripts/fleet/msg usc-worker-<name> "[orchestrator] <text>"
 **Receiving a worker's reply.** Your `usc-orch` session is itself a fleet session, so its lifecycle
 hooks **pop your inbox automatically** at every turn boundary: a worker's `[worker:<name>] ...`
 message is delivered into your conversation as soon as you next take a turn. So the normal flow is
-just *end your turn* — don't poll. The catch: `msg` never wakes `usc-orch` (it's human-attended), so
-if you're running **autonomously and want to block** on a reply mid-turn (no human, no Stop hook
-firing), use:
+just *end your turn* — don't poll. If you're sitting **idle** when a worker messages you, `msg` now
+wakes you too (it types the sentinel to start a turn, but only when your input box is empty, so it
+can't clobber a draft) — so a reply no longer strands while you're parked. You only need to reach for
+explicit receive when you're running **autonomously and want to block** on a reply mid-turn (no human,
+no Stop hook firing yet):
 
 ```
 scripts/fleet/inbox wait [timeout]   # blocks until your inbox has mail, pops it, prints it (exit 3 = timed out)

@@ -3,16 +3,16 @@
 #
 # Deliver a message to another fleet Claude session. The message is written to the
 # target's **inbox** (a file), not typed into its TTY; a lifecycle hook (_hook)
-# drains the inbox into the model as injected context. So a worker message can
-# never clobber what you're typing into the orchestrator -- message content never
-# touches stdin.
+# drains the inbox into the model as injected context. So a message can never
+# clobber what you're typing -- message content never touches stdin.
 #
 # Delivery is guaranteed by the inbox: the target drains it on its next turn end
 # (Stop), next prompt submit (UserPromptSubmit), or next start (SessionStart). For
-# a *parked-idle worker* -- which no hook would otherwise fire on -- `msg` also
-# types a single fixed wake sentinel to start a turn (the only thing ever typed,
-# and only when it's safe). It never types into the orchestrator (the session a
-# human drives) and never into a session someone is actively composing in.
+# a *parked-idle session* -- which no hook would otherwise fire on -- `msg` also
+# types a single fixed wake sentinel to start a turn (the only thing ever typed).
+# This applies to every fleet session, the human-attended orchestrator included;
+# the one safety gate is the target's input box, which must be EMPTY before we type
+# (so the sentinel can't land on a draft you left sitting -- `fleet_input_empty`).
 #
 # The CLI is unchanged; callers don't think about waking anything. Convention:
 #   msg usc-orch         "[worker:auth] need a rig run for the save hook"
@@ -28,17 +28,6 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # harmless: the stray sentinel is swallowed). Set well above the worst-case single tool call (a
 # release cross-compile / test run), since PostToolUse only refreshes the stamp *between* tools.
 BUSY_TTL=600
-
-# A worker that ended its turn within this many seconds is still "settling": the
-# TUI is repainting its response and the input cursor is blinking. That repaint
-# trips the composing heuristic (recent activity + a changing pane) even though no
-# human is typing -- which is exactly the common case of the orchestrator replying
-# the instant a worker parks after messaging it, and it would strand the reply on
-# a session no hook will re-fire on. Within this grace we skip the heuristic and
-# wake (right for a freshly parked worker); a real hand-redirect lands after the
-# repaint settles, where the heuristic still applies. Kept short so the window of
-# "a human starts typing the very instant the worker parks" stays small.
-SETTLE_GRACE=5
 
 sess="${1:-}"; shift || true
 if [ -z "$sess" ]; then
@@ -62,38 +51,32 @@ if ! tmux has-session -t "$sess" 2>/dev/null; then
   exit 0
 fi
 
-# The orchestrator is the human-attended session: never type into it. It drains on
-# its next turn end or your next prompt -- so it can't clobber your typing.
-if [ "$sess" = "usc-orch" ]; then
-  echo "msg: queued to usc-orch inbox (delivers on its next turn / your next prompt)"
-  exit 0
-fi
-
-# Worker: wake it only if it won't otherwise drain promptly. Pre-default so a torn/empty state
-# read can't abort under `set -e` and falls through to the (safe) wake path.
+# Wake the target only if it won't otherwise drain promptly. Pre-default so a torn/empty state
+# read can't abort under `set -e` and falls through to the (safe) inbox-only path.
 st=idle; ts=0
 read -r st ts _ < <(fleet_state_read "$sess") || true
 now="$(date +%s)"
+
+# Busy with a fresh stamp -> its own Stop hook drains at turn end; no wake needed. (This is the
+# common orchestrator case too: a message that lands mid-turn rides out on the next Stop.)
 if [ "$st" = "busy" ] && [ $((now - ts)) -lt "$BUSY_TTL" ]; then
-  echo "msg: queued to $sess inbox (worker busy; delivers at end of its current turn)"
+  echo "msg: queued to $sess inbox (busy; delivers at end of its current turn)"
   exit 0
 fi
 
-# A worker that JUST parked (recent idle stamp from the Stop/SessionStart hook) is
-# repainting, not being typed into -- skip the composing heuristic and wake it (see
-# SETTLE_GRACE). ts==0 means "unknown state", so don't skip: fall through to the
-# heuristic's normal protection.
-just_parked=0
-if [ "$st" = "idle" ] && [ "$ts" -gt 0 ] && [ $((now - ts)) -lt "$SETTLE_GRACE" ]; then
-  just_parked=1
-fi
-
-if [ "$just_parked" -eq 0 ] && fleet_session_composing "$sess"; then
-  echo "msg: queued to $sess inbox (someone is typing in it; delivers on their submit)"
+# Parked idle (or a stale busy stamp). One rule for every session, worker and orchestrator alike:
+# wake it UNLESS the human left draft text in its input box -- in which case the wake-poke would
+# append the sentinel to that draft and submit it. The box being empty is the single signal that
+# protects both (it catches live typing and a stale draft alike). If we can't positively confirm
+# the box is empty (unreadable / mid-repaint), we fall back to inbox-only: the message is already
+# durably queued and drains on the target's next turn end or prompt submit. So a wake can never
+# clobber anything a human typed -- which is what makes it safe to do this to usc-orch at all.
+if ! fleet_input_empty "$sess"; then
+  echo "msg: queued to $sess inbox (draft in its input box, or state unreadable; delivers on its next turn / submit)"
   exit 0
 fi
 
-# Parked idle (or a stale busy stamp): start a turn so the UserPromptSubmit hook drains the inbox
+# Empty box, safe to type: start a turn so the UserPromptSubmit hook drains the inbox
 # now. The message is already durably queued, so a wake-poke failure is not a delivery failure --
 # degrade to success (it'll drain on the target's next lifecycle event). Serialize the keystrokes
 # against concurrent senders. -l sends literally; -- guards a leading '-'; Enter is a separate key
