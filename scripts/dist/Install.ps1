@@ -29,14 +29,20 @@
 
 .PARAMETER NoSaveBackup
   Skip copying your ELDEN RING saves into the backup. Default: copy them (belt-and-suspenders; we
-  never write your saves — co-op uses its own save extension).
+  never write your real save — co-op uses its own isolated save extension).
+
+.PARAMETER NoSeedSave
+  Skip seeding the co-op save from your character. Default: copy your newest ER0000.sl2 to the co-op
+  save extension (ER0000.<ext>) so you test co-op with YOUR character, on an isolated file — your real
+  ER0000.sl2 is never touched. With this switch, you start co-op as a fresh character instead.
 #>
 [CmdletBinding()]
 param(
     [string]$GameDir,
     [switch]$KeepMods,
     [switch]$KeepConfig,
-    [switch]$NoSaveBackup
+    [switch]$NoSaveBackup,
+    [switch]$NoSeedSave
 )
 
 . (Join-Path $PSScriptRoot '_lib.ps1')
@@ -165,9 +171,21 @@ is back to your normal setup, delete that marker file and re-run; otherwise run 
         throw "A copied file's sha256 didn't match the bundle MANIFEST. Re-extract the zip (Unblock it first) and run Install again before playing."
     }
 
-    # Record the install only after verification passes.
-    "build_id: $($manifest.BuildId)`nversion: $($manifest.Version)`ndate: $(Get-Date -Format o)" |
+    # Record the install only after verification passes. We stash the save extension here too, so
+    # Uninstall removes exactly the co-op save WE created (not whatever a later bundle might default to).
+    "build_id: $($manifest.BuildId)`nversion: $($manifest.Version)`nsave_extension: $($manifest.SaveExt)`ndate: $(Get-Date -Format o)" |
         Set-Content -Path $marker -Encoding UTF8
+
+    # ---- seed the co-op save from your character ----------------------------------------------
+    # Co-op uses an isolated extension (ER0000.<ext>), so your real ER0000.sl2 is never read or written
+    # by the game. Seed that co-op save from your newest character so you test with YOUR Tarnished, not
+    # a blank one. Idempotent (keeps an existing co-op save) and fully guarded (never touches .sl2/.co2).
+    if ($NoSeedSave) {
+        Write-Ok 'skipped seeding the co-op save (-NoSeedSave); co-op will start as a new character'
+    } else {
+        Write-Step 'Seeding the co-op test save from your character'
+        Initialize-CoopSave $manifest.SaveExt
+    }
 
     Write-Host ''
     Write-Step "Done. Build $($manifest.BuildId) installed."
