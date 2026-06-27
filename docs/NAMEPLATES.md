@@ -72,17 +72,35 @@ off-screen peer → 2-player.
 
 Ship-ready now (done): projection, base styling, palette, clamp math.
 
-Gated on the **co-op/session core** (rung 3 — real peer feed + identity), then **2-player** to verify:
-- [ ] **Stable per-peer color** — index the palette by SteamID, not iteration order (kills the flicker).
+**Rendering geometry — wired (host-tested math + cdylib draw).** The three rendering behaviors below are
+built against the core math and draw solo (against the placeholder peer set / `show_self`); what's left
+is the real peer **content** and tuning the *feel* with a partner at a real distance (2-player):
+- [x] **Stable per-peer color** — palette keyed off a stable per-peer handle
+      ([`palette::peer_color_for_id`]), not iteration order, so a peer's color can't flicker as the
+      roster reorders. *Still TODO:* swap the handle (the phantom `ChrIns` pointer today) for the SteamID
+      once the session core maps phantom→identity.
+- [x] **Distance LOD** — a peer publishes as a `Plate` carrying its view depth; the overlay degrades it
+      from text to a colored dot past [`projection::is_dot_lod`]'s threshold
+      ([`projection::DEFAULT_DOT_DISTANCE_M`], a constant inside the `max_distance_m` hard cull — the
+      rendering lane doesn't own the config surface, so it's not a config knob yet). *Tune the threshold
+      + dot size at 2-player.*
+- [x] **Off-screen edge indicator** — an off-screen / behind-camera peer publishes as an `Edge` at a
+      border-clamped NDC ([`Camera::edge_indicator_ndc`], which derives the behind-camera bearing from
+      the view-space lateral offset and clamps it); the overlay draws the palette-colored dot. *Tune at
+      2-player.*
+
+Still gated on the **co-op/session core** (rung 3 — real peer feed + identity), then **2-player**:
 - [ ] **Real label content** — name + ping + soul level + death count on `NameplateLabel`, driven by
       [`OverheadDisplay`].
-- [ ] **Distance LOD** — text→dot past a depth threshold (new tuning knob inside `max_distance_m`);
-      tune the threshold + dot size at 2-player.
-- [ ] **Off-screen edge indicator** — derive the behind-camera bearing, render the clamped dot
-      (palette-colored), tune at 2-player.
+- [ ] **Stable color by SteamID** — swap the per-peer color key from the phantom pointer to the SteamID.
 
-Pure-logic pieces (palette, clamp) are host-tested in `unseamless-core` so the gated work is wiring +
-visual tuning, not new math.
+Pure-logic pieces (palette, clamp, LOD threshold, edge-bearing) are host-tested in `unseamless-core` so
+the remaining work is real content + visual tuning, not new math.
+
+[`palette::peer_color_for_id`]: ../crates/unseamless-core/src/palette.rs
+[`projection::is_dot_lod`]: ../crates/unseamless-core/src/projection.rs
+[`projection::DEFAULT_DOT_DISTANCE_M`]: ../crates/unseamless-core/src/projection.rs
+[`Camera::edge_indicator_ndc`]: ../crates/unseamless-core/src/projection.rs
 
 [`NameplateLabel`]: ../crates/unseamless-coop/src/nameplates.rs
 [`OverheadDisplay`]: ../crates/unseamless-core/src/config.rs

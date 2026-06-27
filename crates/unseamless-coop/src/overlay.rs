@@ -22,6 +22,7 @@
 use std::ffi::c_void;
 
 use hudhook::hooks::dx12::ImguiDx12Hooks;
+use hudhook::imgui::draw_list::DrawListMut;
 use hudhook::imgui::{
     Condition, Context, FontConfig, FontId, FontSource, Io, Key, MouseButton, TabItemFlags, Ui,
     WindowFlags,
@@ -103,6 +104,13 @@ const PASSIVE_BG_ALPHA: f32 = 0.35;
 const NAMEPLATE_ALPHA: f32 = 0.65;
 const NAMEPLATE_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
 const NAMEPLATE_SHADOW_OFFSET: f32 = 1.0;
+// Dot markers: the distance-LOD dot a far peer's plate degrades to, and the off-screen edge indicator
+// dot. Both are a filled colored core ringed by a near-opaque dark outline (the same contrast trick the
+// text shadow uses) so a small dot stays legible over any part of the world. The edge dot is a touch
+// larger so an at-the-border "teammate is over here" marker reads at a glance. Tune at 2-player.
+const NAMEPLATE_DOT_R: f32 = 3.0;
+const NAMEPLATE_EDGE_DOT_R: f32 = 4.5;
+const NAMEPLATE_DOT_OUTLINE: f32 = 1.5;
 
 /// One inset, in pixels, from the viewport edge, shared by every overlay surface: the top-left
 /// notifications (left + top), the top-right watermark (right + top), and the utility window's
@@ -326,11 +334,25 @@ impl Overlay {
         // imgui-rs one-live-instance rule isn't violated.
         let dl = ui.get_background_draw_list();
         for n in &labels {
-            let [sx, sy] = unseamless_core::projection::ndc_to_screen(n.ndc, disp);
-            // Center the text horizontally on the projected point.
-            let x = sx - ui.calc_text_size(&n.text)[0] * 0.5;
-            dl.add_text([x + NAMEPLATE_SHADOW_OFFSET, sy + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, &n.text);
-            dl.add_text([x, sy], rgba(n.color, NAMEPLATE_ALPHA), &n.text);
+            let p = unseamless_core::projection::ndc_to_screen(n.ndc, disp);
+            let color = rgba(n.color, NAMEPLATE_ALPHA);
+            match n.kind {
+                // Off-screen peer: a colored dot pinned to the screen border, pointing toward them.
+                crate::nameplates::NameplateKind::Edge => draw_nameplate_dot(&dl, p, NAMEPLATE_EDGE_DOT_R, color),
+                // On-screen peer: full text up close, degrading to a colored dot past the LOD distance
+                // (the `is_dot_lod` threshold) — switching representation rather than scaling the bitmap
+                // font, which would turn mushy. The dot uses the same per-peer palette color.
+                crate::nameplates::NameplateKind::Plate => {
+                    if unseamless_core::projection::is_dot_lod(n.depth, unseamless_core::projection::DEFAULT_DOT_DISTANCE_M) {
+                        draw_nameplate_dot(&dl, p, NAMEPLATE_DOT_R, color);
+                    } else {
+                        // Center the text horizontally on the projected point.
+                        let x = p[0] - ui.calc_text_size(&n.text)[0] * 0.5;
+                        dl.add_text([x + NAMEPLATE_SHADOW_OFFSET, p[1] + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, &n.text);
+                        dl.add_text([x, p[1]], color, &n.text);
+                    }
+                }
+            }
         }
     }
 
@@ -831,6 +853,16 @@ impl ImguiRenderLoop for Overlay {
 /// have no live session, so this is the not-in-session default — only Host / Join enabled.
 fn session_context() -> SessionContext {
     SessionContext::default()
+}
+
+/// Draw a nameplate marker dot — a filled colored core ringed by a near-opaque dark outline (the same
+/// contrast trick the text shadow uses) so a small dot stays legible over any part of the world. Used
+/// for both the distance-LOD dot a far plate degrades to and the off-screen edge indicator. Added to the
+/// caller's already-bound background draw list (the same `dl` the text labels use), so it never binds a
+/// second draw list — imgui-rs's one-live-instance rule stays satisfied.
+fn draw_nameplate_dot(dl: &DrawListMut, center: [f32; 2], r: f32, color: [f32; 4]) {
+    dl.add_circle(center, r + NAMEPLATE_DOT_OUTLINE, NAMEPLATE_SHADOW).filled(true).build();
+    dl.add_circle(center, r, color).filled(true).build();
 }
 
 /// Draw our software cursor — a small faded orb at the mouse hotspot, on the foreground draw list (over

@@ -25,11 +25,20 @@
 //! squash). The label is upright, correctly placed, and tracks the player on foot and on horseback. No
 //! knobs needed — see the rig note in [`docs/NAMEPLATES.md`](../../../docs/NAMEPLATES.md).
 //!
-//! ## The rest of the design (gated, see docs/NAMEPLATES.md)
-//! Per-peer colors (palette wired; stable-by-SteamID is a co-op-core TODO), distance LOD (text→dot far
-//! away), an off-screen edge-clamp indicator, and real label content (name/ping/SL/death) all ride on
-//! the real peer feed and need a 2-player rig to verify. The pure pieces (palette, edge-clamp math) are
-//! host-tested in `unseamless-core` and ready to wire.
+//! ## Rendering behaviors wired here (geometry done; visual feel is 2-player-tuned)
+//! The three rendering behaviors from docs/NAMEPLATES.md are now wired against the host-tested core math:
+//!  - **Stable per-peer color** — the palette is keyed off a stable per-peer handle (the phantom's
+//!    `ChrIns` pointer for now; SteamID once the session core lands), not roster iteration order, so a
+//!    peer keeps its color as the roster reorders ([`peer_color_for_id`](unseamless_core::palette::peer_color_for_id)).
+//!  - **Distance LOD** — a peer is published as a [`Plate`](NameplateKind::Plate) carrying its view
+//!    depth; the overlay degrades it from text to a colored dot past
+//!    [`is_dot_lod`](unseamless_core::projection::is_dot_lod)'s threshold.
+//!  - **Off-screen edge indicator** — an off-screen / behind-camera peer is published as an
+//!    [`Edge`](NameplateKind::Edge) at a border-clamped NDC ([`edge_indicator_ndc`](Camera::edge_indicator_ndc)).
+//!
+//! Still gated on the real peer feed (rung 3) + a 2-player rig: real label **content** (name/ping/SL/
+//! death-count), swapping the color key from the pointer to the SteamID, and tuning the LOD/edge
+//! thresholds so the transitions *feel* right with a partner at a real distance.
 
 use eldenring::cs::{
     CSCamExt, CSCamera, CSTaskGroupIndex, ChrIns, ChrLoadStatus, ChrSet, WorldChrMan,
@@ -40,7 +49,7 @@ use unseamless_core::projection::Camera;
 use unseamless_core::util::Latch;
 
 use crate::feature::{Feature, Tick};
-use crate::nameplates::NameplateLabel;
+use crate::nameplates::{NameplateKind, NameplateLabel};
 
 /// Head clearance above a character's physics position (~feet/center), in meters along world up, so
 /// the label floats above the head rather than at the navel. Rig-tunable (confirm `+Y` up and height).
@@ -48,6 +57,9 @@ const HEAD_OFFSET_M: f32 = 1.8;
 /// NDC slop kept on every screen edge before culling — a label hanging slightly off the frame edge is
 /// fine (its anchor can be just off-screen while the text is still partly visible).
 const ON_SCREEN_MARGIN: f32 = 0.1;
+/// NDC half-extent the off-screen edge indicator is pinned to — just under `1.0` so the dot insets from
+/// the exact frame edge rather than sitting half off-screen. Tune at 2-player.
+const EDGE_INSET: f32 = 0.95;
 /// Color for the debug/solo `show_self` label. A warm near-white, distinct from the peer palette (which
 /// is for *other* players) — it only ever shows during a solo rig check, never in real co-op.
 const SELF_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
@@ -188,14 +200,17 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
     // load-bearing guard rather than the in-`ChrIns` `is_active` flag.
     for chr in active_characters(&wcm.player_chr_set) {
         let base = chr.superclass();
+        let ptr = std::ptr::from_ref(base) as usize;
         // Skip the local player here; it's handled by `show_self` below.
-        if main_ptr == Some(std::ptr::from_ref(base) as usize) {
+        if main_ptr == Some(ptr) {
             continue;
         }
-        // Distinct per-peer color from the shared palette. TODO(co-op core): key the color off a stable
-        // peer identity (SteamID) instead of iteration order — `peer_n` shifts as peers join/leave, so a
-        // player's color can currently flicker. See docs/NAMEPLATES.md.
-        let color = unseamless_core::palette::peer_color(peer_n);
+        // Stable per-peer color: key the palette off a *stable identity*, not iteration order, so a
+        // peer keeps its color even as the roster reorders on join/leave (the flicker docs/NAMEPLATES.md
+        // calls out). Until the session core hands us SteamIDs, the phantom's `ChrIns` pointer is the
+        // stable per-peer handle — constant for a loaded phantom across frames, unlike `peer_n`.
+        // TODO(co-op core): swap `ptr` for the peer's SteamID once the session layer maps phantom→identity.
+        let color = unseamless_core::palette::peer_color_for_id(ptr as u64);
         peer_n += 1;
         push_label(&mut labels, camera, base, max_dist, format!("Player {peer_n}"), color);
     }
@@ -214,8 +229,9 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
     labels
 }
 
-/// Project one character's head position and, if it survives culling, push its label. Reads the
-/// physics-module world position (after `PostPhysics`, so it's this frame's settled value).
+/// Project one character's head position and, if it survives culling, push its label — either an
+/// on-screen [`Plate`](NameplateKind::Plate) or an off-screen [`Edge`](NameplateKind::Edge) indicator.
+/// Reads the physics-module world position (after `PostPhysics`, so it's this frame's settled value).
 fn push_label(
     labels: &mut Vec<NameplateLabel>,
     camera: &Camera,
@@ -226,14 +242,24 @@ fn push_label(
 ) {
     let pos = base.modules.physics.position;
     let world = [pos.0, pos.1 + HEAD_OFFSET_M, pos.2];
-    let Some(projected) = camera.project(world) else {
-        return; // behind the camera
-    };
-    // `depth` is forward (view-Z) distance, not radial distance, so `max_distance_m` culls an off-axis
-    // peer at a slightly larger true range than the name implies — acceptable for a "don't draw distant
-    // labels" cull. `as f32` is lossless: max_dist is clamped to a small integer-meter range.
-    if projected.depth > max_dist as f32 || !projected.on_screen(ON_SCREEN_MARGIN) {
-        return; // too far, or off the edges of the frame
+    // Cull by *radial* distance so the one threshold governs both a plate and an off-screen edge dot
+    // (a behind-camera peer has no forward depth to cull on). `as f32` is lossless — `max_dist` is
+    // clamped to a small integer-meter range. A non-finite distance (a torn position read gives NaN)
+    // is culled here so a NaN never reaches the projector / draw list, the way `on_screen` used to
+    // backstop it before this path existed.
+    let dist = camera.distance_to(world);
+    if !dist.is_finite() || dist > max_dist as f32 {
+        return; // too far, or a bad position — draw nothing at all
     }
-    labels.push(NameplateLabel { ndc: projected.ndc, depth: projected.depth, color, text });
+    // On-screen and in front → a full overhead plate at the projected point; otherwise (off the frame
+    // edges, or behind the camera) → an edge indicator pinned to the screen border pointing at the peer.
+    match camera.project(world) {
+        Some(p) if p.on_screen(ON_SCREEN_MARGIN) => {
+            labels.push(NameplateLabel { ndc: p.ndc, depth: p.depth, color, text, kind: NameplateKind::Plate });
+        }
+        _ => {
+            let ndc = camera.edge_indicator_ndc(world, EDGE_INSET);
+            labels.push(NameplateLabel { ndc, depth: dist, color, text, kind: NameplateKind::Edge });
+        }
+    }
 }

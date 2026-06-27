@@ -134,6 +134,76 @@ pub fn clamp_ndc_to_edge(ndc: [f32; 2], limit: f32) -> [f32; 2] {
     [ndc[0] * t, ndc[1] * t]
 }
 
+/// Default view-depth (meters) at/past which an on-screen nameplate degrades from full text to a small
+/// dot — the **distance LOD** in `docs/NAMEPLATES.md`. It's a *second* distance meant to sit inside the
+/// `nameplates.max_distance_m` hard cull (a peer past `max_distance_m` draws nothing at all); between
+/// this and that cull, the peer reads as a colored dot rather than mushy shrunk text. If the cull is set
+/// tighter than this, the dot stage is simply empty and every visible peer stays text. A bare constant
+/// for now (not a config knob — the rendering lane doesn't own the config surface); the 2-player rig is
+/// where the exact value gets its final tune.
+pub const DEFAULT_DOT_DISTANCE_M: f32 = 25.0;
+
+/// Whether a nameplate at `depth` meters (view-space forward distance — [`Projected::depth`]) should
+/// render as a **dot** instead of full text: true once the peer is at or beyond `dot_distance_m`. The
+/// switch is by depth, not font scaling, because shrinking a bitmap font turns it mushy (see the design
+/// doc). A non-finite `depth` (e.g. a torn camera read that produced NaN) returns `false` — degrade to
+/// drawing text rather than silently swallowing the label — since `NaN >= x` is false.
+pub fn is_dot_lod(depth: f32, dot_distance_m: f32) -> bool {
+    depth >= dot_distance_m
+}
+
+impl Camera {
+    /// Straight-line (radial) distance, in meters, from the camera to `world`. Unlike
+    /// [`Projected::depth`] (forward view-Z, undefined for a point behind the camera), this is defined
+    /// everywhere, so it's the right metric for the nameplate range cull — one threshold governs both an
+    /// on-screen plate and a behind-camera edge indicator. Non-finite if `world` is (a torn position
+    /// read), which the caller culls.
+    pub fn distance_to(&self, world: Vec3) -> f32 {
+        let rel = sub(world, self.position);
+        dot(rel, rel).sqrt()
+    }
+
+    /// Where on the screen **border** to pin an off-screen indicator dot pointing toward `world` — the
+    /// "teammate is over here" co-op compass in `docs/NAMEPLATES.md`. Returns an NDC point on the
+    /// `±limit` border along the bearing to the peer (`limit` is the NDC half-extent; pass slightly
+    /// under `1.0`, e.g. `0.95`, to inset the dot so it isn't half off-screen).
+    ///
+    /// Handles the two off-screen cases the bare [`clamp_ndc_to_edge`] can't on its own:
+    ///  - **in front but off to the side** (`depth > 0`): project normally, then clamp to the border;
+    ///  - **at/behind the camera plane** (`depth <= 0`, where [`project`](Camera::project) returns
+    ///    `None`): there's no perspective image, so derive the bearing from the view-space *lateral*
+    ///    offset (`right`/`up` components) and pin that to the border. This is continuous with the
+    ///    in-front case — as a peer crosses from just-in-front to just-behind on a given side, the dot
+    ///    stays on that same edge rather than jumping. A peer dead behind has no lateral bearing, so it
+    ///    defaults to the bottom edge ("turn around"). The exact behind-camera feel is 2-player-tuned.
+    pub fn edge_indicator_ndc(&self, world: Vec3, limit: f32) -> [f32; 2] {
+        let rel = sub(world, self.position);
+        let depth = dot(rel, self.forward);
+        let tan_half = (self.fov_y * 0.5).tan();
+        // Degenerate camera params (the `is_finite` checks also catch a NaN fov, which the `<= 0.0`
+        // guards alone would let slip through): no usable bearing, so fall back to the bottom edge
+        // rather than dividing by zero / propagating NaN.
+        if !tan_half.is_finite() || tan_half <= 0.0 || !self.aspect_ratio.is_finite() || self.aspect_ratio <= 0.0 {
+            return [0.0, -limit];
+        }
+        let focal = 1.0 / tan_half;
+        // View-space lateral offset, pre-divide, with the same focal/aspect weighting `project` uses —
+        // so for an in-front point `[ax/depth, ay/depth]` is exactly its NDC.
+        let ax = dot(rel, self.right) * focal / self.aspect_ratio;
+        let ay = dot(rel, self.up) * focal;
+        if depth > MIN_DEPTH {
+            clamp_ndc_to_edge([ax / depth, ay / depth], limit)
+        } else {
+            // Behind/beside the camera: no divide. Point at the lateral bearing, pinned to the border;
+            // a dead-behind peer (no lateral offset) — or a non-finite world point (a torn position read
+            // gives NaN here) — has no usable bearing, so default to the bottom edge rather than emit a
+            // NaN NDC that would reach the draw list.
+            let m = ax.abs().max(ay.abs());
+            if !m.is_finite() || m <= 0.0 { [0.0, -limit] } else { [ax / m * limit, ay / m * limit] }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +337,81 @@ mod tests {
         assert_eq!(clamp_ndc_to_edge([2.0, 2.0], 1.0), [1.0, 1.0]); // corner stays on the diagonal
         // A sub-1.0 limit insets the dot from the exact edge.
         assert_eq!(clamp_ndc_to_edge([2.0, 0.0], 0.9), [0.9, 0.0]);
+    }
+
+    #[test]
+    fn is_dot_lod_switches_at_the_threshold() {
+        // Text up close, dot at/past the threshold (inclusive boundary).
+        assert!(!is_dot_lod(10.0, 25.0), "near peer stays text");
+        assert!(!is_dot_lod(24.999, 25.0), "just inside the threshold is still text");
+        assert!(is_dot_lod(25.0, 25.0), "at the threshold is a dot");
+        assert!(is_dot_lod(60.0, 25.0), "far peer is a dot");
+        // A non-finite depth degrades to text (draw something) rather than a dot — `NaN >= x` is false.
+        assert!(!is_dot_lod(f32::NAN, 25.0), "NaN depth must not read as a dot");
+    }
+
+    #[test]
+    fn edge_indicator_pins_offscreen_front_points_to_the_border() {
+        let cam = cam_origin(1.0);
+        // In front but far off to the right (vx ≫ depth): right edge, vertically centered.
+        let r = cam.edge_indicator_ndc([100.0, 0.0, 1.0], 0.95);
+        assert!(close(r[0], 0.95) && close(r[1], 0.0), "right edge: {r:?}");
+        // In front and up-left: clamps along the diagonal, larger axis at the limit.
+        let ul = cam.edge_indicator_ndc([-50.0, 100.0, 1.0], 0.95);
+        assert!(close(ul[1], 0.95), "top dominates: {ul:?}");
+        assert!(ul[0] < 0.0 && ul[0].abs() <= 0.95, "left-of-center, within border: {ul:?}");
+    }
+
+    #[test]
+    fn edge_indicator_derives_a_bearing_for_behind_camera_points() {
+        let cam = cam_origin(1.0); // looks down +z
+        // Dead behind, no lateral offset → defaults to the bottom edge ("turn around").
+        assert_eq!(cam.edge_indicator_ndc([0.0, 0.0, -10.0], 0.95), [0.0, -0.95]);
+        // Behind and to the right → right edge (project() would have returned None here).
+        assert!(cam.project([5.0, 0.0, -10.0]).is_none(), "precondition: behind the camera");
+        let br = cam.edge_indicator_ndc([5.0, 0.0, -10.0], 0.95);
+        assert!(close(br[0], 0.95) && close(br[1], 0.0), "behind-right → right edge: {br:?}");
+        // Behind and above → top edge.
+        let ba = cam.edge_indicator_ndc([0.0, 5.0, -10.0], 0.95);
+        assert!(close(ba[0], 0.0) && close(ba[1], 0.95), "behind-above → top edge: {ba:?}");
+    }
+
+    #[test]
+    fn edge_indicator_is_continuous_across_the_camera_plane() {
+        // A peer on the right side stays on the right edge whether just in front of or just behind the
+        // camera plane — the dot doesn't flip sides as they cross it (the behind-camera continuity the
+        // method's docs promise).
+        let cam = cam_origin(1.0);
+        let front = cam.edge_indicator_ndc([5.0, 0.0, MIN_DEPTH * 2.0], 0.95);
+        let behind = cam.edge_indicator_ndc([5.0, 0.0, -MIN_DEPTH * 2.0], 0.95);
+        assert!(front[0] > 0.0 && behind[0] > 0.0, "both on the right edge: {front:?} {behind:?}");
+    }
+
+    #[test]
+    fn edge_indicator_falls_back_on_degenerate_camera() {
+        let mut cam = cam_origin(1.0);
+        cam.fov_y = f32::NAN; // a torn matrix read
+        let p = cam.edge_indicator_ndc([10.0, 0.0, 10.0], 0.95);
+        assert_eq!(p, [0.0, -0.95], "degenerate camera → bottom-edge fallback, no NaN");
+    }
+
+    #[test]
+    fn edge_indicator_falls_back_on_non_finite_world() {
+        // A torn position read (NaN world coord) must not emit a NaN NDC that reaches the draw list —
+        // it degrades to the bottom-edge fallback, the same as a degenerate camera. (The feature also
+        // culls a non-finite distance upstream; this is the in-math backstop.)
+        let cam = cam_origin(1.0);
+        let p = cam.edge_indicator_ndc([f32::NAN, 0.0, -10.0], 0.95);
+        assert!(p[0].is_finite() && p[1].is_finite(), "must not emit NaN NDC: {p:?}");
+        assert_eq!(p, [0.0, -0.95]);
+    }
+
+    #[test]
+    fn distance_to_is_radial_and_non_finite_passes_through() {
+        let cam = cam_origin(1.0); // at the origin
+        assert!(close(cam.distance_to([3.0, 4.0, 0.0]), 5.0), "3-4-5 radial distance");
+        assert!(close(cam.distance_to([0.0, 0.0, -10.0]), 10.0), "behind the camera still has a distance");
+        assert!(!cam.distance_to([f32::NAN, 0.0, 0.0]).is_finite(), "NaN world → non-finite distance to cull");
     }
 
     #[test]

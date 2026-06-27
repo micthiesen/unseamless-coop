@@ -20,17 +20,36 @@ use std::sync::{Mutex, OnceLock, TryLockError};
 /// the overlay never touches the camera or any game state.
 #[derive(Debug, Clone)]
 pub struct NameplateLabel {
-    /// Screen position in normalized device coords (`x,y ∈ [-1, 1]`, `+x` right, `+y` up), already
-    /// culled to on-screen + in-range by the projector.
+    /// Screen position in normalized device coords (`x,y ∈ [-1, 1]`, `+x` right, `+y` up). For a
+    /// [`Plate`](NameplateKind::Plate) this is the peer's projected head; for an
+    /// [`Edge`](NameplateKind::Edge) it's already clamped to the screen border by the projector.
     pub ndc: [f32; 2],
-    /// View-space depth (meters from the camera). Kept for distance-based styling (the at-distance dot
-    /// LOD in `docs/NAMEPLATES.md`); the projector has already applied the max-distance cull.
+    /// View-space depth (meters from the camera) for a [`Plate`](NameplateKind::Plate), driving the
+    /// text→dot distance LOD ([`unseamless_core::projection::is_dot_lod`]). For an
+    /// [`Edge`](NameplateKind::Edge) marker it carries the peer's radial distance instead (the edge dot
+    /// has no LOD); both are used only for farthest-first paint ordering across the set.
     pub depth: f32,
-    /// RGB tint for this label (and its future dot), so each peer reads as a distinct color
-    /// ([`unseamless_core::palette::peer_color`]). The overlay applies the shared alpha at draw time.
+    /// RGB tint for this label and its dot, so each peer reads as a distinct, *stable* color
+    /// ([`unseamless_core::palette::peer_color_for_id`]). The overlay applies the shared alpha at draw time.
     pub color: [f32; 3],
-    /// The text drawn over the peer's head.
+    /// The text drawn over the peer's head (a [`Plate`](NameplateKind::Plate) up close; ignored when the
+    /// marker renders as a dot).
     pub text: String,
+    /// How to draw this marker — a full overhead plate, or an off-screen edge indicator.
+    pub kind: NameplateKind,
+}
+
+/// How a [`NameplateLabel`] renders, decided by the game-thread projector from the peer's screen
+/// position. The overlay branches on this: a [`Plate`](NameplateKind::Plate) draws over the peer's head
+/// (full text up close, a colored dot once [`is_dot_lod`](unseamless_core::projection::is_dot_lod)
+/// trips); an [`Edge`](NameplateKind::Edge) draws only a colored dot pinned to the screen border,
+/// pointing toward an off-screen peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameplateKind {
+    /// On-screen: an overhead plate at [`ndc`](NameplateLabel::ndc) (text or distance-LOD dot).
+    Plate,
+    /// Off-screen: an edge-clamped indicator dot at [`ndc`](NameplateLabel::ndc) pointing at the peer.
+    Edge,
 }
 
 /// Latest published label set, or `None` before the first publish. A `Mutex<Vec<_>>` (like
