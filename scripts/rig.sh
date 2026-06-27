@@ -55,15 +55,23 @@ RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
 # ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
 # with `cycle --no-dismiss`, or trigger it yourself with `rig.sh dismiss`.
 RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
-# How many confirm presses `dismiss` sends, and the gap between them. The startup popups are MODAL
-# and persist until confirmed, so the loop doesn't need to press fast — it needs to keep pressing
-# long enough to outlast the slowest popup's *appearance*. The "offline mode" popup (#3) only fires
-# after a connection attempt times out (~10-15s), well after the first two, so the total span must
-# reach that. The per-press re-focus (focus_game_window, ~0.7s incl. its own settle sleep) already
-# adds spacing, so the explicit interval can stay short: 8 × (~0.7 + 1.5) ≈ 18s span, enough to
-# catch the late popup without dragging the sequence out.
-RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-8}"
-RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-1.5}"
+# How fast `dismiss` clicks through the startup popups, and how long the whole sequence runs. The
+# popups are MODAL (persist until confirmed), so the loop only needs to (a) press fast enough that
+# each one dies the moment it appears, and (b) keep going long enough to outlast the slowest popup's
+# *appearance* — the "offline mode" popup (#3) fires after a connection attempt times out (~10-15s),
+# well after the first two. Total span ≈ PRESSES × INTERVAL (+ a focus settle every REFOCUS_EVERY
+# presses). Defaults: 22 × 0.4s ≈ 11s span (measured ~0.52s/press incl. the periodic re-focus),
+# long enough to outlast popup #3's ~10-15s timeout. The popups are *in-engine* dialogs, not OS
+# windows, so they can't steal X focus between presses — re-focusing every single press was wasted
+# time, hence REFOCUS_EVERY (focus once, then only re-assert occasionally). Dial these in live with
+# the per-press desktop toasts (RIG_DISMISS_NOTIFY=1): watch when each press fires vs. when a popup
+# actually shows, then raise PRESSES/INTERVAL if popup #3 still slips through, or drop them to go
+# shorter. Set RIG_DISMISS_NOTIFY=0 to silence the toasts once dialed in.
+RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-22}"
+RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-0.4}"
+RIG_DISMISS_REFOCUS_EVERY="${RIG_DISMISS_REFOCUS_EVERY:-4}"   # re-focus the game window every Nth press (1 = every press, old behavior)
+RIG_DISMISS_FOCUS_SETTLE="${RIG_DISMISS_FOCUS_SETTLE:-0.25}"  # pause after activating the window before injecting (was a hardcoded 0.5)
+RIG_DISMISS_NOTIFY="${RIG_DISMISS_NOTIFY:-1}"                 # per-press desktop toast for visually dialing in the timing
 
 # ---- friend-bundle packaging (rig.sh package / share) ------------------------------------------
 # `package` builds the mod and assembles a self-contained zip a friend installs on Windows
@@ -98,6 +106,17 @@ say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Desktop toast (best-effort, KDE/libnotify). The synchronous hint makes a run of calls replace each
+# other in place, so the dismiss loop reads as one live counter instead of stacking N toasts. No-op
+# if notify-send is missing or RIG_DISMISS_NOTIFY=0. $1=summary $2=body $3=timeout-ms (default 1200).
+notify() {
+  [[ "${RIG_DISMISS_NOTIFY:-1}" == 1 ]] || return 0
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -a unseamless-rig -u low -t "${3:-1200}" \
+    -h string:x-canonical-private-synchronous:rig-dismiss \
+    "$1" "${2:-}" 2>/dev/null || true
+}
 
 # Copy $1 to the system clipboard, best-effort. Wayland-native wl-copy first, then X fallbacks, then a
 # real pbcopy binary (macOS). Returns 1 if no tool is found. NOTE: detects real binaries — an
@@ -432,7 +451,7 @@ const ws = (typeof workspace.windowList === "function") ? workspace.windowList()
 for (const w of ws) if (w.resourceClass == "gamescope") { w.minimized = false; workspace.activeWindow = w; print("ERFOCUS | gamescope"); }
 EOF
   stamp="$(date '+%Y-%m-%d %H:%M:%S')"
-  kwin_run "$js" "$plugin"; sleep 0.5; kwin_unload "$plugin"; rm -f "$js"
+  kwin_run "$js" "$plugin"; sleep "$RIG_DISMISS_FOCUS_SETTLE"; kwin_unload "$plugin"; rm -f "$js"
   journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "ERFOCUS"
 }
 
@@ -444,30 +463,43 @@ cmd_dismiss() {
   [[ "$presses" =~ ^[0-9]+$ ]] || { warn "dismiss: press count must be a number, got '$presses'"; return 1; }
   [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
   pgrep -f '[e]ldenring.exe' >/dev/null || warn "eldenring.exe doesn't look like it's running yet"
-  say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart), re-focusing the game window before each…"
-  local i focused=0
+  local refocus="$RIG_DISMISS_REFOCUS_EVERY"
+  [[ "$refocus" =~ ^[0-9]+$ && "$refocus" -gt 0 ]] || refocus=1
+  say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart, re-focusing every ${refocus})…"
+  local i focused=0 start now elapsed
+  start="${EPOCHREALTIME/,/.}"
   for ((i = 0; i < presses; i++)); do
-    # Re-focus before EVERY press, not just once up front: a popup appearing (or KWin reshuffling
-    # focus) can steal it between presses, so a one-time focus would leave later keys landing in the
-    # terminal or wherever else has focus. Only inject when we actually hold the game window —
-    # skip this press otherwise so keys never go to the wrong place.
-    if focus_game_window; then
-      focused=1
-    else
-      warn "couldn't focus the gamescope window this attempt — skipping this press"
-      sleep "$RIG_DISMISS_INTERVAL"
-      continue
+    # The popups are *in-engine* dialogs, not separate OS windows, so focus can't be stolen between
+    # presses — we re-assert it on the first press and every Nth after (insurance against KWin
+    # reshuffling), not every single press. Only inject once we actually hold the game window.
+    if (( i % refocus == 0 )); then
+      if focus_game_window; then
+        focused=1
+      elif (( focused == 0 )); then
+        warn "couldn't focus the gamescope window — skipping this press"
+        notify "rig: dismissing popups" "press $((i + 1))/$presses skipped — no game-window focus" 1500
+        sleep "$RIG_DISMISS_INTERVAL"
+        continue
+      fi
     fi
+    (( focused == 0 )) && { sleep "$RIG_DISMISS_INTERVAL"; continue; }
     ydo key 28:1 28:0 || { warn "ydotool failed — is ydotoold running and YDOTOOL_SOCKET correct?"; return 1; }
+    now="${EPOCHREALTIME/,/.}"
+    elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN { printf "%.1f", b - a }')"
+    notify "rig: dismissing popups" "press $((i + 1))/$presses · ${elapsed}s elapsed"
     sleep "$RIG_DISMISS_INTERVAL"
   done
   if [[ $focused -eq 0 ]]; then
     warn "never managed to focus the game window — nothing dismissed; clear popups manually or: scripts/rig.sh dismiss"
+    notify "rig: dismiss failed" "never got game-window focus — nothing sent" 3000
     return 1
   fi
   focus_game_window || true     # one more focus before the fallback key
   ydo key 18:1 18:0 || true     # one E too, in case a dialog wants the menu-accept key over Enter
-  ok "sent. If a popup is still up, run: scripts/rig.sh dismiss"
+  now="${EPOCHREALTIME/,/.}"
+  elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN { printf "%.1f", b - a }')"
+  notify "rig: popups dismissed" "$presses presses over ${elapsed}s — re-run dismiss if one lingers" 2500
+  ok "sent ($presses presses, ${elapsed}s). If a popup is still up, run: scripts/rig.sh dismiss"
 }
 
 # ---- seed the test save from a real save (rig.sh seed-save) ------------------------------------
