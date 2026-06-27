@@ -262,8 +262,10 @@ const PASSWORD_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 pub const DEFAULT_PASSWORD_LEN: usize = 12;
 /// Minimum acceptable co-op password length. Shorter (including empty) is rejected at startup: the
 /// password is the session key, and an empty/weak one risks accidental or trivially-joinable
-/// sessions. A fresh install's generated password ([`DEFAULT_PASSWORD_LEN`]) always clears this.
-pub const MIN_PASSWORD_LEN: usize = 5;
+/// sessions. Set to 8 (not the bare minimum) because the peer auth proof is a fast SHA-256, so a
+/// captured proof + nonces could be offline-brute-forced against a short password. A fresh install's
+/// generated password ([`DEFAULT_PASSWORD_LEN`] = 12) always clears this.
+pub const MIN_PASSWORD_LEN: usize = 8;
 
 /// Build a session password from raw entropy: one [`PASSWORD_ALPHABET`] char per input byte. Pure
 /// (the charset/format is host-tested) — the cdylib supplies the random bytes, since core has no
@@ -647,8 +649,9 @@ mod tests {
             c.password_is_valid()
         };
         assert!(!with(""), "empty rejected");
-        assert!(!with("abcd"), "4 chars rejected");
-        assert!(with("abcde"), "exactly the minimum accepted");
+        assert!(!with("abcde"), "below the minimum (5 < 8) rejected");
+        assert!(!with("abcdefg"), "one under the minimum (7) rejected");
+        assert!(with("abcdefgh"), "exactly the minimum (8) accepted");
         assert!(with("a-strong-password"), "longer accepted");
         // A freshly generated default always clears the bar.
         assert!(super::generate_password(&[1; super::DEFAULT_PASSWORD_LEN]).chars().count() >= super::MIN_PASSWORD_LEN);
