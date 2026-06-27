@@ -426,7 +426,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
         // `None` means either we went stale (user left — `fail_session` then no-ops) or the SteamID
         // genuinely never resolved; the toast is correct only in the latter, which the guard handles.
         log::warn!("coop: own SteamID never resolved (or session left); lobby discovery not started");
-        fail_session(generation, "Steam isn't ready (own SteamID never resolved) — is Steam running and logged in?");
+        fail_session(generation, "Steam isn't ready (own SteamID never resolved). Is Steam running and logged in?");
         return;
     };
     with_report(|r| r.self_id_at = Some(elapsed()));
@@ -461,7 +461,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 // and here can't publish HOSTING over a newer session's state.
                 if deadline.take().is_some() && !stale(generation) {
                     SESSION.store(SessionState::Hosting.as_u8(), Ordering::Relaxed);
-                    set_banner(BANNER_SESSION, Severity::Info, "World open — waiting for a friend to join.");
+                    set_banner(BANNER_SESSION, Severity::Info, "World open, waiting for a friend to join.");
                     hosting_since = Some(Instant::now());
                 }
                 // Soft one-time nudge: a host with no joiner after a good while may be the both-opened-a-
@@ -484,7 +484,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
             LobbyResult::Pending => {
                 if deadline.is_some_and(|d| Instant::now() >= d) {
                     fail_session(generation, match intent {
-                        LobbyIntent::Host => "Couldn't open the world — Steam matchmaking timed out.",
+                        LobbyIntent::Host => "Couldn't open the world. Steam matchmaking timed out.",
                         LobbyIntent::Join => "No open world found with this password.",
                     });
                     return;
@@ -538,7 +538,7 @@ fn run_session(
     // unconditionally.
     if self_id == peer_id {
         log::error!("coop: resolved partner is our own SteamID; nothing to connect to");
-        fail_session(generation, "Resolved partner is our own SteamID — nothing to connect to.");
+        fail_session(generation, "Resolved partner is our own SteamID, nothing to connect to.");
         return;
     }
     // The host (the lobby creator) is authoritative for the shared settings; the client adopts them.
@@ -546,7 +546,7 @@ fn run_session(
 
     let Some(net) = Networking::resolve() else {
         log::warn!("coop: ISteamNetworkingMessages unavailable; side-channel not started");
-        fail_session(generation, "Steam networking unavailable — couldn't open the co-op channel.");
+        fail_session(generation, "Steam networking unavailable, couldn't open the co-op channel.");
         return;
     };
     // We know the peer out of band, so accept its session up front rather than waiting on the
@@ -632,7 +632,7 @@ fn run_session(
         // this deadline — governs; a transient drop is handled by the "lost contact" banner.)
         if !linked && Instant::now() >= connect_deadline {
             log::warn!("coop: partner {} never completed the handshake; giving up", peer_tag(peer_id));
-            fail_session(generation, "Couldn't reach your friend — no response. Try again.");
+            fail_session(generation, "Couldn't reach your friend, no response. Try again.");
             return;
         }
 

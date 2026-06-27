@@ -883,7 +883,7 @@ impl LobbyDiscovery {
                     None
                 } else {
                     // A friend already opened a world on this password; tell the user to Join instead.
-                    let why = "A world with this password is already open — use Join world instead.";
+                    let why = "A world with this password is already open. Use Join world instead.";
                     crate::coop::note_lobby_failure(why);
                     Some(LobbyResult::Failed(why.to_string()))
                 }

@@ -99,7 +99,7 @@ pub fn is_ready() -> bool {
 /// **plain voice** (CLAUDE.md > "Surfacing errors").
 pub fn start() {
     std::thread::spawn(|| {
-        set_banner(Severity::Info, "Connecting to Steam…");
+        set_banner(Severity::Info, "Connecting to Steam...");
 
         if probe() {
             set(Status::Ready);
