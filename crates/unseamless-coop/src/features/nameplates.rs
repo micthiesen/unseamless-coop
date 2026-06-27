@@ -18,12 +18,18 @@
 //!    `[nameplates] show_self` debug knob draws a label over your *own* head so the projection + draw
 //!    are exercisable solo on the rig before any session exists.
 //!
-//! ## Conventions to confirm on the rig
-//! The projection assumes `forward` points where the camera looks, `fov` is vertical **and in radians**,
-//! and world `+Y` is up (so [`HEAD_OFFSET_M`] lifts the label above the feet/center physics position).
-//! If labels land mirrored, squashed, or at the wrong height, those are the knobs. The fov-unit one is
-//! the nastiest: a degrees-vs-radians mismatch grossly mis-projects *everything* (a silent total
-//! failure, not a cosmetic skew), so confirm it first — see [`unseamless_core::projection`].
+//! ## Projection conventions — rig-confirmed (2026-06-26)
+//! A solo `show_self` rig check validated every convention the math left open: `forward` points where
+//! the camera looks, `fov` is vertical **and in radians**, world `+Y` is up (so [`HEAD_OFFSET_M`] lifts
+//! the label above the head), the `right`-vector sign is correct (not mirrored), and aspect is right (no
+//! squash). The label is upright, correctly placed, and tracks the player on foot and on horseback. No
+//! knobs needed — see the rig note in [`docs/NAMEPLATES.md`](../../../docs/NAMEPLATES.md).
+//!
+//! ## The rest of the design (gated, see docs/NAMEPLATES.md)
+//! Per-peer colors (palette wired; stable-by-SteamID is a co-op-core TODO), distance LOD (text→dot far
+//! away), an off-screen edge-clamp indicator, and real label content (name/ping/SL/death) all ride on
+//! the real peer feed and need a 2-player rig to verify. The pure pieces (palette, edge-clamp math) are
+//! host-tested in `unseamless-core` and ready to wire.
 
 use eldenring::cs::{
     CSCamExt, CSCamera, CSTaskGroupIndex, ChrIns, ChrLoadStatus, ChrSet, WorldChrMan,
@@ -42,6 +48,9 @@ const HEAD_OFFSET_M: f32 = 1.8;
 /// NDC slop kept on every screen edge before culling — a label hanging slightly off the frame edge is
 /// fine (its anchor can be just off-screen while the text is still partly visible).
 const ON_SCREEN_MARGIN: f32 = 0.1;
+/// Color for the debug/solo `show_self` label. A warm near-white, distinct from the peer palette (which
+/// is for *other* players) — it only ever shows during a solo rig check, never in real co-op.
+const SELF_COLOR: [f32; 3] = [1.0, 0.95, 0.85];
 
 /// Draws overhead nameplates over co-op peers. Config-gated (`[nameplates] enabled` +
 /// [`OverheadDisplay`]); a no-op that publishes nothing while off.
@@ -183,8 +192,12 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
         if main_ptr == Some(std::ptr::from_ref(base) as usize) {
             continue;
         }
+        // Distinct per-peer color from the shared palette. TODO(co-op core): key the color off a stable
+        // peer identity (SteamID) instead of iteration order — `peer_n` shifts as peers join/leave, so a
+        // player's color can currently flicker. See docs/NAMEPLATES.md.
+        let color = unseamless_core::palette::peer_color(peer_n);
         peer_n += 1;
-        push_label(&mut labels, camera, base, max_dist, format!("Player {peer_n}"));
+        push_label(&mut labels, camera, base, max_dist, format!("Player {peer_n}"), color);
     }
 
     // Debug/solo self-nameplate: makes the projection + draw verifiable with no session (the only case
@@ -194,7 +207,7 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
     {
         let base = (**p).superclass();
         if base.chr_flags1c8.is_active() {
-            push_label(&mut labels, camera, base, max_dist, "You".to_string());
+            push_label(&mut labels, camera, base, max_dist, "You".to_string(), SELF_COLOR);
         }
     }
 
@@ -203,7 +216,14 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
 
 /// Project one character's head position and, if it survives culling, push its label. Reads the
 /// physics-module world position (after `PostPhysics`, so it's this frame's settled value).
-fn push_label(labels: &mut Vec<NameplateLabel>, camera: &Camera, base: &ChrIns, max_dist: u32, text: String) {
+fn push_label(
+    labels: &mut Vec<NameplateLabel>,
+    camera: &Camera,
+    base: &ChrIns,
+    max_dist: u32,
+    text: String,
+    color: [f32; 3],
+) {
     let pos = base.modules.physics.position;
     let world = [pos.0, pos.1 + HEAD_OFFSET_M, pos.2];
     let Some(projected) = camera.project(world) else {
@@ -215,5 +235,5 @@ fn push_label(labels: &mut Vec<NameplateLabel>, camera: &Camera, base: &ChrIns, 
     if projected.depth > max_dist as f32 || !projected.on_screen(ON_SCREEN_MARGIN) {
         return; // too far, or off the edges of the frame
     }
-    labels.push(NameplateLabel { ndc: projected.ndc, depth: projected.depth, text });
+    labels.push(NameplateLabel { ndc: projected.ndc, depth: projected.depth, color, text });
 }

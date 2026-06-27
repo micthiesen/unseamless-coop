@@ -235,9 +235,11 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
    dimmed, settings showing `value`), and forward the toggle/nav keys to
    `select_next`/`select_prev`/`activate`/`adjust`. The model already returns `MenuOutcome`; the cdylib
    turns those into session actions / config writes. Home the cursor on open (`Menu::home`).
-6. **(Later) Overhead nameplates.** Screen-space text positioned from projected world coordinates of
-   each peer — same imgui draw surface, plus a world→screen projection (camera data is in the SDK,
-   `cs/camera.rs`). Or evaluate `CSEzDraw` world markers. Separate milestone, after menu + toasts.
+6. **Overhead nameplates (projection rig-confirmed 2026-06-26).** Screen-space text from projected peer
+   world coordinates on this same imgui draw surface (a background draw list), via the host-tested
+   `unseamless_core::projection` (camera data is the SDK `cs/camera.rs`). Base styling is shipped; the
+   richer design (per-peer colors, distance LOD to a dot, off-screen edge indicator, real
+   name/ping/SL/death) rides on the co-op core. Full design + status: [NAMEPLATES.md](NAMEPLATES.md).
 
 ## SDK Angle (At Pin `8c67a84`)
 

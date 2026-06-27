@@ -97,7 +97,10 @@ const PASSIVE_BG_ALPHA: f32 = 0.35;
 // Overhead nameplates: bright white text with a dark drop shadow (one pixel down-right) so a label
 // stays legible over any part of the game world. The projected NDC points come from the game-thread
 // feature (see [`crate::nameplates`]); the shadow is the same contrast trick the cursor orb uses.
-const NAMEPLATE_TEXT: [f32; 3] = [1.0, 1.0, 1.0];
+// Per-label tint comes from the published `NameplateLabel::color` (the peer palette); the overlay only
+// owns the shared alpha + the contrast shadow. The text is drawn semi-transparent so a label is present
+// but unobtrusive over the world; the near-opaque shadow keeps it legible at that alpha.
+const NAMEPLATE_ALPHA: f32 = 0.65;
 const NAMEPLATE_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
 const NAMEPLATE_SHADOW_OFFSET: f32 = 1.0;
 
@@ -321,7 +324,7 @@ impl Overlay {
             // Center the text horizontally on the projected point.
             let x = sx - ui.calc_text_size(&n.text)[0] * 0.5;
             dl.add_text([x + NAMEPLATE_SHADOW_OFFSET, sy + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, &n.text);
-            dl.add_text([x, sy], rgba(NAMEPLATE_TEXT, 1.0), &n.text);
+            dl.add_text([x, sy], rgba(n.color, NAMEPLATE_ALPHA), &n.text);
         }
     }
 

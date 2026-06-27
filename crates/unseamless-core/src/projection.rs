@@ -114,6 +114,26 @@ pub fn ndc_to_screen(ndc: [f32; 2], viewport: [f32; 2]) -> [f32; 2] {
     [(ndc[0] * 0.5 + 0.5) * viewport[0], (1.0 - (ndc[1] * 0.5 + 0.5)) * viewport[1]]
 }
 
+/// Clamp an NDC point to the screen border in the direction of the point from screen-center, for an
+/// **off-screen indicator** — a dot pinned to the edge pointing at an off-screen teammate (the design
+/// in `docs/NAMEPLATES.md`). A point already within `limit` on both axes is on-screen and returned
+/// unchanged; otherwise it's scaled so its larger-magnitude axis lands on `±limit`, putting it on the
+/// border along the same bearing from center. `limit` is the NDC half-extent (`1.0` = the exact frame
+/// edge; pass slightly under, e.g. `0.95`, to inset the dot so it isn't half off-screen).
+///
+/// This only handles points that project *in front* of the camera but off to the side. A point
+/// **behind** the camera has no valid NDC ([`Camera::project`] returns `None`), so the edge-indicator
+/// wiring must derive its bearing separately (e.g. from the peer's view-space direction) before
+/// calling this — that part is the 2-player-gated rendering step, not this pure clamp.
+pub fn clamp_ndc_to_edge(ndc: [f32; 2], limit: f32) -> [f32; 2] {
+    let m = ndc[0].abs().max(ndc[1].abs());
+    if m <= limit || m == 0.0 {
+        return ndc; // already on-screen (or degenerate dead-center)
+    }
+    let t = limit / m;
+    [ndc[0] * t, ndc[1] * t]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +253,20 @@ mod tests {
         assert!(just_off.on_screen(0.1), "inside a 0.1 margin");
         let centered = Projected { ndc: [0.0, 0.0], depth: 5.0 };
         assert!(centered.on_screen(0.0));
+    }
+
+    #[test]
+    fn clamp_to_edge_pins_offscreen_points_to_the_border() {
+        // On-screen points pass through untouched.
+        assert_eq!(clamp_ndc_to_edge([0.5, -0.5], 1.0), [0.5, -0.5]);
+        assert_eq!(clamp_ndc_to_edge([0.0, 0.0], 1.0), [0.0, 0.0]); // dead center, no divide-by-zero
+        // Off one axis → that axis hits ±limit, the other stays proportional (same bearing from center).
+        assert_eq!(clamp_ndc_to_edge([2.0, 0.0], 1.0), [1.0, 0.0]);
+        assert_eq!(clamp_ndc_to_edge([0.0, -3.0], 1.0), [0.0, -1.0]);
+        assert_eq!(clamp_ndc_to_edge([3.0, 1.5], 1.0), [1.0, 0.5]); // x dominates → x=1, y scaled
+        assert_eq!(clamp_ndc_to_edge([2.0, 2.0], 1.0), [1.0, 1.0]); // corner stays on the diagonal
+        // A sub-1.0 limit insets the dot from the exact edge.
+        assert_eq!(clamp_ndc_to_edge([2.0, 0.0], 0.9), [0.9, 0.0]);
     }
 
     #[test]

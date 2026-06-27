@@ -24,6 +24,7 @@ pub mod loader;
 pub mod menu;
 pub mod notifications;
 pub mod pad;
+pub mod palette;
 pub mod peer;
 pub mod projection;
 pub mod protocol;

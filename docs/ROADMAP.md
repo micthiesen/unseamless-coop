@@ -34,8 +34,11 @@ Shipped to `main`, rig-verified where applicable:
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
   Accelerates the co-op core below. See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md),
   [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
-- **Overhead nameplates** — screen-space text from projected peer world coords (`cs/camera.rs`
-  projection is charted); the projection is solo-prototypable.
+- **Overhead nameplates** — *projection rig-confirmed (2026-06-26)* + base styling (alpha, shadow,
+  per-peer palette tint) shipped; the color palette + off-screen edge-clamp math are host-tested
+  utilities ready to wire. The rest (stable per-peer colors, distance LOD text→dot, off-screen edge
+  indicator, real name/ping/SL/death content) rides on the co-op core's peer feed and needs 2-player to
+  verify. Full design in [NAMEPLATES.md](NAMEPLATES.md).
 
 ### 2-player-gated (the co-op core + everything riding on it)
 

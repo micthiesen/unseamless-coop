@@ -23,9 +23,12 @@ pub struct NameplateLabel {
     /// Screen position in normalized device coords (`x,y ∈ [-1, 1]`, `+x` right, `+y` up), already
     /// culled to on-screen + in-range by the projector.
     pub ndc: [f32; 2],
-    /// View-space depth (meters from the camera). Kept for optional distance-based styling; the
-    /// projector has already applied the max-distance cull.
+    /// View-space depth (meters from the camera). Kept for distance-based styling (the at-distance dot
+    /// LOD in `docs/NAMEPLATES.md`); the projector has already applied the max-distance cull.
     pub depth: f32,
+    /// RGB tint for this label (and its future dot), so each peer reads as a distinct color
+    /// ([`unseamless_core::palette::peer_color`]). The overlay applies the shared alpha at draw time.
+    pub color: [f32; 3],
     /// The text drawn over the peer's head.
     pub text: String,
 }
