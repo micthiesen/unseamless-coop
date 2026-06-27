@@ -12,6 +12,25 @@ short skill: `.claude/skills/rig-guides/SKILL.md`. The engine is host-tested in
 `crates/unseamless-core/src/guide.rs`; the committed guides are in `…/guide/guides.rs`; the
 game-side binding is `crates/unseamless-coop/src/features/rig_guide.rs` + `coop/overlay.rs`.
 
+## The point: log/state auto-finish, not manual relay
+
+The reason this system exists is to **stop the orchestrator's "do X, read me the result, now do Y"
+loop**, so the load-bearing design rule is: a step should **self-detect its completion from the run log
+or live state**, not wait for the tester to confirm it. Author every step you can with a `done_when(...)`
+predicate (`log_contains(...)` / `lobby_is` / `protocol_is` / `players_at_least` / `game_state_is` /
+`after_secs`, composed with `.and`/`.or`) so the datum lands in the **shareable, host-forwarded log**
+instead of in the tester's eyes. Manual done (hold the chord) is the **fallback** — for a genuine human
+judgement call where no signal exists.
+
+A corollary, and the thing to reach for before writing a manual step: **if a step needs a datum that
+isn't logged yet, make the mod log it** — turn on the matching `[debug.probes]`, extend the diag
+snapshot, or add a one-shot milestone line next to the relevant toast. `two-player-join` is the worked
+example: the side-channel link and config-adoption were once only ephemeral toasts, so the guide now
+auto-finishes on `coop: linked` / `coop: adopted host config` lines added next to those toasts (a real
+diagnostics win too — the live log now shows *when* the link happened). When even that isn't available
+yet (RE-gated), commit the step as a `.stub(...)` noting what's missing — never a manual "tell me it
+worked" relay.
+
 ## Debug-only — zero release cost
 
 The **entire** subsystem is gated behind `#[cfg(debug_assertions)]` (on for the `dev`/test and
@@ -111,7 +130,8 @@ one-line `by_name`/`NAMES` entry in `guide/guides.rs`.
 |---|---|
 | `rung3-create-chart` | **Flagship / dogfood** for the rung-3 create-session RE (`docs/SESSION-RE-FINDINGS.md`). Boot to a loaded save → host via a multiplayer item; auto-finishes on `lobby = TryToCreateSession` (or the `session-probe:` transition line) and **branches**: transition seen → a "captured" terminal, else → a "try a summon sign" retry step. Drives the human steps + auto-detects the log signal; the orchestrator-side ptrace write-watch is separate. Run it with `[debug.probes] session_probe = true`. |
 | `overlay-smoke` | A tiny self-test of the guide system: banner renders, controls work, an `after_secs(3)` auto-advance fires, the done toast shows. Needs no session/RE state. |
-| `two-player-join` | Two-player join dogfood showing **role tagging**: the host machine sees the host steps, the joiner sees the joiner steps, both see the shared steps — from one guide (set `[debug] rig_role` per machine). Ends with a committed **stub** (host-enforced settings-sync verification, pending the sync core). |
+| `two-player-join` | **The canonical role-tagged two-player guide** and the showcase of log-driven auto-finish: it drives the full friend-connect flow (rungs 4 + 2) and every connect step **auto-finishes off the run log** — the lobby-discovery resolve line (per role), the rung-2 link milestone (`coop: linked`), the client's `coop: adopted host config` — so the result is captured in the (forwarded) log, not relayed. Host/joiner/shared steps from one guide (set `[debug] rig_role` per machine). Ends with a committed **stub** (settings take *effect* in-world, pending the apply layer + rung 3). The driving doc is `docs/FRIEND-TEST-RUNBOOK.md`. |
+| `rig-observation` | The **rig observation run** (`docs/RIG-RUNBOOK.md`): drive the session observer through the states to chart and read the `session change @frame …` snapshots. Solo legs auto-finish off the observer log line / live FSM where a fresh signal lands in-window (else the manual advance covers it — the first `session change` may fire at the title, and `TryToCreateSession` is transient; run with `[debug.probes] session_probe = true` for the FSM log signals); the 2-player legs (player count, in-combat scaling, area-boundary persistence) are committed **stubs**, revived during the friend test. Points at `rung3-create-chart` for the FSM capture rather than duplicating it. |
 
 ## How to run one
 

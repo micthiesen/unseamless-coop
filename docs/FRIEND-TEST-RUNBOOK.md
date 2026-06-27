@@ -71,9 +71,12 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
   extracting (the `rig.sh package` step doesn't emit these debug keys, and ConfigSync doesn't carry
   them), and set each machine's `[debug] rig_role` (`host` on the hoster, `join` on the joiner) so a
   role-tagged guide shows the right steps per machine. For this connect test, `two-player-join` fits;
-  for the create RE, `rung3-create-chart`. The whole subsystem is debug-only, so **every machine must
-  run a diag build** (release strips it entirely). Authoring + the committed list:
-  [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
+  for the create RE, `rung3-create-chart`. Their connect steps **auto-finish off the run log** (the
+  lobby-discovery resolve line, `coop: linked`, `coop: adopted host config`, the `session-probe:` FSM
+  lines), so the result lands in the shareable/forwarded log and the tester is never asked "did it
+  connect?" — that's the whole point of staging a guide over a chat round-trip. The whole subsystem is
+  debug-only, so **every machine must run a diag build** (release strips it entirely). Authoring + the
+  committed list: [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
 
 > The `lobby_callback_probe` (rung-4 gate) has already served its purpose solo — it confirmed ER pumps
 > via `RunCallbacks` and `CreateLobby` succeeds. It can stay off for the friend test; the live
@@ -89,13 +92,18 @@ the joiner (Join world) filters the list by the password, finds it, and joins. T
 attempt can be retried (Leave, then Open/Join again), and each Open/Join **resets the `coop_connect`
 report** so the per-stage diagnostics reflect only the latest attempt, not a stale earlier one.
 
-1. Both players set the identical password and launch ELDEN RING (press Play — our launcher starts it
-   outside EAC with the `UNSEAMLESS_LAUNCH` marker). Load into the game (the menu actions are gated on
-   in-game + Steam-ready), open the overlay (backtick), then **one player picks Open World and the other
-   picks Join world**.
-2. Watch the rig side with `scripts/rig.sh log -f`; have the friend ready to hit Export at the end.
+**The in-game procedure is the `two-player-join` guide — don't hand-relay it.** Stage `[debug] guide =
+"two-player-join"` and `[debug] rig_role` per machine (above), and both machines are walked through the
+connect on-screen, each step **auto-finishing off the run log** so the result is captured, not relayed:
+the lobby-discovery resolve line (per role), the rung-2 link milestone (`coop: linked`), and the
+client's config adoption (`coop: adopted host config`). The host sees the host steps, the joiner the
+joiner steps, both the shared ones — set the role on each machine. Just watch the rig side with
+`scripts/rig.sh log -f` and have the friend hit Export at the end; the guide drives the rest. The
+ordered steps live only in the guide (`crates/unseamless-core/src/guide/guides.rs`), never duplicated
+here.
 
-**What to confirm (read the `coop_connect` section of a diag dump, or the live log):**
+**What the logged stages mean (the guide auto-detects these; this table is the diagnostic reference for
+reading the `coop_connect` section of a diag dump, or the live log):**
 
 | Stage | Success looks like | A failure here means |
 |---|---|---|
@@ -126,18 +134,21 @@ even a *failed* attempt fully diagnosable without a second session.
 The same two connected instances are exactly what rung 3 needs. While you have the friend, chart the
 two session-initiation functions — **instrument our side; the friend is just the peer.**
 
-1. With `session_probe = true` already staged, the **FSM rising-edge logger** is live: on a real
-   connect it logs the host walking `None → TryToCreateSession → Host` and the joiner
-   `None → TryToJoinSession → Client`, each frame-stamped, with the live `CSSessionManager @0x…` base
-   printed once. That alone is the first real capture of the transition (confirms the enum values,
-   ordering, and timing).
-2. **Have the friend host once, then join once** — so both initiation paths fire on *our* machine
-   across the session (we see `TryToCreateSession` when we host, `TryToJoinSession` when we join).
-3. On our side, set a **Frida write-watch on `&CSSessionManager.lobby_state` (`base + 0xc`)** — the
-   base comes from the `session-probe: FSM live …` line. The watch reports the instruction that writes
-   `1` (create) / `4` (join); walk up to the enclosing function prologue → that entry is the hook
-   site. (Full strategy, the store-site AOB fallback, and the scaffold to fill are in
-   [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) > "Find the two initiation functions".)
+**The on-screen procedure for this leg is the `rung3-create-chart` guide** (the flagship; switch
+`[debug] guide` to it for the host-once/join-once leg, or run the friend test in two passes). With
+`session_probe = true` staged, its steps drive the host/join and **auto-finish on the FSM signal** —
+the rising-edge logger logging the host walking `None → TryToCreateSession → Host` and the joiner
+`None → TryToJoinSession → Client`, each frame-stamped, with the live `CSSessionManager @0x…` base
+printed once. Have the friend **host once, then join once** so both initiation paths fire on *our*
+machine. The guide's ordered steps live only in `guides.rs`; the procedure and outcomes are
+[SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) — don't duplicate either here.
+
+The orchestrator-side capture is separate from the guide: set a **Frida write-watch on
+`&CSSessionManager.lobby_state` (`base + 0xc`)** — the base comes from the `session-probe: FSM live …`
+line. The watch reports the instruction that writes `1` (create) / `4` (join); walk up to the
+enclosing function prologue → that entry is the hook site. (Full strategy, the store-site AOB fallback,
+and the scaffold to fill are in [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) > "Find the two
+initiation functions".)
 
 > **Privacy:** the create/join hook register dumps (`rdx`/`r8`/`r9`) may carry a raw peer SteamID64,
 > which resolves straight to a Steam profile. Keep those `debug!` lines out of any shared log — scrub

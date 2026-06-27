@@ -119,6 +119,15 @@ the one genuinely hard step — driving the game's own session so players see ea
   `ForwardLogger` tees records into a bounded queue that the driver drains through `Peer::forward_log`
   onto the wire (a forwarding *client* only; own-module lines are dropped to avoid a feedback loop).
   This is the transport "Log-forwarding status" below was waiting on.
+- **The link + config-adoption edges are logged milestones**, not just toasts: `coop::update_link_status`
+  emits `coop: linked with partner <tag> (rung 2); versions match/mismatch` on the handshake edge and
+  `coop::adopt_host_config` emits `coop: adopted host config (settings synced)` on adoption (both `info`,
+  `peer_tag`-scrubbed, one-shot). So each machine's own (locally captured / exportable) log now shows
+  *when* the link happened (the on-demand diag dump was previously the only place), and the
+  `two-player-join` rig guide auto-finishes its connect steps on those stable substrings instead of a
+  manual relay. (These stay in each machine's own log — `forward.rs` drops `unseamless_coop::coop`-target
+  records as side-channel noise, so they don't reach the host's forwarded bundle; that's fine, each
+  machine's guide reads its own log.)
 - **Implementation grounded; the open piece is the two-player rig run** — confirm the NAT/auth open
   question (peers may need to be Steam friends), that both sides establish without us pumping the
   SessionRequest callback (we proactively `AcceptSessionWithUser`), and that the `coop_connect` report

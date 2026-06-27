@@ -170,13 +170,28 @@ verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts
 bare install primitive `rig.sh apply` is built on — usable directly only on a clean rig with no real
 ERSC stack to protect, per RIG-RUNBOOK; otherwise prefer `rig.sh`.)
 
-**Driving a specific test? Ship a guide.** For a focused rig or friend run (validating one behaviour,
-an RE step, a two-player flow), set `[debug] guide = "<name>"` in the rig seed config (or hand-add it
-to each extracted config for a friend run — `rig.sh package`/ConfigSync don't carry these debug keys)
-so the tester is walked through the steps on-screen (a pinned banner; advance with `L3 + D-pad Up`,
-skip with `L3 + D-pad Down`) instead of a chat round-trip — and set `[debug] rig_role` per machine for
-a two-player guide. Guides are debug-only (every machine needs a diag build). Committed list + how to author one:
-[RIG-GUIDES.md](../../../docs/RIG-GUIDES.md) and the `rig-guides` skill.
+**Driving a specific test? Ship a guide — the guide IS the test flow.** For any in-game test sequence
+(validating one behaviour, an RE step, a two-player flow), the ordered steps live in a **committed
+guide** (`crates/unseamless-core/src/guide/guides.rs`), not in a hand-relayed step-list in a doc or in
+this skill. Set `[debug] guide = "<name>"` in the rig seed config (or hand-add it to each extracted
+config for a friend run — `rig.sh package`/ConfigSync don't carry these debug keys) and the tester is
+walked through the steps on-screen (a pinned banner; advance with `L3 + D-pad Up`, skip with `L3 + D-pad
+Down`) instead of a chat round-trip — and set `[debug] rig_role` per machine for a two-player guide.
+
+> **Prefer log/state-driven auto-finish; manual done is the fallback.** The point of a guide is to stop
+> the "do X, read me the result, do Y" loop, so author each step to **self-detect completion from the
+> run log or live state** (`done_when(log_contains(...))` / `lobby_is` / `players_at_least` / …) — then
+> the datum is captured in the shareable (and host-forwarded) log, not relayed off-screen by the tester.
+> Reach for a manual step only when no signal exists (a genuine human judgement call). **If a step needs
+> a datum that isn't logged yet, make the mod log it** (turn on the matching `[debug.probes]`, extend the
+> diag snapshot, or add a one-shot milestone line next to its toast — as `two-player-join` does with
+> `coop: linked` / `coop: adopted host config`) rather than asking the tester to read it. If even that
+> isn't available yet, commit the step as a `.stub(...)` noting what's missing, not a manual relay.
+
+Guides are debug-only (every machine needs a diag build). Committed list + how to author one (incl. the
+ready-made finish predicates): [RIG-GUIDES.md](../../../docs/RIG-GUIDES.md) and the `rig-guides` skill.
+The runbooks (`FRIEND-TEST-RUNBOOK`, `SESSION-RE-RUNBOOK`, `RIG-RUNBOOK`) keep the *rationale*; their
+test *procedure* is the guide.
 
 **Solo-verifiable here (assistant drives end to end):** the DLL loads, registers its feature task,
 fires per frame (the `FrameBegin` heartbeat ticks even at the title screen), writes + reads config,
@@ -186,11 +201,17 @@ log file.
 
 ## Layer 5 — Real co-op (ongoing, manual)
 
-Two or more real players. Can't be automated. To make it useful to the assistant afterward: set
-`[debug] enabled = true` and (on clients) `forward_to_host = true`, so the host machine aggregates
-everyone's logs into one `LogBundle`; then hand over the host's `unseamless-coop/logs/` folder. The
-self-describing `RunInfo` header (version, role, session id, config) lets the assistant reconstruct
-the session without context. This is the acceptance loop and the only one that proves real co-op.
+Two or more real players. Can't be automated, but **ship a role-tagged guide so it isn't hand-driven**:
+`two-player-join` walks both machines through the connect, each step auto-finishing off the run log (set
+`[debug] guide` + `[debug] rig_role` per machine; see the "Ship a guide" box above and FRIEND-TEST-RUNBOOK).
+To make it useful to the assistant afterward: set `[debug] enabled = true` and (on clients)
+`forward_to_host = true`, so the host machine aggregates everyone's logs into one `LogBundle`, then hand
+over the host's `unseamless-coop/logs/` folder. (Note: the `coop: linked` / `coop: adopted host config`
+guide milestones are NOT forwarded — `forward.rs` drops `unseamless_coop::coop`-target lines as
+side-channel noise — so they live in each machine's own log; collect both machines' logs, or have each
+hit Export, to capture them.) The self-describing `RunInfo` header (version,
+role, session id, config) lets the assistant reconstruct the session without context. This is the
+acceptance loop and the only one that proves real co-op.
 
 ---
 

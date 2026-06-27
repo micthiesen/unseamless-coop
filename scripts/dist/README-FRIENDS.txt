@@ -30,6 +30,14 @@ INSTALL (about 30 seconds)
 To play together: we all just press Play. The shared password is already baked into the
 config that came with this bundle, so there's nothing to set up.
 
+FOLLOW THE ON-SCREEN STEPS. When we're running a guided test, a pinned banner appears at the
+top of the screen and walks all of us through the exact same sequence, one step at a time, so
+there's nothing to coordinate over chat. Each step advances on its own once the game reaches
+it; if one ever needs you to move it along by hand, the banner says so. Manual advance/skip is on
+the CONTROLLER (advance = hold L3 + D-pad Up, i.e. press the left stick in while holding D-pad Up;
+skip = L3 + D-pad Down), so have a controller handy for those few steps -- most advance on their
+own. Just read the banner and do what it says.
+
 
 UNINSTALL (back to your normal setup)
 -------------------------------------
@@ -51,22 +59,16 @@ IF WINDOWS BLOCKS IT
 
 SENDING ME DIAGNOSTICS AFTER A SESSION
 --------------------------------------
-If something misbehaves (especially if we couldn't connect at all), the easiest way to send
-me what I need is the in-game Export button. ONE click makes a single file to send:
-
-1. In-game, press the  `  key (top-left of the keyboard, above Tab) to open the mod menu.
-   (On a controller: press RB + click both sticks, L3 + R3, together.)
-2. You'll be on the "Actions" tab. Move down to  Export diagnostics  and press Enter
-   (or the A button on a controller).
-3. A message pops up with the exact file it saved. It's here:
+The on-screen steps usually end by asking you to do this, but here's the whole of it: the
+easiest way to send me what I need is the in-game Export button. Open the mod menu (the  `
+key, top-left above Tab — or, on a controller, RB + click both sticks L3 + R3 together), and
+on the "Actions" tab pick  Export diagnostics  (Enter, or the A button). It saves ONE file:
 
       <your ELDEN RING\Game>\unseamless-coop\unseamless-coop-diagnostics.txt
 
-4. Send me that one file.
-
-That file works even when we never managed to connect (that's the case I most need it for).
-It does NOT contain your password (redacted) or your Steam account (the Steam IDs in it are
-scrubbed), so it's safe to send or paste anywhere.
+Send me that one file. It works even when we never managed to connect (that's the case I most
+need it for). It does NOT contain your password (redacted) or your Steam account (the Steam IDs
+in it are scrubbed), so it's safe to send or paste anywhere.
 
 If the menu won't open or you can't find the file, fallback: there's a logs folder at
 <your ELDEN RING\Game>\unseamless-coop\logs\ — zip the whole "logs" folder and send that

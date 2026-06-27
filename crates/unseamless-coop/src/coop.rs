@@ -499,6 +499,8 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
     };
 
     let forward = !is_host && forward_pref;
+    // rig-guide `two-player-join` auto-finishes host-open / join-join on the role-distinct substrings
+    // `we are the host` / `we are the client` below — keep those fragments if you reword the rest.
     log::info!(
         "coop: lobby discovery resolved partner {} (we are the {}); seeding rung 2",
         peer_tag(peer_id),
@@ -655,6 +657,14 @@ fn adopt_host_config(session: &Session<SteamP2PTransport>, is_host: bool, mirror
         let shared = SharedSettings::from(cfg);
         *mirrored = cfg.clone();
         crate::state::update(move |c| shared.apply_to(c));
+        // Log the adoption (not just toast it) so a guide can auto-finish the "host settings adopted"
+        // step from the run log, and the client's own (locally captured / exportable) log shows it took
+        // the host's config. NOTE: this stays in the client's OWN log — `forward.rs` drops
+        // `unseamless_coop::coop`-target records as side-channel noise, so it does not reach the host's
+        // forwarded bundle (fine: the joiner's guide auto-finishes off its own log). One-shot per
+        // changed sync, so `info!` is right. rig-guide `two-player-join` auto-finishes on the stable
+        // substring `coop: adopted host config` — keep that fragment if you reword the rest.
+        log::info!("coop: adopted host config (settings synced)");
         toast(Severity::Info, CONFIG_SYNCED_MESSAGE);
     }
 }
@@ -682,6 +692,20 @@ fn update_link_status(
             r.handshake_at = Some(elapsed());
             r.version = if compatible { VersionCheck::Match } else { VersionCheck::Mismatch };
         });
+        // Log the link edge (not just toast it), so the moment-of-link lands in the run log — the live
+        // `info` log otherwise can't show *when* rung 2 linked (only the on-demand diag dump could). A
+        // one-shot session milestone (not hot-path), so `info!` is right; `peer_tag` keeps a raw
+        // SteamID64 out of the (locally captured / exportable) log. NOTE: this stays in each machine's
+        // OWN log — it does NOT reach the host's forwarded bundle, since `forward.rs` drops
+        // `unseamless_coop::coop`-target records as side-channel noise (see there). Fine: each machine's
+        // guide auto-finishes off its own `coop: linked`.
+        // rig-guide `two-player-join` auto-finishes on the stable substring `coop: linked` — keep that
+        // fragment if you reword the rest.
+        log::info!(
+            "coop: linked with partner {} (rung 2); versions {}",
+            peer_tag(peer_id),
+            if compatible { "match" } else { "mismatch" },
+        );
         toast(Severity::Info, format!("Co-op partner connected ({})", peer_tag(peer_id)));
         if !compatible {
             set_banner(

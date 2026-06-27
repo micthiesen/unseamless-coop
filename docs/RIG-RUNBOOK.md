@@ -59,21 +59,28 @@ save — same trick as er-crit-coop.) Logs are under `unseamless-coop/logs/`.
 
 ## The observation run (the actual deliverable)
 
-Drive this sequence and capture the `session change:` log lines at each step:
+**The ordered steps are the committed `rig-observation` guide** (set `[debug] guide = "rig-observation"`),
+not a hand-driven step-list here — its steps live only in `crates/unseamless-core/src/guide/guides.rs`.
+The solo legs **auto-finish** off live state + the observer's `session change @frame …` log line; the
+multiplayer legs (player count, in-combat scaling, area-boundary persistence) ship as committed
+**stubs**, revived during the friend test (FRIEND-TEST-RUNBOOK) once a real second player is available.
+The full create/join FSM *capture* is its own flagship (`rung3-create-chart`), which `rig-observation`
+points at rather than duplicating.
 
-1. **Load a save (solo).** Expect a session snapshot with `players` small and a `limit`. Record
-   `lobby`, `protocol`, `players`, `limit`, and the per-player roster (`host/local/cid`).
-2. **Host a co-op session.** Watch the `lobby` transitions (`TryToCreateSession → Host`) and the
-   `protocol` FSM.
-3. **Have a second player join.** This is the key data point:
-   - Does `players` go to 2? Is the local player included in `players.len()` or separate
-     (`host_player`)? → settles the true "player count" for scaling.
-   - What is `limit` (`session_player_limit`)? Expect 4 (open world).
-   - Roster: which entry is `host`, which `local`, the `cid`s and steam_ids.
-4. **Cross an area boundary / fast-travel together.** Watch whether `protocol` goes through
-   `WaitReentryToMap` and whether the session persists or tears down. This is the heart of
-   "seamless".
-5. **Trigger a boss fight.** Note any state change (for boss-vs-enemy scaling targeting later).
+What the run is *for* (the rationale the guide steps encode — the data to read out of the captured
+`session change:` lines):
+
+- **Solo snapshot:** `players` small + a `limit`; `lobby`/`protocol`/`players`/`limit` and the
+  per-player roster (`host/local/cid`). Loading / fighting / dying must **not** drive the FSM solo.
+- **Host (create edge):** the `lobby` transition off `None` (`TryToCreateSession`), then `→ Host` once
+  a peer joins; the `protocol` FSM alongside.
+- **Second player joins** (the key data point): does `players` go to 2, and is the local player counted
+  in `players.len()` or separate (`host_player`)? → settles the true "player count" for scaling. What
+  is `limit` (`session_player_limit`)? Expect 4 (open world). Roster: which entry is `host`, which
+  `local`, the `cid`s and steam_ids.
+- **Area boundary / fast-travel together:** whether `protocol` passes through `WaitReentryToMap` and
+  the session persists or tears down — the heart of "seamless".
+- **Boss fight:** any state change (for boss-vs-enemy scaling targeting later).
 
 Save the full `unseamless_coop.log` from this run — it's the spec for designing Layer 2.
 

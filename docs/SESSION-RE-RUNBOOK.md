@@ -62,6 +62,14 @@ Correlate them by frame/timestamp — together they are the before/after of an i
 
 ## Rig recipe
 
+> **The on-screen driving — boot, host, watch the FSM — is the committed `rung3-create-chart` guide,
+> not a hand-relayed step-list.** Its ordered steps live only in `crates/unseamless-core/src/guide/guides.rs`;
+> it walks the human through hosting and **auto-finishes on the FSM signal** (`lobby = TryToCreateSession`
+> or the `session-probe: …->TryToCreateSession` line), branching to a "captured" terminal. Run it with
+> `[debug] guide = "rung3-create-chart"` + `[debug.probes] session_probe = true`. The steps below are
+> the *RE procedure that the guide can't automate* — the orchestrator-side write-watch, the AOB chart,
+> the scaffold fill — plus the rationale; don't duplicate the guide's boot/host/watch steps in prose.
+
 ### 0. Arrange the run
 
 - Set `[debug.probes] session_probe = true` in the seed config (`scripts/rig/seed-config.toml`), then

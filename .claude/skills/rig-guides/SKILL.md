@@ -77,6 +77,20 @@ Need something not listed? Add a constructor next to these in `guide.rs` returni
 (`Predicate::new(|ctx| …)` takes any closure over `ctx.state` / `ctx.step_elapsed_secs` /
 `ctx.log_contains(...)`). Keep new predicates in core so they stay host-tested.
 
+**Why auto over manual (the whole point).** This system exists to stop the orchestrator's "do X, read
+me the result, now do Y" loop, so **prefer a `done_when(...)` that self-detects from the log or live
+state** — then the datum is captured in the shareable (and host-forwarded) log, not relayed off-screen.
+Manual done is the fallback, for a genuine human judgement call only.
+
+**If the signal isn't logged yet, make the mod log it** — don't fall back to a manual relay. Turn on
+the matching `[debug.probes]`, extend the diag snapshot, or add a one-shot milestone line next to the
+relevant toast (as `coop.rs` does with `coop: linked` / `coop: adopted host config` for `two-player-join`),
+then `log_contains` it. Pin the **stable substring** the guide matches (not a variable id/version part)
+and leave a comment at the log site so a reword can't silently break the predicate. Adding *engine
+surface* (a new `RigState` field, a new control) is a bigger step — check with the orchestrator first;
+adding a normal one-shot `info!` milestone next to an existing toast is not. When even that isn't
+available yet (the work is RE-gated), commit the step as a `.stub(...)` — never a "tell me it worked" step.
+
 ## Branching on a result
 
 A branching step finishes (auto or manual) and then its `.branch` closure picks the next step:
@@ -140,7 +154,9 @@ reaches the done toast via skip. When the work lands, drop `.stub(...)` and add 
 ## Checklist
 
 - [ ] Builder function + `by_name` arm + `NAMES` entry in `guide/guides.rs`.
-- [ ] Prefer `.done_when(...)` (auto) over manual where a signal exists; manual is the fallback.
+- [ ] Prefer `.done_when(...)` (auto, from log/state) over manual where a signal exists; manual is the
+      fallback. If the datum isn't logged, log it (probe / diag / a milestone line) before relaying; if
+      it's RE-gated, `.stub(...)` it. Pin the stable matched substring + comment the log site.
 - [ ] Branching step has a `.default_branch(...)` (so skip is sensible).
 - [ ] Role-tag steps for two-player guides; leave shared steps untagged.
 - [ ] Stub anything not yet executable rather than leaving it out.
