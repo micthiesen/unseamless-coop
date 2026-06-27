@@ -27,11 +27,10 @@
 //! Present thread. The only shared state is one [`AtomicU64`].
 
 use std::ffi::{CString, c_char, c_void};
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use unseamless_core::diagnostics::peer_tag;
+use unseamless_core::diagnostics::{LobbyRole, peer_tag};
 use unseamless_core::protocol::PROTOCOL_VERSION;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -448,37 +447,39 @@ fn resolve_net_accessor(module: HMODULE) -> Option<(NetMessagesAccessor, u32)> {
 }
 
 // ===================================================================================================
-// Rung 4: Steam matchmaking lobbies — password-keyed discovery via the C++-ABI call-result path.
+// Rung 4: Steam matchmaking lobbies — password-keyed discovery, POLL-BASED.
 //
-//   *** DORMANT — gated in `crate::coop::start` on `LOBBY_DISCOVERY_ENABLED`, off until a rig probe
-//       confirms ELDEN RING pumps Steam via legacy `SteamAPI_RunCallbacks` (so our registered
-//       call-results fire), not `ManualDispatch`. See docs/COOP-CONNECTION.md rung-4 build order. ***
+//   *** DORMANT — gated in `crate::coop::start` on `LOBBY_DISCOVERY_ENABLED`, off until a two-player
+//       rig run validates the full joiner-finds-host flow. The rig already PROVED the mechanism: an
+//       in-process `CreateLobby` succeeds, and its `SteamAPICall_t` resolves cleanly when *polled*
+//       via `ISteamUtils` (see `run_lobby_callback_probe`). See docs/COOP-CONNECTION.md rung-4. ***
 //
-// This REPLACES the manual `[coop] peer_steam_id` copy-paste: the host creates a public lobby tagged
-// with `hash(password)`, the joiner filters the lobby list by that hash, joins, reads the host's
-// SteamID, and that seeds the rung-2 side-channel (`crate::coop`). Lobbies are *discovery*, not a new
-// transport — once the peer SteamID is known, rung 2 runs unchanged.
+// This is the ONLY way two players pair — the manual peer-SteamID entry is gone. The role is
+// **derived, not configured**: list lobbies filtered by `hash(password)`; if a match exists, JOIN it
+// (we're the client) and read the host from the lobby owner; if none exists, CREATE one + publish the
+// password/version data (we're the host). The resolved peer + derived `is_host` seed the rung-2
+// side-channel (`crate::coop`) unchanged — lobbies are *discovery*, not a new transport.
 //
-// ## Why this is a gnarlier bind than rungs 1-3
-// Rungs 1-3 are poll-only, so they never touch Steam's callback dispatch. Lobbies are inherently
-// **async**: `CreateLobby`/`RequestLobbyList`/`JoinLobby` each return a `SteamAPICall_t` and deliver
-// the result via a **call-result** — a C++ `CCallbackBase*` object Steam invokes through a vtable. We
-// hand-build that object (vtable + the ABI header fields) in Rust, register it via the flat
-// `SteamAPI_RegisterCallResult`, and let the game's own `RunCallbacks` pump deliver it to us. We never
-// pump dispatch ourselves (that would steal the game's events). The thunks are foreign→us FFI entry
-// points, so each is `catch_unwind`-firewalled per docs/FFI-UNWIND-AUDIT.md.
+// ## Why poll-based, not call-results (the rig-proven lesson)
+// Lobbies are inherently **async**: `CreateLobby`/`RequestLobbyList`/`JoinLobby` each return a
+// `SteamAPICall_t`. The SDK offers two ways to get the result: register a `CCallbackBase` call-result
+// (delivered by Steam's `RunCallbacks` pump), or POLL the handle via `ISteamUtils`
+// (`IsAPICallCompleted` → `GetAPICallResult`). We POLL. The rig proved that registering a call-result
+// on a handle we also poll is a trap: ELDEN RING pumps Steam via `RunCallbacks` and consumes the
+// handle first, so our later poll then sees `InvalidHandle`. Poll-only sidesteps Steam's dispatch
+// entirely (the same poll-not-pump discipline as rungs 1-3) and runs the whole flow on the co-op
+// driver thread — so there are no call-result FFI thunks and no cross-thread shared state here.
 //
 // ## Clean-room note
-// The `CCallbackBase` layout, the `SteamAPI_*` flat names, the callback ids, and the result-struct
-// fields below are all from the **public** Steamworks SDK headers (`steam_api_common.h`,
-// `isteammatchmaking.h`), which are public knowledge like the rest of the flat API we bind — not from
-// disassembling anything. Re-derive the export names after a Steam update with:
-//   x86_64-w64-mingw32-objdump -p "ELDEN RING/Game/steam_api64.dll" | grep -E 'RegisterCallResult|ISteamMatchmaking|SteamMatchmaking_v'
+// The `SteamAPI_*` flat names, the callback ids, and the result-struct fields below are all from the
+// **public** Steamworks SDK headers (`isteammatchmaking.h`, `isteamutils.h`) — public knowledge like
+// the rest of the flat API we bind, not from disassembling anything. Re-derive the export names after
+// a Steam update with:
+//   x86_64-w64-mingw32-objdump -p "ELDEN RING/Game/steam_api64.dll" | grep -E 'ISteamMatchmaking|SteamMatchmaking_v|ISteamUtils|SteamUtils_v'
 //
-// RIG-VERIFY checklist (each marked inline too): the `SteamAPI_RegisterCallResult` export exists; the
-// matchmaking accessor version; the `CCallbackBase` field offsets + the third vtable slot's semantics;
-// the callback-struct packing; and the headline question — do our registered call-results fire at all
-// under ER's pump.
+// RIG-VERIFY checklist (each marked inline too): the matchmaking + utils accessor versions; the
+// callback-struct packing (we read these structs out of `GetAPICallResult`); and the headline
+// two-player question — does a joiner's filtered list find the host's freshly-tagged lobby.
 
 /// A Steamworks async-call handle (`SteamAPICall_t`); `0` is `k_uAPICallInvalid`.
 type SteamAPICall = u64;
@@ -533,10 +534,12 @@ struct LobbyMatchList {
 /// `LobbyEnter_t` — joiner's `JoinLobby` result. We only read the lobby id (then `GetLobbyOwner`).
 #[repr(C)]
 struct LobbyEnter {
-    lobby: u64,           // m_ulSteamIDLobby        @0
-    chat_permissions: u32, // m_rgfChatPermissions   @8
-    locked: bool,          // m_bLocked              @12
-    enter_response: u32,   // m_EChatRoomEnterResponse @16
+    lobby: u64,            // m_ulSteamIDLobby         @0
+    chat_permissions: u32, // m_rgfChatPermissions    @8
+    // `m_bLocked` @12. Typed `u8`, not `bool`: `read_result` has Steam memcpy the raw result bytes into
+    // this struct, and a byte other than 0/1 landing in a Rust `bool` is instant UB even if never read.
+    locked: u8,
+    enter_response: u32, // m_EChatRoomEnterResponse  @16
 }
 
 // RIG-VERIFY: these match the public-SDK pack(8) layout; a skew is silent UB (we read Steam-owned
@@ -549,138 +552,6 @@ const _: () = {
     assert!(std::mem::offset_of!(LobbyEnter, lobby) == 0);
 };
 
-// --- CCallbackBase: the C++ object Steam invokes through a vtable ----------------------------------
-//
-// `RegisterCallResult` takes a `CCallbackBase*` whose first bytes Steam reads/writes:
-//   @0  vfptr             (the 3-entry vtable below)
-//   @8  m_nCallbackFlags  (uint8 — Steam sets the "registered" bit)
-//   @12 m_iCallback       (int   — the expected callback id, so Steam routes the right result)
-// We append our own context (the boxed Rust handler) past offset 16; Steam never touches it.
-//
-// RIG-VERIFY: the public header's third *virtual* is `GetCallbackSizeBytes()` (returns the result
-// struct size so the dispatcher knows how many bytes `pvParam` covers); `GetICallback()` is a
-// *non-virtual* inline accessor over `m_iCallback`. docs/COOP-CONNECTION.md labels the third slot
-// `GetICallback()` — same slot, the doc's shorthand. We implement it as `GetCallbackSizeBytes`
-// (returning our stored size); confirm on the rig that the dispatcher is happy with this.
-
-/// The 3-entry vtable shared by every [`CallResult`]. On Win64 the C++ member-call ABI and `extern "C"`
-/// pass `this` in `rcx` identically, so plain `extern "C"` thunks match Steam's expected calls.
-#[repr(C)]
-struct CallbackVtable {
-    /// `virtual void Run(void *pvParam)` — the plain-callback entry; unused for a call-result.
-    run: unsafe extern "C" fn(*mut CallResult, *mut c_void),
-    /// `virtual void Run(void *pvParam, bool bIOFailure, SteamAPICall_t hSteamAPICall)` — the
-    /// call-result entry; this is the one Steam invokes when our async call completes.
-    run_call_result: unsafe extern "C" fn(*mut CallResult, *mut c_void, bool, SteamAPICall),
-    /// `virtual int GetCallbackSizeBytes()` — the result struct's size (see the RIG-VERIFY note above).
-    get_callback_size_bytes: unsafe extern "C" fn(*mut CallResult) -> i32,
-}
-
-static CALLBACK_VTABLE: CallbackVtable = CallbackVtable {
-    run: cr_run,
-    run_call_result: cr_run_call_result,
-    get_callback_size_bytes: cr_size,
-};
-
-/// A registered call-result: the ABI-fixed `CCallbackBase` header (Steam's first 16 bytes) followed by
-/// our boxed handler. Heap-allocated and handed to Steam by raw pointer; reclaimed in
-/// [`cr_run_call_result`] after it fires exactly once.
-#[repr(C)]
-struct CallResult {
-    vtable: *const CallbackVtable, // @0  vfptr
-    flags: u8,                     // @8  m_nCallbackFlags
-    _pad: [u8; 3],                 // @9  (m_iCallback is 4-aligned)
-    callback_id: i32,              // @12 m_iCallback
-    // ---- past here Steam never reads ----
-    expected_size: i32,
-    handler: Box<dyn FnMut(*const c_void, bool) + Send>,
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(CallResult, vtable) == 0);
-    assert!(std::mem::offset_of!(CallResult, flags) == 8);
-    assert!(std::mem::offset_of!(CallResult, callback_id) == 12);
-};
-
-/// Contain a panic at a call-result FFI boundary: Steam invokes these thunks from the game's pump
-/// across `extern "C"`, so an unwind would cross into non-Rust frames (UB under `panic = "unwind"`).
-/// Mirrors the `input.rs`/`saves.rs` firewall; logs once via the self-protecting `error_contained`.
-fn cr_firewall(what: &str, f: impl FnOnce()) {
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
-        crate::logger::error_contained(format_args!(
-            "steam: lobby call-result thunk '{what}' panicked; suppressed at the FFI boundary"
-        ));
-    }
-}
-
-/// `Run(void*)` — plain callbacks aren't used for our call-results; firewall + ignore (it's still an
-/// FFI entry, and unlike the call-result path it must NOT free the object — it can fire repeatedly).
-unsafe extern "C" fn cr_run(_this: *mut CallResult, _param: *mut c_void) {
-    cr_firewall("Run(callback)", || {});
-}
-
-/// `Run(void*, bool, SteamAPICall_t)` — the call-result fires here. Dispatch to the boxed handler, then
-/// reclaim the heap object (a call-result fires exactly once, after which Steam is done with it).
-unsafe extern "C" fn cr_run_call_result(
-    this: *mut CallResult,
-    param: *mut c_void,
-    io_failure: bool,
-    _call: SteamAPICall,
-) {
-    cr_firewall("Run(call-result)", || {
-        if this.is_null() {
-            return;
-        }
-        // SAFETY: `this` is the object we registered (still alive — only freed below, after this).
-        let cr = unsafe { &mut *this };
-        (cr.handler)(param as *const c_void, io_failure);
-    });
-    if !this.is_null() {
-        // Reclaim is also firewalled: dropping the box drops the boxed handler, and a panicking `Drop`
-        // would otherwise unwind across this `extern "C"` boundary. Separate firewall (not one wrapping
-        // both) so the object is still freed even if the handler above panicked.
-        // SAFETY: we created `this` with `Box::into_raw` in `register_call_result`; reclaim it once.
-        cr_firewall("call-result reclaim", || unsafe { drop(Box::from_raw(this)) });
-    }
-}
-
-/// `GetCallbackSizeBytes()` — the registered result struct's size.
-unsafe extern "C" fn cr_size(this: *mut CallResult) -> i32 {
-    if this.is_null() {
-        return 0;
-    }
-    // SAFETY: `this` is one of our live `CallResult`s.
-    unsafe { (*this).expected_size }
-}
-
-/// `void SteamAPI_RegisterCallResult(CCallbackBase *pCallback, SteamAPICall_t hAPICall)`.
-type RegisterCallResultFn = unsafe extern "C" fn(*mut c_void, SteamAPICall);
-
-/// Heap-allocate a [`CallResult`] for `callback_id`/`expected_size` wrapping `handler`, and register it
-/// against the pending `call`. The object stays alive (leaked into Steam's keeping) until its result
-/// fires and [`cr_run_call_result`] frees it. A never-firing call (the dormant/blocked case) leaks one
-/// small object for the process lifetime — acceptable.
-fn register_call_result(
-    register: RegisterCallResultFn,
-    call: SteamAPICall,
-    callback_id: i32,
-    expected_size: i32,
-    handler: Box<dyn FnMut(*const c_void, bool) + Send>,
-) {
-    let cr = Box::new(CallResult {
-        vtable: &CALLBACK_VTABLE as *const CallbackVtable,
-        flags: 0,
-        _pad: [0; 3],
-        callback_id,
-        expected_size,
-        handler,
-    });
-    let raw = Box::into_raw(cr);
-    // SAFETY: `register` is the resolved flat export; `raw` is a valid CCallbackBase-shaped object that
-    // outlives the pending call (freed only when the result fires). us → Steam; not an unwind boundary.
-    unsafe { register(raw as *mut c_void, call) };
-}
-
 // --- ISteamMatchmaking flat methods ----------------------------------------------------------------
 
 type MatchmakingAccessor = unsafe extern "C" fn() -> *mut c_void;
@@ -690,15 +561,14 @@ type AddListStringFilterFn = unsafe extern "C" fn(*mut c_void, *const c_char, *c
 type RequestLobbyListFn = unsafe extern "C" fn(*mut c_void) -> SteamAPICall;
 type GetLobbyByIndexFn = unsafe extern "C" fn(*mut c_void, i32) -> u64;
 type JoinLobbyFn = unsafe extern "C" fn(*mut c_void, u64) -> SteamAPICall;
+type LeaveLobbyFn = unsafe extern "C" fn(*mut c_void, u64);
 type GetLobbyOwnerFn = unsafe extern "C" fn(*mut c_void, u64) -> u64;
 type GetNumLobbyMembersFn = unsafe extern "C" fn(*mut c_void, u64) -> i32;
 type GetLobbyMemberByIndexFn = unsafe extern "C" fn(*mut c_void, u64, i32) -> u64;
 
-/// The resolved `ISteamMatchmaking` interface + the flat methods rung 4 uses. The raw `iface` pointer
-/// makes this `!Send`/`!Sync` by default, but the lobby flow spans threads (the call-result handlers
-/// run on the game's pump thread; the host's member poll runs on the co-op driver thread), and Steam's
-/// interface methods are internally thread-safe — so we assert `Send`/`Sync` and only ever *read*
-/// `iface` to pass it to those thread-safe flat methods (never mutate the pointee).
+/// The resolved `ISteamMatchmaking` interface + the flat methods rung 4 uses. The whole poll-based
+/// lobby flow lives on the single co-op driver thread (see [`LobbyDiscovery`]), so this never crosses
+/// threads and needs no `Send`/`Sync` — we hold the raw `iface` only to pass it to the flat methods.
 struct Matchmaking {
     iface: *mut c_void,
     create_lobby: CreateLobbyFn,
@@ -707,15 +577,11 @@ struct Matchmaking {
     request_list: RequestLobbyListFn,
     get_by_index: GetLobbyByIndexFn,
     join_lobby: JoinLobbyFn,
+    leave_lobby: LeaveLobbyFn,
     get_lobby_owner: GetLobbyOwnerFn,
     get_num_members: GetNumLobbyMembersFn,
     get_member_by_index: GetLobbyMemberByIndexFn,
 }
-
-// SAFETY: see the `Matchmaking` doc — Steam's flat matchmaking methods are thread-safe and we only read
-// `iface`. The function pointers are themselves `Send`/`Sync`.
-unsafe impl Send for Matchmaking {}
-unsafe impl Sync for Matchmaking {}
 
 impl Matchmaking {
     /// Resolve the accessor + every flat method we need. `None` (logged) if Steam isn't up or any export
@@ -738,6 +604,7 @@ impl Matchmaking {
         let request_list = unsafe { std::mem::transmute::<usize, RequestLobbyListFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_RequestLobbyList", s!("SteamAPI_ISteamMatchmaking_RequestLobbyList"))?) };
         let get_by_index = unsafe { std::mem::transmute::<usize, GetLobbyByIndexFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_GetLobbyByIndex", s!("SteamAPI_ISteamMatchmaking_GetLobbyByIndex"))?) };
         let join_lobby = unsafe { std::mem::transmute::<usize, JoinLobbyFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_JoinLobby", s!("SteamAPI_ISteamMatchmaking_JoinLobby"))?) };
+        let leave_lobby = unsafe { std::mem::transmute::<usize, LeaveLobbyFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_LeaveLobby", s!("SteamAPI_ISteamMatchmaking_LeaveLobby"))?) };
         let get_lobby_owner = unsafe { std::mem::transmute::<usize, GetLobbyOwnerFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_GetLobbyOwner", s!("SteamAPI_ISteamMatchmaking_GetLobbyOwner"))?) };
         let get_num_members = unsafe { std::mem::transmute::<usize, GetNumLobbyMembersFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers", s!("SteamAPI_ISteamMatchmaking_GetNumLobbyMembers"))?) };
         let get_member_by_index = unsafe { std::mem::transmute::<usize, GetLobbyMemberByIndexFn>(resolve_required(module, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex", s!("SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex"))?) };
@@ -750,6 +617,7 @@ impl Matchmaking {
             request_list,
             get_by_index,
             join_lobby,
+            leave_lobby,
             get_lobby_owner,
             get_num_members,
             get_member_by_index,
@@ -757,45 +625,72 @@ impl Matchmaking {
     }
 }
 
-/// The shared matchmaking binding, parked where the `'static` call-result handlers reach it across
-/// threads. Set once by [`LobbyDiscovery::start`].
-static MATCHMAKING: OnceLock<Matchmaking> = OnceLock::new();
-/// The other player's resolved SteamID — the rung-2 peer (joiner→host via `GetLobbyOwner`, host→joiner
-/// via member poll). `0` until resolved.
-static DISCOVERED_PEER: AtomicU64 = AtomicU64::new(0);
-/// Host only: our created lobby, so the driver thread can poll its members for the joiner. `0` until
-/// `LobbyCreated_t` lands.
-static HOST_LOBBY_ID: AtomicU64 = AtomicU64::new(0);
-/// Joiner only: the lobby we entered, so the driver can poll `GetLobbyOwner` until it's populated (owner
-/// metadata can lag the `LobbyEnter_t` by a beat). `0` until we've joined.
-static JOINED_LOBBY_ID: AtomicU64 = AtomicU64::new(0);
-/// Joiner only: a `RequestLobbyList` is outstanding, so the driver's retry doesn't issue overlapping
-/// requests (the SDK allows only one in flight). Cleared when its `LobbyMatchList_t` lands.
-static JOINER_REQUEST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Joiner: re-issue `RequestLobbyList` this often until a match is found. The host tags its lobby only
-/// *after* `CreateLobby` completes, so a joiner that starts first must retry rather than latch the first
-/// empty result as failure — the `run_discovery` timeout is the real deadline.
+/// Re-issue `RequestLobbyList` this often. Valve does not index a freshly-published lobby's data
+/// instantly, so the first filtered list is often empty even when a host is already up — re-issue rather
+/// than latch that as failure. A host re-lists on the same beat to catch the both-create race. The
+/// `run_discovery` timeout is the real deadline.
 const LOBBY_LIST_RETRY: Duration = Duration::from_secs(2);
 
-/// Drives password-keyed lobby discovery to resolve the rung-2 peer. Construct with [`start`]; then the
-/// co-op driver calls [`poll`](LobbyDiscovery::poll) each tick until it yields the peer SteamID.
+/// Which side of the pairing we've settled into. **Derived** from what discovery finds (not configured):
+/// an existing matching lobby ⇒ we join it as the client; none ⇒ we create one as the host. The
+/// both-create race is resolved by a deterministic owner-SteamID tiebreak (see [`LobbyDiscovery`]).
+enum Role {
+    /// Haven't created or joined yet — waiting on a filtered list to decide.
+    Undecided,
+    /// Our `CreateLobby` is in flight (polled via [`Utils`]).
+    Creating { call: SteamAPICall },
+    /// We own a lobby (host). Poll its members for the joiner; keep re-listing to catch a competing
+    /// lobby we'd lose the tiebreak to.
+    Hosting { lobby: u64 },
+    /// Our `JoinLobby` is in flight; `lobby` is the one we're entering.
+    Joining { call: SteamAPICall, lobby: u64 },
+    /// We entered a lobby (client). Poll `GetLobbyOwner` until the host id is populated.
+    Joined { lobby: u64 },
+}
+
+/// Drives password-keyed lobby discovery to resolve the rung-2 peer **and** our derived host/client
+/// role. Construct with [`start`](LobbyDiscovery::start); the co-op driver calls
+/// [`poll`](LobbyDiscovery::poll) each tick until it yields `(peer, is_host)`.
+///
+/// Entirely poll-based and single-threaded (the co-op driver thread): each async lobby call returns a
+/// `SteamAPICall_t` we poll via [`Utils`] (`IsAPICallCompleted`/`GetAPICallResult`), never registering a
+/// `CCallbackBase` call-result — ELDEN RING's own `RunCallbacks` pump would consume the handle first and
+/// leave our poll seeing `InvalidHandle` (the rig-proven lesson; see the rung-4 module comment).
+///
+/// ## Both-create race
+/// If both players' first list comes back empty (Valve indexing lag), both create a lobby. Each then
+/// keeps re-listing while hosting; once a host sees a competing lobby whose **lobby SteamID** is lower
+/// than its own it loses the tiebreak — it leaves its own lobby and joins the winner's. The lower-id
+/// host stays put and finds the joiner via its member poll. The rule is deterministic and symmetric
+/// (both sides see the same lobby ids and compute the same global minimum), so both converge on the
+/// same lobby.
+///
+/// The tiebreak keys on the **lobby** SteamID, not the lobby *owner*, on purpose: `GetLobbyOwner`
+/// (like the member accessors) requires us to be a *member* of the lobby and returns nil for a
+/// listed-but-unjoined one, so an owner is only readable post-join (see [`poll_owner`]). A lobby's own
+/// SteamID, in contrast, comes straight from `GetLobbyByIndex` pre-join. RIG-VERIFY: confirm
+/// `GetLobbyOwner`/`GetLobbyByIndex` pre-join behavior on the two-player rig before flipping the gate.
 pub struct LobbyDiscovery {
-    is_host: bool,
-    mm: &'static Matchmaking,
-    register: RegisterCallResultFn,
-    /// Joiner: the password filter value, re-applied on each list retry (the filter is consumed per
-    /// request).
+    mm: Matchmaking,
+    utils: Utils,
+    /// Our own SteamID — excludes us from the host's member scan (the tiebreak keys on lobby ids, not
+    /// this).
+    self_id: u64,
+    /// The `usc_pw` filter value (the password token), re-applied on each list retry (the filter is
+    /// consumed per request).
     key: String,
-    /// Joiner: when we last issued a `RequestLobbyList`, to pace retries.
+    role: Role,
+    /// A `RequestLobbyList` we've issued and are polling, if any (the SDK allows one in flight).
+    list_call: Option<SteamAPICall>,
+    /// When we last issued a `RequestLobbyList`, to pace retries to [`LOBBY_LIST_RETRY`].
     last_request: Option<Instant>,
 }
 
 impl LobbyDiscovery {
-    /// Bind matchmaking + the call-result register, and kick off the role's first async call (host:
-    /// `CreateLobby`; joiner: filter + `RequestLobbyList`), registering the call-result that advances
-    /// the flow. `None` (logged) if the Steam binding isn't available.
-    pub fn start(is_host: bool, password: &str) -> Option<LobbyDiscovery> {
+    /// Bind matchmaking + utils against the already-loaded `steam_api64.dll` and start discovery in the
+    /// `Undecided` state. `None` (logged) if the Steam binding isn't available — the caller degrades.
+    /// `self_id` is our own resolved SteamID (rung 1), which the caller has already waited for.
+    pub fn start(self_id: u64, password: &str) -> Option<LobbyDiscovery> {
         // SAFETY: borrow the already-loaded module handle (same as rung 1/2); not-found means Steam
         // hasn't loaded yet.
         let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
@@ -805,138 +700,246 @@ impl LobbyDiscovery {
                 return None;
             }
         };
-        // RIG-VERIFY: that `SteamAPI_RegisterCallResult` is even exported by ER's dll (it's part of the
-        // flat API, but confirm with objdump) — and the headline unknown, that the call-results we
-        // register actually fire under ER's `RunCallbacks` pump.
-        let register: RegisterCallResultFn = unsafe {
-            std::mem::transmute::<usize, RegisterCallResultFn>(resolve_required(module, "SteamAPI_RegisterCallResult", s!("SteamAPI_RegisterCallResult"))?)
-        };
         let mm = Matchmaking::resolve(module)?;
-        // Park the binding for the 'static handlers; ignore "already set" (a second start is a no-op).
-        let _ = MATCHMAKING.set(mm);
-        let mm: &'static Matchmaking = MATCHMAKING.get()?;
-
-        let key = password_lobby_key(password);
-        let mut discovery = LobbyDiscovery { is_host, mm, register, key, last_request: None };
-        if is_host {
-            // SAFETY: resolved flat method; us → Steam.
-            let call = unsafe { (mm.create_lobby)(mm.iface, ELOBBY_TYPE_PUBLIC, LOBBY_MAX_MEMBERS) };
-            register_lobby_created(register, mm, call, discovery.key.clone());
-        } else {
-            // First filtered list request; the driver re-issues it on a timer until a match appears.
-            discovery.request_list_now();
-        }
-        Some(discovery)
+        let utils = Utils::resolve(module)?;
+        Some(LobbyDiscovery {
+            mm,
+            utils,
+            self_id,
+            key: password_lobby_key(password),
+            role: Role::Undecided,
+            list_call: None,
+            last_request: None,
+        })
     }
 
-    /// Poll for the resolved rung-2 peer (`None` until it lands). Called each tick by the co-op driver.
-    pub fn poll(&mut self) -> Option<u64> {
-        if let Some(peer) = peer_or_none() {
-            return Some(peer);
+    /// Poll the flow one tick. Returns `Some((peer, is_host))` once the partner is resolved (and which
+    /// role we derived), else `None`. Called each tick by the co-op driver until it yields.
+    pub fn poll(&mut self) -> Option<(u64, bool)> {
+        // Service any outstanding filtered-list result first — it can move us out of `Undecided`
+        // (decide create-vs-join) or, while `Hosting`, trigger the race tiebreak.
+        self.poll_list();
+
+        match self.role {
+            Role::Undecided => {
+                // Need a list to decide; (re)issue one on the retry cadence.
+                self.maybe_request_list();
+                None
+            }
+            Role::Creating { call } => {
+                self.poll_create(call);
+                None
+            }
+            Role::Hosting { lobby } => {
+                // Keep re-listing to catch the both-create race, then scan members for the joiner.
+                self.maybe_request_list();
+                self.poll_host_members(lobby)
+            }
+            Role::Joining { call, lobby } => {
+                self.poll_join(call, lobby);
+                None
+            }
+            Role::Joined { lobby } => self.poll_owner(lobby),
         }
-        if self.is_host { self.poll_host() } else { self.poll_joiner() }
     }
 
-    /// Host: once our lobby exists, scan its members (poll-based, no extra callback) for the non-self
-    /// entry — that's the joiner, our rung-2 peer.
-    fn poll_host(&self) -> Option<u64> {
-        let lobby = HOST_LOBBY_ID.load(Ordering::Acquire);
-        if lobby == 0 {
-            return None; // our lobby isn't created yet
+    /// Poll a pending `RequestLobbyList`; on completion, hand the match count to [`handle_list`].
+    fn poll_list(&mut self) {
+        let Some(call) = self.list_call else { return };
+        match self.utils.completed(call) {
+            None => {}                            // still pending
+            Some(true) => self.list_call = None, // IO failure — drop it; the cadence re-issues
+            Some(false) => {
+                self.list_call = None;
+                let mut res = LobbyMatchList { matching: 0 };
+                if self.utils.read_result(call, CB_LOBBY_MATCH_LIST, &mut res) {
+                    self.handle_list(res.matching);
+                }
+            }
         }
-        let mm = MATCHMAKING.get()?;
-        // Need our own id to exclude ourselves from the member list; if rung 1 hasn't published it yet,
-        // skip this scan (don't fall back to `0`, which would mis-pick our own membership as the peer).
-        let me = self_steam_id()?;
-        // SAFETY: resolved flat methods; `iface` read-only (see the `Matchmaking` thread-safety note).
-        let count = unsafe { (mm.get_num_members)(mm.iface, lobby) };
+    }
+
+    /// Decide what to do with a returned filtered list. Collects the matching **lobby SteamIDs** (the
+    /// only deterministic key readable pre-join — see the [`LobbyDiscovery`] race note), then:
+    /// `Undecided` ⇒ join the lowest-id lobby if any (else create); `Hosting` ⇒ if a competing lobby has
+    /// a strictly-lower id than ours, we lose the tiebreak — leave ours and join it.
+    fn handle_list(&mut self, matching: u32) {
+        crate::coop::note_lobby_list(matching);
+        // Lobby SteamIDs of each match. `get_by_index` indexes the *last* list (the one we just
+        // completed) and returns the id pre-join; the owner/members are NOT readable until we join.
+        let mut lobbies: Vec<u64> = Vec::new();
+        for i in 0..matching as i32 {
+            // SAFETY: resolved flat method; `iface` read-only; `i` in range (i < matching).
+            let lobby = unsafe { (self.mm.get_by_index)(self.mm.iface, i) };
+            if lobby != 0 {
+                lobbies.push(lobby);
+            }
+        }
+
+        match self.role {
+            Role::Undecided => {
+                // Existing lobby ⇒ join the lowest-id one (deterministic if several match); none ⇒
+                // create our own and become the host.
+                match lobbies.iter().copied().min() {
+                    Some(lobby) => self.start_join(lobby),
+                    None => self.start_create(),
+                }
+            }
+            Role::Hosting { lobby: mine } => {
+                // Both-create race: a competing lobby with an id below ours wins; we leave + join it.
+                let winner = lobbies.iter().copied().filter(|&lobby| lobby < mine).min();
+                if let Some(winner_lobby) = winner {
+                    log::info!(
+                        "steam: lost the lobby tiebreak (our lobby {mine:#x} > {winner_lobby:#x}); leaving ours to join theirs"
+                    );
+                    // SAFETY: resolved flat method; us → Steam.
+                    unsafe { (self.mm.leave_lobby)(self.mm.iface, mine) };
+                    self.start_join(winner_lobby);
+                }
+            }
+            // A stray list result while a create/join is in flight or already joined — ignore it.
+            _ => {}
+        }
+    }
+
+    /// Poll our in-flight `CreateLobby`. On success, publish the password/version data and become the
+    /// host; on failure, drop back to `Undecided` so the retry cadence tries again.
+    fn poll_create(&mut self, call: SteamAPICall) {
+        match self.utils.completed(call) {
+            None => {} // pending
+            Some(true) => {
+                crate::coop::note_lobby_failure("CreateLobby reported an IO failure");
+                self.role = Role::Undecided;
+            }
+            Some(false) => {
+                let mut res = LobbyCreated { result: 0, lobby: 0 };
+                if self.utils.read_result(call, CB_LOBBY_CREATED, &mut res)
+                    && res.result == E_RESULT_OK
+                {
+                    set_lobby_data(&self.mm, res.lobby, LOBBY_KEY_PASSWORD, &self.key);
+                    set_lobby_data(&self.mm, res.lobby, LOBBY_KEY_VERSION, &PROTOCOL_VERSION.to_string());
+                    crate::coop::note_lobby_created();
+                    self.role = Role::Hosting { lobby: res.lobby };
+                } else {
+                    crate::coop::note_lobby_failure(format!("CreateLobby failed (EResult {})", res.result));
+                    self.role = Role::Undecided;
+                }
+            }
+        }
+    }
+
+    /// Poll our in-flight `JoinLobby`. On success, move to `Joined` (the owner read is deferred to
+    /// [`poll_owner`], to tolerate owner metadata lagging the enter); on failure, retry from scratch.
+    fn poll_join(&mut self, call: SteamAPICall, lobby: u64) {
+        match self.utils.completed(call) {
+            None => {} // pending
+            Some(true) => {
+                crate::coop::note_lobby_failure("JoinLobby reported an IO failure");
+                self.role = Role::Undecided;
+            }
+            Some(false) => {
+                let mut res =
+                    LobbyEnter { lobby: 0, chat_permissions: 0, locked: 0, enter_response: 0 };
+                if self.utils.read_result(call, CB_LOBBY_ENTER, &mut res) {
+                    crate::coop::note_lobby_joined();
+                    self.role = Role::Joined { lobby };
+                } else {
+                    crate::coop::note_lobby_failure("JoinLobby failed");
+                    self.role = Role::Undecided;
+                }
+            }
+        }
+    }
+
+    /// Host: scan our lobby's members for the non-self entry — that's the joiner, our rung-2 peer.
+    fn poll_host_members(&self, lobby: u64) -> Option<(u64, bool)> {
+        // SAFETY: resolved flat methods; `iface` read-only.
+        let count = unsafe { (self.mm.get_num_members)(self.mm.iface, lobby) };
         for i in 0..count {
-            let member = unsafe { (mm.get_member_by_index)(mm.iface, lobby, i) };
-            if member != 0 && member != me {
-                DISCOVERED_PEER.store(member, Ordering::Release);
-                crate::coop::note_lobby_host_resolved();
-                return Some(member);
+            let member = unsafe { (self.mm.get_member_by_index)(self.mm.iface, lobby, i) };
+            if member != 0 && member != self.self_id {
+                crate::coop::note_lobby_host_resolved(); // the host id is our own — trivially known
+                return Some((member, true));
             }
         }
         None
     }
 
-    /// Joiner: once joined, resolve the host from `GetLobbyOwner` (owner metadata can lag `LobbyEnter`,
-    /// so we poll until it's non-zero rather than treating a transient `0` as failure). Until joined,
-    /// re-issue the filtered `RequestLobbyList` on a timer.
-    fn poll_joiner(&mut self) -> Option<u64> {
-        let lobby = JOINED_LOBBY_ID.load(Ordering::Acquire);
-        if lobby != 0 {
-            let mm = MATCHMAKING.get()?;
-            // SAFETY: resolved flat method; `iface` read-only.
-            let owner = unsafe { (mm.get_lobby_owner)(mm.iface, lobby) };
-            if owner != 0 {
-                DISCOVERED_PEER.store(owner, Ordering::Release);
-                crate::coop::note_lobby_host_resolved();
-                return Some(owner);
-            }
-            return None; // owner not populated yet; poll again
+    /// Joiner: resolve the host from `GetLobbyOwner`. Owner metadata can lag `LobbyEnter`, so a transient
+    /// `0` means "poll again", not failure.
+    fn poll_owner(&self, lobby: u64) -> Option<(u64, bool)> {
+        // SAFETY: resolved flat method; `iface` read-only.
+        let owner = unsafe { (self.mm.get_lobby_owner)(self.mm.iface, lobby) };
+        if owner != 0 {
+            crate::coop::note_lobby_host_resolved();
+            Some((owner, false))
+        } else {
+            None
         }
-        // Not joined yet — (re)issue the filtered list request on an interval, unless one is in flight.
-        let due = self.last_request.is_none_or(|t| t.elapsed() >= LOBBY_LIST_RETRY);
-        if due && !JOINER_REQUEST_IN_FLIGHT.load(Ordering::Acquire) {
-            self.request_list_now();
-        }
-        None
     }
 
-    /// Joiner: apply the password filter and issue one `RequestLobbyList`, marking a request outstanding.
-    fn request_list_now(&mut self) {
+    /// Issue `CreateLobby` and enter the `Creating` state. A refused call leaves us `Undecided` to retry.
+    fn start_create(&mut self) {
+        crate::coop::note_lobby_role(LobbyRole::Host);
+        // SAFETY: resolved flat method; us → Steam.
+        let call =
+            unsafe { (self.mm.create_lobby)(self.mm.iface, ELOBBY_TYPE_PUBLIC, LOBBY_MAX_MEMBERS) };
+        if call == API_CALL_INVALID {
+            crate::coop::note_lobby_failure("CreateLobby returned no API call (Steam refused it)");
+            return; // stay Undecided; the retry cadence tries again
+        }
+        self.role = Role::Creating { call };
+    }
+
+    /// Issue `JoinLobby` for `lobby` and enter the `Joining` state. A refused call leaves us `Undecided`.
+    fn start_join(&mut self, lobby: u64) {
+        crate::coop::note_lobby_role(LobbyRole::Joiner);
+        // SAFETY: resolved flat method; us → Steam.
+        let call = unsafe { (self.mm.join_lobby)(self.mm.iface, lobby) };
+        if call == API_CALL_INVALID {
+            crate::coop::note_lobby_failure("JoinLobby returned no API call (Steam refused it)");
+            self.role = Role::Undecided;
+            return;
+        }
+        self.role = Role::Joining { call, lobby };
+    }
+
+    /// (Re)issue a filtered `RequestLobbyList` on the [`LOBBY_LIST_RETRY`] cadence, unless one is already
+    /// in flight. The string filter is consumed per request, so re-apply it every time.
+    fn maybe_request_list(&mut self) {
+        if self.list_call.is_some() {
+            return; // one already outstanding
+        }
+        if self.last_request.is_some_and(|t| t.elapsed() < LOBBY_LIST_RETRY) {
+            return; // too soon since the last request
+        }
+        let (Ok(fk), Ok(fv)) = (CString::new(LOBBY_KEY_PASSWORD), CString::new(self.key.clone()))
+        else {
+            crate::coop::note_lobby_failure("could not marshal the lobby password filter");
+            return;
+        };
         self.last_request = Some(Instant::now());
-        joiner_request_list(self.register, self.mm, &self.key);
-    }
-}
-
-/// The resolved peer SteamID, or `None` while still `0`.
-fn peer_or_none() -> Option<u64> {
-    match DISCOVERED_PEER.load(Ordering::Acquire) {
-        0 => None,
-        id => Some(id),
-    }
-}
-
-/// Host: register the `LobbyCreated_t` handler — on success, stash the lobby id, publish the password +
-/// version data so a joiner's filter finds us, and mark the stage.
-fn register_lobby_created(register: RegisterCallResultFn, mm: &'static Matchmaking, call: SteamAPICall, key: String) {
-    if call == API_CALL_INVALID {
-        crate::coop::note_lobby_failure("CreateLobby returned no API call (Steam refused it)");
-        return;
-    }
-    let handler = Box::new(move |param: *const c_void, io_failure: bool| {
-        if io_failure || param.is_null() {
-            crate::coop::note_lobby_failure("LobbyCreated_t reported an IO failure");
-            return;
+        // SAFETY: resolved flat methods; the CStrings outlive the calls.
+        unsafe { (self.mm.add_filter)(self.mm.iface, fk.as_ptr(), fv.as_ptr(), ELOBBY_CMP_EQUAL) };
+        let call = unsafe { (self.mm.request_list)(self.mm.iface) };
+        if call != API_CALL_INVALID {
+            self.list_call = Some(call);
         }
-        // SAFETY: for this callback id Steam hands us a `LobbyCreated_t`; we read it as POD.
-        let res = unsafe { &*(param as *const LobbyCreated) };
-        if res.result != E_RESULT_OK {
-            crate::coop::note_lobby_failure(format!("CreateLobby failed (EResult {})", res.result));
-            return;
-        }
-        HOST_LOBBY_ID.store(res.lobby, Ordering::Release);
-        set_lobby_data(mm, res.lobby, LOBBY_KEY_PASSWORD, &key);
-        set_lobby_data(mm, res.lobby, LOBBY_KEY_VERSION, &PROTOCOL_VERSION.to_string());
-        crate::coop::note_lobby_created();
-        crate::coop::note_lobby_host_resolved(); // the host id is our own — trivially known
-    });
-    register_call_result(register, call, CB_LOBBY_CREATED, size_of::<LobbyCreated>() as i32, handler);
+        // A refused request leaves `list_call` None; the next cadence tick retries.
+    }
 }
 
-/// **Rung-4 `RunCallbacks` probe** — gated by `[debug.probes] lobby_callback_probe` (off by default),
-/// wired in [`crate::app`]. Answers the one empirical question gating
-/// [`LOBBY_DISCOVERY_ENABLED`](crate::coop): does ELDEN RING pump Steam via the legacy
-/// `SteamAPI_RunCallbacks` — so the call-results we register actually fire — or via `ManualDispatch`
-/// internally, which would never deliver to us and block rung 4?
+/// **Rung-4 lobby probe** (the re-derivation tool) — gated by `[debug.probes] lobby_callback_probe`
+/// (off by default), wired in [`crate::app`]. Confirms the mechanism the real discovery
+/// ([`LobbyDiscovery`]) is built on: that an in-process `CreateLobby` succeeds and its `SteamAPICall_t`
+/// resolves cleanly when **polled** via `ISteamUtils` (`IsAPICallCompleted`/`GetAPICallResult`).
 ///
-/// Registers ONE harmless private `CreateLobby` call-result and logs (info, `lobby-probe:` prefix) the
-/// instant it fires; a watcher makes "never fired" legible too, so a negative (ManualDispatch) verdict
-/// reads just as clearly. Deliberately isolated from the discovery flow — no password, no join, no
-/// joiner-wait — so the log says exactly "a registered call-result came back" or it didn't. Solo.
+/// This already settled the design question that gated [`LOBBY_DISCOVERY_ENABLED`](crate::coop): ELDEN
+/// RING pumps Steam via `RunCallbacks` and consumes a handle before we could poll it *if* we also
+/// register a call-result on it — so registering is the trap and poll-only is the path. Kept as the
+/// fast re-derive after a game/Steam update: it issues one harmless private `CreateLobby` and logs
+/// (info, `lobby-probe:` prefix) the polled outcome. Deliberately isolated from discovery — no password,
+/// no join — so a negative (the call never completes) reads just as clearly. Solo.
 ///
 /// Re-derive after a game/Steam update: docs/COOP-CONNECTION.md rung-4 build order, step 1.
 pub fn run_lobby_callback_probe() {
@@ -949,8 +952,8 @@ pub fn run_lobby_callback_probe() {
 }
 
 /// Body of [`run_lobby_callback_probe`], on its own thread. Resolves the binding, then retries
-/// `CreateLobby` over ~a minute — polling each attempt via `ISteamUtils` (and registering a call-result
-/// alongside) — logging whether the call succeeds, IO-fails, and whether the dispatch fires.
+/// `CreateLobby` over ~a minute — polling each attempt via `ISteamUtils` (never registering a
+/// call-result on the handle) — logging whether the call succeeds or IO-fails.
 fn issue_probe_create_lobby() {
     // SAFETY: borrow the already-loaded module handle (same as rung 1/2); not-found = Steam not up.
     let module = match unsafe { GetModuleHandleA(s!("steam_api64.dll")) } {
@@ -962,11 +965,6 @@ fn issue_probe_create_lobby() {
     };
     let Some(mm) = Matchmaking::resolve(module) else {
         log::warn!("lobby-probe: ISteamMatchmaking unavailable (Steam not initialized?); cannot probe");
-        return;
-    };
-    let _ = MATCHMAKING.set(mm);
-    let Some(mm) = MATCHMAKING.get() else {
-        log::warn!("lobby-probe: matchmaking binding unexpectedly unset; cannot probe");
         return;
     };
 
@@ -1042,7 +1040,7 @@ fn issue_probe_create_lobby() {
     log::warn!("lobby-probe: VERDICT — CreateLobby IO-failed on all {ATTEMPTS} attempts over ~a minute while Steam is online and running ELDEN RING → not a timing issue. Our in-process CreateLobby is being rejected; next: compare how ERSC issues it (lobby type/params, Steam user/pipe context, whether a SteamAPI re-init / RunCallbacks priming is needed)");
 }
 
-// --- ISteamUtils manual call-result poll (the poll path that may replace RegisterCallResult for rung 4) ---
+// --- ISteamUtils manual call-result poll (the poll path rung 4 + the probe are built on) ---
 type UtilsAccessor = unsafe extern "C" fn() -> *mut c_void;
 type IsAPICallCompletedFn = unsafe extern "C" fn(*mut c_void, SteamAPICall, *mut bool) -> bool;
 type GetAPICallResultFn =
@@ -1051,19 +1049,46 @@ type GetFailureReasonFn = unsafe extern "C" fn(*mut c_void, SteamAPICall) -> i32
 
 /// `ISteamUtils` + the manual call-result methods. Lets us POLL a `SteamAPICall_t` for completion and
 /// read its result/failure without the `CCallbackBase`/`RunCallbacks` dispatch — the same poll-not-pump
-/// approach rung 1/2 use for networking. Raw `iface` makes this `!Send`; the methods are thread-safe and
-/// we only read `iface`, so we assert `Send`/`Sync` (cf. [`Matchmaking`]).
+/// approach rung 1/2 use for networking. Used only on a single thread (the co-op driver, or the probe's
+/// own thread), so it never crosses threads and needs no `Send`/`Sync`; we hold the raw `iface` only to
+/// pass it to the flat methods.
 struct Utils {
     iface: *mut c_void,
     is_completed: IsAPICallCompletedFn,
     get_result: GetAPICallResultFn,
     get_failure_reason: GetFailureReasonFn,
 }
-// SAFETY: Steam's ISteamUtils flat methods are thread-safe; we only read `iface`. (cf. `Matchmaking`.)
-unsafe impl Send for Utils {}
-unsafe impl Sync for Utils {}
 
 impl Utils {
+    /// Has `call` completed? `None` = still pending; `Some(io_failure)` = completed, with the IO-failure
+    /// flag Steam reported (a `true` means the call itself failed, e.g. `InvalidHandle`/`NetworkFailure`).
+    fn completed(&self, call: SteamAPICall) -> Option<bool> {
+        let mut io_failure = false;
+        // SAFETY: resolved flat method; `io_failure` is a valid out-param.
+        let done = unsafe { (self.is_completed)(self.iface, call, &mut io_failure) };
+        done.then_some(io_failure)
+    }
+
+    /// Read a completed call's result struct (POD `T`) for `callback_id` into `out`. Returns whether the
+    /// read succeeded *and* the call did not IO-fail. Call only after [`completed`](Utils::completed)
+    /// returns `Some(false)`.
+    fn read_result<T>(&self, call: SteamAPICall, callback_id: i32, out: &mut T) -> bool {
+        let mut io_failure = false;
+        // SAFETY: resolved flat method; `out` is a valid `T` buffer whose size/`callback_id` match the
+        // pending call's result struct (the caller pairs them — see CB_LOBBY_* and the result structs).
+        let ok = unsafe {
+            (self.get_result)(
+                self.iface,
+                call,
+                (out as *mut T).cast(),
+                size_of::<T>() as i32,
+                callback_id,
+                &mut io_failure,
+            )
+        };
+        ok && !io_failure
+    }
+
     fn resolve(module: HMODULE) -> Option<Utils> {
         // SAFETY: resolved accessor taking no args; null = Steam not initialized.
         let accessor: UtilsAccessor = unsafe {
@@ -1098,72 +1123,6 @@ fn failure_reason_str(reason: i32) -> &'static str {
         3 => "MismatchedCallback (expected callback id doesn't match the result)",
         _ => "unknown",
     }
-}
-
-/// Joiner: apply the password filter and request the lobby list, registering the `LobbyMatchList_t`
-/// handler. The string filter is consumed per request, so re-apply it on every (retry) call.
-fn joiner_request_list(register: RegisterCallResultFn, mm: &'static Matchmaking, key: &str) {
-    let (Ok(fk), Ok(fv)) = (CString::new(LOBBY_KEY_PASSWORD), CString::new(key.to_string())) else {
-        crate::coop::note_lobby_failure("could not marshal the lobby password filter");
-        return;
-    };
-    JOINER_REQUEST_IN_FLIGHT.store(true, Ordering::Release);
-    // SAFETY: resolved flat methods; the CStrings outlive the calls.
-    unsafe { (mm.add_filter)(mm.iface, fk.as_ptr(), fv.as_ptr(), ELOBBY_CMP_EQUAL) };
-    let call = unsafe { (mm.request_list)(mm.iface) };
-    register_lobby_match_list(register, mm, call);
-}
-
-/// Joiner: register the `LobbyMatchList_t` handler — pick the first matching lobby and join it. An empty
-/// list (or a refused request) is **not** terminal: clear the in-flight flag so the driver retries (the
-/// host may not have created its lobby yet); the discovery timeout is the real deadline, and the report
-/// keeps the last `candidates` count so a persistent empty filter is still legible.
-fn register_lobby_match_list(register: RegisterCallResultFn, mm: &'static Matchmaking, call: SteamAPICall) {
-    if call == API_CALL_INVALID {
-        JOINER_REQUEST_IN_FLIGHT.store(false, Ordering::Release); // let the driver retry
-        return;
-    }
-    let handler = Box::new(move |param: *const c_void, io_failure: bool| {
-        JOINER_REQUEST_IN_FLIGHT.store(false, Ordering::Release); // this request completed
-        if io_failure || param.is_null() {
-            return; // transient; the driver retries
-        }
-        // SAFETY: for this callback id Steam hands us a `LobbyMatchList_t`.
-        let res = unsafe { &*(param as *const LobbyMatchList) };
-        crate::coop::note_lobby_list(res.matching);
-        if res.matching == 0 {
-            return; // empty this round — the driver retries until the timeout
-        }
-        // SAFETY: resolved flat method; index 0 is in range (matching >= 1).
-        let lobby = unsafe { (mm.get_by_index)(mm.iface, 0) };
-        if lobby == 0 {
-            return; // odd, but non-terminal; the driver retries
-        }
-        let join_call = unsafe { (mm.join_lobby)(mm.iface, lobby) };
-        register_lobby_enter(register, join_call);
-    });
-    register_call_result(register, call, CB_LOBBY_MATCH_LIST, size_of::<LobbyMatchList>() as i32, handler);
-}
-
-/// Joiner: register the `LobbyEnter_t` handler — once in, publish the joined lobby so the driver can
-/// resolve the host owner from it (the host read is done on the poll side to tolerate the owner-metadata
-/// lag right after entering).
-fn register_lobby_enter(register: RegisterCallResultFn, call: SteamAPICall) {
-    if call == API_CALL_INVALID {
-        crate::coop::note_lobby_failure("JoinLobby returned no API call (Steam refused it)");
-        return;
-    }
-    let handler = Box::new(move |param: *const c_void, io_failure: bool| {
-        if io_failure || param.is_null() {
-            crate::coop::note_lobby_failure("LobbyEnter_t reported an IO failure");
-            return;
-        }
-        // SAFETY: for this callback id Steam hands us a `LobbyEnter_t`.
-        let res = unsafe { &*(param as *const LobbyEnter) };
-        crate::coop::note_lobby_joined();
-        JOINED_LOBBY_ID.store(res.lobby, Ordering::Release);
-    });
-    register_call_result(register, call, CB_LOBBY_ENTER, size_of::<LobbyEnter>() as i32, handler);
 }
 
 /// `SetLobbyData(lobby, key, value)` with the strings marshaled to C. Best-effort (a non-UTF-safe key

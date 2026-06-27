@@ -9,10 +9,11 @@
 //! The [`bridge`](crate::bridge) was the loopback rehearsal for exactly this: drive a `Session` on a
 //! dedicated thread, applying any received config into the live [`crate::state`] so the game-thread
 //! features pick it up. Here the transport is [`SteamP2PTransport`] over `ISteamNetworkingMessages`
-//! (see [`crate::steam`]) instead of a TCP socket, and the peer is a **manually-entered** SteamID
-//! (`[coop] peer_steam_id`, exchanged out of band per rung 1) — lobby discovery is the deferred rung
-//! 4. Unlike the bridge (a pure test harness), this also surfaces connection events to the in-game
-//! overlay via [`crate::notify`].
+//! (see [`crate::steam`]) instead of a TCP socket, and the peer is resolved by **password-keyed lobby
+//! discovery** (rung 4, [`steam::LobbyDiscovery`]): both players key a Steam lobby off the shared
+//! session password, and whoever finds an existing lobby joins it (client) while the other creates one
+//! (host), so the role is derived, not configured. Unlike the bridge (a pure test harness), this also
+//! surfaces connection events to the in-game overlay via [`crate::notify`].
 //!
 //! ## Why its own thread (not a game-frame task)
 //! Steam's networking calls are thread-safe and the `Session`/`Peer` are pure core types, so the
@@ -61,11 +62,11 @@ const BANNER_LIVENESS: &str = "coop-liveness";
 /// Published connection phase for the diagnostic report's `coop` line (read from the game thread).
 /// The driver is on its own thread, so this single relaxed atomic is the whole cross-thread readout.
 static PHASE: AtomicU8 = AtomicU8::new(PHASE_OFF);
-const PHASE_OFF: u8 = 0; // no peer configured — driver never started
+const PHASE_OFF: u8 = 0; // discovery never started (no password / gated off) — driver never ran
 const PHASE_LINKING: u8 = 1; // resolving identity + networking; partner not yet heard from
 const PHASE_LINKED: u8 = 2; // handshake complete (partner's Hello seen)
 const PHASE_LOST: u8 = 3; // was linked, partner went silent
-const PHASE_FAILED: u8 = 4; // a partner WAS configured, but startup failed (no Steam ID / networking)
+const PHASE_FAILED: u8 = 4; // discovery was attempted, but startup failed (no Steam ID / networking / timeout)
 
 /// One-line co-op connection status for the diagnostic report's `coop` field (inside the `steam`
 /// section), so a rig run (or a friend's shared log) shows at a glance whether the side-channel
@@ -75,8 +76,8 @@ pub fn status_line() -> &'static str {
         PHASE_LINKING => "linking (Steam P2P)",
         PHASE_LINKED => "linked",
         PHASE_LOST => "partner lost (silent)",
-        PHASE_FAILED => "configured, but couldn't start (see log)",
-        _ => "off (no [coop] peer_steam_id set)",
+        PHASE_FAILED => "attempted, but couldn't start (see log)",
+        _ => "off (no co-op password, or discovery disabled)",
     }
 }
 
@@ -133,14 +134,18 @@ fn record_failure(why: impl Into<String>) {
     with_report(|r| r.failure = Some(why));
 }
 
-// Rung-4 lobby-discovery stage notes — called from [`crate::steam`]'s call-result handlers (which run
-// on the game's Steam pump thread). Centralized here so all report mutation + timing stamping lives in
-// one place. These are referenced only by the (currently dormant) rung-4 path; see [`start`].
+// Rung-4 lobby-discovery stage notes — called from [`crate::steam`]'s poll-based discovery (on the co-op
+// driver thread). Centralized here so all report mutation + timing stamping lives in one place. These
+// are referenced only by the (currently dormant) rung-4 path; see [`start`].
 
-/// Record which side of lobby discovery we're playing (creates the `lobby` sub-report).
+/// Record which side of lobby discovery we're playing (creates the `lobby` sub-report). Idempotent for a
+/// repeated *same* role (a `CreateLobby` retry re-announces `Host`) so it doesn't wipe earlier stamps; a
+/// genuine role flip (losing the both-create race ⇒ `Host`→`Joiner`) does reset, reflecting the new role.
 pub(crate) fn note_lobby_role(role: LobbyRole) {
     with_report(|r| {
-        r.lobby = Some(LobbyProgress::new(role));
+        if r.lobby.as_ref().map(|l| l.role) != Some(role) {
+            r.lobby = Some(LobbyProgress::new(role));
+        }
     });
 }
 /// Host: the lobby was created and its password data published.
@@ -184,11 +189,12 @@ pub(crate) fn note_lobby_failure(why: impl Into<String>) {
     record_failure(why);
 }
 
-/// RIG-VERIFY gate (rung 4): password-keyed Steam-lobby discovery stays **dormant** until a single-
-/// player rig probe confirms ELDEN RING pumps Steam via legacy `SteamAPI_RunCallbacks` (so our
-/// registered call-results fire) rather than `ManualDispatch` (which would block the whole approach).
-/// Until that's confirmed and this flips to `true`, only the manual `[coop] peer_steam_id` path runs.
-/// See docs/COOP-CONNECTION.md rung-4 build order, step 1.
+/// RIG-VERIFY gate (rung 4): password-keyed Steam-lobby discovery stays **dormant** until a two-player
+/// rig run validates the full joiner-finds-host flow end to end. The mechanism is already rig-proven
+/// (an in-process `CreateLobby` succeeds and its handle resolves when polled via `ISteamUtils` — see
+/// `steam::run_lobby_callback_probe`); what remains is confirming a joiner's filtered list actually
+/// finds the host's freshly-tagged lobby across two machines. With the manual peer-entry path removed,
+/// `false` simply means co-op is inactive — no fallback. See docs/COOP-CONNECTION.md rung-4.
 const LOBBY_DISCOVERY_ENABLED: bool = false;
 
 /// How long the rung-4 discovery driver waits for a partner before giving up (a lobby create/join and a
@@ -196,28 +202,22 @@ const LOBBY_DISCOVERY_ENABLED: bool = false;
 const LOBBY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOBBY_DISCOVERY_POLL: Duration = Duration::from_millis(250);
 
-/// Start the side-channel. With `[coop] peer_steam_id` set, connects to that manually-entered partner
-/// (rung 2). With it unset but a session password configured, rung-4 lobby discovery would resolve the
-/// partner automatically (host via `is_host`) — but that path is gated off ([`LOBBY_DISCOVERY_ENABLED`])
-/// until the rig probe lands, so today an unset peer is simply a no-op (a solo session pays nothing).
-/// Spawns one detached driver thread; reads the few config values it needs up front.
+/// Start the side-channel. Pairing is **password-keyed lobby discovery** (rung 4) and nothing else: with
+/// a session password configured, discovery finds-or-creates a lobby tagged by that password, derives
+/// our host/client role, and seeds the rung-2 driver with the resolved partner. Gated off
+/// ([`LOBBY_DISCOVERY_ENABLED`]) until the two-player rig run lands, so today this is a no-op (a solo
+/// session pays nothing). Spawns one detached driver thread; reads the few config values it needs up
+/// front.
 pub fn start(config: &Config) {
-    let peer_id = config.coop.peer_steam_id;
-    let is_host = config.coop.is_host;
-    // Only a client forwards its log to the host, and only when asked (`forward_to_host`).
-    let forward = !is_host && config.debug.forward_to_host;
-
-    if peer_id == 0 {
-        // Rung-4 lobby discovery replaces the manual peer entry: a host (`is_host = true`) creates a
-        // password-tagged lobby, a joiner finds + joins it, and the resolved peer seeds rung 2. Dormant
-        // until the rig probe (see the gate). A host doesn't need a peer id; both need the password.
-        if LOBBY_DISCOVERY_ENABLED && !config.session.password.is_empty() {
-            let password = config.session.password.clone();
-            spawn_driver("unseamless-coop-lobby", move || run_discovery(is_host, password, forward));
-        }
-        return;
+    if !LOBBY_DISCOVERY_ENABLED || config.session.password.is_empty() {
+        return; // co-op inactive: discovery is gated off, or there's no password to key a lobby on
     }
-    spawn_driver("unseamless-coop", move || run(peer_id, is_host, forward));
+    let password = config.session.password.clone();
+    // Whether *this* instance forwards its debug log depends on the role discovery derives (only a
+    // client forwards, and only when asked) — so pass the preference and let `run_discovery` apply it
+    // once the role is known.
+    let forward_pref = config.debug.forward_to_host;
+    spawn_driver("unseamless-coop-lobby", move || run_discovery(password, forward_pref));
 }
 
 /// Spawn a detached, named driver thread, logging (not panicking) if the OS refuses the thread.
@@ -228,35 +228,36 @@ fn spawn_driver(name: &str, body: impl FnOnce() + Send + 'static) {
     }
 }
 
-/// Rung-4 driver (dormant — see [`LOBBY_DISCOVERY_ENABLED`]): resolve the partner via Steam-lobby
-/// discovery, then hand off to the normal rung-2 [`run`] with that peer. Every failure degrades to a
-/// `failed` phase with a recorded reason, like [`run`].
-fn run_discovery(is_host: bool, password: String, forward: bool) {
+/// Rung-4 driver (dormant — see [`LOBBY_DISCOVERY_ENABLED`]): resolve the partner **and our derived
+/// host/client role** via password-keyed Steam-lobby discovery, then hand off to the normal rung-2
+/// [`run`] with that peer + role. The role-dependent forward decision is applied here (only a client
+/// forwards). Every failure degrades to a `failed` phase with a recorded reason, like [`run`].
+fn run_discovery(password: String, forward_pref: bool) {
     begin_attempt();
     PHASE.store(PHASE_LINKING, Ordering::Relaxed);
-    note_lobby_role(if is_host { LobbyRole::Host } else { LobbyRole::Joiner });
+    // The lobby role (host vs joiner) is derived by discovery, not known yet — `note_lobby_role` is
+    // recorded inside `LobbyDiscovery` the moment it decides (create ⇒ host, join ⇒ joiner).
 
-    if wait_self_id().is_none() {
+    let Some(self_id) = wait_self_id() else {
         log::warn!("coop: own SteamID never resolved; lobby discovery not started");
         record_failure("own SteamID never resolved (rung 1) — is Steam running and logged in?");
         PHASE.store(PHASE_FAILED, Ordering::Relaxed);
         return;
-    }
+    };
     with_report(|r| r.self_id_at = Some(elapsed()));
 
-    let Some(mut discovery) = steam::LobbyDiscovery::start(is_host, &password) else {
+    let Some(mut discovery) = steam::LobbyDiscovery::start(self_id, &password) else {
         log::warn!("coop: Steam matchmaking unavailable; lobby discovery not started");
         record_failure("Steam matchmaking unavailable (Steam not up or export missing)");
         PHASE.store(PHASE_FAILED, Ordering::Relaxed);
         return;
     };
 
-    // The async lobby flow completes on the game's Steam pump thread (via our call-results); poll here
-    // for the resolved peer until it lands or we time out.
+    // Poll discovery on this thread until it resolves the partner (and the role we derived) or times out.
     let deadline = Instant::now() + LOBBY_DISCOVERY_TIMEOUT;
-    let peer_id = loop {
-        if let Some(peer) = discovery.poll() {
-            break peer;
+    let (peer_id, is_host) = loop {
+        if let Some(resolved) = discovery.poll() {
+            break resolved;
         }
         if Instant::now() >= deadline {
             log::warn!("coop: lobby discovery timed out; no partner found");
@@ -267,8 +268,15 @@ fn run_discovery(is_host: bool, password: String, forward: bool) {
         std::thread::sleep(LOBBY_DISCOVERY_POLL);
     };
 
-    log::info!("coop: lobby discovery resolved partner {}; seeding rung 2", peer_tag(peer_id));
-    // Hand the resolved peer to the normal rung-2 driver — lobbies are discovery, not a new transport.
+    // Only a client forwards its debug log to the host, and only when asked.
+    let forward = !is_host && forward_pref;
+    log::info!(
+        "coop: lobby discovery resolved partner {} (we are the {}); seeding rung 2",
+        peer_tag(peer_id),
+        if is_host { "host" } else { "client" },
+    );
+    // Hand the resolved peer + derived role to the normal rung-2 driver — lobbies are discovery, not a
+    // new transport.
     run(peer_id, is_host, forward);
 }
 
@@ -287,13 +295,13 @@ fn run(peer_id: PeerId, is_host: bool, forward: bool) {
     };
     with_report(|r| r.self_id_at = Some(elapsed()));
     if self_id == peer_id {
-        log::error!("coop: [coop] peer_steam_id is our own SteamID; nothing to connect to");
-        record_failure("configured [coop] peer_steam_id is our own SteamID");
+        log::error!("coop: resolved partner is our own SteamID; nothing to connect to");
+        record_failure("resolved partner is our own SteamID");
         PHASE.store(PHASE_FAILED, Ordering::Relaxed);
         return;
     }
-    // Host identity is agreed out of band by who sets `is_host` (manual pairing for rung 2): the host
-    // is authoritative for the shared settings; the client adopts them.
+    // The host (the lobby creator, per the derived discovery role) is authoritative for the shared
+    // settings; the client adopts them.
     let host_id = if is_host { self_id } else { peer_id };
 
     let Some(net) = Networking::resolve() else {

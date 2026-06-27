@@ -53,7 +53,6 @@ pub struct Config {
     /// Tuning for the death-debuff stacking (the on/off toggle is `gameplay.death_debuffs`).
     pub death_debuffs: crate::death_debuffs::DeathDebuffTuning,
     pub world_time: WorldTime,
-    pub coop: Coop,
     pub nameplates: Nameplates,
 }
 
@@ -88,24 +87,6 @@ impl Default for Nameplates {
 pub const MIN_NAMEPLATE_DISTANCE: u32 = 5;
 pub const MAX_NAMEPLATE_DISTANCE: u32 = 300;
 pub const DEFAULT_NAMEPLATE_DISTANCE: u32 = 60;
-
-/// Private Steam P2P **side-channel** pairing (rung 2 of `docs/COOP-CONNECTION.md`). For now the
-/// partner is entered by hand — two players swap SteamIDs out of band (the rung-1 copy button), each
-/// puts the *other's* ID here, and exactly one sets `is_host`. This is the deliberately-temporary
-/// manual mechanism that unblocks the first real two-player side-channel test; password-keyed lobby
-/// discovery (rung 4) is meant to replace it, at which point these fields go away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Coop {
-    /// The partner's 64-bit SteamID. `0` (the default) disables the side-channel — a solo session
-    /// stands up nothing. A SteamID64 always fits a TOML integer (`i64`), since its top universe
-    /// nibble keeps it well under `i64::MAX`.
-    pub peer_steam_id: u64,
-    /// Whether this instance is the session **host** (authoritative for the shared settings the host
-    /// pushes via `ConfigSync`). The other player must set this `false` so it adopts the host's
-    /// settings. No validation enforces "exactly one host" — that's on the two players to coordinate.
-    pub is_host: bool,
-}
 
 /// Lock the in-game time of day. Local for now (each player sets their own); host-enforced sync is a
 /// follow-up, since time-of-day desync between co-op players is a known annoyance worth syncing later.
