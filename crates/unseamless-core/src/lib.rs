@@ -21,6 +21,10 @@ pub mod death_debuffs;
 pub mod diagnostics;
 pub mod framing;
 pub mod game_state;
+/// The in-overlay rig-testing guide engine. Debug-only (`dev`/test/`diag` profiles): the shipping
+/// `release` build strips it entirely, since there is no rig in a player's hands.
+#[cfg(debug_assertions)]
+pub mod guide;
 pub mod loader;
 pub mod menu;
 pub mod notifications;

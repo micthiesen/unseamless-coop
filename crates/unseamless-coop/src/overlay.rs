@@ -94,6 +94,10 @@ const DIM_GREY: [f32; 3] = [0.55, 0.55, 0.55];
 /// Background alpha shared by the passive corner surfaces (notifications, watermark), so the two
 /// can't drift apart.
 const PASSIVE_BG_ALPHA: f32 = 0.35;
+/// Background alpha for the rig-guide pinned step banner (debug-only) — a touch more opaque than the
+/// passive surfaces so the current test instruction stands out as the thing to act on.
+#[cfg(debug_assertions)]
+const PINNED_BG_ALPHA: f32 = 0.55;
 
 // Overhead nameplates: bright white text with a dark drop shadow (one pixel down-right) so a label
 // stays legible over any part of the game world. The projected NDC points come from the game-thread
@@ -272,6 +276,11 @@ impl Overlay {
             self.config = cfg;
         }
         self.draw_notifications(ui);
+        // Rig-testing guide pinned step banner (debug-only): a top-center surface showing the current
+        // guide step, always visible (independent of the utility window) while a guide runs. No-op when
+        // no guide is active. Drawn after notifications so it sits below the top-right toast stack.
+        #[cfg(debug_assertions)]
+        self.draw_rig_guide_banner(ui);
         // Overhead peer nameplates: screen-space labels the game-thread feature
         // (`crate::features::nameplates`) projected and published to `crate::nameplates`. Drawn over
         // the world but behind our own windows; a no-op when nothing's published (off / no peers).
@@ -356,6 +365,47 @@ impl Overlay {
                     .fold(0.0_f32, f32::max);
                 draw_banners(ui, &banners, max_w);
                 draw_toasts(ui, &toasts, max_w);
+            });
+    }
+
+    /// Draw the rig-testing guide's **pinned step banner** (debug-only): a top-center, borderless,
+    /// input-transparent surface showing the current guide step's instruction + the auto-appended
+    /// control hints, in the engine's auto-assigned colour (a per-step palette hue, or the muted
+    /// pending colour for a stub). It's a *dedicated pinned slot* — distinct from the rotating,
+    /// capped notification banners — so a long test instruction stays put while toasts come and go.
+    /// Reads [`crate::rig_guide`] non-blocking; a no-op when no guide is active or it's finished.
+    #[cfg(debug_assertions)]
+    fn draw_rig_guide_banner(&self, ui: &Ui) {
+        // Outer None: uninitialized / momentarily contended — skip this frame. Inner None: no guide
+        // banner active — nothing to draw.
+        let Some(Some(banner)) = crate::rig_guide::snapshot() else {
+            return;
+        };
+        // Top-center, anchored by its own top-center (pivot 0.5,0) so it stays centered as the text
+        // wraps. Clear of the top-left watermark and top-right notifications.
+        let disp = ui.io().display_size;
+        // Cap the banner width so a long instruction wraps instead of spilling off both screen edges;
+        // the ALWAYS_AUTO_RESIZE window then only grows vertically. Wrap at an explicit window-local x
+        // (a default/content-edge wrap pos would be circular with auto-resize).
+        let wrap_width = (disp[0] * 0.6).clamp(360.0, 720.0);
+        ui.window("##unseamless-rig-guide")
+            .position([disp[0] * 0.5, OVERLAY_MARGIN], Condition::Always)
+            .position_pivot([0.5, 0.0])
+            .size_constraints([0.0, 0.0], [wrap_width, f32::MAX])
+            .bg_alpha(PINNED_BG_ALPHA)
+            .flags(passive_window_flags())
+            .build(|| {
+                let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
+                let _wrap = ui.push_text_wrap_pos_with_pos(wrap_width);
+                ui.text_disabled("RIG GUIDE");
+                // The banner text is one or more lines (a `[PENDING …]` marker, the instruction, then
+                // the control hints), all drawn in the engine's auto-assigned colour. The colour is
+                // never chosen in a guide — the engine assigns a stable per-step hue (or the pending
+                // colour for a stub) so a step reads as colour-coded across an advance.
+                let color = rgba(banner.color, 1.0);
+                for line in banner.text.lines() {
+                    ui.text_colored(color, line);
+                }
             });
     }
 

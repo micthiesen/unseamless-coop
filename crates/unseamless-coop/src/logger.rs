@@ -78,11 +78,17 @@ pub fn init(config: &Config, base: &Path) {
     // in-memory ring buffer the overlay's Log tab reads live (`crate::logbuf`), and the co-op
     // forward queue (`crate::forward`) — inert unless we're a forwarding client, then drained onto
     // the side-channel so the host aggregates this client's log.
-    let loggers: Vec<Box<dyn SharedLogger>> = vec![
+    // `mut` is only exercised by the debug-only push below; release strips that, so allow it there.
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut loggers: Vec<Box<dyn SharedLogger>> = vec![
         WriteLogger::new(level, log_config, file),
         crate::logbuf::ring_logger(level),
         crate::forward::forward_logger(level),
     ];
+    // Debug-only: tee into the rig-guide queue so a running guide's `log_contains` predicates can see
+    // log output. Inert (drops every record) until a guide enables it; stripped from release entirely.
+    #[cfg(debug_assertions)]
+    loggers.push(crate::guide_log::guide_logger(level));
     let _ = CombinedLogger::init(loggers);
 
     log::info!("logging at {level} -> {}", path.display());

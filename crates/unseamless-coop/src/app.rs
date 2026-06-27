@@ -113,6 +113,10 @@ fn init_subsystems(
 ) {
     crate::logbuf::init();
     crate::forward::init();
+    // Rig-guide log tee queue (debug-only): must exist before the logger installs its `guide_logger`
+    // sink, like the ring/forward queues above. Inert (drops every record) until a guide enables it.
+    #[cfg(debug_assertions)]
+    crate::guide_log::init();
     crate::logger::init(config, base);
     crate::notify::init();
     // Queue for menu-requested session actions (overlay → game thread). Before any feature ticks.
@@ -121,6 +125,10 @@ fn init_subsystems(
     crate::debug_panel::init();
     // Label cell the nameplates feature posts projected peer labels into and the overlay draws.
     crate::nameplates::init();
+    // Rig-testing guide pinned-banner cell the overlay reads (debug-only). Before any feature ticks
+    // or the overlay draws; inert until a `[debug] guide` is configured (the banner stays `None`).
+    #[cfg(debug_assertions)]
+    crate::rig_guide::init();
     for (level, message) in notes {
         log::log!(level, "{message}");
         // Surface only *actionable* config notes (a clamped value, a malformed file) as toasts —
@@ -264,6 +272,11 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
     // the transition machinery still running). Off by default; on for a create/join RE run.
     features.extend(crate::diag::probe_features(config));
     features.extend(crate::session_probe::probe_features(config));
+    // Rig-testing guide (debug-only): one feature when `[debug] guide` names a committed guide, else
+    // empty. Appended last, like the diagnostic probes — it only reads state + the pad and publishes a
+    // banner, so its tick order doesn't matter.
+    #[cfg(debug_assertions)]
+    features.extend(crate::features::rig_guide::feature(config));
     features
 }
 

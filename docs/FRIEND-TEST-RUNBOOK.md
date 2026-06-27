@@ -64,6 +64,16 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
 - `[debug.probes] session_probe = true` — turns on the rung-3 FSM rising-edge logger + the create/join
   entry hooks (`session-probe:` prefix). See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md).
 - The **friend-capture export** is always available (the overlay button); no flag needed.
+- `[debug] guide = "<name>"` — **when this session is to validate something specific, always ship a
+  guide.** An in-overlay guide pins the test steps on-screen so the friend(s) **and** you follow the
+  exact same sequence (advance with `L3 + D-pad Up`, skip with `L3 + D-pad Down`), instead of a chat
+  round-trip. Add it **by hand** to each machine's `unseamless-coop/unseamless_coop.toml` after
+  extracting (the `rig.sh package` step doesn't emit these debug keys, and ConfigSync doesn't carry
+  them), and set each machine's `[debug] rig_role` (`host` on the hoster, `join` on the joiner) so a
+  role-tagged guide shows the right steps per machine. For this connect test, `two-player-join` fits;
+  for the create RE, `rung3-create-chart`. The whole subsystem is debug-only, so **every machine must
+  run a diag build** (release strips it entirely). Authoring + the committed list:
+  [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
 
 > The `lobby_callback_probe` (rung-4 gate) has already served its purpose solo — it confirmed ER pumps
 > via `RunCallbacks` and `CreateLobby` succeeds. It can stay off for the friend test; the live

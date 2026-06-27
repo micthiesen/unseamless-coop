@@ -10,6 +10,9 @@ pub mod nameplates;
 pub mod notifications;
 pub mod observer;
 pub mod playstate;
+/// The rig-testing guide binding (debug-only; see `crate::rig_guide` / `unseamless_core::guide`).
+#[cfg(debug_assertions)]
+pub mod rig_guide;
 pub mod scaling;
 pub mod seamless;
 pub mod session_actions;

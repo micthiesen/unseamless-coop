@@ -32,6 +32,11 @@ mod feature;
 mod features;
 mod forward;
 mod guard;
+// Rig-testing guide subsystem (debug-only; stripped from release — there's no rig in a player's
+// hands). `guide_log` tees log lines to the engine; `rig_guide` is the pinned-banner channel to the
+// overlay; the engine itself is `unseamless_core::guide`, driven by `features::rig_guide`.
+#[cfg(debug_assertions)]
+mod guide_log;
 mod hook;
 mod input;
 mod logbuf;
@@ -43,6 +48,8 @@ mod overlay;
 mod patch;
 mod playstate;
 mod proxy;
+#[cfg(debug_assertions)]
+mod rig_guide;
 mod saves;
 mod sdk;
 mod session;

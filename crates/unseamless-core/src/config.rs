@@ -149,6 +149,19 @@ pub struct Debug {
     /// On-demand diagnostic probes (`[debug.probes]`). All off by default — these are the levers we
     /// ask a tester to flip when chasing a specific issue ("set this, reproduce, send the log").
     pub probes: DebugProbes,
+    /// (**debug builds only**) Which committed rig-testing guide to run, by name (empty = off). The
+    /// guide engine is gated behind `#[cfg(debug_assertions)]` (zero release cost), so these two
+    /// fields are too — a `release` config simply has no such keys, and an old/foreign config that
+    /// carries them is ignored. See [`crate::guide::guides`] for the names.
+    #[cfg(debug_assertions)]
+    #[serde(default)]
+    pub guide: String,
+    /// (**debug builds only**) Which role this machine plays for an active [`guide`](Debug::guide):
+    /// `host` / `join` / `solo` (default `solo`). One shared guide runs on every machine; each shows
+    /// only the steps tagged for its role.
+    #[cfg(debug_assertions)]
+    #[serde(default)]
+    pub rig_role: crate::guide::Role,
 }
 
 impl Default for Debug {
@@ -160,6 +173,10 @@ impl Default for Debug {
             bridge_port: 0,
             overlay: true,
             probes: DebugProbes::default(),
+            #[cfg(debug_assertions)]
+            guide: String::new(),
+            #[cfg(debug_assertions)]
+            rig_role: crate::guide::Role::default(),
         }
     }
 }

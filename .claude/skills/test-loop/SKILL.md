@@ -170,6 +170,14 @@ verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts
 bare install primitive `rig.sh apply` is built on — usable directly only on a clean rig with no real
 ERSC stack to protect, per RIG-RUNBOOK; otherwise prefer `rig.sh`.)
 
+**Driving a specific test? Ship a guide.** For a focused rig or friend run (validating one behaviour,
+an RE step, a two-player flow), set `[debug] guide = "<name>"` in the rig seed config (or hand-add it
+to each extracted config for a friend run — `rig.sh package`/ConfigSync don't carry these debug keys)
+so the tester is walked through the steps on-screen (a pinned banner; advance with `L3 + D-pad Up`,
+skip with `L3 + D-pad Down`) instead of a chat round-trip — and set `[debug] rig_role` per machine for
+a two-player guide. Guides are debug-only (every machine needs a diag build). Committed list + how to author one:
+[RIG-GUIDES.md](../../../docs/RIG-GUIDES.md) and the `rig-guides` skill.
+
 **Solo-verifiable here (assistant drives end to end):** the DLL loads, registers its feature task,
 fires per frame (the `FrameBegin` heartbeat ticks even at the title screen), writes + reads config,
 runs the session observer, and stays stable — i.e. the RIG-RUNBOOK "first rig" checklist. **Not**

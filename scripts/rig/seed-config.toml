@@ -63,6 +63,18 @@ bridge_port = 47700
 # In-game overlay (on by default). Recovery kill-switch: set false and relaunch to run without it if
 # the DX12 present-hook ever misbehaves under Proton/vkd3d.
 overlay = true
+# In-overlay rig-testing GUIDE: a pinned, on-screen sequence of test steps that walks the tester
+# through a run (so the orchestrator doesn't round-trip "do X, now do Y"). Empty = off. Debug-only
+# (diag/dev builds; stripped from release). When validating something SPECIFIC — solo, on the rig, or
+# in a friend/prerelease bundle — set this to the relevant guide so the tester(s) AND you follow the
+# same steps. Committed guides: "rung3-create-chart" (create-session RE; pair with session_probe = true
+# below), "overlay-smoke" (guide self-test), "two-player-join" (role-tagged 2-player). See
+# docs/RIG-GUIDES.md; author new ones per the rig-guides skill.
+guide = ""
+# Which role this machine plays for an active `guide`: "host" / "join" / "solo" (default "solo"). One
+# shared guide runs on every machine; each shows only the steps tagged for its role. For a two-player
+# guide set "host" on the hosting machine and "join" on the joiner.
+rig_role = "solo"
 
 # Requestable diagnostic probes — all off by default. Flip on demand when chasing a specific issue
 # (yourself on the rig, or ask a friend tester to set one, reproduce, and send the log). A full
