@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# _place-inject <tmux-session>
+#
+# Wait for a worker session's Alacritty terminal to map, then drop that window
+# into the next free Alacritty tile-slot via the global `place-alacritty-next`
+# tool (see ~/.local/bin + balance-alacritty). Fully best-effort and decoupled:
+# worker-new fires this with `setsid -f`, so it never blocks or affects the spawn.
+# No-op (exit 0) if there's no display, the tool is missing, or the window never
+# appears -- the worker just stays where Alacritty opened it.
+set -euo pipefail
+
+sess="${1:?usage: _place-inject <session>}"
+PLACER="$HOME/.local/bin/place-alacritty-next"
+
+[ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] || exit 0
+[ -x "$PLACER" ] || exit 0
+
+# Resolve the Alacritty pid: worker-new launches `alacritty -e tmux attach -t
+# $sess`, so the tmux client's parent IS that Alacritty process (verified:
+# `tmux list-clients` client_pid -> ppid == alacritty). KWin keys windows by pid,
+# so this hands the placer an unambiguous target without any window-class hack.
+pid=""
+for _ in $(seq 1 40); do   # ~8s for the terminal to attach
+    cpid="$(tmux list-clients -t "$sess" -F '#{client_pid}' 2>/dev/null | head -n1 || true)"
+    if [ -n "$cpid" ]; then
+        ppid="$(ps -o ppid= -p "$cpid" 2>/dev/null | tr -d ' ' || true)"
+        if [ -n "$ppid" ] && grep -qa alacritty "/proc/$ppid/comm" 2>/dev/null; then
+            pid="$ppid"; break
+        fi
+    fi
+    sleep 0.2
+done
+[ -n "$pid" ] || exit 0
+
+"$PLACER" "$pid" >/dev/null 2>&1 || true

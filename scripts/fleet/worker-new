@@ -170,6 +170,13 @@ tmux new-session -d -s "$sess" -c "$ws" \
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
   echo "    opened Alacritty attached to $sess"
+  # Drop the new terminal into the next free Alacritty tile-slot (bottom-right
+  # first), best-effort and fully decoupled: a DETACHED injector waits for the
+  # window to map, derives the current grid from the other tiled windows, and
+  # places this one. Never blocks or breaks the spawn; no-op without the tiler.
+  if [ -x "$SELF/_place-inject" ]; then
+    setsid -f "$SELF/_place-inject" "$sess" >/dev/null 2>&1 || true
+  fi
 else
   echo "    no display detected; attach with:  tmux attach -t $sess"
 fi
