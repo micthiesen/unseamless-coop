@@ -3,7 +3,7 @@
 //! This is the math behind the overhead peer nameplates (see `docs/OVERLAY-RENDERING.md` >
 //! "(Later) Overhead nameplates"): given the camera and a peer's world position, where on screen
 //! does a label go, and should it be drawn at all? Keeping it here means the tricky part — the
-//! perspective transform and the culling — is verified on the Mac (`scripts/test-core.sh`); the
+//! perspective transform and the culling — is verified on the host (`scripts/test-core.sh`); the
 //! cdylib just feeds it the live camera (the SDK's `cs/camera.rs` `CSCam` named fields) and consumes
 //! the result.
 //!
