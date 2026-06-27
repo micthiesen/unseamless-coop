@@ -29,6 +29,17 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # release cross-compile / test run), since PostToolUse only refreshes the stamp *between* tools.
 BUSY_TTL=600
 
+# A worker that ended its turn within this many seconds is still "settling": the
+# TUI is repainting its response and the input cursor is blinking. That repaint
+# trips the composing heuristic (recent activity + a changing pane) even though no
+# human is typing -- which is exactly the common case of the orchestrator replying
+# the instant a worker parks after messaging it, and it would strand the reply on
+# a session no hook will re-fire on. Within this grace we skip the heuristic and
+# wake (right for a freshly parked worker); a real hand-redirect lands after the
+# repaint settles, where the heuristic still applies. Kept short so the window of
+# "a human starts typing the very instant the worker parks" stays small.
+SETTLE_GRACE=5
+
 sess="${1:-}"; shift || true
 if [ -z "$sess" ]; then
   echo "usage: msg <tmux-session> <text...>   (or pipe text on stdin)" >&2
@@ -68,7 +79,16 @@ if [ "$st" = "busy" ] && [ $((now - ts)) -lt "$BUSY_TTL" ]; then
   exit 0
 fi
 
-if fleet_session_composing "$sess"; then
+# A worker that JUST parked (recent idle stamp from the Stop/SessionStart hook) is
+# repainting, not being typed into -- skip the composing heuristic and wake it (see
+# SETTLE_GRACE). ts==0 means "unknown state", so don't skip: fall through to the
+# heuristic's normal protection.
+just_parked=0
+if [ "$st" = "idle" ] && [ "$ts" -gt 0 ] && [ $((now - ts)) -lt "$SETTLE_GRACE" ]; then
+  just_parked=1
+fi
+
+if [ "$just_parked" -eq 0 ] && fleet_session_composing "$sess"; then
   echo "msg: queued to $sess inbox (someone is typing in it; delivers on their submit)"
   exit 0
 fi

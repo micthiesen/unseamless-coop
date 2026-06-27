@@ -91,11 +91,16 @@ fleet_state_read() {
 
 # fleet_session_composing <sess>  ->  0 if a human appears to be typing into it
 # Used by `msg` to avoid waking (typing into) a session someone is composing in.
-# Biased hard against false positives so it can never strand a message on a truly
-# idle session: it declares "composing" only when the session was active very
-# recently AND its pane is still changing between two samples. A long-idle session
-# has stale activity -> not composing; a session that just finished a turn has a
-# static pane -> not composing; only live keystrokes satisfy both.
+# It declares "composing" only when the session was active very recently AND its
+# pane is still changing between two samples. A long-idle session has stale
+# activity -> not composing.
+#
+# Caveat this CANNOT see on its own: a session that just ended a turn is *also*
+# recently-active with a changing pane -- it's repainting its response and
+# blinking the input cursor, not being typed into. So this returns a false
+# "composing" right after a turn. `msg` compensates with the authoritative hook
+# state (SETTLE_GRACE): it skips this heuristic for a worker whose idle stamp is
+# only seconds old. Don't rely on this function alone to mean "a human is typing."
 fleet_session_composing() {
   local sess="$1" last now delta a b
   command -v tmux >/dev/null 2>&1 || return 1
