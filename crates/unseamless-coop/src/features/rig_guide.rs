@@ -10,13 +10,13 @@
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex};
 use unseamless_core::config::Config;
 use unseamless_core::guide::{
-    ControlHints, GuideInput, GuideRunner, LobbyState, ProtocolState, RigState, guides,
+    ChoiceInput, ControlHints, GuideInput, GuideRunner, LobbyState, ProtocolState, RigState, guides,
 };
 use unseamless_core::notifications::Severity;
 use unseamless_core::pad::{XINPUT_DPAD_DOWN, XINPUT_DPAD_UP, XINPUT_LEFT_THUMB};
 
 use crate::feature::{Feature, Tick};
-use crate::rig_guide::RigBanner;
+use crate::rig_guide::{RigBanner, RigView};
 
 // The two control chords (chosen here, trivially swappable — retuning these is expected). Made only
 // of **standard** XInput bits (no Guide/Home button) so they survive Steam Input, the same reasoning
@@ -112,10 +112,15 @@ impl Feature for RigGuideFeature {
 
         // Controller chords from the live pad snapshot (an atomic read written by the overlay's XInput
         // hook, safe from the game thread). The engine turns the raw held bools into hold-to-confirm
-        // (done) and a one-shot edge (skip).
+        // (done) and a one-shot edge (skip). The skip chord still escapes a choice modal — it's read
+        // here regardless of overlay state, so "skip always escapes" holds even with a modal up.
         let (buttons, _lx, _ly) = crate::input::pad_snapshot();
         let done_held = buttons & DONE_CHORD == DONE_CHORD;
         let skip_held = buttons & SKIP_CHORD == SKIP_CHORD;
+
+        // Choice-modal input the overlay pushed back (menu nav up/down/confirm + the keyboard note
+        // buffer). A quiet frame on a normal step; only a choice step reads it.
+        let (choice_up, choice_down, choice_confirm, note) = crate::rig_guide::drain_modal_input();
 
         let result = self.runner.tick(&GuideInput {
             delta: tick.delta,
@@ -123,19 +128,41 @@ impl Feature for RigGuideFeature {
             new_log_lines: &lines,
             done_held,
             skip_held,
+            choice: ChoiceInput {
+                up: choice_up,
+                down: choice_down,
+                confirm: choice_confirm,
+                note: &note,
+            },
         });
 
-        // Tee log lines into the guide queue only while a step is actually showing: on once the first
-        // tick produces a banner, off the moment the guide finishes or is idle (banner `None`). This
-        // keeps pre-guide boot lines out of step 1 and never leaves the tee running for a guide that
-        // started already-finished (every step tagged for another role).
-        let showing = result.banner.is_some();
+        // A resolved choice is captured/shareable like every other guide signal: log it. Plain voice
+        // (a debug tool), and the note is quoted so a multi-word annotation reads cleanly. This is the
+        // one datum logging alone can't reach — the tester's judgement, turned into a logged line.
+        if let Some(made) = &result.choice_made {
+            if made.note.is_empty() {
+                log::info!("rig-guide: '{}' -> '{}'", made.step_id, made.label);
+            } else {
+                log::info!("rig-guide: '{}' -> '{}' note = \"{}\"", made.step_id, made.label, made.note);
+            }
+        }
+
+        // Tee log lines into the guide queue only while a step is actually showing (a pinned banner OR
+        // a choice modal): on once the first tick produces one, off the moment the guide finishes or is
+        // idle. This keeps pre-guide boot lines out of step 1 and never leaves the tee running for a
+        // guide that started already-finished (every step tagged for another role).
+        let showing = result.banner.is_some() || result.choice.is_some();
         crate::guide_log::set_enabled(showing);
 
-        // Copy the scalar outputs out before moving the banner text into the published struct.
+        // Copy the scalar outputs out before moving the banner/choice into the published view.
         let color = result.color;
         let finished_now = result.finished_now;
-        crate::rig_guide::publish(result.banner.map(|text| RigBanner { text, color }));
+        let view = match (result.choice, result.banner) {
+            (Some(choice), _) => Some(RigView::Choice(choice)),
+            (None, Some(text)) => Some(RigView::Banner(RigBanner { text, color })),
+            (None, None) => None,
+        };
+        crate::rig_guide::publish(view);
 
         if finished_now {
             log::info!("rig-guide: guide complete");

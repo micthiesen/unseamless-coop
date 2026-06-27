@@ -510,4 +510,11 @@ fn disable_feature(index: usize) {
     // degrade that "a panicking feature is disabled, the game keeps running" intends. Cheap + idempotent
     // for every other feature's disable, and inside the caller's firewall so a re-panic stays contained.
     crate::nameplates::publish(Vec::new());
+    // Same rationale, higher stakes: if the rig-guide feature died with a CHOICE modal published, the
+    // stale `Choice` view keeps the overlay's `set_blocked`/input-focus latched, stranding the game's
+    // keyboard/mouse blocked (the overlay toggle can't clear it, and skip can't rescue since the dead
+    // feature no longer ticks). Clear the view so a dead modal releases input focus. Debug-only (the
+    // whole guide subsystem is `#[cfg(debug_assertions)]`); idempotent for non-guide feature disables.
+    #[cfg(debug_assertions)]
+    crate::rig_guide::publish(None);
 }

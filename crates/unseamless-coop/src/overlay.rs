@@ -98,6 +98,14 @@ const PASSIVE_BG_ALPHA: f32 = 0.35;
 /// passive surfaces so the current test instruction stands out as the thing to act on.
 #[cfg(debug_assertions)]
 const PINNED_BG_ALPHA: f32 = 0.55;
+/// Near-opaque background for the rig-guide **choice modal** (debug-only): a focused prompt, not a
+/// passive surface, so it reads as solid and blocking rather than a translucent banner.
+#[cfg(debug_assertions)]
+const MODAL_BG_ALPHA: f32 = 0.92;
+/// Full-screen dim quad drawn behind the choice modal so it reads as the one thing to act on (the
+/// "blocking" cue — we can't freeze ER's own loop, so the scrim + input focus stand in for it).
+#[cfg(debug_assertions)]
+const MODAL_SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
 
 // Overhead nameplates: bright white text with a dark drop shadow (one pixel down-right) so a label
 // stays legible over any part of the game world. The projected NDC points come from the game-thread
@@ -213,6 +221,16 @@ struct Overlay {
     /// frame it's shown. `None` until the first publish lands. Present-thread only.
     debug_report: Option<DiagnosticReport>,
     debug_report_version: u64,
+    /// Rig-guide **choice modal** state (debug-only, Present-thread only). `choice_note` is the keyboard
+    /// free-form buffer for the active modal; `last_choice_step` is the step id it belongs to, so a new
+    /// modal clears it; `choice_modal_active` latches whether a modal is up this frame, read by
+    /// [`message_filter`](Overlay::message_filter) so the modal takes input focus like the utility window.
+    #[cfg(debug_assertions)]
+    choice_note: String,
+    #[cfg(debug_assertions)]
+    last_choice_step: Option<String>,
+    #[cfg(debug_assertions)]
+    choice_modal_active: bool,
 }
 
 impl Overlay {
@@ -240,6 +258,12 @@ impl Overlay {
             module,
             debug_report: None,
             debug_report_version: 0,
+            #[cfg(debug_assertions)]
+            choice_note: String::new(),
+            #[cfg(debug_assertions)]
+            last_choice_step: None,
+            #[cfg(debug_assertions)]
+            choice_modal_active: false,
         }
     }
 
@@ -267,20 +291,29 @@ impl Overlay {
         if self.open && (pad.cancel || ui.is_key_pressed_no_repeat(Key::Escape)) {
             self.open = false;
         }
-        // Mirror the open-state into the input suppressor every frame: while open the game doesn't see
-        // keyboard/mouse (but imgui still gets them via hudhook's WndProc hook), and closing the window
-        // restores game input immediately.
-        crate::input::set_blocked(self.open);
+        // Rig-guide view (debug-only): snapshot it once *before* setting input suppression — a choice
+        // modal takes input focus like the utility window even when the window itself is closed, so it
+        // must factor into `set_blocked`. A momentarily-contended read (outer `None`) draws nothing and
+        // doesn't grab focus this frame (rare; matches the banner's skip-on-contention).
+        #[cfg(debug_assertions)]
+        let rig_view = crate::rig_guide::snapshot().flatten();
+        #[cfg(debug_assertions)]
+        let choice_active = matches!(rig_view, Some(crate::rig_guide::RigView::Choice(_)));
+        #[cfg(not(debug_assertions))]
+        let choice_active = false;
+        #[cfg(debug_assertions)]
+        {
+            self.choice_modal_active = choice_active;
+        }
+        // Mirror the open-state into the input suppressor every frame: while the window is open OR a
+        // choice modal is up, the game doesn't see keyboard/mouse (but imgui still gets them via
+        // hudhook's WndProc hook), and dropping both restores game input immediately.
+        crate::input::set_blocked(self.open || choice_active);
         // Refresh the config snapshot non-blocking; keep the last good one on contention.
         if let Some(cfg) = crate::state::try_snapshot() {
             self.config = cfg;
         }
         self.draw_notifications(ui);
-        // Rig-testing guide pinned step banner (debug-only): a top-center surface showing the current
-        // guide step, always visible (independent of the utility window) while a guide runs. No-op when
-        // no guide is active. Drawn after notifications so it sits below the top-right toast stack.
-        #[cfg(debug_assertions)]
-        self.draw_rig_guide_banner(ui);
         // Overhead peer nameplates: screen-space labels the game-thread feature
         // (`crate::features::nameplates`) projected and published to `crate::nameplates`. Drawn over
         // the world but behind our own windows; a no-op when nothing's published (off / no peers).
@@ -323,7 +356,17 @@ impl Overlay {
             // on the detail toggles, so it's a no-op when none are on.
             self.draw_debug_detail_pane(ui, report);
         }
-        if self.open {
+        // Rig-testing guide (debug-only): a normal step draws as a top-center pinned banner (always
+        // visible while a guide runs, independent of the utility window); a choice step draws as a
+        // focused, centered modal. Drawn here — after the passive surfaces incl. the (default-on in
+        // debug) corner debug panel — so the modal sits on top of them, but before the utility window
+        // (which yields to an active modal anyway). No-op when no guide is active.
+        #[cfg(debug_assertions)]
+        self.draw_rig_guide(ui, rig_view, pad);
+        // The utility window yields to an active choice modal (the modal owns focus and drives its own
+        // nav, so drawing the window too would double-handle the arrows). `choice_active` is always
+        // false on release, so this is just `self.open` there.
+        if self.open && !choice_active {
             self.draw_utility_window(ui, pad);
             draw_cursor_marker(ui);
         }
@@ -368,19 +411,30 @@ impl Overlay {
             });
     }
 
+    /// Draw the rig-testing guide surface (debug-only) from the per-frame view the game-thread feature
+    /// published ([`crate::rig_guide`]): a normal/stub step is a pinned banner, a choice step a focused
+    /// modal. `view` was snapshotted once in `render_inner` (so it could also gate input focus); a
+    /// `None` view (no guide / finished / momentarily contended) draws nothing and clears the modal's
+    /// per-step note state.
+    #[cfg(debug_assertions)]
+    fn draw_rig_guide(&mut self, ui: &Ui, view: Option<crate::rig_guide::RigView>, pad: crate::input::PadEdges) {
+        match view {
+            Some(crate::rig_guide::RigView::Banner(banner)) => {
+                self.last_choice_step = None; // not on a choice step — reset the note buffer's owner
+                self.draw_rig_guide_banner(ui, &banner);
+            }
+            Some(crate::rig_guide::RigView::Choice(choice)) => self.draw_rig_guide_choice(ui, &choice, pad),
+            None => self.last_choice_step = None,
+        }
+    }
+
     /// Draw the rig-testing guide's **pinned step banner** (debug-only): a top-center, borderless,
     /// input-transparent surface showing the current guide step's instruction + the auto-appended
     /// control hints, in the engine's auto-assigned colour (a per-step palette hue, or the muted
     /// pending colour for a stub). It's a *dedicated pinned slot* — distinct from the rotating,
     /// capped notification banners — so a long test instruction stays put while toasts come and go.
-    /// Reads [`crate::rig_guide`] non-blocking; a no-op when no guide is active or it's finished.
     #[cfg(debug_assertions)]
-    fn draw_rig_guide_banner(&self, ui: &Ui) {
-        // Outer None: uninitialized / momentarily contended — skip this frame. Inner None: no guide
-        // banner active — nothing to draw.
-        let Some(Some(banner)) = crate::rig_guide::snapshot() else {
-            return;
-        };
+    fn draw_rig_guide_banner(&self, ui: &Ui, banner: &crate::rig_guide::RigBanner) {
         // Top-center, anchored by its own top-center (pivot 0.5,0) so it stays centered as the text
         // wraps. Clear of the top-left watermark and top-right notifications.
         let disp = ui.io().display_size;
@@ -407,6 +461,100 @@ impl Overlay {
                     ui.text_colored(color, line);
                 }
             });
+    }
+
+    /// Draw the rig-testing guide's **choice modal** (debug-only): a centered, focused, near-opaque
+    /// window over a dim scrim — visually distinct from the pinned banner — listing the engine's preset
+    /// options (the engine-held `selected` highlighted), an optional keyboard free-form note field, and
+    /// the controls. The modal is "blocking" in the sense the brief means: it takes input focus (the
+    /// utility window yields and `message_filter`/`set_blocked` suppress game input) and the guide waits
+    /// until the tester confirms or skips — we can't freeze ER's own loop.
+    ///
+    /// Decision logic stays in core: the overlay only renders and pushes this frame's nav/confirm/note
+    /// back to the game thread ([`crate::rig_guide::push_modal_input`]); the engine holds the selection
+    /// index, resolves the chosen [`Advance`](unseamless_core::guide::Advance), and logs the answer.
+    #[cfg(debug_assertions)]
+    fn draw_rig_guide_choice(&mut self, ui: &Ui, choice: &unseamless_core::guide::ChoiceView, pad: crate::input::PadEdges) {
+        // A new modal (different step) resets the free-form buffer so a note can't bleed across steps.
+        if self.last_choice_step.as_deref() != Some(choice.step_id) {
+            self.last_choice_step = Some(choice.step_id.to_string());
+            self.choice_note.clear();
+        }
+
+        let disp = ui.io().display_size;
+        // Dim the whole screen behind the modal (the "blocking" cue). The background draw list is a
+        // distinct instance from the foreground one `draw_cursor_marker` binds, and this runs before
+        // `draw_nameplates` binds its own — so imgui-rs's one-live-instance rule holds. Scope it so the
+        // list drops before the window builds.
+        {
+            let dl = ui.get_background_draw_list();
+            dl.add_rect([0.0, 0.0], disp, MODAL_SCRIM).filled(true).build();
+        }
+
+        let width = (disp[0] * 0.5).clamp(360.0, 640.0);
+        // `typing` latches whether the note field is capturing the keyboard this frame, so keyboard nav
+        // (arrows/Enter) yields to text entry while it's focused (the controller still navigates).
+        let mut typing = false;
+        ui.window("##unseamless-rig-choice")
+            .position([disp[0] * 0.5, disp[1] * 0.5], Condition::Always)
+            .position_pivot([0.5, 0.5])
+            .size_constraints([width, 0.0], [width, f32::MAX])
+            .flags(
+                WindowFlags::NO_SAVED_SETTINGS
+                    | WindowFlags::NO_COLLAPSE
+                    | WindowFlags::NO_MOVE
+                    | WindowFlags::NO_RESIZE
+                    | WindowFlags::NO_NAV
+                    | WindowFlags::ALWAYS_AUTO_RESIZE,
+            )
+            .bg_alpha(MODAL_BG_ALPHA)
+            .build(|| {
+                let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
+                let _wrap = ui.push_text_wrap_pos_with_pos(width - 16.0);
+                ui.text_disabled("RIG GUIDE - CHOICE");
+                ui.separator();
+                // The prompt in the step's auto-assigned hue (never chosen in a guide).
+                ui.text_colored(rgba(choice.color, 1.0), &choice.prompt);
+                ui.spacing();
+                // Options: the engine-held selection is marked + amber; others grey. A `> ` caret marks
+                // the selection so it reads even in one colour. (Controller/keyboard drive selection;
+                // the engine owns the index — the overlay only highlights it.)
+                for (i, label) in choice.options.iter().enumerate() {
+                    let selected = i == choice.selected;
+                    let marker = if selected { "> " } else { "  " };
+                    let color = if selected { AMBER } else { GREY };
+                    ui.text_colored(rgba(color, 1.0), format!("{marker}{label}"));
+                }
+                if choice.note_enabled {
+                    ui.spacing();
+                    ui.text_disabled("Note (keyboard, optional):");
+                    ui.set_next_item_width(width - 16.0);
+                    ui.input_text("##rig-choice-note", &mut self.choice_note).build();
+                    typing = ui.is_item_active();
+                }
+                ui.separator();
+                // The control hint. The skip label rides through from the engine (`ControlHints`); the
+                // nav/confirm names are the overlay menu layer's, hard-coded here like `CLOSE_HINT`.
+                ui.text_disabled(format!(
+                    "d-pad/arrows: choose | A/Enter: confirm | {}: skip",
+                    choice.skip_hint,
+                ));
+            });
+
+        // This frame's nav/confirm from the menu layer — the controller always, the keyboard only when
+        // the note field isn't capturing it — pushed back to the game thread with the current note.
+        // NB (rig-verify): like the utility window's `activate` and the done/skip chords, the A-confirm
+        // is read out-of-band via XInput, which `MessageFilter` can't suppress — so confirming with A
+        // also feeds the game one A (interact/attack) this frame. Harmless on a debug rig; confirm with
+        // Enter to avoid it. Same known limitation the movement/attack note at `message_filter` covers.
+        let kb = !typing;
+        let up = pad.up || (kb && ui.is_key_pressed(Key::UpArrow));
+        let down = pad.down || (kb && ui.is_key_pressed(Key::DownArrow));
+        let confirm = pad.activate || (kb && enter_pressed(ui));
+        crate::rig_guide::push_modal_input(up, down, confirm, &self.choice_note);
+
+        // Our software cursor, so the keyboard note field is visibly clickable to focus.
+        draw_cursor_marker(ui);
     }
 
     /// Draw overhead peer nameplates from the projected labels the game-thread feature publishes
@@ -889,6 +1037,20 @@ impl Overlay {
     fn flush_pending(&mut self) {
         self.pending.retain(|&action| !crate::actionq::try_offer(action));
     }
+
+    /// Whether a rig-guide choice modal is taking input focus this frame, so `message_filter` swallows
+    /// game input for it like the utility window. Always `false` on release (the guide subsystem — and
+    /// the field — is stripped there), so the modal path costs the shipping build nothing.
+    fn rig_choice_focus(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.choice_modal_active
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
 }
 
 impl ImguiRenderLoop for Overlay {
@@ -971,7 +1133,11 @@ impl ImguiRenderLoop for Overlay {
         // out-of-band (DirectInput/XInput/GetAsyncKeyState), `MessageFilter` can't stop it, so verify
         // that movement/attack actually halt with the window open.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if self.open { MessageFilter::InputAll } else { MessageFilter::empty() }
+            if self.open || self.rig_choice_focus() {
+                MessageFilter::InputAll
+            } else {
+                MessageFilter::empty()
+            }
         }))
         .unwrap_or_else(|_| MessageFilter::empty())
     }

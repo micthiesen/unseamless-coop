@@ -50,20 +50,31 @@ auto-colouring. It's unit-tested by feeding synthetic log lines + button events,
 
 1. gathers a read-only snapshot — `game_state` (from `playstate`), the session FSM
    (`lobby_state`/`protocol_state`/`players` via `session::read`), the new log lines since last tick
-   (drained from `guide_log`), and the two control chords (from the pad snapshot);
+   (drained from `guide_log`), the two control chords (from the pad snapshot), **and the choice-modal
+   input the overlay pushed back** (menu nav up/down/confirm + the keyboard note buffer, drained from
+   `rig_guide`);
 2. ticks the `GuideRunner` with that `GuideInput`;
-3. publishes the returned banner (text + auto colour) to `crate::rig_guide` for the overlay to draw,
-   and fires the "done testing" toast on the completing tick.
+3. publishes the returned view to `crate::rig_guide` for the overlay to draw — a **pinned banner**
+   (`RigView::Banner`, text + auto colour) for a normal/stub step, or a **choice modal**
+   (`RigView::Choice`, a `ChoiceView`) for a choice step — **logs a resolved choice**
+   (`TickResult::choice_made`), and fires the "done testing" toast on the completing tick.
+
+A choice modal needs input *back* from the overlay (the menu nav layer + the keyboard note field can
+only be read on the Present thread), so `rig_guide` carries a second cell in the opposite direction —
+the overlay pushes `ModalInput`, the game thread drains it into the next `GuideInput::choice`. The
+selection index, nav (wrap), confirm-resolution, and the captured note all live in the **engine**
+(host-tested); the overlay only renders the modal and pushes raw nav/confirm/note.
 
 ```
                        crate::guide_log (log TEE → drain queue)
                                    │ new log lines / tick
  game thread                       ▼
  features::rig_guide ── GuideInput ─▶ unseamless_core::guide::GuideRunner::tick ─▶ TickResult
-   (gather snapshot)                                                                  │
-   playstate / session::read / pad_snapshot                                           │ publish
-                                                                                      ▼
- Present thread:  coop::overlay::draw_rig_guide_banner ◀── crate::rig_guide (pinned banner cell)
+   (gather snapshot)        ▲                                                          │
+   playstate/session/pad    │ ModalInput (nav/confirm/note)                            │ publish
+                            │  drain ◀───────────────────────────┐          banner OR choice
+                                                                  │                    ▼
+ Present thread:  coop::overlay::draw_rig_guide{_banner,_choice} ─┴── crate::rig_guide (view + modal-input cells)
 ```
 
 The split is the same one the rest of the mod follows (`docs/ARCHITECTURE.md` > core-vs-coop):
@@ -90,6 +101,30 @@ logic is *verified* in core, the binding just samples and renders.
   finish; it advances on done/skip like any manual step, so a partially-built (or all-stub) guide
   can be committed now and revived later **without ever trapping the tester** — skip walks it
   straight to the done toast.
+- **Choice steps** — `.choice(&[(label, advance)])` (optionally `.note()`) marks a step that renders
+  as a focused **modal** of preset options instead of a pinned banner. Selecting one captures the
+  answer as a `ChoiceMade`, **logs it** (`rig-guide: '<id>' -> '<label>'`, plus `note = "..."` for a
+  free-form annotation), and advances per that option's `Advance`. It's the **last resort after
+  logging** (see below): the modal exists for the one source logging can't reach — the tester's
+  eyes/judgement — and turns it into captured, logged, branchable data instead of throwing it away.
+  Skip still escapes it (logged as `skipped`, taking the default branch), so the never-trap rule holds.
+
+#### Choice modal: the last resort after logging
+
+The whole point of the system (above) is **capture data, never verbal relay**: `done_when(...)`
+auto-finishes off the log/live state. A choice modal is the *capstone* of that principle, not an
+escape from it — it's only for an **irreducibly human-perceptual** signal where the answer **matters**
+(it branches, or is worth recording): does the peer render in-world, is the nameplate placed right,
+does the log show the expected snapshot. A plain "press to continue" stays a normal manual step, **not**
+a choice. The ordering is: a `done_when(...)` predicate first; if the datum isn't logged, log it; only
+when the signal is irreducibly in the tester's judgement reach for `.choice(...)` — and even then the
+answer is logged, so it's captured and shareable like every other guide signal.
+
+**Controls.** Preset options are navigated with the **overlay menu input layer** (d-pad / left-stick /
+arrows to move, A / Enter to confirm) — *not* the done/skip chords, which stay the normal-step
+controls. The skip chord still escapes. The optional free-form **note** is **keyboard-only** (the rig
+has a keyboard; there's no controller text entry / virtual keyboard) — a controller-only tester uses
+the presets + skip, free-form needs a keyboard.
 
 ### Controls (the one TBD — picked, documented, swappable)
 
@@ -113,13 +148,21 @@ consecutive steps read as visibly distinct); a **stub** gets one fixed, muted "p
 documentation banners read as dim/secondary. The colour rides on `TickResult` and the overlay draws
 the banner text in it.
 
-### Rendering — a dedicated pinned slot
+### Rendering — a dedicated pinned slot (and a focused modal)
 
 The step banner is its **own** top-center surface (`draw_rig_guide_banner`), distinct from the
 rotating, capped notification banners — it doesn't consume a `MAX_BANNERS` slot and stays put while
 toasts come and go. It reuses the passive-surface rendering primitives (borderless,
 input-transparent, the crisp menu font) but is a separate window, always visible while a guide runs
 (independent of the utility window). The done toast goes through the normal notifications model.
+
+A **choice step** renders instead as a centered, near-opaque **modal** (`draw_rig_guide_choice`) over
+a dim full-screen scrim — visually distinct from the pinned banner, and *focused/blocking*: it takes
+input focus (the utility window yields, and `message_filter` + `set_blocked` suppress game input the
+same way an open utility window does — we can't freeze ER's own loop, so "blocking" = modal focus +
+the guide waits), and the guide doesn't advance until the tester confirms an option or skips. The
+modal lists the engine-held options (the `selected` one highlighted), an optional keyboard note field
+(`input_text`), and the controls; it's the one interactive overlay surface besides the utility window.
 
 ## Committed guides
 
@@ -129,7 +172,7 @@ one-line `by_name`/`NAMES` entry in `guide/guides.rs`.
 | Name | What it does |
 |---|---|
 | `rung3-create-chart` | **Flagship / dogfood** for the rung-3 create-session RE (`docs/SESSION-RE-FINDINGS.md`). Boot to a loaded save → host via a multiplayer item; auto-finishes on `lobby = TryToCreateSession` (or the `session-probe:` transition line) and **branches**: transition seen → a "captured" terminal, else → a "try a summon sign" retry step. Drives the human steps + auto-detects the log signal; the orchestrator-side ptrace write-watch is separate. Run it with `[debug.probes] session_probe = true`. |
-| `overlay-smoke` | A tiny self-test of the guide system: banner renders, controls work, an `after_secs(3)` auto-advance fires, the done toast shows. Needs no session/RE state. |
+| `overlay-smoke` | A tiny self-test of the guide system: banner renders, controls work, an `after_secs(3)` auto-advance fires, the **choice modal** renders + captures an answer (with a free-form note), the done toast shows. Needs no session/RE state — the worked example of the choice capability. |
 | `two-player-join` | **The canonical role-tagged two-player guide** and the showcase of log-driven auto-finish: it drives the full friend-connect flow (rungs 4 + 2) and every connect step **auto-finishes off the run log** — the lobby-discovery resolve line (per role), the rung-2 link milestone (`coop: linked`), the client's `coop: adopted host config` — so the result is captured in the (forwarded) log, not relayed. Host/joiner/shared steps from one guide (set `[debug] rig_role` per machine). Ends with a committed **stub** (settings take *effect* in-world, pending the apply layer + rung 3). The driving doc is `docs/FRIEND-TEST-RUNBOOK.md`. |
 | `rig-observation` | The **rig observation run** (`docs/RIG-RUNBOOK.md`): drive the session observer through the states to chart and read the `session change @frame …` snapshots. Solo legs auto-finish off the observer log line / live FSM where a fresh signal lands in-window (else the manual advance covers it — the first `session change` may fire at the title, and `TryToCreateSession` is transient; run with `[debug.probes] session_probe = true` for the FSM log signals); the 2-player legs (player count, in-combat scaling, area-boundary persistence) are committed **stubs**, revived during the friend test. Points at `rung3-create-chart` for the FSM capture rather than duplicating it. |
 
@@ -161,3 +204,8 @@ rig_role`. The guide is debug-only, so this only takes effect on a diag/prerelea
   (the engine is control-agnostic — it takes raw held bools and the hint labels).
 - **A new guide**: a builder function + a `by_name`/`NAMES` arm. Stubs let you commit a guide before
   the steps are executable.
+- **A choice step**: `.choice(&[(label, advance)])` (+ `.note()` for a free-form field) on any step —
+  but only as the **last resort after logging** (a human-perceptual signal whose answer matters). The
+  engine surfaces it as `TickResult::choice`/`choice_made`; if you change the modal's controls or
+  styling, that's `draw_rig_guide_choice` + the `ModalInput` channel in `coop/{overlay,rig_guide}.rs`,
+  not the engine.

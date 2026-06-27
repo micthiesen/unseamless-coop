@@ -68,7 +68,10 @@ fn rung3_create_chart() -> Guide {
 }
 
 /// A tiny smoke guide to sanity-check the guide system itself on the rig (banner renders, controls
-/// work, auto-advance fires, the done toast shows) without needing any session/RE state.
+/// work, auto-advance fires, the **choice modal** renders + captures, the done toast shows) without
+/// needing any session/RE state. The choice step is the worked example of the modal capability: a
+/// human-perceptual question (does the modal render clearly?) whose answer is logged, with a free-form
+/// note for *what* looked wrong — exactly the "last resort after logging" the modal is for.
 fn overlay_smoke() -> Guide {
     Guide::new("overlay-smoke")
         .step(
@@ -78,6 +81,16 @@ fn overlay_smoke() -> Guide {
         )
         .step("auto", "This step auto-advances after 3 seconds (watch the banner replace itself).")
         .done_when(after_secs(3.0))
+        // Choice-modal smoke test: a focused modal with preset options + an optional keyboard note.
+        // Both options land on the same finish step (this is a render/capture check, not a real
+        // branch); the logged answer + note prove the modal captured the tester's judgement.
+        .step(
+            "modal",
+            "Choice-modal test: does this centered modal render clearly (options highlighted, controls \
+             legible)? Pick one; if not, type what's off in the note.",
+        )
+        .choice(&[("Yes, looks right", Advance::To("manual")), ("No, something is off", Advance::To("manual"))])
+        .note()
         .step("manual", "Last step: hold the done control to finish and see the 'done testing' toast.")
 }
 
@@ -206,6 +219,45 @@ mod tests {
     }
 
     #[test]
+    fn overlay_smoke_choice_modal_captures_an_answer_and_reaches_done() {
+        // The worked example of the choice capability: drive overlay-smoke to its choice step, confirm
+        // an option with a free-form note, and check the answer surfaces (so the binding logs it) and
+        // the guide finishes. Exercises the modal end-to-end on the committed example guide.
+        use crate::guide::{ChoiceInput, ControlHints, GuideInput, GuideRunner, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(overlay_smoke(), Role::Solo, hints);
+        let state = RigState::default();
+        let frame = |r: &mut GuideRunner, choice: ChoiceInput, done: bool| {
+            r.tick(&GuideInput {
+                delta: 5.0, // long enough to cross the auto step's after_secs(3) in one tick
+                state: &state,
+                new_log_lines: &[],
+                done_held: done,
+                skip_held: false,
+                choice,
+            })
+        };
+        // intro (manual): release then a long done-hold advances it.
+        frame(&mut r, ChoiceInput::default(), false);
+        frame(&mut r, ChoiceInput::default(), true); // intro -> auto
+        // auto auto-finishes on the 5s frame -> the choice modal.
+        let at_modal = frame(&mut r, ChoiceInput::default(), false);
+        let view = at_modal.choice.expect("overlay-smoke reaches its choice modal");
+        assert_eq!(view.options.len(), 2);
+        assert!(view.note_enabled, "the smoke choice offers a free-form note");
+        // Confirm the first option with a note -> the answer is captured and we land on "manual".
+        let confirm = ChoiceInput { up: false, down: false, confirm: true, note: "looked fine" };
+        let out = frame(&mut r, confirm, false);
+        let made = out.choice_made.expect("confirm captures the answer");
+        assert_eq!(made.label, "Yes, looks right");
+        assert_eq!(made.note, "looked fine");
+        assert!(out.banner.unwrap().contains("Last step"), "choice -> manual");
+        // manual (done) finishes the guide.
+        frame(&mut r, ChoiceInput::default(), false); // release
+        assert!(frame(&mut r, ChoiceInput::default(), true).finished_now, "reaches the done toast");
+    }
+
+    #[test]
     fn flagship_is_solo_runnable_to_completion() {
         // The create-RE flagship must be drivable on a Solo machine (create is solo-capable): every
         // step is untagged, so a Solo runner walks boot -> host -> captured/retry -> done.
@@ -220,6 +272,7 @@ mod tests {
             new_log_lines: &[],
             done_held: false,
             skip_held: true,
+            choice: crate::guide::ChoiceInput::default(),
         };
         // Three skips walk it to the end (each is a fresh rising edge after a release).
         for _ in 0..6 {
@@ -245,7 +298,7 @@ mod tests {
 
         // boot auto-finishes on InGame -> the host step.
         let in_game = RigState { game_state: GameState::InGame, ..Default::default() };
-        let boot = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false };
+        let boot = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() };
         assert!(r.tick(&boot).banner.unwrap().contains("multiplayer item"), "boot -> host");
 
         // host: lobby reaches TryToCreateSession -> auto-finish -> branch to "captured".
@@ -254,7 +307,7 @@ mod tests {
             lobby_state: LobbyState::TryToCreateSession,
             ..Default::default()
         };
-        let host = GuideInput { delta: 0.1, state: &hosting, new_log_lines: &[], done_held: false, skip_held: false };
+        let host = GuideInput { delta: 0.1, state: &hosting, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() };
         let banner = r.tick(&host).banner.expect("should be on 'captured', not finished");
         assert!(banner.contains("Captured"), "host auto-finish must branch to 'captured', got: {banner}");
     }
@@ -272,8 +325,8 @@ mod tests {
             let mut finished = false;
             for _ in 0..12 {
                 // release frame, then a skip-press (rising edge) frame
-                r.tick(&GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: false });
-                let press = GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: true };
+                r.tick(&GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+                let press = GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
                 if r.tick(&press).finished_now {
                     finished = true;
                     break;
@@ -300,6 +353,7 @@ mod tests {
                 new_log_lines: lines,
                 done_held: false,
                 skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
             })
         };
 
@@ -307,7 +361,7 @@ mod tests {
         assert!(tick(&mut r, &[]).banner.unwrap().contains("SAME co-op password"), "boot -> password");
         // both-password is a manual reminder; skip it -> join-join.
         tick(&mut r, &[]); // release (prev_skip = false)
-        let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true };
+        let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
         assert!(r.tick(&skip).banner.unwrap().contains("Join world"), "skip password -> join-join");
         // join-join auto-finishes on the joiner-only discovery line -> linked.
         let disc = ["coop: lobby discovery resolved partner peer-7 (we are the client); seeding rung 2".to_string()];
@@ -321,8 +375,8 @@ mod tests {
         // export is a manual step and sync-check is a stub; skip both to confirm the auto-finished run
         // actually TERMINATES (reaches the done toast), not just advances to export.
         let skip = |r: &mut GuideRunner| {
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false });
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() })
         };
         assert!(skip(&mut r).stub, "skip export -> the sync-check stub");
         assert!(skip(&mut r).finished_now, "the auto-finished joiner run reaches the done toast");
@@ -338,7 +392,7 @@ mod tests {
         let mut r = GuideRunner::start(rig_observation(), Role::Solo, hints);
         let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
         let tick = |r: &mut GuideRunner, lines: &[String]| {
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: lines, done_held: false, skip_held: false })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: lines, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
         };
         // Walk the solo legs to host-create-edge.
         tick(&mut r, &[]); // boot -> solo-snapshot
@@ -360,22 +414,22 @@ mod tests {
         let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
 
         // boot -> both-password; skip the manual reminder -> host-open.
-        r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false });
-        r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false });
-        let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true };
+        r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+        r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+        let skip = GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
         assert!(r.tick(&skip).banner.unwrap().contains("Open World"), "skip password -> host-open");
 
         // The joiner's line must NOT finish the host step...
         let joiner_line = ["coop: lobby discovery resolved partner peer-7 (we are the client); seeding rung 2".to_string()];
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &joiner_line, done_held: false, skip_held: false })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &joiner_line, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
                 .banner.unwrap().contains("Open World"),
             "host-open must ignore the joiner's discovery line",
         );
         // ...but the host's own line does, advancing to the shared linked step.
         let host_line = ["coop: lobby discovery resolved partner peer-7 (we are the host); seeding rung 2".to_string()];
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &host_line, done_held: false, skip_held: false })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &host_line, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
                 .banner.unwrap().contains("Steam P2P link"),
             "host-open -> linked on the host's own discovery line",
         );
@@ -392,21 +446,21 @@ mod tests {
         // boot auto-finishes on InGame -> solo-snapshot.
         let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
                 .banner.unwrap().contains("solo snapshot"),
             "boot -> solo-snapshot",
         );
         // solo-snapshot auto-finishes on the observer's 'session change' line -> host-create-edge.
         let snap = ["session change @frame 120: lobby=None protocol=None players=0 limit=6 override=0 | tether: -".to_string()];
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &snap, done_held: false, skip_held: false })
+            r.tick(&GuideInput { delta: 0.1, state: &ingame, new_log_lines: &snap, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() })
                 .banner.unwrap().contains("summon sign"),
             "solo-snapshot -> host-create-edge",
         );
         // host-create-edge auto-finishes on the (solo-reachable) create edge -> the first stub.
         let creating = RigState { game_state: GameState::InGame, lobby_state: LobbyState::TryToCreateSession, ..Default::default() };
         assert!(
-            r.tick(&GuideInput { delta: 0.1, state: &creating, new_log_lines: &[], done_held: false, skip_held: false }).stub,
+            r.tick(&GuideInput { delta: 0.1, state: &creating, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() }).stub,
             "host-create-edge -> a stub",
         );
         // The 2-player stubs never auto-finish (state that would satisfy a predicate has no effect);
@@ -414,8 +468,8 @@ mod tests {
         let loaded = RigState { game_state: GameState::InGame, players: 4, ..Default::default() };
         let mut finished = false;
         for _ in 0..8 {
-            r.tick(&GuideInput { delta: 0.016, state: &loaded, new_log_lines: &[], done_held: false, skip_held: false });
-            let press = GuideInput { delta: 0.016, state: &loaded, new_log_lines: &[], done_held: false, skip_held: true };
+            r.tick(&GuideInput { delta: 0.016, state: &loaded, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+            let press = GuideInput { delta: 0.016, state: &loaded, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
             if r.tick(&press).finished_now {
                 finished = true;
                 break;

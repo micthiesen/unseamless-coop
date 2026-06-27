@@ -54,6 +54,8 @@ a modifier to opt out of a default. The modifiers chain after the `.step(...)` t
 | `.branch(\|ctx\| …)` | On finish, choose the next step from the result (return an `Advance`). Default is serial `Next`. |
 | `.default_branch(advance)` | Where **skip** sends this step (and the sensible default for a branching step). Default `Next`. |
 | `.stub("reason")` | Mark a not-yet-executable step (renders as `[PENDING: reason]`; advances on done/skip, never auto). |
+| `.choice(&[(label, advance)])` | Make this a **choice step**: a focused modal of preset options; selecting one logs the answer and advances per its `Advance`. The **last resort after logging** (see below). Supersedes `done_when`/`branch`. |
+| `.note()` | On a choice step, also offer an optional **keyboard** free-form note field; whatever's typed is logged with the answer. |
 
 The `id` is a short stable string, unique within the guide; `.branch(...)`/`Advance::To` address steps
 by it.
@@ -141,6 +143,35 @@ A stub renders as `[PENDING: pending the settings-sync core]` in a dimmed colour
 done/skip — it never auto-finishes and never traps the tester. A guide that's **all** stubs still
 reaches the done toast via skip. When the work lands, drop `.stub(...)` and add a `.done_when(...)`.
 
+## Choice steps (the last resort after logging)
+
+When a step needs the tester's **eyes/judgement** — the one signal logging can't reach (does the peer
+render in-world, is the nameplate placed right, does the log show the expected snapshot) — turn it into
+a **choice step**: a focused modal of preset options. Selecting one **logs the answer**
+(`rig-guide: '<id>' -> '<label>'`) and advances per that option's `Advance`, so the judgement becomes
+captured, shareable, branchable data instead of a verbal relay.
+
+```rust
+.step("see-peer", "Can you see your partner's character in-world?")
+    .choice(&[("Yes", Advance::Next), ("No", Advance::To("troubleshoot"))])
+    .note()                                  // optional keyboard free-form, logged with the answer
+    .default_branch(Advance::To("troubleshoot"))   // where SKIP goes
+```
+
+**This is the LAST RESORT, after logging — not a shortcut around it.** The order is always:
+`done_when(...)` (auto, from log/state) first → if the datum isn't logged, **make the mod log it** →
+only when the answer is *irreducibly* in the tester's perception, and it **matters** (it branches or is
+worth recording), reach for `.choice(...)`. A plain "press to continue" is **not** a choice — that's a
+normal manual step. A choice throws nothing away: even a skip is logged (`-> 'skipped'`).
+
+- **Controller vs keyboard.** Presets are navigated with the overlay menu layer (d-pad / stick / arrows
+  to move, A / Enter to confirm) — *not* the done/skip chords. The skip chord still escapes (logged
+  `skipped`, taking the `default_branch`), so the never-trap rule holds. The `.note()` free-form field
+  is **keyboard-only** (no controller text entry) — a controller-only tester uses the presets + skip;
+  free-form needs a keyboard.
+- `.choice(...)` supersedes `done_when`/`branch` (the option's own `Advance` is the branch). Give it a
+  `.default_branch(...)` so skip is sensible, exactly like a branching step.
+
 ## Controls & rendering (you don't write these)
 
 - The tester advances with **hold `L3 + D-pad Up`** (done) and skips with **press `L3 + D-pad Down`**
@@ -158,6 +189,9 @@ reaches the done toast via skip. When the work lands, drop `.stub(...)` and add 
       fallback. If the datum isn't logged, log it (probe / diag / a milestone line) before relaying; if
       it's RE-gated, `.stub(...)` it. Pin the stable matched substring + comment the log site.
 - [ ] Branching step has a `.default_branch(...)` (so skip is sensible).
+- [ ] A `.choice(...)` only for an irreducibly human-perceptual signal whose answer matters (the last
+      resort after logging) — never as a manual "press to continue". Give it a `.default_branch(...)`;
+      add `.note()` only if free-form detail is worth capturing. The answer is logged either way.
 - [ ] Role-tag steps for two-player guides; leave shared steps untagged.
 - [ ] Stub anything not yet executable rather than leaving it out.
 - [ ] `scripts/test-core.sh` green (the registry test builds every named guide).

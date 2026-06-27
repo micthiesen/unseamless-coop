@@ -304,11 +304,32 @@ pub struct Step {
     /// finish; it advances on done/skip like any manual step, so an all-stub guide still reaches the
     /// done toast cleanly. See `.stub(...)`.
     stub: Option<&'static str>,
+    /// `Some(options)` marks a **choice step**: instead of the normal manual-done / auto-finish path,
+    /// it shows a focused modal of preset options (each a label + the [`Advance`] confirming it takes)
+    /// and waits for the tester to pick one (or skip). Selecting one captures the answer as a
+    /// [`ChoiceMade`] (logged by the binding) and advances per that option's `Advance`. This is the
+    /// **last resort after logging** (CLAUDE.md / the rig-guides skill): only for an irreducibly
+    /// human-perceptual signal whose answer matters (it branches, or is worth recording). See
+    /// [`Guide::choice`].
+    choice: Option<Vec<(&'static str, Advance)>>,
+    /// Whether a choice step also offers an optional free-form **note** field (keyboard-entered in the
+    /// overlay). The captured note rides on the logged [`ChoiceMade`]. Only meaningful with `choice`.
+    choice_note: bool,
 }
 
 impl Step {
     fn new(id: &'static str, instruction: String) -> Self {
-        Step { id, instruction, role: None, done_when: None, branch: None, skip_to: None, stub: None }
+        Step {
+            id,
+            instruction,
+            role: None,
+            done_when: None,
+            branch: None,
+            skip_to: None,
+            stub: None,
+            choice: None,
+            choice_note: false,
+        }
     }
 }
 
@@ -352,14 +373,26 @@ impl Guide {
     /// still works as an override (hold the done control), so a never-firing predicate can't trap the
     /// tester.
     pub fn done_when(mut self, pred: Predicate) -> Self {
-        self.last_mut().done_when = Some(pred);
+        let step = self.last_mut();
+        debug_assert!(
+            step.choice.is_none(),
+            "step '{}' mixes .done_when() with .choice() — a choice supersedes the auto-finish path",
+            step.id,
+        );
+        step.done_when = Some(pred);
         self
     }
 
     /// On finish, decide the next step from the result (the read-only [`PredicateCtx`]) instead of
     /// going serially to the next step. Return an [`Advance`].
     pub fn branch(mut self, f: impl Fn(&PredicateCtx) -> Advance + Send + 'static) -> Self {
-        self.last_mut().branch = Some(Box::new(f));
+        let step = self.last_mut();
+        debug_assert!(
+            step.choice.is_none(),
+            "step '{}' mixes .branch() with .choice() — a choice's options carry their own Advance",
+            step.id,
+        );
+        step.branch = Some(Box::new(f));
         self
     }
 
@@ -376,7 +409,46 @@ impl Guide {
     /// finish — so a partially-built guide can be committed now as living documentation and revived
     /// when the RE catches up, and a tester is never trapped by it.
     pub fn stub(mut self, reason: &'static str) -> Self {
-        self.last_mut().stub = Some(reason);
+        let step = self.last_mut();
+        debug_assert!(
+            step.choice.is_none(),
+            "step '{}' mixes .stub() with .choice() — a stub isn't an executable choice",
+            step.id,
+        );
+        step.stub = Some(reason);
+        self
+    }
+
+    /// Make this step a **choice step**: a focused modal presenting `options` (each a `(label,
+    /// Advance)`), where selecting one logs the answer and advances per that option's [`Advance`].
+    /// Use it as the **last resort after logging** — only for an irreducibly human-perceptual signal
+    /// (the tester's eyes/judgement) whose answer *matters*, i.e. it branches or is worth recording;
+    /// a plain "press to continue" stays a normal manual step, not a choice. The answer is always
+    /// logged (captured, shareable), like every other guide signal. Pair with [`note`](Self::note)
+    /// for an optional free-form annotation, and [`default_branch`](Self::default_branch) for where a
+    /// skip lands.
+    ///
+    /// A choice step supersedes the manual-done / `done_when` / `branch` path — the option's own
+    /// `Advance` is the branch. Skip still escapes it (logged as `skipped`, taking the skip target),
+    /// so the never-trap rule holds.
+    pub fn choice(mut self, options: &[(&'static str, Advance)]) -> Self {
+        debug_assert!(!options.is_empty(), "a choice step needs at least one option");
+        let step = self.last_mut();
+        debug_assert!(
+            step.done_when.is_none() && step.branch.is_none() && step.stub.is_none(),
+            "step '{}' mixes .choice() with .done_when()/.branch()/.stub() — a choice supersedes them",
+            step.id,
+        );
+        step.choice = Some(options.to_vec());
+        self
+    }
+
+    /// Offer an optional free-form **note** field on a [`choice`](Self::choice) step — a keyboard-only
+    /// text entry (the controller can only navigate the presets; the note needs a keyboard). Whatever
+    /// the tester types is captured on the logged [`ChoiceMade`] alongside the chosen label. No-op
+    /// styling on a non-choice step (the modal is what renders the field).
+    pub fn note(mut self) -> Self {
+        self.last_mut().choice_note = true;
         self
     }
 
@@ -429,6 +501,27 @@ pub struct GuideInput<'a> {
     pub done_held: bool,
     /// The **skip** chord is held this frame (raw level; the engine fires on the rising edge).
     pub skip_held: bool,
+    /// Modal input for a **choice step** (no effect on a normal step). Gathered by the binding from the
+    /// overlay menu input layer (the same up/down/confirm the Actions/Settings tabs use) and the
+    /// keyboard note field — not the done/skip chords, which stay the normal-step controls.
+    pub choice: ChoiceInput<'a>,
+}
+
+/// One frame of **choice-modal** input, fed through [`GuideInput`]. `up`/`down` are already-edged nav
+/// intents (the overlay's [`PadEdges`](crate::pad::PadEdges) auto-repeat + keyboard arrows), `confirm`
+/// a one-shot select, and `note` the current free-form text buffer (keyboard-entered in the overlay,
+/// captured by the engine on confirm). All-default ("no modal input this frame") is the correct
+/// reading on a normal step or an idle modal frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChoiceInput<'a> {
+    /// Move the selection to the previous option (wraps).
+    pub up: bool,
+    /// Move the selection to the next option (wraps).
+    pub down: bool,
+    /// Confirm the selected option (one-shot): logs the answer and advances per its [`Advance`].
+    pub confirm: bool,
+    /// The current free-form note buffer, captured onto [`ChoiceMade`] when a choice resolves.
+    pub note: &'a str,
 }
 
 /// What the binding should render after a [`tick`](GuideRunner::tick). `banner` is the pinned-banner
@@ -443,6 +536,45 @@ pub struct TickResult {
     pub color: [f32; 3],
     pub finished_now: bool,
     pub stub: bool,
+    /// `Some` while the current step is a **choice step**: the modal the binding should draw (and a
+    /// signal that the pinned `banner` is `None` for this step — the modal replaces it). Carries the
+    /// engine-held selection so the overlay just highlights it.
+    pub choice: Option<ChoiceView>,
+    /// `Some` on exactly the tick a choice **resolved** (a confirm or a skip), so the binding logs the
+    /// captured answer once — the one source logging alone can't reach (the tester's judgement) turned
+    /// into captured, shareable data.
+    pub choice_made: Option<ChoiceMade>,
+}
+
+/// The render model for a **choice modal** — everything the overlay needs to draw it, with no decision
+/// logic. The selection index is engine-held (the overlay only highlights `selected`); colours and the
+/// skip hint are passed through so the overlay invents none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChoiceView {
+    pub step_id: &'static str,
+    /// The tester-facing prompt (the step's instruction text). Plain/diagnostic voice.
+    pub prompt: String,
+    /// The preset option labels, in declaration order; `selected` indexes into this.
+    pub options: Vec<&'static str>,
+    /// The engine-held selection index (already clamped in range).
+    pub selected: usize,
+    /// Whether to draw the optional free-form note field (keyboard-only).
+    pub note_enabled: bool,
+    /// Auto-assigned banner colour (a per-step palette hue) — never chosen in a guide.
+    pub color: [f32; 3],
+    /// The skip control label (from [`ControlHints`]) so the modal can show how to escape without the
+    /// overlay hard-coding the chord.
+    pub skip_hint: &'static str,
+}
+
+/// A resolved choice, surfaced once on [`TickResult::choice_made`] for the binding to log
+/// (`rig-guide: '<id>' -> '<label>'`, plus `note = "<text>"` when free-form). `label` is the chosen
+/// option's label, or `"skipped"` when the step was skipped.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChoiceMade {
+    pub step_id: &'static str,
+    pub label: &'static str,
+    pub note: String,
 }
 
 /// Drives one [`Guide`] for one machine: tracks the current step, the per-step timers and log buffer,
@@ -467,6 +599,12 @@ pub struct GuideRunner {
     /// Set by [`advance`](GuideRunner::advance) on the tick the guide reaches its end, surfaced once
     /// via [`TickResult::finished_now`].
     just_finished: bool,
+    /// Selection index within the current **choice step** (reset to 0 on every advance). Engine-held so
+    /// the nav/clamp/wrap logic stays host-tested; the overlay only renders [`ChoiceView::selected`].
+    choice_sel: usize,
+    /// Set on the tick a choice resolves, surfaced once via [`TickResult::choice_made`] (recomputed
+    /// each tick like [`just_finished`](Self::just_finished)).
+    just_made_choice: Option<ChoiceMade>,
 }
 
 impl GuideRunner {
@@ -485,6 +623,8 @@ impl GuideRunner {
             prev_skip: false,
             step_log: VecDeque::new(),
             just_finished: false,
+            choice_sel: 0,
+            just_made_choice: None,
         };
         runner.current = runner.first_visible_from(0);
         runner
@@ -497,6 +637,7 @@ impl GuideRunner {
     /// branch loops back to itself) can never starve skip and trap the tester.
     pub fn tick(&mut self, input: &GuideInput) -> TickResult {
         self.just_finished = false; // one-shot, recomputed each tick
+        self.just_made_choice = None; // ditto — only set on the tick a choice resolves
 
         let Some(idx) = self.current else {
             return TickResult::default(); // finished/idle: nothing to draw, no toast
@@ -524,6 +665,51 @@ impl GuideRunner {
         // Skip: rising edge of the skip chord (a press, not a hold).
         let skip_fired = input.skip_held && !self.prev_skip;
         self.prev_skip = input.skip_held;
+
+        // Choice step: driven by the modal nav/confirm (overlay menu layer) + the skip chord, not the
+        // done/auto path. Handled here and returned, so a choice never consults `done_when`/`branch`.
+        // Cloning the small options vec sidesteps a borrow tangle with `self.advance` below; it's a
+        // handful of (`&str`, `Advance`) per frame a modal is up.
+        if let Some(options) = self.guide.steps[idx].choice.clone() {
+            let step_id = self.guide.steps[idx].id;
+            let skip_to = self.guide.steps[idx].skip_to.clone();
+            let note_enabled = self.guide.steps[idx].choice_note;
+            let n = options.len();
+            // Nav (wrap). Clamp first so a stale index (shouldn't happen — options are fixed) can't
+            // index out of range below.
+            if self.choice_sel >= n {
+                self.choice_sel = 0;
+            }
+            if n > 0 {
+                if input.choice.up {
+                    self.choice_sel = (self.choice_sel + n - 1) % n;
+                }
+                if input.choice.down {
+                    self.choice_sel = (self.choice_sel + 1) % n;
+                }
+            }
+            // Resolve: skip escapes above confirm (never-trap — a choice step is always escapable). A
+            // skip carries NO note — it's "I'm bailing", not an answer, and the cross-thread note buffer
+            // may still hold a *prior* note-step's text (skip is read out-of-band and can fire before the
+            // overlay redraws this modal). The note is captured only on a real confirm, and only for a
+            // step that opted into `.note()`.
+            let resolved: Option<(Advance, ChoiceMade)> = if skip_fired {
+                let made = ChoiceMade { step_id, label: "skipped", note: String::new() };
+                Some((skip_to.unwrap_or(Advance::Next), made))
+            } else if input.choice.confirm && n > 0 {
+                let note = if note_enabled { input.choice.note.to_string() } else { String::new() };
+                let (label, advance) = options[self.choice_sel].clone();
+                let made = ChoiceMade { step_id, label, note };
+                Some((advance, made))
+            } else {
+                None
+            };
+            if let Some((advance, made)) = resolved {
+                self.just_made_choice = Some(made);
+                self.advance(advance, idx);
+            }
+            return self.render();
+        }
 
         let ctx = PredicateCtx {
             state: input.state,
@@ -560,18 +746,51 @@ impl GuideRunner {
     /// Build the [`TickResult`] for the (possibly newly-advanced) current step, including its
     /// auto-assigned colour (a per-step palette hue, or [`PENDING_BANNER_COLOR`] for a stub).
     fn render(&self) -> TickResult {
+        // A resolved choice surfaces once, regardless of where it advanced to (incl. straight to Done).
+        let choice_made = self.just_made_choice.clone();
         match self.current {
             Some(idx) => {
                 let step = &self.guide.steps[idx];
+                // A choice step renders as a modal, not a pinned banner: `banner` is `None`, `choice`
+                // carries the model. The colour is a normal per-step hue (a choice is never a stub).
+                if let Some(options) = step.choice.as_ref() {
+                    let color = step_color(step.id);
+                    let view = ChoiceView {
+                        step_id: step.id,
+                        prompt: step.instruction.clone(),
+                        options: options.iter().map(|(label, _)| *label).collect(),
+                        selected: self.choice_sel.min(options.len().saturating_sub(1)),
+                        note_enabled: step.choice_note,
+                        color,
+                        skip_hint: self.hints.skip,
+                    };
+                    return TickResult {
+                        banner: None,
+                        color,
+                        finished_now: false,
+                        stub: false,
+                        choice: Some(view),
+                        choice_made,
+                    };
+                }
                 let stub = step.stub.is_some();
                 let color = if stub { PENDING_BANNER_COLOR } else { step_color(step.id) };
-                TickResult { banner: Some(self.banner_for(step)), color, finished_now: false, stub }
+                TickResult {
+                    banner: Some(self.banner_for(step)),
+                    color,
+                    finished_now: false,
+                    stub,
+                    choice: None,
+                    choice_made,
+                }
             }
             None => TickResult {
                 banner: None,
                 color: PENDING_BANNER_COLOR,
                 finished_now: self.just_finished,
                 stub: false,
+                choice: None,
+                choice_made,
             },
         }
     }
@@ -602,6 +821,7 @@ impl GuideRunner {
         self.current = target;
         self.step_elapsed = 0.0;
         self.done_hold = 0.0;
+        self.choice_sel = 0; // a fresh step's modal (if any) starts on its first option
         // Keep `done_consumed` true if the done chord is still held (set by the caller on a manual
         // finish): the tester must release and re-hold to advance the next step. `prev_skip` likewise
         // stays so a still-held skip doesn't re-fire on the next step.
@@ -636,7 +856,14 @@ mod tests {
 
     /// Build a default input (no signals) over a borrowed state + log slice.
     fn input<'a>(state: &'a RigState, lines: &'a [String], delta: f32) -> GuideInput<'a> {
-        GuideInput { delta, state, new_log_lines: lines, done_held: false, skip_held: false }
+        GuideInput {
+            delta,
+            state,
+            new_log_lines: lines,
+            done_held: false,
+            skip_held: false,
+            choice: ChoiceInput::default(),
+        }
     }
 
     /// Tick with no external signals (just time passing).
@@ -1035,5 +1262,273 @@ mod tests {
         assert!(idle_tick(&mut r, &state).banner.unwrap().contains("loops"), "auto-finish self-loops");
         // Skip escapes despite the auto-finish firing the same frame.
         assert!(skip_tick(&mut r, &state).banner.unwrap().contains("end"));
+    }
+
+    // --- Choice / feedback modal --------------------------------------------------------------------
+
+    /// A choice-modal input frame: nav up/down, confirm, and the current note buffer. Defaults to a
+    /// quiet frame (no nav, no confirm, empty note) over a borrowed state.
+    fn choice_input<'a>(
+        state: &'a RigState,
+        up: bool,
+        down: bool,
+        confirm: bool,
+        note: &'a str,
+    ) -> GuideInput<'a> {
+        GuideInput {
+            delta: 1.0 / 60.0,
+            state,
+            new_log_lines: &[],
+            done_held: false,
+            skip_held: false,
+            choice: ChoiceInput { up, down, confirm, note },
+        }
+    }
+
+    fn three_option_guide() -> Guide {
+        // A choice step branching three ways, then the three landing steps.
+        Guide::new("g")
+            .step("pick", "Pick one")
+            .choice(&[
+                ("Alpha", Advance::To("a")),
+                ("Bravo", Advance::To("b")),
+                ("Charlie", Advance::To("c")),
+            ])
+            .default_branch(Advance::To("c"))
+            .step("a", "landed alpha")
+            .step("b", "landed bravo")
+            .step("c", "landed charlie")
+    }
+
+    #[test]
+    fn choice_step_renders_a_modal_not_a_banner() {
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        let out = r.tick(&choice_input(&state, false, false, false, ""));
+        assert!(out.banner.is_none(), "a choice step has no pinned banner — the modal replaces it");
+        let view = out.choice.expect("a choice step surfaces a ChoiceView");
+        assert_eq!(view.step_id, "pick");
+        assert_eq!(view.prompt, "Pick one");
+        assert_eq!(view.options, vec!["Alpha", "Bravo", "Charlie"]);
+        assert_eq!(view.selected, 0, "selection starts on the first option");
+        assert!(!view.note_enabled, "no .note() -> no free-form field");
+        assert_eq!(view.skip_hint, HINTS.skip, "the modal passes through the skip hint");
+        assert!(out.choice_made.is_none(), "nothing resolved yet");
+    }
+
+    #[test]
+    fn choice_nav_wraps_in_both_directions() {
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        // down: 0 -> 1 -> 2 -> wraps to 0.
+        assert_eq!(r.tick(&choice_input(&state, false, true, false, "")).choice.unwrap().selected, 1);
+        assert_eq!(r.tick(&choice_input(&state, false, true, false, "")).choice.unwrap().selected, 2);
+        assert_eq!(r.tick(&choice_input(&state, false, true, false, "")).choice.unwrap().selected, 0, "down wraps past the end");
+        // up from 0 wraps to the last option.
+        assert_eq!(r.tick(&choice_input(&state, true, false, false, "")).choice.unwrap().selected, 2, "up wraps past the start");
+    }
+
+    #[test]
+    fn single_option_choice_nav_stays_put() {
+        // The n==1 boundary of the wrap math: up and down both leave selection at 0 (no under/overflow).
+        let guide = Guide::new("g").step("only", "one").choice(&[("Only", Advance::Next)]).step("end", "end");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        assert_eq!(r.tick(&choice_input(&state, false, false, false, "")).choice.unwrap().selected, 0);
+        assert_eq!(r.tick(&choice_input(&state, true, false, false, "")).choice.unwrap().selected, 0, "up stays at 0 with one option");
+        assert_eq!(r.tick(&choice_input(&state, false, true, false, "")).choice.unwrap().selected, 0, "down stays at 0 with one option");
+    }
+
+    #[test]
+    fn a_second_choice_step_resets_selection_and_carries_no_stale_note() {
+        // Two note-enabled choice steps: the second must start on option 0 (advance resets the index) and
+        // carry NO note from the first (the engine reads the note fresh per resolve, never holding it).
+        let guide = Guide::new("g")
+            .step("first", "first")
+            .choice(&[("A", Advance::Next), ("B", Advance::Next)])
+            .note()
+            .step("second", "second")
+            .choice(&[("X", Advance::Next), ("Y", Advance::Next)])
+            .note()
+            .step("end", "end");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        r.tick(&choice_input(&state, false, true, false, "")); // first: down -> index 1
+        let made1 = r.tick(&choice_input(&state, false, false, true, "looks off")).choice_made.unwrap();
+        assert_eq!((made1.label, made1.note.as_str()), ("B", "looks off"));
+        // second renders at option 0 (reset), and a confirm with an empty buffer logs no stale note.
+        assert_eq!(r.tick(&choice_input(&state, false, false, false, "")).choice.unwrap().selected, 0, "second choice resets to option 0");
+        let made2 = r.tick(&choice_input(&state, false, false, true, "")).choice_made.unwrap();
+        assert_eq!((made2.label, made2.note.as_str()), ("X", ""), "no stale note carried from the first choice");
+    }
+
+    #[test]
+    #[should_panic(expected = "supersedes")]
+    fn choice_after_done_when_panics() {
+        let _ = Guide::new("g").step("s", "x").done_when(after_secs(0.0)).choice(&[("A", Advance::Next)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "supersedes")]
+    fn done_when_after_choice_panics() {
+        let _ = Guide::new("g").step("s", "x").choice(&[("A", Advance::Next)]).done_when(after_secs(0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "executable choice")]
+    fn stub_after_choice_panics() {
+        let _ = Guide::new("g").step("s", "x").choice(&[("A", Advance::Next)]).stub("nope");
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one option")]
+    fn empty_choice_panics() {
+        let _ = Guide::new("g").step("s", "x").choice(&[]);
+    }
+
+    #[test]
+    fn confirm_resolves_the_selected_options_advance_and_emits_the_event() {
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        // Move to "Bravo" (index 1), then confirm -> branches to its To("b").
+        r.tick(&choice_input(&state, false, true, false, ""));
+        let out = r.tick(&choice_input(&state, false, false, true, ""));
+        let made = out.choice_made.expect("confirm emits a choice_made event");
+        assert_eq!(made.step_id, "pick");
+        assert_eq!(made.label, "Bravo", "the chosen option's label is captured");
+        assert_eq!(made.note, "", "no free-form note -> empty");
+        assert_eq!(out.banner.unwrap(), {
+            // landed on "b" with the auto-appended hints
+            "landed bravo\n(hold DONE = done, SKIP = skip)".to_string()
+        });
+    }
+
+    #[test]
+    fn choice_made_event_fires_exactly_once() {
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        assert!(r.tick(&choice_input(&state, false, false, true, "")).choice_made.is_some(), "fires on resolve");
+        assert!(r.tick(&choice_input(&state, false, false, false, "")).choice_made.is_none(), "not again next tick");
+    }
+
+    #[test]
+    fn free_form_note_is_captured_and_surfaced() {
+        let guide = Guide::new("g")
+            .step("rate", "How did it look?")
+            .choice(&[("Good", Advance::Next), ("Bad", Advance::Next)])
+            .note()
+            .step("end", "end");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        // The view advertises the note field.
+        assert!(r.tick(&choice_input(&state, false, false, false, "")).choice.unwrap().note_enabled);
+        // Confirm with a typed note -> it rides on the event.
+        let made = r
+            .tick(&choice_input(&state, false, false, true, "nameplate was 2px high"))
+            .choice_made
+            .expect("confirm with a note");
+        assert_eq!(made.label, "Good");
+        assert_eq!(made.note, "nameplate was 2px high");
+    }
+
+    #[test]
+    fn a_choice_without_note_captures_no_note_even_if_the_buffer_is_nonempty() {
+        // The note is captured only for a `.note()` step. Without it, a non-empty modal-input buffer
+        // (which can linger in the cross-thread channel) must NOT leak onto the answer — core's capture
+        // doesn't lean on the overlay having cleared the buffer.
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS); // no `.note()`
+        let state = RigState::default();
+        r.tick(&choice_input(&state, false, false, false, "stale buffer text"));
+        let made = r
+            .tick(&choice_input(&state, false, false, true, "stale buffer text"))
+            .choice_made
+            .expect("confirm resolves");
+        assert_eq!(made.note, "", "a no-note choice carries no note regardless of the buffer");
+    }
+
+    #[test]
+    fn skip_logs_skipped_and_takes_the_default_branch() {
+        // A note-enabled choice with a non-empty buffer, to prove a skip carries NO note even so — a
+        // skip is a bail-out, not an answer (and the out-of-band buffer may hold a prior step's text).
+        let guide = Guide::new("g")
+            .step("pick", "Pick one")
+            .choice(&[("Alpha", Advance::To("a")), ("Bravo", Advance::To("b"))])
+            .note()
+            .default_branch(Advance::To("c"))
+            .step("a", "landed alpha")
+            .step("b", "landed bravo")
+            .step("c", "landed charlie");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        // Show the modal, then skip via the chord (rising edge: released frame first).
+        r.tick(&choice_input(&state, false, false, false, ""));
+        let mut skip = choice_input(&state, false, false, false, "still typing");
+        skip.skip_held = true;
+        let out = r.tick(&skip);
+        let made = out.choice_made.expect("skip still captures the answer — never thrown away");
+        assert_eq!(made.label, "skipped", "a skip is logged as 'skipped'");
+        assert_eq!(made.note, "", "a skip carries no note, even with a non-empty buffer");
+        // default_branch(To("c")) -> landed charlie (not the selected/first option's To("a")).
+        assert!(out.banner.unwrap().contains("landed charlie"), "skip takes the default branch");
+    }
+
+    #[test]
+    fn choice_step_is_always_escapable_via_skip_even_without_confirm() {
+        // never-trap: a choice with options that loop back to itself can't trap the tester — skip escapes.
+        let guide = Guide::new("g")
+            .step("loop", "loops?")
+            .choice(&[("Stay", Advance::To("loop"))])
+            .default_branch(Advance::To("out"))
+            .step("out", "escaped");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        // Confirming "Stay" re-enters the same modal...
+        r.tick(&choice_input(&state, false, false, false, ""));
+        assert!(r.tick(&choice_input(&state, false, false, true, "")).choice.is_some(), "Stay loops back to the modal");
+        // ...but a skip still escapes to the default branch.
+        let mut skip = choice_input(&state, false, false, false, "");
+        skip.skip_held = true;
+        assert!(r.tick(&skip).banner.unwrap().contains("escaped"), "skip always escapes a choice");
+    }
+
+    #[test]
+    fn confirming_a_choice_to_done_reaches_the_toast_and_logs_the_answer() {
+        let guide = Guide::new("g").step("last", "done?").choice(&[("Yes", Advance::Done)]);
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        r.tick(&choice_input(&state, false, false, false, ""));
+        let out = r.tick(&choice_input(&state, false, false, true, ""));
+        assert!(out.finished_now, "a choice that advances to Done fires the done toast");
+        assert_eq!(out.choice_made.expect("answer logged on the completing tick").label, "Yes");
+        assert!(out.choice.is_none() && out.banner.is_none());
+    }
+
+    #[test]
+    fn role_filtering_skips_a_choice_tagged_for_another_machine() {
+        // A choice step tagged Host is invisible to a Solo runner — role filtering applies to choices too.
+        let guide = Guide::new("g")
+            .step("intro", "both")
+            .step("host-pick", "host only")
+            .role(Role::Host)
+            .choice(&[("X", Advance::Next)])
+            .step("end", "end");
+        let mut s = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        assert!(idle_tick(&mut s, &state).banner.unwrap().contains("both"));
+        // Manual done on the untagged intro skips the host choice entirely, landing on "end".
+        assert!(done_tick(&mut s, &state).banner.unwrap().contains("end"));
+    }
+
+    #[test]
+    fn done_chord_does_not_advance_a_choice_step() {
+        // The done/skip chords are normal-step controls; on a choice step a held done is inert (you
+        // confirm a selection or skip instead). Guards that holding done can't bypass the modal.
+        let mut r = GuideRunner::start(three_option_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        r.tick(&choice_input(&state, false, false, false, ""));
+        let mut done = choice_input(&state, false, false, false, "");
+        done.done_held = true;
+        done.delta = HOLD_FRAME;
+        assert!(r.tick(&done).choice.is_some(), "a completed done hold does not resolve a choice step");
     }
 }
