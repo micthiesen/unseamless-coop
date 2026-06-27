@@ -736,17 +736,18 @@ impl Overlay {
         // One detail toggle per category; greyed (non-selectable) while the panel is off.
         for (i, cat) in DEBUG_CATEGORIES.iter().enumerate() {
             let row = i + 1;
-            let label = format!(
-                "Detail - {}: {}###debug-detail-{i}",
-                cat.label,
-                if self.debug_details[i] { "on" } else { "off" }
-            );
+            let display = format!("Detail - {}: {}", cat.label, if self.debug_details[i] { "on" } else { "off" });
             if show_debug {
+                // `###id` keeps a stable imgui identity as the on/off text flips; the selectable strips
+                // it from the visible label.
+                let label = format!("{display}###debug-detail-{i}");
                 if ui.selectable_config(&label).selected(self.debug_sel == row).build() {
                     clicked = Some(row);
                 }
             } else {
-                ui.text_disabled(&label);
+                // `text_disabled` renders its string literally (no `###` id stripping), so pass the
+                // display text only — otherwise the raw `###debug-detail-N` id leaks into the row.
+                ui.text_disabled(&display);
             }
         }
 
