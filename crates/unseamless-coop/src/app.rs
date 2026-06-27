@@ -152,6 +152,11 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
     // and logs it. Independent of the overlay kill-switch and of the task system below.
     crate::steam::start();
 
+    // Steam-readiness gate: a one-shot probe that publishes Connecting -> Ready/Failed (off the rung-1
+    // SteamID + networking resolve) and narrates it via a banner. The overlay gates the Open World /
+    // Join world actions on this so the player can't try to host/join before Steam networking is up.
+    crate::steam_ready::start();
+
     // Co-op save isolation, installed as early as possible — before the game opens its save (the
     // title/load screen is the first read). Redirects ER0000.sl2 -> ER0000.<ext> so co-op never
     // touches the player's single-player save. This is **safety-critical**: if the user wants
