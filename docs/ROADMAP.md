@@ -29,12 +29,12 @@ Shipped to `main`, rig-verified where applicable:
 
 ### Solo / host-doable (no 2nd player needed)
 
-- **Rung 4 — Steam lobby discovery (password-keyed).** *In progress — the chosen connection path,
-  landing this wave.* It **replaces** the manual SteamID copy-paste: both players set the same password,
-  a create-or-join resolves who hosts, and the resolved peer + derived role seed the rung-2 side-channel.
-  (It lands behind a gate; until that flips, the manual path is still what runs.)
-  *Independent of rung 3* — it links the side-channels, it doesn't put players in one another's world
-  (that's still rung 3). Status against the build order (full spec in
+- **Rung 4 — Steam lobby discovery (password-keyed).** *Shipped — the live connection path.* It
+  **replaces** the manual SteamID copy-paste: co-op is triggered on demand from the overlay menu (Open
+  World hosts, Join world joins), both players share the same password, and the resolved peer + chosen
+  role seed the rung-2 side-channel. The role is the user's choice, not derived — only the host creates a
+  lobby (no both-create race). *Independent of rung 3* — it links the side-channels, it doesn't put
+  players in one another's world (that's still rung 3). Status against the build order (full spec in
   [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 4):
   - ✅ **Rig probe (done 2026-06-26).** The one hard unknown is answered: ELDEN RING pumps Steam via
     legacy `RunCallbacks` (its imports carry `RunCallbacks` + `RegisterCallResult`, no `ManualDispatch`),
@@ -46,11 +46,11 @@ Shipped to `main`, rig-verified where applicable:
     *can* take `steamworks-rs`) proved `CreateLobby` → `SetLobbyData("usc_pw", hash(password))` + version
     tag → `AddRequestLobbyListStringFilter` → `RequestLobbyList` → `JoinLobby` → read host SteamID, on
     Spacewar (appid 480), validating the password-keyed scheme off-rig.
-  - **DLL hand-bind (in progress).** Bind the **poll-based** `ISteamUtils`/`ISteamMatchmaking` path in
-    `coop/steam.rs` (replacing the dormant register-based `CCallbackBase` machinery) and seed the rung-2
-    side-channel from the resolved host SteamID + derived role. Solo `CreateLobby` is rig-proven; the
-    **joiner-finds-host leg + the host/client flip** land with the two-player friend test (see
-    [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)), then flip on lobby discovery.
+  - ✅ **DLL hand-bind (shipped).** The **poll-based** `ISteamUtils`/`ISteamMatchmaking` path is bound in
+    `coop/steam.rs` (the register-based `CCallbackBase` machinery is gone), driven on demand by the Open
+    World / Join world actions and seeding the rung-2 side-channel from the resolved host SteamID + chosen
+    role. Solo `CreateLobby` is rig-proven; the **joiner-finds-host leg** is the one piece still pending
+    the two-player friend test (see [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
 - **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
   `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
@@ -65,10 +65,10 @@ Shipped to `main`, rig-verified where applicable:
 ### 2-player-gated (the co-op core + everything riding on it)
 
 - **Rung 2 verification** — confirm the private Steam P2P side-channel links across two machines
-  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven. The old
-  manual `[coop] peer_steam_id` + `is_host` pairing path is **being retired** — the side-channel is
-  moving to seeding by rung-4 lobby discovery, so this verification rides the lobby-discovery friend
-  test rather than a hand-entered peer. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
+  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven. There is no
+  manual peer pairing — the side-channel is seeded by rung-4 lobby discovery, so this verification rides
+  the lobby-discovery friend test (one player opens a world, the other joins) rather than a hand-entered
+  peer. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 - **Rung 3 — drive the session FSM** to put a peer in your world (the hard RE: the create/join
   functions, the password-derived AES key). This is what unblocks in-world presence.
 - **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password,

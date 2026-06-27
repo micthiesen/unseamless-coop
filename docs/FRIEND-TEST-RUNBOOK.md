@@ -16,8 +16,8 @@ send one file).
 
 Read alongside [COOP-CONNECTION.md](COOP-CONNECTION.md) (the rung model + the Steam decisions) and
 [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) (the rung-3 create/join RE in full). The connection
-itself is driven by lobby discovery — there are **no SteamIDs to copy**; both players set the same
-password and launch.
+itself is driven by lobby discovery — there are **no SteamIDs to copy**; both players share the same
+password, then one picks **Open World** and the other picks **Join world** from the overlay menu.
 
 ## What's already shipped (lean on it)
 
@@ -63,12 +63,16 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
 
 ## Part A — Connect via lobby discovery (rungs 4 + 2)
 
-The connection model: **both set the same password and launch.** Discovery does a create-or-join —
-whoever comes up first creates the lobby and is host; the other filters the list by the password,
-finds it, and joins. The role is **derived**, never configured.
+The connection model: **both share the same password; one opens a world, the other joins.** Co-op is
+triggered on demand from the overlay menu, not at launch — the actions stay disabled until Steam
+networking is ready and the player is in-game. The host (Open World) creates the password-keyed lobby;
+the joiner (Join world) filters the list by the password, finds it, and joins. The role is the user's
+**choice**, never derived — only the host creates a lobby.
 
-1. Both players set the identical password, launch ELDEN RING (press Play — our launcher starts it
-   outside EAC with the `UNSEAMLESS_LAUNCH` marker).
+1. Both players set the identical password and launch ELDEN RING (press Play — our launcher starts it
+   outside EAC with the `UNSEAMLESS_LAUNCH` marker). Load into the game (the menu actions are gated on
+   in-game + Steam-ready), open the overlay (backtick), then **one player picks Open World and the other
+   picks Join world**.
 2. Watch the rig side with `scripts/rig.sh log -f`; have the friend ready to hit Export at the end.
 
 **What to confirm (read the `coop_connect` section of a diag dump, or the live log):**

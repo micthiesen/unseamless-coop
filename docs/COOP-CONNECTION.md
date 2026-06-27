@@ -5,19 +5,18 @@ one another's worlds" problem from [ARCHITECTURE.md](ARCHITECTURE.md), planned o
 today, what's reverse-engineering-gated, the incremental build order, and the decided approach for
 talking to Steam.
 
-> **Status: rungs 1-2 shipped; rung 4 (lobby discovery) is the chosen connection path and is landing
-> this wave — solo create+poll rig-proven, the joiner leg pending the friend test; rung 3 is the
-> remaining hard RE.** The mod loads, configures, observes a session, reads our own SteamID (rung 1,
-> `coop/steam.rs`), and stands up a private Steam P2P **side-channel** running the host-tested
-> `Peer`/`Session` for real (handshake, host config push, liveness, client→host log forwarding). The
-> design decision for this wave: **drop the hand-copied SteamID** in favor of **password-keyed Steam
-> lobby discovery** (rung 4) to seed that side-channel — both players set the same password, a
-> create-or-join resolves who hosts, and the resolved peer feeds the existing transport. (The lobby
-> driver lands behind a gate this wave; until it flips, the manual path is what runs.) None of this
-> yet puts players in one another's *world* — that's the game-session RE (rung 3). This doc is the spec
-> for the rest, written for session handoff. Everything game-internal is grounded in the pinned
-> `fromsoftware-rs` SDK or flagged as inference to confirm on the rig (per
-> [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
+> **Status: rungs 1, 2, and 4 shipped; rung 3 is the remaining hard RE.** The mod loads, configures,
+> observes a session, reads our own SteamID (rung 1, `coop/steam.rs`), and — on demand from the
+> in-overlay **Open World / Join world** actions — stands up a private Steam P2P **side-channel**
+> running the host-tested `Peer`/`Session` for real (handshake, host config push, liveness, client→host
+> log forwarding). The side-channel finds its peer by **password-keyed Steam lobby discovery** (rung 4):
+> both players share a password, the one who picks **Open World** creates the lobby and the one who picks
+> **Join world** enters it. The role is the user's **choice**, not derived — only the host ever creates a
+> lobby. (The joiner-finds-host leg across two machines is still pending the two-player friend test; solo
+> create+poll is rig-proven.) None of this yet puts players in one another's *world* — that's the
+> game-session RE (rung 3). This doc is the spec for the rest, written for session handoff. Everything
+> game-internal is grounded in the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the
+> rig (per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
 
 ## The one fact that makes a native path viable: "offline" ≠ no network
 
@@ -97,12 +96,10 @@ the one genuinely hard step — driving the game's own session so players see ea
 ### Rung 2 — Private Steam P2P side-channel (the real unblock) — **SHIPPED (pending two-player rig run)**
 - `SteamP2PTransport` ([`coop/coop.rs`](../crates/unseamless-coop/src/coop.rs)) satisfies the existing
   [`Transport`](../crates/unseamless-core/src/transport.rs) trait (`PeerId = u64` is already "a Steam
-  ID in production"), over poll-based `ISteamNetworkingMessages`. The peer SteamID and host/client
-  role are moving off hand-configuration: once rung 4 lands they're handed to the transport by **lobby
-  discovery** (create-or-join on the shared password resolves who hosts and who the peer is). The old
-  `[coop] peer_steam_id` + `is_host` manual-pairing path is **being retired** this wave (it's still the
-  only path that runs until the lobby gate flips); rung 1's copy button then stays only for
-  visibility/debugging, not as the pairing mechanism.
+  ID in production"), over poll-based `ISteamNetworkingMessages`. The peer SteamID and host/client role
+  come from **lobby discovery** (rung 4): the user's Open World / Join world choice sets the role, and
+  the matching lobby resolves the peer. There is no hand-configured pairing — rung 1's copy button stays
+  only for visibility/debugging, not as the pairing mechanism.
 - Runs the existing host-tested `Peer`/`Session` over it — the *whole* side-channel (version
   handshake, `ConfigSync`, liveness, log-forward), already proven on `Loopback`/`TcpTransport`/the
   bridge. The driver mirrors received config into the live config and surfaces connect / version-
@@ -122,7 +119,8 @@ the one genuinely hard step — driving the game's own session so players see ea
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
 - With two instances we control + the rung-2 channel to coordinate ("both call join now") + observer
   instrumentation, RE the create/join functions that move `CSSessionManager` to `Host`/`Client` for a
-  given peer SteamID. Feed in the SteamID from rung 1; the **password derives the session AES key**.
+  given peer SteamID. Feed in the peer SteamID resolved by rung-4 lobby discovery; the **password
+  derives the session AES key**.
 - This is what gives **in-world presence** (the game's own net sync takes over once `Ingame`).
 - Doable **without ERSC** via our own two instances + AOB-scan/hook of the `NetworkSession` vtable.
   ERSC observation stays an *optional accelerator* if blind RE stalls (restore the ERSC stack, watch
@@ -132,24 +130,38 @@ the one genuinely hard step — driving the game's own session so players see ea
   [RIG-RUNBOOK.md](RIG-RUNBOOK.md) "observation run" becomes executable *with our mod*), and the
   side-channel can optionally migrate in-band to `broadcast_packet`.
 
-### Rung 4 — Discovery / lobby (the live connection path) — **IN PROGRESS (solo create+poll rig-proven)**
-- Password-keyed **Steam lobby** discovery, becoming the **only** way the side-channel finds its peer
-  (the manual SteamID exchange is being retired this wave). Host sets lobby data = password hash; joiner
-  filters the lobby list by it. Steam's matchmaking lobby API makes this largely turnkey *at the API
-  level*.
+### Rung 4 — Discovery / lobby (the live connection path) — **SHIPPED (joiner leg pending the friend test)**
+- Password-keyed **Steam lobby** discovery, the **only** way the side-channel finds its peer (there is
+  no manual SteamID exchange). The host (Open World) sets lobby data = password hash; the joiner (Join
+  world) filters the lobby list by it. Steam's matchmaking lobby API makes this largely turnkey *at the
+  API level*.
 
-> **Scope reality — what rung 4 does and doesn't give.** Rung 4 is **independent of rung 3**. It makes
-> two modded games with the same password auto-link their **side-channels** (handshake, config-sync,
-> log-forward) instead of hand-copying a SteamID — but they still won't see each other *in the world*
-> until rung 3 (the session-FSM RE) lands. So it's the live connection mechanism + a much nicer
-> two-player test loop, not the in-world co-op piece. It retires the manual pairing, it doesn't replace
-> rung 3.
+> **Scope reality — what rung 4 does and doesn't give.** Rung 4 is **independent of rung 3**. It links
+> two modded games' **side-channels** (handshake, config-sync, log-forward) when one opens a world and
+> the other joins it on the same password — no SteamID to hand-copy — but they still won't see each
+> other *in the world* until rung 3 (the session-FSM RE) lands. So it's the live connection mechanism +
+> a much nicer two-player test loop, not the in-world co-op piece.
 
-**The connection model (decided).** No host/client choice, no IDs to copy: **both players set the same
-password and launch.** Lobby discovery does a **create-or-join** — the first to come up creates the
-lobby and becomes host; the other finds it and joins. The role (`is_host`) is **derived** from that
-outcome, never configured. The resolved peer SteamID + role are handed to rung 2's `SteamP2PTransport`,
-which then runs the side-channel exactly as before.
+**The connection model.** Co-op is triggered **on demand from the overlay menu**, never at launch — a
+solo session pays nothing. The shared **password** is the only pairing input (and the lobby key). Three
+explicit actions drive it:
+
+- **Open World** (host): a best-effort existence check first (one filtered list on the password); if a
+  lobby with that password already exists, it fails with a toast telling the user to **Join** instead.
+  Otherwise it creates the lobby and waits — **no timeout** — for a friend to join.
+- **Join world** (joiner): list on a cadence for an existing lobby keyed on the password, with a ~20 s
+  timeout. Found ⇒ join the lowest-id match; none ⇒ "No open world found with this password."
+- **Leave world**: tear the session down (leave the Steam lobby, stop the driver thread), re-enabling
+  Open/Join.
+
+The role is the user's **choice** (`steam::LobbyIntent::Host` / `Join`), **not derived** from a
+create-or-join race — only the host ever creates a lobby, so there is no both-create race and no
+owner/lobby-id tiebreak. The actions are **gated**: disabled until Steam networking is ready
+(`crate::steam_ready` — a Connecting/Ready/Failed gate with a connecting banner) **and** the player is
+in-game (`crate::playstate`), and disabled while already in a session (you can't host/join twice; Leave
+is enabled instead). The resolved peer SteamID + chosen role are handed to rung 2's `SteamP2PTransport`,
+which runs the side-channel exactly as before. Progress and results surface via an in-overlay **session
+banner** + toasts.
 
 **Poll, don't pump — the same trick rungs 1-2 use (rig-resolved 2026-06-26).** The earlier plan here
 was to *register* call-result handlers (`SteamAPI_RegisterCallResult`, a `CCallbackBase*` C++-ABI) and
@@ -181,12 +193,13 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
 > registered somewhere — keep the lobby calls poll-only.
 
 **The flow (feeds the existing side-channel).**
-- Host: `CreateLobby` → poll `LobbyCreated_t` → `SetLobbyData("usc_pw", hash(password))` + a version tag
-  so it's findable + identifiable as ours.
-- Joiner: `AddRequestLobbyListStringFilter("usc_pw", hash(password))` → `RequestLobbyList` → poll
-  `LobbyMatchList_t` → `GetLobbyByIndex` → `JoinLobby` → poll `LobbyEnter_t` → read the host's SteamID
-  from the lobby owner/members.
-- Then **hand the resolved peer SteamID + derived role to rung 2's transport** — lobbies *replace* the
+- Host (Open World): one filtered list to confirm no lobby with this password exists (else fail →
+  "Join instead") → `CreateLobby` → poll `LobbyCreated_t` → `SetLobbyData("usc_pw", hash(password))` + a
+  version tag so it's findable + identifiable as ours → wait for a member to join.
+- Joiner (Join world): `AddRequestLobbyListStringFilter("usc_pw", hash(password))` → `RequestLobbyList`
+  → poll `LobbyMatchList_t` → `GetLobbyByIndex` → `JoinLobby` → poll `LobbyEnter_t` → read the host's
+  SteamID from the lobby owner.
+- Then **hand the resolved peer SteamID + chosen role to rung 2's transport** — lobbies *replace* the
   manual copy-paste, they don't add a new transport.
 - The discovery token (`SetLobbyData`/filter value) is `diagnostics::lobby_discovery_token` — a
   domain-separated SHA-256 over the *verbatim* password (prefix `"unseamless-coop/lobby-discovery/v1\0"`),
@@ -198,10 +211,11 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
    poll-based (not register-based). Done 2026-06-26.
 2. ✅ **Harness prototype** — the [`harness`](../crates/harness) crate is a normal exe and *can* link
    `steamworks-rs`; create/list/filter/join + the password-data scheme proven off the rig.
-3. **DLL hand-bind (in progress)** — bind the poll-based `ISteamUtils` path in `coop/steam.rs` (replace
-   the dormant register-based `CCallbackBase` machinery) and feed the resolved host SteamID + derived
-   role into the side-channel. Solo `CreateLobby` is rig-proven; the joiner leg lands with the friend
-   test.
+3. ✅ **DLL hand-bind (shipped)** — the poll-based `ISteamUtils`/`ISteamMatchmaking` path is bound in
+   `coop/steam.rs` (the register-based `CCallbackBase` machinery is gone), driven on demand by the
+   Open World / Join world actions and feeding the resolved host SteamID + chosen role into the
+   side-channel. Solo `CreateLobby` is rig-proven; the **joiner-finds-host leg** is the one piece still
+   pending the two-player friend test.
 
 ## Steam integration: hand-bind the flat C API at runtime (do NOT take the crate)
 
@@ -302,12 +316,13 @@ path now exists and lights up the moment two modded games link.
 
 ## Concrete next step
 
-Rungs 1-2 are shipped (`coop/steam.rs` + `coop/coop.rs` + `coop/forward.rs`); rung 4's solo half is
-rig-proven (`CreateLobby` succeeds, polled). The immediate next action is the **two-player friend
-test** — now a *single* lobby-discovery run that exercises rungs 2 and 4 together (full recipe in
-[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)): both players set the **same password** and launch,
-discovery does create-or-join (one becomes host), and we confirm the joiner finds the host's lobby, the
-peer SteamID + role resolve, and the side-channel links — the `coop_connect` report should walk
+Rungs 1, 2, and 4 are shipped (`coop/steam.rs` + `coop/coop.rs` + `coop/forward.rs`); rung 4's solo
+half is rig-proven (`CreateLobby` succeeds, polled). The immediate next action is the **two-player
+friend test** — a *single* lobby-discovery run that exercises rungs 2 and 4 together (full recipe in
+[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)): both players set the **same password**, one opens a
+world (Open World) and the other joins it (Join world), and we confirm the joiner finds the host's
+lobby, the peer SteamID + role resolve, and the side-channel links — the `coop_connect` report should
+walk
 `linking → linked`, an overlay "Co-op partner connected" toast should fire, the client should adopt the
 host's config, and (with `forward_to_host`) the host's `LogBundle` should pick up the client's lines.
 Watch the NAT/auth open question (the peers may need to be Steam friends).
