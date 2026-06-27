@@ -68,13 +68,45 @@ const BANNER_SESSION: &str = "coop-session";
 // World / Join disabled while in a session; Leave enabled). Read non-blocking by the overlay's Present
 // thread via [`session_context`]; written only by the co-op driver thread + the action entry points.
 
-static SESSION: AtomicU8 = AtomicU8::new(SESSION_OFF);
-const SESSION_OFF: u8 = 0; // solo — no session
-const SESSION_CONNECTING: u8 = 1; // host setting up / joiner searching / rung-2 linking
-const SESSION_HOSTING: u8 = 2; // host: lobby open, waiting for a friend
-const SESSION_CONNECTED: u8 = 3; // partner linked
+/// User-facing session lifecycle tag stored in [`SESSION`]. Mirrors [`crate::steam_ready::Status`]'s
+/// `as_u8`/`from_u8` shape so the `AtomicU8` keeps a stable wire of the variant rather than a bare
+/// primitive the call sites have to remember the meaning of. (Named `SessionState` to avoid colliding
+/// with the rung-2 [`Session`] transport type.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
+enum SessionState {
+    /// Solo — no session.
+    #[default]
+    Off = 0,
+    /// Host setting up / joiner searching / rung-2 linking.
+    Connecting = 1,
+    /// Host: lobby open, waiting for a friend.
+    Hosting = 2,
+    /// Partner linked.
+    Connected = 3,
+}
+
+impl SessionState {
+    /// Stable `u8` tag for publishing through [`SESSION`].
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`as_u8`](SessionState::as_u8); an unknown tag falls back to [`SessionState::Off`]
+    /// (the safe default — "no session"), so an unexpected tag never fabricates an in-session state.
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => SessionState::Connecting,
+            2 => SessionState::Hosting,
+            3 => SessionState::Connected,
+            _ => SessionState::Off,
+        }
+    }
+}
+
+static SESSION: AtomicU8 = AtomicU8::new(SessionState::Off as u8);
 /// Whether the active session is ours to host (Open World) vs joined (Join world). Only meaningful when
-/// `SESSION != SESSION_OFF`.
+/// [`SESSION`] is not [`SessionState::Off`].
 static IS_HOST: AtomicBool = AtomicBool::new(false);
 
 /// Bumped on every [`host`]/[`join`]/[`leave`] so an in-flight driver thread learns its session ended
@@ -103,7 +135,7 @@ pub struct SessionFlags {
 /// The current session flags for the menu's `SessionContext`, read from the overlay's Present thread.
 pub fn session_flags() -> SessionFlags {
     SessionFlags {
-        in_session: SESSION.load(Ordering::Relaxed) != SESSION_OFF,
+        in_session: SessionState::from_u8(SESSION.load(Ordering::Relaxed)) != SessionState::Off,
         is_host: IS_HOST.load(Ordering::Relaxed),
     }
 }
@@ -127,23 +159,56 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Published connection phase for the diagnostic report's `coop` line (read from the game thread).
 /// The driver is on its own thread, so this single relaxed atomic is the whole cross-thread readout.
-static PHASE: AtomicU8 = AtomicU8::new(PHASE_OFF);
-const PHASE_OFF: u8 = 0; // discovery never started (no password / gated off) — driver never ran
-const PHASE_LINKING: u8 = 1; // resolving identity + networking; partner not yet heard from
-const PHASE_LINKED: u8 = 2; // handshake complete (partner's Hello seen)
-const PHASE_LOST: u8 = 3; // was linked, partner went silent
-const PHASE_FAILED: u8 = 4; // discovery was attempted, but startup failed (no Steam ID / networking / timeout)
+/// Published connection-phase tag stored in [`PHASE`]. Same `as_u8`/`from_u8` shape as [`Session`] /
+/// [`crate::steam_ready::Status`], so the diagnostic readout matches a named variant rather than a bare
+/// `u8` the reader has to decode by hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u8)]
+enum Phase {
+    /// Discovery never started (no password / gated off) — driver never ran.
+    #[default]
+    Off = 0,
+    /// Resolving identity + networking; partner not yet heard from.
+    Linking = 1,
+    /// Handshake complete (partner's Hello seen).
+    Linked = 2,
+    /// Was linked, partner went silent.
+    Lost = 3,
+    /// Discovery was attempted, but startup failed (no Steam ID / networking / timeout).
+    Failed = 4,
+}
+
+impl Phase {
+    /// Stable `u8` tag for publishing through [`PHASE`].
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Inverse of [`as_u8`](Phase::as_u8); an unknown tag falls back to [`Phase::Off`] (the safe
+    /// default — "discovery never started").
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Phase::Linking,
+            2 => Phase::Linked,
+            3 => Phase::Lost,
+            4 => Phase::Failed,
+            _ => Phase::Off,
+        }
+    }
+}
+
+static PHASE: AtomicU8 = AtomicU8::new(Phase::Off as u8);
 
 /// One-line co-op connection status for the diagnostic report's `coop` field (inside the `steam`
 /// section), so a rig run (or a friend's shared log) shows at a glance whether the side-channel
 /// linked up — and, crucially, distinguishes "not configured" from "configured but failed to start".
 pub fn status_line() -> &'static str {
-    match PHASE.load(Ordering::Relaxed) {
-        PHASE_LINKING => "linking (Steam P2P)",
-        PHASE_LINKED => "linked",
-        PHASE_LOST => "partner lost (silent)",
-        PHASE_FAILED => "attempted, but couldn't start (see log)",
-        _ => "off (no co-op password, or discovery disabled)",
+    match Phase::from_u8(PHASE.load(Ordering::Relaxed)) {
+        Phase::Linking => "linking (Steam P2P)",
+        Phase::Linked => "linked",
+        Phase::Lost => "partner lost (silent)",
+        Phase::Failed => "attempted, but couldn't start (see log)",
+        Phase::Off => "off (no co-op password, or discovery disabled)",
     }
 }
 
@@ -291,7 +356,7 @@ fn start_session(config: &Config, intent: LobbyIntent) {
     let generation = SESSION_GEN.fetch_add(1, Ordering::Relaxed) + 1;
     let is_host = matches!(intent, LobbyIntent::Host);
     IS_HOST.store(is_host, Ordering::Relaxed);
-    SESSION.store(SESSION_CONNECTING, Ordering::Relaxed);
+    SESSION.store(SessionState::Connecting.as_u8(), Ordering::Relaxed);
     set_banner(
         BANNER_SESSION,
         Severity::Info,
@@ -309,9 +374,9 @@ fn start_session(config: &Config, intent: LobbyIntent) {
 /// re-enables Open World/Join. Safe to call with no active session (just resets state).
 pub fn leave() {
     SESSION_GEN.fetch_add(1, Ordering::Relaxed);
-    SESSION.store(SESSION_OFF, Ordering::Relaxed);
+    SESSION.store(SessionState::Off.as_u8(), Ordering::Relaxed);
     IS_HOST.store(false, Ordering::Relaxed);
-    PHASE.store(PHASE_OFF, Ordering::Relaxed);
+    PHASE.store(Phase::Off.as_u8(), Ordering::Relaxed);
     clear_banner(BANNER_SESSION);
     clear_banner(BANNER_VERSION);
     clear_banner(BANNER_LIVENESS);
@@ -334,8 +399,8 @@ fn fail_session(generation: u64, why: impl Into<String>) {
     }
     let why = why.into();
     record_failure(why.clone());
-    PHASE.store(PHASE_FAILED, Ordering::Relaxed);
-    SESSION.store(SESSION_OFF, Ordering::Relaxed);
+    PHASE.store(Phase::Failed.as_u8(), Ordering::Relaxed);
+    SESSION.store(SessionState::Off.as_u8(), Ordering::Relaxed);
     IS_HOST.store(false, Ordering::Relaxed);
     clear_banner(BANNER_SESSION);
     toast(Severity::Warning, why);
@@ -355,7 +420,7 @@ fn spawn_driver(name: &str, body: impl FnOnce() + Send + 'static) {
 /// [`fail_session`] and resets the menu so the user can retry.
 fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, generation: u64) {
     begin_attempt();
-    PHASE.store(PHASE_LINKING, Ordering::Relaxed);
+    PHASE.store(Phase::Linking.as_u8(), Ordering::Relaxed);
 
     let Some(self_id) = wait_self_id(generation) else {
         // `None` means either we went stale (user left — `fail_session` then no-ops) or the SteamID
@@ -395,7 +460,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 // Guard the store on the generation so a driver that went stale between the loop-top check
                 // and here can't publish HOSTING over a newer session's state.
                 if deadline.take().is_some() && !stale(generation) {
-                    SESSION.store(SESSION_HOSTING, Ordering::Relaxed);
+                    SESSION.store(SessionState::Hosting.as_u8(), Ordering::Relaxed);
                     set_banner(BANNER_SESSION, Severity::Info, "World open — waiting for a friend to join.");
                     hosting_since = Some(Instant::now());
                 }
@@ -551,19 +616,7 @@ fn run_session(
             last_maintain = Instant::now();
         }
 
-        // Client adopts the host's authoritative shared settings: apply *only* the shared subset into
-        // the live config (a narrowed [`crate::state::update`], not a whole-config `set`), so a
-        // concurrent menu write to a machine-local field isn't clobbered by the sync. The host has
-        // nothing to adopt — its own config is authoritative.
-        if !is_host {
-            let cfg = session.peer().config();
-            if *cfg != mirrored {
-                mirrored = cfg.clone();
-                let shared = SharedSettings::from(&mirrored);
-                crate::state::update(move |c| shared.apply_to(c));
-                toast(Severity::Info, CONFIG_SYNCED_MESSAGE);
-            }
-        }
+        adopt_host_config(&session, is_host, &mut mirrored);
 
         let was_linked = linked;
         update_link_status(&session, peer_id, &mut linked, &mut lost);
@@ -571,7 +624,7 @@ fn run_session(
             // Handshake landed: mark the session connected and drop the setup banner (the connected
             // toast from `update_link_status` is the user-facing confirmation). Guarded on the generation
             // so a superseded driver can't publish CONNECTED over a newer session's state.
-            SESSION.store(SESSION_CONNECTED, Ordering::Relaxed);
+            SESSION.store(SessionState::Connected.as_u8(), Ordering::Relaxed);
             clear_banner(BANNER_SESSION);
         }
 
@@ -584,6 +637,25 @@ fn run_session(
         }
 
         std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Client-side config adoption, run each loop tick: when the host pushes an updated authoritative
+/// `ConfigSync`, apply *only* the shared subset into the live config (a narrowed
+/// [`crate::state::update`], not a whole-config `set`), so a concurrent menu write to a machine-local
+/// field isn't clobbered by the sync — then toast it once. `mirrored` is the change-detector seed,
+/// updated in place so only a *changed* sync re-applies (the no-op initial seed never toasts). A no-op
+/// for a host: its own config is authoritative, so it has nothing to adopt.
+fn adopt_host_config(session: &Session<SteamP2PTransport>, is_host: bool, mirrored: &mut Config) {
+    if is_host {
+        return;
+    }
+    let cfg = session.peer().config();
+    if *cfg != *mirrored {
+        let shared = SharedSettings::from(cfg);
+        *mirrored = cfg.clone();
+        crate::state::update(move |c| shared.apply_to(c));
+        toast(Severity::Info, CONFIG_SYNCED_MESSAGE);
     }
 }
 
@@ -602,7 +674,7 @@ fn update_link_status(
         && let Some(&their_version) = peer.known_peers().get(&peer_id)
     {
         *linked = true;
-        PHASE.store(PHASE_LINKED, Ordering::Relaxed);
+        PHASE.store(Phase::Linked.as_u8(), Ordering::Relaxed);
         let compatible = PROTOCOL_VERSION.compatible_with(their_version);
         // Record the handshake stage + version verdict on the connect report, so a stuck-then-linked
         // attempt shows *when* it linked and whether the versions agree (not just the coarse phase).
@@ -625,10 +697,10 @@ fn update_link_status(
         if now_lost != *lost {
             *lost = now_lost;
             if now_lost {
-                PHASE.store(PHASE_LOST, Ordering::Relaxed);
+                PHASE.store(Phase::Lost.as_u8(), Ordering::Relaxed);
                 set_banner(BANNER_LIVENESS, Severity::Warning, lost_contact_message(peer_id));
             } else {
-                PHASE.store(PHASE_LINKED, Ordering::Relaxed);
+                PHASE.store(Phase::Linked.as_u8(), Ordering::Relaxed);
                 clear_banner(BANNER_LIVENESS);
             }
         }
