@@ -22,6 +22,16 @@ reproduced (CLAUDE.md > Clean-room).
 the manager is constructed during boot). This is the single most useful result — the runtime
 write-watch hangs off it.
 
+> **Runtime-confirmed (2026-06-27, solo, undriven — boot to title only).** With
+> `[debug.probes] session_probe = true`, the FSM probe logged
+> `CSSessionManager @0x7fffd056a4a0 lobby=None protocol=None` by frame 51 (it's live at the title
+> screen — **no gameplay needed**). Reading the live process bears out the whole static chain: Wine
+> loads `eldenring.exe` at its preferred base `0x140000000`, so `G` is at runtime VA `0x143d7a4d0`,
+> and `[G]` read from `/proc/<pid>/mem` was **`0x7fffd056a4a0`** — exactly the probe's base. The
+> object there has `[+0] = 0x142b9a0c8` (the vtable — matches the value the ctor stores, so it *is*
+> the primary vtable), `[+0xc] = 0` (`lobby_state None`), `[+0x10] = 0` (`protocol_state None`). The
+> keystone, the vtable, and the offsets are all verified against the running game, not just inferred.
+
 How it was found (re-derivable):
 
 1. **Find the constructor by a unique fingerprint.** The SDK documents
@@ -88,33 +98,44 @@ Net: the value-store can't be statically tied to the *initiation entry* on this 
 why the runbook already calls **strategy A (runtime write-watch) "most direct"** — now it's the
 *only* reliable route, and the keystone makes it cheap.
 
-The `CSSessionManager` vtable identity is left **uncertain**: the ctor's first `[this+0]` store is
-`0x142b9a0c8`, but that vtable's methods read a *different* singleton's state, so it is likely a
-base-class/secondary vtable, not the leaf used for session methods. Create/join are **non-virtual**
-regardless (not reachable by walking a vtable), so this doesn't matter for the write-watch.
+The `CSSessionManager` vtable is **`0x142b9a0c8`** (the ctor's `[this+0]` store, runtime-confirmed
+as `[base+0]` above). It is a short vtable (~2 slots); one slot observes a *different* singleton's
+state, which is why a quick read of it looked off — but the live object genuinely carries this
+vtable. Create/join are **non-virtual** anyway (not reachable by walking a vtable), so the write-watch
+remains the route.
 
 ## The cheap runtime confirm (hand-off for the next rig/driven session)
 
-This replaces the open-ended "find these two functions":
+This replaces the open-ended "find these two functions". **Frida is not required** — the runtime
+confirmation showed the exe loads at its preferred base, so a Linux-native hardware watchpoint works:
 
-1. Boot with `[debug.probes] session_probe = true` and `[debug] verbosity` on. The FSM probe prints
-   `session-probe: FSM live … CSSessionManager @0x<base>` once the manager is live; `<base>` is
-   `[G]` (the singleton's target) — you don't even need to read `G` yourself.
-2. Attach Frida-gadget (RUNTIME-RE.md, Option B) and set a **4-byte hardware write-watch on
-   `<base> + 0xc`** (`lobby_state`).
+1. Boot with `[debug.probes] session_probe = true`. The FSM probe prints
+   `session-probe: FSM live … CSSessionManager @0x<base>` once the manager is live (at the title
+   screen). `<base>` is `[G]`; read it yourself any time with
+   `python: open(f"/proc/{pid}/mem","rb").seek(0x143d7a4d0); read(8)` (re-read each boot — the object
+   is heap-allocated, so `<base>` changes per run; `G` itself is stable at the preferred base).
+2. Arm a **4-byte hardware write-watchpoint on `<base> + 0xc`** (`lobby_state`). Either:
+   - **ptrace, no Frida** (preferred here): `PTRACE_ATTACH` the game pid, set `DR0 = <base>+0xc` and
+     `DR7` to enable a 4-byte write watch (len=11b, rw=01b, L0=1), `PTRACE_CONT`; on the trap read
+     `RIP` from `GETREGSET`. A ~40-line Python `ctypes` script does it. Yama allows same-uid attach.
+   - or Frida-gadget (RUNTIME-RE.md, Option B) if you'd rather script in JS.
 3. **Host once**: the watch fires at the exact instruction writing `1` on the first `None →
    TryToCreateSession` edge (the probe's transition line timestamps it for correlation — ignore
-   later copies in the assignment family). Its `.pdata`-enclosing function is the **create**
-   initiation. **Join once** for the `… → 4` write → the **join** initiation.
+   later copies in the assignment family). Subtract the `0x140000000` load base from `RIP` to get the
+   static VA; its `.pdata`-enclosing function is the **create** initiation. **Join once** for the
+   `… → 4` write → the **join** initiation.
 4. Walk each writer to its function prologue, take ~16 unique bytes as the pelite landmark, and fill
    `SESSION_CREATE_SITE` / `SESSION_JOIN_SITE` in `coop/session_probe.rs` (the scaffold is otherwise
    ready). Because the write is in a `this`-param callee, also note from the captured call stack the
    outermost entry you actually want to hook (the one the host/join UI calls), if it differs from
    the leaf writer.
 
-Solo (no peer) only reaches the **host** edge — hosting can be initiated locally; joining needs a
-peer to join. So a solo driven session can confirm **create**; **join** waits for the two-player
-friend test (which the runbook already folds in).
+The one thing still needed is the **in-game host/join *trigger***: our overlay "Open World" drives
+only the rung-4 lobby, not the game session FSM, so the transition must be kicked by a native
+multiplayer action (a summon-sign / multiplayer item). That's the step beyond "boot + enter
+gameplay." Solo reaches the **host/create** edge only (hosting initiates locally; joining needs a
+peer), so a solo driven session can chart **create**; **join** waits for the two-player friend test
+(which the runbook already folds in).
 
 ## Re-usable method notes
 

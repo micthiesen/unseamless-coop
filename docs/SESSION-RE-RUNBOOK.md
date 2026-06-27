@@ -74,6 +74,12 @@ Correlate them by frame/timestamp — together they are the before/after of an i
 
 ### 1. Confirm the FSM logger (no addresses needed)
 
+> **Already confirmed solo (2026-06-27).** A boot-to-title run logged
+> `session-probe: FSM live @frame 51 — CSSessionManager @0x… lobby=None protocol=None` (the manager
+> is live at the title screen, no gameplay needed), and reading `/proc/<pid>/mem` at the charted
+> global `0x143d7a4d0` returned exactly that base, with `[+0xc]=0`/`[+0x10]=0` — so the probe, the
+> instance global, and the offsets are all verified live. See [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md).
+
 On a real connect you should see the host walk `None -> TryToCreateSession -> Host` and the joiner
 `None -> TryToJoinSession -> Client`, each line frame-stamped, and the `CSSessionManager @0x…` base
 printed once per instance. This alone is the first real capture of the transition — it confirms the
