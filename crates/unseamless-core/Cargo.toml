@@ -12,4 +12,5 @@ name = "unseamless_core"
 log = { workspace = true }
 num_enum = "0.7"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10" # pure-Rust SHA-256 for the rung-4 lobby-discovery token (links on windows-gnu)
 toml = "0.8"

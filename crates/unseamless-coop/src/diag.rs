@@ -97,6 +97,16 @@ pub fn build_report(title: &str) -> DiagnosticReport {
         // private Steam P2P channel actually came up (the first thing to check when a connect fails).
         .field("coop", crate::coop::status_line());
 
+    // Per-stage connect report: only present once an attempt has begun (a configured peer or rung-4
+    // discovery), so a solo log stays uncluttered. This is what makes a failed two-player attempt
+    // diagnosable from one log — one-way NAT vs no-receive vs version mismatch vs empty lobby filter.
+    if let Some(cr) = crate::coop::connect_report() {
+        let sec = r.section("coop_connect");
+        for (k, v) in cr.fields() {
+            sec.field(k, v);
+        }
+    }
+
     let sec = r.section("session");
     match session {
         Some(v) => {

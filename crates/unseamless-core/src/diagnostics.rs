@@ -14,6 +14,7 @@
 //! has the clock/OS); it's fully host-tested.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use serde::{Deserialize, Serialize};
@@ -355,6 +356,183 @@ impl FlagScanner {
     }
 }
 
+/// Protocol-version verdict for the [`ConnectReport`], decided once the handshake lands. Distinct from
+/// "not reached" so a stuck link reads as *version mismatch* rather than a network problem at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VersionCheck {
+    /// Handshake not reached yet — we haven't heard the partner's `Hello`, so there's nothing to check.
+    #[default]
+    Unknown,
+    /// Majors compatible (the partner speaks a protocol we can talk to).
+    Match,
+    /// Majors differ — the link can establish but the side-channel won't agree; surfaced explicitly so
+    /// this isn't mistaken for a NAT/receive failure.
+    Mismatch,
+}
+
+impl VersionCheck {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VersionCheck::Unknown => "unknown (handshake not reached)",
+            VersionCheck::Match => "match",
+            VersionCheck::Mismatch => "MISMATCH",
+        }
+    }
+}
+
+/// Which side of a rung-4 lobby-discovery attempt this machine played, for the [`ConnectReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LobbyRole {
+    /// We created the lobby and published the password data (the joiner finds us).
+    Host,
+    /// We filtered the lobby list by the password and joined a match.
+    Joiner,
+}
+
+impl LobbyRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LobbyRole::Host => "host (created the lobby)",
+            LobbyRole::Joiner => "joiner (found + joined)",
+        }
+    }
+}
+
+/// Rung-4 lobby-discovery progress, when that path drove the attempt (else the [`ConnectReport`]'s
+/// `lobby` is `None` — manual `[coop] peer_steam_id` entry). The joiner's `candidates` is the key
+/// signal for an **empty-lobby-filter** failure: `Some(0)` means the password filter matched no lobby
+/// (wrong password / host not up / different version tag), as distinct from "the list never returned".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LobbyProgress {
+    pub role: LobbyRole,
+    /// Host: when `LobbyCreated_t` reported success (lobby exists, data published).
+    pub created_at: Option<Duration>,
+    /// Joiner: when `LobbyMatchList_t` returned (the filtered list came back).
+    pub list_returned_at: Option<Duration>,
+    /// Joiner: how many lobbies matched the password filter. `Some(0)` is the empty-filter case.
+    pub candidates: Option<u32>,
+    /// Joiner: when `LobbyEnter_t` reported we were in the lobby.
+    pub joined_at: Option<Duration>,
+    /// Whether the host's SteamID was read out of the lobby (the value that seeds rung 2).
+    pub host_id_resolved: bool,
+}
+
+impl LobbyProgress {
+    pub fn new(role: LobbyRole) -> Self {
+        Self {
+            role,
+            created_at: None,
+            list_returned_at: None,
+            candidates: None,
+            joined_at: None,
+            host_id_resolved: false,
+        }
+    }
+}
+
+/// Per-stage, timestamped record of a single co-op **connection attempt** — the "connect report".
+///
+/// A coarse phase atomic (off / linking / linked / lost) can't say *why* an attempt is stuck: a link
+/// frozen at "linking" looks the same whether it's one-way NAT, a total receive failure, a protocol
+/// version mismatch, or (rung 4) an empty lobby filter. This captures each stage and its timing so a
+/// **single shared log** from a failed two-player test is fully diagnosable without a second run:
+///
+/// - `self_id` resolved? (rung 1 — if not, nothing downstream can run)
+/// - `session_accepted`? (we proactively `AcceptSessionWithUser`'d the known peer)
+/// - `messages` sent vs received — **the** NAT discriminator: `sent > 0, received = 0` is one-way.
+/// - `handshake` reached? (the partner's `Hello` landed)
+/// - `version` match vs mismatch
+/// - (rung 4) `lobby` created / found / joined
+///
+/// **No raw SteamIDs live here** — identities are surfaced separately via [`peer_tag`] in the rung-2
+/// `coop` status line, so this whole block is safe to share publicly. Pure model + renderer; the cdylib
+/// fills it from the live driver and stamps the timings (core has no clock).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnectReport {
+    /// When our own SteamID resolved (rung 1). `None` = never (the side-channel can't start).
+    pub self_id_at: Option<Duration>,
+    /// When we proactively `AcceptSessionWithUser`'d the known peer (rung 2).
+    pub session_accepted_at: Option<Duration>,
+    /// Side-channel frames Steam accepted from us for delivery.
+    pub messages_sent: u64,
+    /// Side-channel frames received on our channel (counted **before** the peer-trust filter, so this
+    /// answers "did *any* P2P traffic arrive" — the NAT/auth question — not "did the right peer reply").
+    pub messages_received: u64,
+    /// When we first heard the partner (their `Hello` — the handshake landed). `None` = never linked.
+    pub handshake_at: Option<Duration>,
+    /// Protocol-version verdict, once the handshake lands.
+    pub version: VersionCheck,
+    /// Rung-4 lobby discovery, if that path drove this attempt (else `None` — manual peer entry).
+    pub lobby: Option<LobbyProgress>,
+    /// Terminal failure reason in plain words, set when a stage gives up — the "why" the phase atomic
+    /// can't carry. `None` while healthy or still trying.
+    pub failure: Option<String>,
+}
+
+impl ConnectReport {
+    /// A fresh, empty report (const so it can seed a `static` directly).
+    pub const fn new() -> Self {
+        Self {
+            self_id_at: None,
+            session_accepted_at: None,
+            messages_sent: 0,
+            messages_received: 0,
+            handshake_at: None,
+            version: VersionCheck::Unknown,
+            lobby: None,
+            failure: None,
+        }
+    }
+
+    /// Render as ordered `(key, value)` diagnostic lines for a report section — the per-stage connect
+    /// picture. The fixed `self_id / session_accepted / messages / handshake / version` lines always
+    /// appear; the `lobby_*` lines only when rung-4 discovery drove the attempt; `failure` only when set.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        let mut f = vec![
+            ("self_id".to_string(), stamp(self.self_id_at, "resolved", "not resolved")),
+            ("session_accepted".to_string(), stamp(self.session_accepted_at, "yes", "no")),
+            ("messages".to_string(), format!("sent {} / received {}", self.messages_sent, self.messages_received)),
+            ("handshake".to_string(), stamp(self.handshake_at, "reached", "not reached")),
+            ("version".to_string(), self.version.as_str().to_string()),
+        ];
+        if let Some(l) = &self.lobby {
+            f.push(("lobby_role".to_string(), l.role.as_str().to_string()));
+            match l.role {
+                LobbyRole::Host => {
+                    f.push(("lobby_created".to_string(), stamp(l.created_at, "yes", "no")));
+                }
+                LobbyRole::Joiner => {
+                    let list = match l.candidates {
+                        Some(0) => "0 matching (empty filter)".to_string(),
+                        Some(n) => format!("{n} matching"),
+                        None => "not returned".to_string(),
+                    };
+                    f.push(("lobby_list".to_string(), list));
+                    f.push(("lobby_joined".to_string(), stamp(l.joined_at, "yes", "no")));
+                }
+            }
+            f.push((
+                "host_id".to_string(),
+                if l.host_id_resolved { "resolved" } else { "not resolved" }.to_string(),
+            ));
+        }
+        if let Some(why) = &self.failure {
+            f.push(("failure".to_string(), why.clone()));
+        }
+        f
+    }
+}
+
+/// Format a stage timestamp: `"<yes> (+1.23s)"` once reached, else the bare `<no>` label. The `+Ns` is
+/// elapsed since the attempt's epoch (the cdylib supplies it; core has no clock), so stages line up in
+/// time within one report.
+fn stamp(at: Option<Duration>, yes: &str, no: &str) -> String {
+    match at {
+        Some(d) => format!("{yes} (+{:.2}s)", d.as_secs_f32()),
+        None => no.to_string(),
+    }
+}
+
 /// A short, stable, non-reversible tag for a peer's Steam ID, for use in **shareable** logs.
 ///
 /// A raw 64-bit SteamID resolves directly to a person's Steam profile, so writing other players'
@@ -371,6 +549,36 @@ pub fn peer_tag(steam_id: u64) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("peer-{:08x}", (hash & 0xffff_ffff) as u32)
+}
+
+/// The rung-4 lobby-discovery **password token** — the value a host publishes as the `usc_pw` lobby
+/// datum and a joiner filters the lobby list by. This is the cross-implementation **contract**: the DLL
+/// hand-bind ([`crate`]'s sibling `coop/steam.rs`) and the `harness` lobby prototype must produce the
+/// **byte-identical** token or two players with the same password never find each other.
+///
+/// `token = lowercase_hex( SHA-256("unseamless-coop/lobby-discovery/v1\0" || password_bytes)[0..16] )`
+///
+/// Load-bearing details, each one a silent-discovery-break if violated:
+/// - the domain-separator prefix ends with a **literal NUL** (`\0`) before the password bytes;
+/// - the password is hashed **verbatim** — the caller must pass the raw configured bytes with **no**
+///   trim, case-fold, or Unicode normalization (a stray normalize in the config layer breaks this);
+/// - only the **first 16 bytes** of the digest are taken, rendered **lowercase** hex (32 chars).
+///
+/// SHA-256 here is for a stable, well-specified, collision-resistant keying of a shared secret into a
+/// public lobby field — not a confidentiality primitive (lobby data is world-readable). Pinned by the
+/// known-answer test below; the harness carries the matching KAT.
+pub fn lobby_discovery_token(password: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"unseamless-coop/lobby-discovery/v1\0");
+    hasher.update(password.as_bytes());
+    let digest = hasher.finalize();
+    // First 16 bytes, lowercase hex (no external hex crate — format each byte).
+    let mut token = String::with_capacity(32);
+    for byte in &digest[..16] {
+        token.push_str(&format!("{byte:02x}"));
+    }
+    token
 }
 
 fn level_tag(level: LogLevel) -> &'static str {
@@ -592,6 +800,90 @@ mod tests {
         assert_eq!(s.changes(&[true]), [(0, true)]);
         // Longer input ignores the tail beyond the watched range.
         assert_eq!(s.changes(&[true, true, false, true]), [(1, true)]);
+    }
+
+    #[test]
+    fn lobby_discovery_token_matches_the_pinned_contract() {
+        // Known-answer test: these must match the harness's KAT byte-for-byte (the DLL hand-bind and
+        // the harness both call this fn, but the values are pinned independently so a future edit to
+        // the domain string / digest slice / hex casing is caught as the discovery-breaking change it
+        // is). Values computed from SHA-256("unseamless-coop/lobby-discovery/v1\0" || password)[0..16].
+        assert_eq!(lobby_discovery_token("swordfish"), "e1ae25ea4eab35799470c31622b014b8");
+        assert_eq!(lobby_discovery_token(""), "997351a38b7ef8eecef4d5c57de65ff4");
+        assert_eq!(lobby_discovery_token("hunter2"), "1ad477bb65bcc83f7235160ee4b63883");
+        // 16 bytes -> 32 lowercase hex chars, and the password is keyed verbatim (case-sensitive).
+        assert_eq!(lobby_discovery_token("hunter2").len(), 32);
+        assert_ne!(lobby_discovery_token("hunter2"), lobby_discovery_token("Hunter2"));
+    }
+
+    #[test]
+    fn connect_report_default_shows_every_stage_unreached() {
+        let f = ConnectReport::new().fields();
+        let map: std::collections::HashMap<_, _> = f.into_iter().collect();
+        assert_eq!(map["self_id"], "not resolved");
+        assert_eq!(map["session_accepted"], "no");
+        assert_eq!(map["messages"], "sent 0 / received 0");
+        assert_eq!(map["handshake"], "not reached");
+        assert_eq!(map["version"], "unknown (handshake not reached)");
+        // No lobby / failure lines until those paths populate them.
+        assert!(!map.contains_key("lobby_role"));
+        assert!(!map.contains_key("failure"));
+    }
+
+    #[test]
+    fn connect_report_distinguishes_one_way_nat_from_no_receive() {
+        // One-way NAT: we sent, nothing came back, handshake never reached.
+        let mut r = ConnectReport::new();
+        r.self_id_at = Some(Duration::from_millis(500));
+        r.session_accepted_at = Some(Duration::from_millis(600));
+        r.messages_sent = 12;
+        r.messages_received = 0;
+        let map: std::collections::HashMap<_, _> = r.fields().into_iter().collect();
+        assert_eq!(map["self_id"], "resolved (+0.50s)");
+        assert_eq!(map["session_accepted"], "yes (+0.60s)");
+        assert_eq!(map["messages"], "sent 12 / received 0"); // the one-way signal
+        assert_eq!(map["handshake"], "not reached");
+    }
+
+    #[test]
+    fn connect_report_surfaces_version_mismatch_and_failure() {
+        let mut r = ConnectReport::new();
+        r.handshake_at = Some(Duration::from_secs(2));
+        r.version = VersionCheck::Mismatch;
+        r.failure = Some("partner speaks protocol v2; we speak v1".into());
+        let map: std::collections::HashMap<_, _> = r.fields().into_iter().collect();
+        assert_eq!(map["handshake"], "reached (+2.00s)");
+        assert_eq!(map["version"], "MISMATCH");
+        assert_eq!(map["failure"], "partner speaks protocol v2; we speak v1");
+    }
+
+    #[test]
+    fn connect_report_joiner_empty_filter_is_legible() {
+        let mut r = ConnectReport::new();
+        let mut l = LobbyProgress::new(LobbyRole::Joiner);
+        l.list_returned_at = Some(Duration::from_secs(1));
+        l.candidates = Some(0); // password filter matched nothing
+        r.lobby = Some(l);
+        let map: std::collections::HashMap<_, _> = r.fields().into_iter().collect();
+        assert_eq!(map["lobby_role"], "joiner (found + joined)");
+        assert_eq!(map["lobby_list"], "0 matching (empty filter)");
+        assert_eq!(map["lobby_joined"], "no");
+        assert_eq!(map["host_id"], "not resolved");
+    }
+
+    #[test]
+    fn connect_report_host_lobby_branch_renders() {
+        let mut r = ConnectReport::new();
+        let mut l = LobbyProgress::new(LobbyRole::Host);
+        l.created_at = Some(Duration::from_millis(800));
+        l.host_id_resolved = true;
+        r.lobby = Some(l);
+        let map: std::collections::HashMap<_, _> = r.fields().into_iter().collect();
+        assert_eq!(map["lobby_role"], "host (created the lobby)");
+        assert_eq!(map["lobby_created"], "yes (+0.80s)");
+        assert_eq!(map["host_id"], "resolved");
+        // The joiner-only lines must not appear on the host branch.
+        assert!(!map.contains_key("lobby_list"));
     }
 
     #[test]

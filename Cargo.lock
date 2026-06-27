@@ -920,6 +920,7 @@ dependencies = [
  "log",
  "num_enum",
  "serde",
+ "sha2",
  "toml",
 ]
 
