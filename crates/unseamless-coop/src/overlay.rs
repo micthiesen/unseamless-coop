@@ -30,7 +30,7 @@ use hudhook::imgui::{
 use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
-use unseamless_core::diagnostics::{DiagnosticReport, ReportSection};
+use unseamless_core::diagnostics::DiagnosticReport;
 use unseamless_core::menu::{Menu, MenuOutcome, SessionContext};
 use unseamless_core::notifications::{Banner, Severity, Toast};
 use unseamless_core::protocol::SessionAction;
@@ -54,7 +54,7 @@ fn window_title() -> &'static str {
 const MENU_FONT: &[u8] = include_bytes!("../assets/menu-font.otf");
 const MENU_FONT_SIZE: f32 = 16.0;
 /// The utility window's tabs, in order. Left/Right arrows cycle through them.
-const TABS: [&str; 3] = ["Actions", "Settings", "Log"];
+const TABS: [&str; 4] = ["Actions", "Settings", "Debug", "Log"];
 /// Short hint drawn right-aligned in the utility window's title bar: backtick (the toggle key) or B
 /// (the controller cancel) closes it. ASCII (incl. backtick) so it renders in the default title font.
 const CLOSE_HINT: &str = "` or B to close";
@@ -176,14 +176,22 @@ struct Overlay {
     /// Updated once per frame in `render_inner`; Present-thread only (see [`crate::input::PadNav`]).
     pad: crate::input::PadNav,
     /// Whether the bottom-left **debug panel** is shown. Defaults to on in debug builds (`diag`
-    /// profile), off in release; toggled from the Actions tab. Independent of `open` and of gameplay
+    /// profile), off in release; toggled from the Debug tab. Independent of `open` and of gameplay
     /// state — unlike the watermark, it stays up during play. Mirrored to [`crate::debug_panel`] each frame
     /// so the game-thread publisher only does work while it's shown. Present-thread only.
     show_debug: bool,
-    /// Cursor into the Actions tab's combined list — the menu's action rows followed by two trailing
-    /// always-enabled rows: the debug-panel toggle (index `== menu rows`) and "Export diagnostics"
-    /// (index `== menu rows + 1`). Owns selection across all of them (the core `Menu`'s own cursor is
-    /// only synced to it at activation), so arrow/d-pad nav spans the trailing rows too.
+    /// Per-[`DEBUG_CATEGORIES`] toggles: whether each category's full detail is shown in the bottom-right
+    /// detail pane. All off by default; set from the Debug tab. Only has visible effect while `show_debug`
+    /// is on. Present-thread only.
+    debug_details: [bool; DEBUG_CATEGORIES.len()],
+    /// Cursor into the Debug tab's row list — the debug-panel on/off toggle at index 0, then one row per
+    /// [`DEBUG_CATEGORIES`] entry (the detail toggles). Like [`actions_sel`], owns selection so arrow/d-pad
+    /// nav spans the list. Present-thread only.
+    debug_sel: usize,
+    /// Cursor into the Actions tab's combined list — the menu's action rows followed by a trailing
+    /// always-enabled "Export diagnostics" row (index `== menu rows`). Owns selection across all of them
+    /// (the core `Menu`'s own cursor is only synced to it at activation), so arrow/d-pad nav spans the
+    /// trailing row too.
     actions_sel: usize,
     /// Home-snap affordance state. `home_dragging` latches true once an in-progress window move is
     /// detected (the window position changed while the left button is held) and clears on release —
@@ -215,8 +223,10 @@ impl Overlay {
             password_revealed: false,
             pad: crate::input::PadNav::new(),
             // On by default in debug builds (the `diag` profile keeps debug-assertions); off in the
-            // stripped release, where it's an opt-in toggled from the Actions tab.
+            // stripped release, where it's an opt-in toggled from the Debug tab.
             show_debug: cfg!(debug_assertions),
+            debug_details: [false; DEBUG_CATEGORIES.len()],
+            debug_sel: 0,
             actions_sel: 0,
             home_dragging: false,
             last_win_pos: None,
@@ -276,7 +286,13 @@ impl Overlay {
         // does work while it's shown; then draw from the snapshot it posts.
         crate::debug_panel::set_visible(self.show_debug);
         if self.show_debug {
-            self.draw_debug_panel(ui);
+            // One non-blocking snapshot read per frame, shared by both panes: halves the per-frame
+            // clone and guarantees the concise panel and the detail pane render the same published
+            // report (two independent reads could straddle a ~10 Hz publish and disagree by a frame).
+            let report = crate::debug_panel::snapshot();
+            self.draw_debug_panel(ui, report.as_ref());
+            // Opt-in per-category detail, balanced into the opposite (bottom-right) corner.
+            self.draw_debug_detail_pane(ui, report.as_ref());
         }
         if self.open {
             self.draw_utility_window(ui, pad);
@@ -308,8 +324,18 @@ impl Overlay {
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
-                draw_banners(ui, &banners);
-                draw_toasts(ui, &toasts);
+                // Right-align every line to the window's auto-sized right edge — the corner it's
+                // pinned to — so the notifications hug the screen edge instead of ragged-left. The
+                // target width is the widest line across banners + toasts (they share this window), so
+                // each shorter line is offset right by the difference.
+                let max_w = banners
+                    .iter()
+                    .map(|b| b.message.as_str())
+                    .chain(toasts.iter().map(|t| t.message.as_str()))
+                    .map(|m| ui.calc_text_size(m)[0])
+                    .fold(0.0_f32, f32::max);
+                draw_banners(ui, &banners, max_w);
+                draw_toasts(ui, &toasts, max_w);
             });
     }
 
@@ -393,16 +419,16 @@ impl Overlay {
     /// **Deliberately exempt from streamer-mode masking** (see [`draw_secret_row`]): this panel shows
     /// identifying info — the Steam ID and all — *in the clear*, because it's a diagnostics surface, not
     /// the always-available player UI, and it's opt-in on release builds (off by default there; on in
-    /// debug builds or when toggled from the Actions tab via [`Overlay::show_debug`]). If you ever make
+    /// debug builds or when toggled from the Debug tab via [`Overlay::show_debug`]). If you ever make
     /// this panel visible by default on release, revisit that — it would then leak identity on stream.
     ///
     /// Bottom-left is the one free corner (watermark top-left, notifications top-right,
     /// Steam's toasts bottom-right). Anchored by its own bottom-left corner (pivot 0,1) so it grows
     /// upward from a fixed inset and never runs off the bottom. Borderless + input-transparent like the
-    /// other passive surfaces; reads the snapshot non-blocking and skips the frame before the first
-    /// publish or on contention. Drawn in the compact default font (like the toasts) rather than the
-    /// crisp menu font — the smaller type suits a dense, glanceable info panel.
-    fn draw_debug_panel(&self, ui: &Ui) {
+    /// other passive surfaces; renders the caller's shared snapshot and shows a "gathering" line before
+    /// the first publish or on contention. Drawn in the compact default font (like the toasts) rather
+    /// than the crisp menu font — the smaller type suits a dense, glanceable info panel.
+    fn draw_debug_panel(&self, ui: &Ui, report: Option<&DiagnosticReport>) {
         let disp = ui.io().display_size;
         ui.window("##unseamless-debug")
             .position([OVERLAY_MARGIN, disp[1] - OVERLAY_MARGIN], Condition::Always)
@@ -410,11 +436,40 @@ impl Overlay {
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
-                match crate::debug_panel::snapshot() {
-                    Some(report) => draw_report(ui, &report),
+                match report {
+                    Some(report) => draw_groups(ui, &concise_groups(report)),
                     None => ui.text_disabled("debug panel: gathering..."),
                 }
             });
+    }
+
+    /// Draw the **debug detail pane** — a second passive surface, bottom-**right**, that appears only
+    /// when the debug panel is on and at least one [`DEBUG_CATEGORIES`] toggle is enabled (from the Debug
+    /// tab). It shows the *full* `fields` of each enabled category's sections, while the concise panel
+    /// (bottom-left) keeps showing their rollups — so detail is opt-in and balanced into the opposite
+    /// corner. Same passive/click-through styling, and renders the same shared snapshot the concise panel
+    /// got; silently skips the frame when there's nothing enabled to show (so it never draws an empty box).
+    fn draw_debug_detail_pane(&self, ui: &Ui, report: Option<&DiagnosticReport>) {
+        if !self.debug_details.iter().any(|&on| on) {
+            return; // no category enabled — nothing to expand
+        }
+        let Some(report) = report else {
+            return; // not published yet or momentarily contended
+        };
+        let groups = detail_groups(report, &self.debug_details);
+        if groups.is_empty() {
+            return; // enabled categories have no matching section in this snapshot
+        }
+        // Bottom-right, anchored by its own bottom-right corner (pivot 1,1) so it grows up-and-left from a
+        // fixed inset, mirroring the concise panel's bottom-left anchor. Shares the right edge with Steam's
+        // bottom-right toasts, but it's opt-in (only while details are on), so the occasional overlap is fine.
+        let disp = ui.io().display_size;
+        ui.window("##unseamless-debug-detail")
+            .position([disp[0] - OVERLAY_MARGIN, disp[1] - OVERLAY_MARGIN], Condition::Always)
+            .position_pivot([1.0, 1.0])
+            .bg_alpha(PASSIVE_BG_ALPHA)
+            .flags(passive_window_flags())
+            .build(|| draw_groups(ui, &groups));
     }
 
     /// Keep the window fully inside the ER viewport ("lock it to the game window"). Reads the current
@@ -550,6 +605,7 @@ impl Overlay {
                                 .build(|| match label {
                                     "Actions" => self.draw_actions_tab(ui, &ctx, pad),
                                     "Settings" => self.draw_settings_tab(ui, pad), // &mut self: reveal toggle
+                                    "Debug" => self.draw_debug_tab(ui, pad),
                                     "Log" => draw_log_tab(ui, pad),
                                     _ => {}
                                 });
@@ -559,34 +615,25 @@ impl Overlay {
             });
     }
 
-    /// The interactive session-action list, plus a trailing **debug-overlay** toggle. Up/down (arrow
-    /// keys or d-pad / left-stick) move the cursor across both (skipping disabled action rows); Enter,
-    /// the controller A button, or a click activates the selected row. Activating an action hands it to
-    /// the game thread; activating the toggle flips the local debug panel (no game round-trip).
+    /// The interactive session-action list. Up/down (arrow keys or d-pad / left-stick) move the cursor
+    /// across the action rows (skipping disabled ones); Enter, the controller A button, or a click
+    /// activates the selected row, handing the action to the game thread.
     ///
-    /// The overlay owns the combined cursor ([`Overlay::actions_sel`]) rather than the core `Menu`'s,
-    /// so the toggle can live in the same nav list as the menu rows without that pure model knowing
-    /// about an overlay-local UI control. The menu's own cursor is synced (via `select_index`) only at
-    /// the moment of activation.
+    /// The overlay owns the cursor ([`Overlay::actions_sel`]) rather than the core `Menu`'s; the menu's
+    /// own cursor is synced (via `select_index`) only at the moment of activation. (The debug-panel
+    /// toggle and the Export-diagnostics action that used to trail this list now live in the Debug tab.)
     fn draw_actions_tab(&mut self, ui: &Ui, ctx: &SessionContext, pad: crate::input::PadEdges) {
         // `rows` indices are 1:1 with the menu's items (actions-only, no filtering), so a row index is
-        // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows).
+        // a valid `select_index` target. `MenuRow.value` is always `None` here (no setting rows). The
+        // skip-disabled/wrap stepping reuses the core menu's host-tested helpers so this cursor can't
+        // drift from `Menu`'s own nav.
         let rows = self.menu.rows(&self.config, ctx);
-        let n = rows.len();
-        // Combined list = the `n` action rows, then two always-enabled trailing rows: the debug-panel
-        // toggle at index `n` and the "Export diagnostics" row at index `n + 1`. The skip-disabled/wrap
-        // stepping reuses the core menu's host-tested helpers so this cursor can't drift from `Menu`'s
-        // own nav. Both trailing rows are controller-navigable (unlike the Settings/Log tab buttons), so
-        // a friend on a pad can export with no mouse — the one-action capture must not need a mouse.
-        const TRAILING_ROWS: usize = 2;
-        let toggle_row = n;
-        let export_row = n + 1;
-        let total = n + TRAILING_ROWS;
-        let enabled = |i: usize| if i < n { rows[i].enabled } else { true };
+        let total = rows.len();
+        let enabled = |i: usize| rows[i].enabled;
 
         // Repair the cursor if it's out of range or on a now-disabled row (e.g. the session context
         // changed since last frame), landing it on the first enabled row.
-        if self.actions_sel >= total || !enabled(self.actions_sel) {
+        if self.actions_sel >= total || (total > 0 && !enabled(self.actions_sel)) {
             self.actions_sel = unseamless_core::menu::first_enabled(total, enabled);
         }
         if ui.is_key_pressed(Key::DownArrow) || pad.down {
@@ -608,42 +655,104 @@ impl Overlay {
                 ui.text_disabled(&row.label);
             }
         }
-        // The two trailing rows, after a separator. The debug-panel toggle's on/off state rides in its
-        // visible label, but a fixed `###` id keeps its imgui identity stable as that text flips
-        // (otherwise the id would change each toggle). "Debug panel" — not "overlay" — to avoid
-        // colliding with the whole-overlay `[debug] overlay` config switch; this only controls the
-        // bottom-left panel.
-        ui.separator();
-        let toggle_label = format!("Debug panel: {}###debug-panel-toggle", if self.show_debug { "on" } else { "off" });
-        if ui.selectable_config(&toggle_label).selected(self.actions_sel == toggle_row).build() {
-            clicked = Some(toggle_row);
-        }
-        // "Export diagnostics": writes the one-file shareable bundle (report + log tail, SteamIDs
-        // scrubbed) next to the config/logs. The whole point is a single action a non-technical friend
-        // can do — and one that works with NO peer connected, so it captures the failed-to-link case
-        // that log-forwarding (which needs the link up) never can.
-        if ui.selectable_config("Export diagnostics###export-diag").selected(self.actions_sel == export_row).build() {
-            clicked = Some(export_row);
-        }
         if let Some(i) = clicked {
             self.actions_sel = i;
             activate = true;
         }
 
-        if activate {
-            if self.actions_sel == toggle_row {
+        if activate && self.actions_sel < total {
+            // Sync the core menu's cursor to the activated action row, then fire it. actions_only never
+            // mutates config on activate; pass a scratch clone (per activation, not per frame) so the
+            // `&mut Config` signature is satisfied without touching our snapshot.
+            self.menu.select_index(self.actions_sel);
+            let mut scratch = self.config.clone();
+            if let MenuOutcome::Action(action) = self.menu.activate(&mut scratch, ctx) {
+                self.request_action(action);
+            }
+        }
+    }
+
+    /// The **Debug** tab: a navigable list mirroring the Actions tab. Row 0 turns the whole debug panel
+    /// on/off (moved here from Actions — it's where it naturally belongs); rows 1..=N are one per
+    /// [`DEBUG_CATEGORIES`] entry, each toggling whether that category's full detail shows in the
+    /// bottom-right pane; the final row is "Export diagnostics" (also moved here from Actions). Detail
+    /// rows are greyed (non-selectable) while the panel is off, since they have no effect then — but the
+    /// panel toggle and Export stay enabled regardless, so a friend can export with the panel off. Up/down
+    /// (arrows or d-pad / left-stick) move the cursor, skipping disabled rows; Enter / the A button / a
+    /// click activates the selected row. Owns its own cursor ([`Overlay::debug_sel`]), like the Actions tab.
+    fn draw_debug_tab(&mut self, ui: &Ui, pad: crate::input::PadEdges) {
+        // Rows: 0 = panel on/off (always enabled); 1..=N = per-category detail toggles (enabled only while
+        // the panel is on); the trailing `export_row` = Export diagnostics (always enabled). `show_debug`
+        // is captured into a local so the `enabled` closure doesn't borrow `self` across the toggle
+        // mutation below. Reuses the core menu's host-tested skip-disabled stepping.
+        let show_debug = self.show_debug;
+        let export_row = 1 + DEBUG_CATEGORIES.len();
+        let total = export_row + 1;
+        let enabled = |i: usize| i == 0 || i == export_row || show_debug;
+
+        if self.debug_sel >= total || !enabled(self.debug_sel) {
+            self.debug_sel = unseamless_core::menu::first_enabled(total, enabled);
+        }
+        if ui.is_key_pressed(Key::DownArrow) || pad.down {
+            self.debug_sel = unseamless_core::menu::step_enabled(self.debug_sel, total, true, enabled);
+        }
+        if ui.is_key_pressed(Key::UpArrow) || pad.up {
+            self.debug_sel = unseamless_core::menu::step_enabled(self.debug_sel, total, false, enabled);
+        }
+        let mut activate = enter_pressed(ui) || pad.activate;
+        let mut clicked = None;
+
+        // Panel on/off. State rides in the visible label; a fixed `###` id keeps imgui identity stable as
+        // the text flips. "Debug panel" — not "overlay" — to avoid colliding with the `[debug] overlay`
+        // config switch; this only controls the in-game panel.
+        let panel_label =
+            format!("Debug panel: {}###debug-panel-toggle", if show_debug { "on" } else { "off" });
+        if ui.selectable_config(&panel_label).selected(self.debug_sel == 0).build() {
+            clicked = Some(0);
+        }
+
+        ui.separator();
+        if !show_debug {
+            ui.text_disabled("Turn the panel on to enable detail.");
+        }
+        // One detail toggle per category; greyed (non-selectable) while the panel is off.
+        for (i, cat) in DEBUG_CATEGORIES.iter().enumerate() {
+            let row = i + 1;
+            let label = format!(
+                "Detail - {}: {}###debug-detail-{i}",
+                cat.label,
+                if self.debug_details[i] { "on" } else { "off" }
+            );
+            if show_debug {
+                if ui.selectable_config(&label).selected(self.debug_sel == row).build() {
+                    clicked = Some(row);
+                }
+            } else {
+                ui.text_disabled(&label);
+            }
+        }
+
+        // "Export diagnostics": writes the one-file shareable bundle (report + log tail, SteamIDs
+        // scrubbed) next to the config/logs. The whole point is a single action a non-technical friend
+        // can do — and one that works with NO peer connected, so it captures the failed-to-link case that
+        // log-forwarding (which needs the link up) never can. Always enabled (independent of the panel),
+        // and controller-navigable, so a friend on a pad can export with no mouse.
+        ui.separator();
+        if ui.selectable_config("Export diagnostics###export-diag").selected(self.debug_sel == export_row).build() {
+            clicked = Some(export_row);
+        }
+
+        if let Some(i) = clicked {
+            self.debug_sel = i;
+            activate = true;
+        }
+        if activate && enabled(self.debug_sel) {
+            if self.debug_sel == 0 {
                 self.show_debug = !self.show_debug;
-            } else if self.actions_sel == export_row {
+            } else if self.debug_sel == export_row {
                 self.export_diagnostics();
             } else {
-                // Sync the core menu's cursor to the activated action row, then fire it. actions_only
-                // never mutates config on activate; pass a scratch clone (per activation, not per
-                // frame) so the `&mut Config` signature is satisfied without touching our snapshot.
-                self.menu.select_index(self.actions_sel);
-                let mut scratch = self.config.clone();
-                if let MenuOutcome::Action(action) = self.menu.activate(&mut scratch, ctx) {
-                    self.request_action(action);
-                }
+                self.debug_details[self.debug_sel - 1] ^= true;
             }
         }
     }
@@ -922,31 +1031,54 @@ fn enter_pressed(ui: &Ui) -> bool {
 /// of each other — the effective inter-column gap is this minus that padding.
 const DEBUG_PANEL_COL_GAP: f32 = 28.0;
 
-/// Render a [`DiagnosticReport`] into the current window as a compact two-column layout. The sections
-/// fill **column-major**: partitioned on section boundaries into a LEFT and a RIGHT column at the split
-/// that most evenly balances their heights, each drawn as its own vertical stack — so a section's fields
-/// never split across columns. Both columns are **bottom-aligned** (the shorter one is top-padded),
-/// pooling the unused space in the top corner. Halves the height versus one tall stack while using the
-/// wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built that way in
-/// [`crate::diag::build_report`]).
-fn draw_report(ui: &Ui, report: &DiagnosticReport) {
-    let sections = report.sections();
-    if sections.is_empty() {
+/// A debug **detail category**: a label for the Debug tab's toggle list, and the report section titles
+/// whose full `fields` it reveals in the bottom-right detail pane when enabled. Each named section is
+/// rolled up in the always-on concise panel (so the summary stays visible) and expanded here on demand.
+struct DebugCategory {
+    label: &'static str,
+    sections: &'static [&'static str],
+}
+
+/// The detail categories listed in the Debug tab, in order. Each mirrors a verbose section the concise
+/// panel rolls up — toggling one expands that section's full detail into the bottom-right pane. Section
+/// titles must match those built in [`crate::diag::build_report`].
+const DEBUG_CATEGORIES: [DebugCategory; 3] = [
+    DebugCategory { label: "Connection", sections: &["coop_connect", "session"] },
+    DebugCategory { label: "Features", sections: &["features"] },
+    DebugCategory { label: "Player status", sections: &["status"] },
+];
+
+/// A titled block of `key = value` rows for the two-column debug layout — one report section rendered as
+/// either its condensed `summary` (concise panel) or its full `fields` (detail pane), the caller's
+/// choice. Borrows from a live snapshot, so it's frame-scoped.
+struct ReportGroup<'a> {
+    title: &'a str,
+    rows: &'a [(String, String)],
+}
+
+/// Render a list of [`ReportGroup`]s into the current window as a compact two-column layout. The groups
+/// fill **column-major**: partitioned on group boundaries into a heavier LEFT column (filled first, top
+/// to bottom) and a lighter RIGHT one, each drawn as its own vertical stack — so a group's rows never
+/// split across columns. Both columns are **bottom-aligned** (the shorter right column is top-padded),
+/// pooling all the unused space in the top-right corner. Halves the height versus one tall stack while
+/// using the wide bottom-left space. Keys/values stay left-aligned; values are ASCII (built that way in
+/// [`crate::diag::build_report`]). Shared by the concise panel and the detail pane.
+fn draw_groups(ui: &Ui, groups: &[ReportGroup]) {
+    if groups.is_empty() {
         return;
     }
-    // A section's vertical extent in text lines: its title plus one per field.
-    let section_lines = |s: &ReportSection| 1 + s.fields().len();
+    // A group's vertical extent in text lines: its title plus one per row.
+    let group_lines = |g: &ReportGroup| 1 + g.rows.len();
 
-    // Per-column rendered height: one line per section title + field, plus one inter-section gap per
-    // boundary. Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide by
-    // construction.
+    // Per-column rendered height: one line per group title + row, plus one inter-group gap per boundary.
+    // Partition AND bottom-align use this same metric, so "heavier" and "taller" coincide by construction.
     let line_h = ui.text_line_height_with_spacing();
     // The per-boundary gap is the *measured* advance of `ui.spacing()`, not an assumed `item_spacing.y`:
     // `ui.spacing()` advances the cursor by its own rule, so deriving the gap from the style would leave
-    // a residual that scales with each column's section count (the columns hold different section counts,
+    // a residual that scales with each column's group count (the columns hold different group counts,
     // so it would NOT cancel). Probing the real advance — then restoring the cursor so the layout is
     // untouched — makes the per-boundary term identical to what's rendered, so it cancels exactly in the
-    // top-pad difference and the columns bottom-align to the pixel no matter how the sections split.
+    // top-pad difference and the columns bottom-align to the pixel no matter how the groups split.
     let gap = {
         let probe = ui.cursor_pos();
         ui.spacing();
@@ -954,71 +1086,97 @@ fn draw_report(ui: &Ui, report: &DiagnosticReport) {
         ui.set_cursor_pos(probe); // undo the probe — measurement only, no layout shift
         advance
     };
-    let column_height = |col: &[ReportSection]| {
-        let lines: usize = col.iter().map(section_lines).sum();
+    let column_height = |col: &[ReportGroup]| {
+        let lines: usize = col.iter().map(group_lines).sum();
         lines as f32 * line_h + col.len().saturating_sub(1) as f32 * gap
     };
 
-    // Partition on section boundaries by rendered height, choosing the split that **minimizes the
-    // height difference** between the two columns. As the split moves right the left column grows and
-    // the right shrinks, so the difference is a single-valley curve; we just keep the smallest. Unlike
-    // a "first split where left >= right" rule (which always parks the heavier column on the left and
-    // can leave the right one sparse), this lets a small trailing section tip into the right column
-    // whenever doing so balances the two columns better. Either column may end up the taller one, so
-    // the bottom-align below pads whichever is shorter. Single section => `split == len` (one column).
-    let mut split = sections.len();
-    let mut best_diff = f32::INFINITY;
-    for k in 1..sections.len() {
-        let diff = (column_height(&sections[..k]) - column_height(&sections[k..])).abs();
-        if diff < best_diff {
-            best_diff = diff;
+    // Partition on group boundaries by rendered height: the first split where the left column is at
+    // least as tall as the right. Left height grows / right height shrinks as the split moves right, so
+    // this is the most balanced split with left >= right — left is the heavier column and the pad below
+    // is non-negative by construction. Falls back to `split == groups.len()` (everything left, a single
+    // column) for one group, or the degenerate case where one group out-measures all the rest.
+    let mut split = groups.len();
+    for k in 1..groups.len() {
+        if column_height(&groups[..k]) >= column_height(&groups[k..]) {
             split = k;
+            break;
         }
     }
-    let (left, right) = sections.split_at(split);
+    let (left, right) = groups.split_at(split);
 
-    // Right column's x = widest rendered line (title or `  key = value`) across every section, plus a
-    // gap. One pitch measured over all sections keeps the right column clear of the left regardless of
-    // which section is widest (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
+    // Right column's x = widest rendered line (title or `  key = value`) across every group, plus a
+    // gap. One pitch measured over all groups keeps the right column clear of the left regardless of
+    // which group is widest (see DEBUG_PANEL_COL_GAP on the window-padding caveat).
     let line_width = |text: &str| ui.calc_text_size(text)[0];
     let mut pitch = 0.0_f32;
-    for s in sections {
-        pitch = pitch.max(line_width(s.title()));
-        for (k, v) in s.fields() {
+    for g in groups {
+        pitch = pitch.max(line_width(g.title));
+        for (k, v) in g.rows {
             pitch = pitch.max(line_width(&format!("  {k} = {v}")));
         }
     }
     pitch += DEBUG_PANEL_COL_GAP;
 
-    // Bottom-align the two columns by top-padding whichever is shorter, pooling the empty space in the
-    // top corner. With the balanced split above either column can be the taller one, so pad each by its
-    // own deficit (one of the two is always zero).
-    let (left_h, right_h) = (column_height(left), column_height(right));
-    let pad_column = |ui: &Ui, sections: &[ReportSection], pad: f32| {
-        if pad > 0.0 {
-            ui.dummy([0.0, pad]);
-        }
-        draw_report_column(ui, sections);
-    };
-    ui.group(|| pad_column(ui, left, (right_h - left_h).max(0.0)));
+    ui.group(|| draw_group_column(ui, left));
     if !right.is_empty() {
         ui.same_line_with_pos(pitch);
-        ui.group(|| pad_column(ui, right, (left_h - right_h).max(0.0)));
+        ui.group(|| {
+            // Top-pad the lighter right column by the height difference so its bottom lines up with the
+            // left's — pushing the empty space into the top-right corner.
+            let pad = (column_height(left) - column_height(right)).max(0.0);
+            if pad > 0.0 {
+                ui.dummy([0.0, pad]);
+            }
+            draw_group_column(ui, right);
+        });
     }
 }
 
-/// Draw one column of the debug panel: each section's title in blue, then its `key = value` lines dimmed
-/// and indented, with a blank gap between sections.
-fn draw_report_column(ui: &Ui, sections: &[ReportSection]) {
-    for (i, section) in sections.iter().enumerate() {
+/// Draw one column of the debug layout: each group's title in blue, then its `key = value` lines dimmed
+/// and indented, with a blank gap between groups.
+fn draw_group_column(ui: &Ui, groups: &[ReportGroup]) {
+    for (i, group) in groups.iter().enumerate() {
         if i > 0 {
             ui.spacing();
         }
-        ui.text_colored(rgba(BLUE, 1.0), section.title());
-        for (k, v) in section.fields() {
+        ui.text_colored(rgba(BLUE, 1.0), group.title);
+        for (k, v) in group.rows {
             ui.text_disabled(format!("  {k} = {v}"));
         }
     }
+}
+
+/// Concise view of a report: every section, condensed to its `summary` where it has one (verbose
+/// sections — features / status / coop_connect / session) and shown in full otherwise. This is the
+/// always-on bottom-left panel; the per-category full detail lives in the bottom-right pane.
+fn concise_groups(report: &DiagnosticReport) -> Vec<ReportGroup<'_>> {
+    report
+        .sections()
+        .iter()
+        .map(|s| ReportGroup {
+            title: s.title(),
+            rows: if s.has_summary() { s.summary() } else { s.fields() },
+        })
+        .collect()
+}
+
+/// Full detail for the enabled categories: each present section named by an enabled [`DEBUG_CATEGORIES`]
+/// entry, in full `fields`. Empty when nothing is enabled or no matching section is in the snapshot
+/// (e.g. `coop_connect` only exists during a connect attempt) — then the detail pane isn't drawn.
+fn detail_groups<'a>(report: &'a DiagnosticReport, enabled: &[bool]) -> Vec<ReportGroup<'a>> {
+    let mut groups = Vec::new();
+    for (cat, &on) in DEBUG_CATEGORIES.iter().zip(enabled) {
+        if !on {
+            continue;
+        }
+        for &title in cat.sections {
+            if let Some(s) = report.sections().iter().find(|s| s.title() == title) {
+                groups.push(ReportGroup { title: s.title(), rows: s.fields() });
+            }
+        }
+    }
+    groups
 }
 
 /// Draw a **sensitive identity row**: a label, the value masked behind `*` by default, a Reveal/Hide
@@ -1073,19 +1231,31 @@ fn draw_secret_row(ui: &Ui, label: &str, noun: &str, value: &str, revealed: &mut
     }
 }
 
-fn draw_banners(ui: &Ui, banners: &[Banner]) {
+fn draw_banners(ui: &Ui, banners: &[Banner], max_w: f32) {
     for b in banners {
-        ui.text_colored(rgba(severity_color(b.severity), 1.0), &b.message);
+        text_right_aligned(ui, rgba(severity_color(b.severity), 1.0), max_w, &b.message);
     }
 }
 
-fn draw_toasts(ui: &Ui, toasts: &[Toast]) {
+fn draw_toasts(ui: &Ui, toasts: &[Toast], max_w: f32) {
     for t in toasts {
         // Fade alpha out as the toast expires. The model guarantees `duration > 0.0` and finite, so
         // this can't divide by zero.
         let alpha = (t.remaining / t.duration).clamp(0.0, 1.0);
-        ui.text_colored(rgba(severity_color(t.severity), alpha), &t.message);
+        text_right_aligned(ui, rgba(severity_color(t.severity), alpha), max_w, &t.message);
     }
+}
+
+/// Draw one notification line right-aligned within `max_w` (the widest line in the corner window), by
+/// pushing the cursor right by the line's shortfall before drawing. Keeps the top-right notifications
+/// flush with the screen edge they're pinned to rather than left-aligned ragged.
+fn text_right_aligned(ui: &Ui, color: [f32; 4], max_w: f32, text: &str) {
+    let off = (max_w - ui.calc_text_size(text)[0]).max(0.0);
+    if off > 0.0 {
+        let pos = ui.cursor_pos();
+        ui.set_cursor_pos([pos[0] + off, pos[1]]);
+    }
+    ui.text_colored(color, text);
 }
 
 /// Scroll the current window vertically from up/down input — keyboard arrows or the controller d-pad /

@@ -613,6 +613,20 @@ cmd_status() {
 # layer-4 "does the DLL load, register, and tick" check from the test-loop skill; it does NOT need a
 # save (FrameBegin ticks at the title screen). Leaves the game running so you can drive an
 # observation run; 'rig.sh kill' when done.
+# Launch with --wait (block until the framework's install/heartbeat lines appear), then unless
+# dismiss=0 clear the offline-mode / connection-error startup popups so the game lands ready to play
+# instead of stuck behind intros. Shared by `cycle` and `friend-test`.
+launch_and_dismiss() {
+  local dismiss="${1:-1}"
+  if cmd_launch --wait; then
+    if [[ $dismiss -eq 1 ]]; then
+      sleep 2          # give the offline/connection popups a moment to appear after the title
+      cmd_dismiss || warn "auto-dismiss failed; clear the popups manually or: scripts/rig.sh dismiss"
+    fi
+    say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
+  fi
+}
+
 cmd_cycle() {
   # Pull our own flags out of the arg list before forwarding the rest to apply (which would `die` on
   # an unknown option). `--no-dismiss` leaves the startup popups for you to clear manually.
@@ -624,13 +638,7 @@ cmd_cycle() {
     esac
   done
   cmd_apply ${args[@]+"${args[@]}"}
-  if cmd_launch --wait; then
-    if [[ $dismiss -eq 1 ]]; then
-      sleep 2          # give the offline/connection popups a moment to appear after the title
-      cmd_dismiss || warn "auto-dismiss failed; clear the popups manually or: scripts/rig.sh dismiss"
-    fi
-    say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
-  fi
+  launch_and_dismiss "$dismiss"
 }
 
 # ---- friend-bundle packaging ---------------------------------------------------------------------
@@ -759,22 +767,25 @@ cmd_share() {
   fi
   [[ -f "$zipf" ]] || die "no such zip: $zipf"
   say "Sharing $(basename "$zipf") to GitHub prerelease '$SHARE_TAG'"
-  if ! ( cd "$ROOT" && gh release view "$SHARE_TAG" >/dev/null 2>&1 ); then
-    say "Creating prerelease '$SHARE_TAG'"
-    ( cd "$ROOT" && gh release create "$SHARE_TAG" --prerelease --target main \
-        --title "unseamless-coop friend test builds" \
-        --notes "Rolling bucket of test builds for co-op testing. Grab the newest asset; install per README-FRIENDS.txt inside. Not a real release." ) \
-      || die "couldn't create prerelease '$SHARE_TAG'"
+  # Delete-and-recreate the prerelease on every share so it re-pins to the top of GitHub's Releases
+  # list (which orders by publish date — reusing the release would freeze its position there while
+  # version releases pile up above it, burying the freshest build). Cleaning the tag too makes the
+  # recreate point at current main and start asset-free, so no stale bundles or "Source code" archives
+  # linger from a prior build.
+  if ( cd "$ROOT" && gh release view "$SHARE_TAG" >/dev/null 2>&1 ); then
+    say "Replacing existing prerelease '$SHARE_TAG'"
+    # Keep gh's stderr (only stdout is silenced): this is the one step that destroys remote state, so a
+    # failure cause (auth, rate-limit, partial --cleanup-tag) must reach the terminal, not be swallowed.
+    ( cd "$ROOT" && gh release delete "$SHARE_TAG" --cleanup-tag --yes >/dev/null ) \
+      || die "couldn't delete existing prerelease '$SHARE_TAG'"
   fi
-  # Auto-prune prior bundle assets so the release holds only the current build (different build_ids
-  # would otherwise accumulate — a new commit changes the asset name, so --clobber alone won't replace
-  # it). Matches only our own `unseamless-coop-*.zip` uploads. NOTE: GitHub's auto-generated "Source
-  # code (zip/tar.gz)" archives are derived from the tag, not assets, so they can't be pruned here.
-  local old
-  while IFS= read -r old; do
-    [[ -n "$old" ]] || continue
-    ( cd "$ROOT" && gh release delete-asset "$SHARE_TAG" "$old" --yes >/dev/null 2>&1 ) && say "pruned old asset: $old"
-  done < <(cd "$ROOT" && gh release view "$SHARE_TAG" --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^unseamless-coop-.*\.zip$' || true)
+  say "Creating prerelease '$SHARE_TAG'"
+  # If this fails the old release is already gone (deleted just above): say so, and that a rerun recovers
+  # it — the source zip is still in dist/, so 'rig.sh share' recreates the release from scratch.
+  ( cd "$ROOT" && gh release create "$SHARE_TAG" --prerelease --target main \
+      --title "$SHARE_TAG" \
+      --notes "Rolling bucket of test builds for co-op testing. Grab the newest asset; install per README-FRIENDS.txt inside. Not a real release." ) \
+    || die "couldn't create prerelease '$SHARE_TAG' (the old one was already deleted; re-run 'rig.sh share' to recreate it — your dist/ zip is intact)"
 
   ( cd "$ROOT" && gh release upload "$SHARE_TAG" "$zipf" --clobber ) || die "upload failed"
   ok "uploaded $(basename "$zipf")"
@@ -785,6 +796,42 @@ cmd_share() {
     if clip_copy "$url"; then ok "copied to clipboard"; else warn "no clipboard tool (wl-copy/xclip/xsel) — URL not copied"; fi
   else
     say "Release: $(cd "$ROOT" && gh release view "$SHARE_TAG" --json url --jq .url 2>/dev/null || true)"
+  fi
+}
+
+# All-in-one friend-test loop: build + package a debug bundle of the current code, install those same
+# bits locally (host) with the shared config, push the zip to the GitHub prerelease (copying the
+# download link to your clipboard — `share` does that by default), then launch the game and clear the
+# startup popups (like `cycle`, so it lands ready to play instead of stuck behind intros). The host
+# rig and the friend zip run the same co-op password because `package --apply` resolves it once and
+# writes the one seed config to both (cycle's own apply would write a default config and break that,
+# which is why this packages-then-applies rather than calling `cycle`). Package opts pass through
+# (--release, --password X); --no-launch stops before starting the game; --no-dismiss leaves the
+# popups for you.
+cmd_friend_test() {
+  local do_launch=1 dismiss=1 pkg_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-launch)  do_launch=0 ;;
+      --no-dismiss) dismiss=0 ;;
+      *) pkg_args+=("$1") ;;
+    esac
+    shift
+  done
+  # Seed a stable default password the first time so the loop is truly zero-config; everything after
+  # reuses it (and so do friends' bundles), and you can edit the file to change it. Only kicks in when
+  # neither the env var nor the file already supplies one — never overrides an explicit choice.
+  if [[ -z "${UNSEAMLESS_SHARED_PASSWORD:-}" && ! -f "$SHARED_PASSWORD_FILE" ]]; then
+    mkdir -p "$(dirname "$SHARED_PASSWORD_FILE")"
+    printf 'coop-test\n' > "$SHARED_PASSWORD_FILE"
+    say "seeded default co-op password 'coop-test' -> $SHARED_PASSWORD_FILE (edit to change)"
+  fi
+  cmd_package --apply ${pkg_args[@]+"${pkg_args[@]}"}
+  cmd_share
+  if [[ $do_launch -eq 1 ]]; then
+    launch_and_dismiss "$dismiss"   # launch --wait + auto-clear startup popups (like `cycle`)
+  else
+    say "skipping launch (--no-launch)"
   fi
 }
 
@@ -831,7 +878,13 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                            scripts/dist/.shared-password). Must be >= 5 chars.
         --apply            Also install the same build locally (host) with the shared config.
   share [zip]            Upload a packaged zip (default: newest in dist/) to the GitHub prerelease
-                         '$SHARE_TAG', creating it if needed. Prints the download URL.
+                         '$SHARE_TAG', recreating it fresh each time so it re-pins to the top of the
+                         Releases list. Prints the download URL and copies it to your clipboard.
+  friend-test [opts]     All-in-one: package + apply a debug build, share it (link to clipboard), then
+                         launch and auto-clear the startup popups (like 'cycle', lands ready to play).
+                         Host and bundle share one co-op password (seeds a default 'coop-test' on first
+                         run). Passes package opts through (--release, --password X); --no-launch stops
+                         before starting the game; --no-dismiss leaves the popups for you.
 
 Env overrides: GAME_DIR, BACKUP_DIR, APPID, SAVE_DIR, WINDOW_MARGIN, RIG_WINDOW_WIDTH,
                RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
@@ -854,6 +907,7 @@ case "$cmd" in
   cycle)   cmd_cycle "$@" ;;
   package) cmd_package "$@" ;;
   share)   cmd_share "$@" ;;
+  friend-test) cmd_friend_test "$@" ;;
   ""|-h|--help|help) usage ;;
   *) die "unknown command '$cmd' (try: rig.sh help)" ;;
 esac

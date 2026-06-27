@@ -253,10 +253,17 @@ pub struct DiagnosticReport {
 /// One section of a [`DiagnosticReport`] — a titled, ordered list of `key = value` lines. Returned by
 /// [`DiagnosticReport::section`] for chained [`field`](ReportSection::field) calls; fields are private
 /// so it's append-only.
+///
+/// A section may also carry a shorter **summary** (via [`summary_line`](ReportSection::summary_line)) —
+/// a condensed rollup of its full `fields` for a space-constrained renderer. The log [`render`] and the
+/// overlay's detail pane always use the full `fields`; the overlay's concise panel prefers `summary`
+/// when present (see [`has_summary`](ReportSection::has_summary)). A section with no summary is shown in
+/// full everywhere — summaries are opt-in, set only on the verbose sections worth condensing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportSection {
     title: String,
     fields: Vec<(String, String)>,
+    summary: Vec<(String, String)>,
 }
 
 impl DiagnosticReport {
@@ -266,7 +273,11 @@ impl DiagnosticReport {
 
     /// Start a new section and return it for chained [`field`](ReportSection::field) calls.
     pub fn section(&mut self, title: impl Into<String>) -> &mut ReportSection {
-        self.sections.push(ReportSection { title: title.into(), fields: Vec::new() });
+        self.sections.push(ReportSection {
+            title: title.into(),
+            fields: Vec::new(),
+            summary: Vec::new(),
+        });
         self.sections.last_mut().expect("just pushed")
     }
 
@@ -310,6 +321,26 @@ impl ReportSection {
     /// The section's `(key, value)` lines, in order — for a structured renderer like the debug panel.
     pub fn fields(&self) -> &[(String, String)] {
         &self.fields
+    }
+
+    /// Add a condensed `key = value` line to the section's **summary** (the rollup a space-constrained
+    /// renderer shows in place of the full `fields`). Returns `&mut self` for chaining. Set only on
+    /// verbose sections worth condensing; leaving it empty means the section renders in full everywhere.
+    pub fn summary_line(&mut self, key: impl Into<String>, value: impl std::fmt::Display) -> &mut Self {
+        self.summary.push((key.into(), value.to_string()));
+        self
+    }
+
+    /// The section's condensed summary lines, in order — empty when the section has no summary (then the
+    /// full [`fields`](ReportSection::fields) are the only representation). See [`has_summary`].
+    pub fn summary(&self) -> &[(String, String)] {
+        &self.summary
+    }
+
+    /// Whether this section carries a separate condensed summary (so a concise renderer should prefer it
+    /// over the full `fields`).
+    pub fn has_summary(&self) -> bool {
+        !self.summary.is_empty()
     }
 }
 
@@ -668,6 +699,37 @@ fn level_tag(level: LogLevel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_summary_is_optional_and_independent_of_full_fields() {
+        let mut report = DiagnosticReport::new("t");
+        let plain = report.section("plain");
+        plain.field("a", 1).field("b", 2);
+        let verbose = report.section("verbose");
+        verbose.field("x", 1).field("y", 2).field("z", 3);
+        verbose.summary_line("rollup", "3 items");
+
+        let sections = report.sections();
+        // A section with no summary reports none; its full fields are the only representation.
+        assert!(!sections[0].has_summary());
+        assert!(sections[0].summary().is_empty());
+        assert_eq!(sections[0].fields().len(), 2);
+        // A summary is a separate, shorter view — it doesn't disturb the full fields.
+        assert!(sections[1].has_summary());
+        assert_eq!(sections[1].summary(), &[("rollup".to_string(), "3 items".to_string())]);
+        assert_eq!(sections[1].fields().len(), 3);
+    }
+
+    #[test]
+    fn render_always_uses_full_fields_not_the_summary() {
+        let mut report = DiagnosticReport::new("t");
+        report.section("verbose").field("x", 1).field("y", 2).summary_line("rollup", "2 items");
+        let text = report.render();
+        // The log dump is the authoritative full record: it shows every field and never the summary.
+        assert!(text.contains("x = 1"), "{text}");
+        assert!(text.contains("y = 2"), "{text}");
+        assert!(!text.contains("rollup"), "summary must not leak into the log render:\n{text}");
+    }
 
     #[test]
     fn header_block_contains_everything_an_agent_needs() {

@@ -102,9 +102,21 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     // diagnosable from one log — one-way NAT vs no-receive vs version mismatch vs empty lobby filter.
     if let Some(cr) = crate::coop::connect_report() {
         let sec = r.section("coop_connect");
-        for (k, v) in cr.fields() {
+        let fields = cr.fields();
+        // Summary headline: the failure if the attempt has one, else the handshake state, else just
+        // "connecting" — the one line that says how the attempt is going without the full breakdown.
+        let headline = fields
+            .iter()
+            .find(|(k, _)| k == "failure")
+            .map(|(_, v)| format!("failed: {v}"))
+            .or_else(|| {
+                fields.iter().find(|(k, _)| k == "handshake").map(|(_, v)| format!("handshake {v}"))
+            })
+            .unwrap_or_else(|| "connecting".to_string());
+        for (k, v) in &fields {
             sec.field(k, v);
         }
+        sec.summary_line("connect", headline);
     }
 
     let sec = r.section("session");
@@ -122,25 +134,47 @@ pub fn build_report(title: &str) -> DiagnosticReport {
                         |t| t.restriction_disabled.to_string(),
                     ),
                 );
+            sec.summary_line(
+                "session",
+                format!("{:?}, {}/{} players", v.lobby_state, v.players, v.player_limit),
+            );
         }
         None => {
             sec.field("status", "no CSSessionManager yet (pre-init / title screen)");
+            sec.summary_line("session", "no session (pre-init / title screen)");
         }
     }
 
+    // Full: in_gameplay + one row per feature. Summary (for the concise panel): in_gameplay + a single
+    // ok-count rollup, naming only the DISABLED (panicked) ones — those are the lines you actually want
+    // to see at a glance, so a healthy build collapses ~13 rows to two.
     let feat = r.section("features");
     feat.field("in_gameplay", in_gameplay);
+    feat.summary_line("in_gameplay", in_gameplay);
     match features {
         // Before registration completes (earliest boot) the lock-free registry isn't set yet.
         None => {
             feat.field("status", "not registered yet (pre-init)");
+            feat.summary_line("features", "not registered yet (pre-init)");
         }
         Some(list) if list.is_empty() => {
             feat.field("status", "not registered yet");
+            feat.summary_line("features", "not registered yet");
         }
         Some(list) => {
-            for (name, disabled) in list {
-                feat.field(name, if disabled { "DISABLED (panicked)" } else { "ok" });
+            let total = list.len();
+            let disabled: Vec<&str> = list.iter().filter(|(_, d)| *d).map(|(n, _)| *n).collect();
+            for (name, d) in &list {
+                feat.field(*name, if *d { "DISABLED (panicked)" } else { "ok" });
+            }
+            let ok = total - disabled.len();
+            if disabled.is_empty() {
+                feat.summary_line("features", format!("{ok}/{total} ok"));
+            } else {
+                feat.summary_line(
+                    "features",
+                    format!("{ok}/{total} ok, DISABLED: {}", disabled.join(", ")),
+                );
             }
         }
     }
@@ -194,11 +228,11 @@ pub fn build_report(title: &str) -> DiagnosticReport {
             // status order ([`AILMENTS`]). To verify/fix, apply ONE known ailment in-game (e.g. stand in
             // Scarlet Rot) and watch which index climbs in the live panel — relabel AILMENTS if it's off.
             let status = r.section("status");
-            let mut any_active = false;
+            let mut active: Vec<&str> = Vec::new();
             for (i, name) in AILMENTS.iter().enumerate() {
                 let (cur, max, timer) = (v.gauges[i], v.gauge_max[i], v.proc_timers[i]);
                 if cur > 0 || timer > 0.0 {
-                    any_active = true;
+                    active.push(*name);
                     if timer > 0.0 {
                         status.field(*name, format!("{cur}/{max} (proc {timer:.1}s)"));
                     } else {
@@ -206,8 +240,13 @@ pub fn build_report(title: &str) -> DiagnosticReport {
                     }
                 }
             }
-            if !any_active {
+            // Summary (concise panel): just which ailments are in play, no per-ailment numbers — the
+            // detail pane carries the buildup/proc values.
+            if active.is_empty() {
                 status.field("ailments", "none building or active");
+                status.summary_line("ailments", "none building or active");
+            } else {
+                status.summary_line("ailments", active.join(", "));
             }
         }
         Some(None) => {
