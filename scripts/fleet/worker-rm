@@ -34,17 +34,32 @@ if [ -d "$ws" ]; then
   # a worker inherits from the orchestrator is noise, not its own work). Refuse
   # unless forced. Use `git cherry` (patch-id equivalence), NOT `git log main..`:
   # after a normal squash-integrate the worker's pre-squash commit is patch-equal
-  # to the squashed commit on main, so cherry marks it '-' (already applied) and
-  # we don't demand a spurious -f for a worker whose work is safely on main. Only
-  # a commit with no patch-equivalent on main ('+') counts as unintegrated.
+  # to the squashed commit on main, so cherry marks it '-' (already applied) and a
+  # safely-landed lane tears down with no -f. Only a commit with no patch-
+  # equivalent on main ('+') counts as unintegrated.
+  #
+  # Critically, compare against the CANONICAL main (this repo, $REPO) -- the one
+  # the orchestrator integrates onto -- NOT the workspace's `main`, which is the
+  # stale tip the worker forked from and lacks the just-landed squash commit
+  # (comparing there flags every integrated lane). So fetch the branch into the
+  # stable ref refs/fleet/<name> (cheap, COW-shared) and run cherry here.
   # (Caveat: several worker commits squashed into ONE main commit won't patch-
   # match individually -- which is why a worker consolidates to a single clean
   # commit on top of its base before reporting done; see docs/roles/worker.md.)
-  unmerged="$(git -C "$ws" cherry main "$branch" 2>/dev/null | sed -n 's/^+ //p' || true)"
+  unmerged=""
+  if git -C "$ws" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    if git -C "$REPO" fetch "$ws" "+$branch:refs/fleet/$name" >/dev/null 2>&1; then
+      unmerged="$(git -C "$REPO" cherry main "refs/fleet/$name" 2>/dev/null | sed -n 's/^+ //p' || true)"
+    elif [ "$force" -ne 1 ]; then
+      echo "REFUSING to remove '$name': could not fetch $branch to verify it's integrated." >&2
+      echo "Integrate first (scripts/fleet/worker-integrate $name), or re-run with -f to discard." >&2
+      exit 1
+    fi
+  fi
   if [ -n "$unmerged" ] && [ "$force" -ne 1 ]; then
     echo "REFUSING to remove '$name': it has unintegrated commits on $branch:" >&2
     while IFS= read -r sha; do
-      [ -n "$sha" ] && git -C "$ws" log --oneline -1 "$sha" >&2
+      [ -n "$sha" ] && git -C "$REPO" log --oneline -1 "$sha" >&2
     done <<<"$unmerged"
     echo "Integrate first (scripts/fleet/worker-integrate $name), or re-run with -f to discard." >&2
     exit 1
@@ -71,4 +86,7 @@ else
 fi
 
 rm -f "$FLEET_DIR/assignments/$name.md"
+# Drop the integration ref (created here for the cherry check, or earlier by
+# worker-integrate) -- the lane is gone, so it's just cruft now.
+git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true
 echo "worker '$name' removed."
