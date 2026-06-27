@@ -44,11 +44,19 @@ So the friend's whole reporting duty is: press the Export button, send back one 
 This run rides the **lobby-discovery build** (the one where rung 4's discovery path is live). In
 `scripts/rig/seed-config.toml` (and in the bundle that ships to the friend), set:
 
-- `[session] password` — the **same** non-empty value on both players. This is the only pairing input:
-  it keys the lobby (`SetLobbyData`/filter via the verbatim SHA-256 `lobby_discovery_token`) **and**
-  derives the session AES key later. (The lobby key/filter is `lobby_discovery_token` — a
-  domain-separated SHA-256 over the verbatim password, truncated to 32 hex chars, KAT-pinned so the DLL
-  and the harness agree.) Nothing else identifies the peer.
+- `[session] password`: the **same** value on both players, and now **at least 8 characters**
+  (`MIN_PASSWORD_LEN`; the startup guard refuses to launch a shorter one). This is the only pairing
+  input: it keys the lobby (`SetLobbyData`/filter via the verbatim SHA-256 `lobby_discovery_token`),
+  it **authenticates the peer** (the side-channel handshake now proves password knowledge before
+  linking, see below), **and** it derives the session AES key later. (The lobby key/filter is
+  `lobby_discovery_token`, a domain-separated SHA-256 over the verbatim password, truncated to 32 hex
+  chars, KAT-pinned so the DLL and the harness agree.) Nothing else identifies the peer.
+
+> **Both players MUST set the identical password.** The side-channel now authenticates the peer: each
+> side presents a password-keyed proof (`Auth`) and is **not linked** until the other side verifies it.
+> A mismatch shows a plain-voice **"Authentication failed … (wrong co-op password)"** banner and the
+> peers never link: no config sync, no session actions, no log forwarding. A wrong password is no
+> longer a silent non-connect; it names itself.
 - `[debug] enabled = true`, `level = "debug"` — so the `session-probe:` / `coop` lines (and the
   rung-3 register dumps, which are `debug!`) are captured.
 - `[debug] forward_to_host = true` — once linked, the client tees its log to the host's `LogBundle`
@@ -67,7 +75,9 @@ The connection model: **both share the same password; one opens a world, the oth
 triggered on demand from the overlay menu, not at launch — the actions stay disabled until Steam
 networking is ready and the player is in-game. The host (Open World) creates the password-keyed lobby;
 the joiner (Join world) filters the list by the password, finds it, and joins. The role is the user's
-**choice**, never derived — only the host creates a lobby.
+**choice**, never derived (only the host creates a lobby). The connection is **repeatable**: a failed
+attempt can be retried (Leave, then Open/Join again), and each Open/Join **resets the `coop_connect`
+report** so the per-stage diagnostics reflect only the latest attempt, not a stale earlier one.
 
 1. Both players set the identical password and launch ELDEN RING (press Play — our launcher starts it
    outside EAC with the `UNSEAMLESS_LAUNCH` marker). Load into the game (the menu actions are gated on
@@ -86,6 +96,7 @@ the joiner (Join world) filters the list by the password, finds it, and joins. T
 | Session accept (rung 2) | `session_accepted_at` set | we never `AcceptSessionWithUser`'d the resolved peer |
 | Messages | `messages_sent > 0` **and** `messages_received > 0` | `sent>0, recv=0` = one-way NAT (the classic) |
 | Handshake | handshake stamped, `coop_connect` → `linked` | partner's `Hello` never landed |
+| Auth | peer linked (proof verified) | an **"Authentication failed with <peer> (wrong co-op password)"** banner = the two passwords differ; fix them to match |
 | Version | match | version mismatch (confirm both ran the same `build_id`) |
 
 A clean link shows `coop_connect` walking `linking → linked`, an overlay **"Co-op partner connected"**

@@ -154,15 +154,21 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
    questions), so the registry still drives the *display*, just not an editable menu yet.
 3. **Session actions are a menu, not items/hotkeys.** ERSC triggers host/join/leave via custom
    in-game **goods** (the `MODGOODS_*` items) and fixed hotkeys. We drive them through a menu
-   model (`unseamless-core/menu.rs`, the actions-only `Menu::actions_only`) rendered as an **ImGui
-   overlay** toggled by a hotkey (backtick) (via hudhook; see
-   [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). We are **not** reproducing
-   the custom goods, and we are **not** injecting a native pause-menu entry — the SDK exposes no
-   API for that and it's heavy UI RE (an overlay is simpler and fully ours). If you see the
-   `MODGOODS_*`/item machinery in FEATURES.md, it's catalogued for reference, not as a build target.
+   model (`unseamless-core/menu.rs`) rendered as an **ImGui overlay** toggled by a hotkey (backtick)
+   (via hudhook; see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). The overlay's Actions tab renders
+   from the dynamic `menu::action_rows(ctx)` (paired verbs collapsed into one stateful row,
+   inapplicable rows hidden) while the static `Menu` stays host-tested scaffolding for a future
+   editable menu. We are **not** reproducing the custom goods, and we are **not** injecting a native
+   pause-menu entry: the SDK exposes no API for that and it's heavy UI RE (an overlay is simpler and
+   fully ours). If you see the `MODGOODS_*`/item machinery in FEATURES.md, it's catalogued for
+   reference, not as a build target.
 4. **Networking: drive the game's own session layer; add a small private side-channel.** No
    bespoke transport, and **no interop with vanilla-ERSC's** side-channel packet format (see the
-   "Key decision" section above).
+   "Key decision" section above). The connection is **explicit and on-demand** (the overlay's Open
+   World / Join world / Leave world, never auto-started at launch), the host/joiner role is the user's
+   **choice** and never derived (only the host creates a lobby), and the side-channel handshake
+   **authenticates the peer with a password-keyed proof** before linking (see
+   [COOP-CONNECTION.md](COOP-CONNECTION.md)).
 5. **We own the whole install — no Elden Mod Loader, no ERSC launcher.** The cdylib ships as the
    game's `dinput8.dll` (a search-order proxy the game auto-loads; `coop/proxy.rs` forwards the real
    exports), which makes this mod the **parent loader**: it also `LoadLibrary`s other DLL mods from
@@ -183,10 +189,11 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `unseamless-core/scaling.rs` | 1 | done, tested |
 | `unseamless-core/menu.rs` (menu model) | 1 | done, tested |
 | `unseamless-core/notifications.rs` (toast/banner model) | 1 | done, tested; **wired** to the overlay renderer (`coop/notify.rs` + `coop/features/notifications.rs`) |
-| `unseamless-core/protocol.rs` (side-channel, wire v2: generation/seq identity) | 2 | done, tested (wiring is rig-gated) |
+| `unseamless-core/protocol.rs` (side-channel, wire v6: generation/seq identity + `Hello` nonce + `Auth` proof) | 2 | done, tested (wiring is rig-gated) |
 | `unseamless-core/transport.rs` (`Transport` seam + `Loopback` + `FaultModel`) | 2 | done, tested |
 | `unseamless-core/framing.rs` (length-prefixed wire codec, shared by `TcpTransport` + the bridge) | 2 | done, tested |
-| `unseamless-core/peer.rs` (`Peer`/`Session`: handshake/config-sync/actions/log-forward/liveness, self-healing) | 2 | done, tested |
+| `unseamless-core/peer.rs` (`Peer`/`Session`: handshake/peer-auth/config-sync/actions/log-forward/liveness, self-healing) | 2 | done, tested |
+| `unseamless-core/crypto.rs` (password-keyed hashes: `auth_proof` + `lobby_discovery_token`, domain-separated) | 2 | done, tested (KAT-pinned) |
 | `unseamless-core/loader.rs` (mod-load ordering policy) | 1 | done, tested |
 | `harness` bin (in-memory + lossy + two-process TCP loops, no game) | — | done — see the `/test-loop` skill |
 | `coop/proxy.rs` (dinput8 export forwarding) | — | done (export-table verified; live forward rig-gated) |

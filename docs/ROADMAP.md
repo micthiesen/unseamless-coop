@@ -24,8 +24,40 @@ Shipped to `main`, rig-verified where applicable:
   firewalled with `catch_unwind` ([FFI-UNWIND-AUDIT.md](FFI-UNWIND-AUDIT.md)), so release/shipping now
   builds with `panic=unwind` like `diag` — a feature panic is caught, disabled, and toasted (plain
   voice) instead of crashing the player's game.
+- **Explicit, on-demand connection.** Co-op is no longer auto-started at launch; the overlay Actions
+  menu drives it: **Open World** (host) / **Join world** (joiner) / **Leave world**. The role is the
+  user's **choice** (`steam::LobbyIntent`), not derived, so only the host creates a lobby (no
+  both-create race, no owner-id tiebreak). A **Steam-readiness gate** (`crate::steam_ready`:
+  Connecting/Ready/Failed) holds Open/Join disabled (behind a "Connecting to Steam..." banner)
+  until the SteamID + networking + lobby interfaces resolve and the player is in-game. **Leave** tears
+  the session down via a generation counter; the lobby is left on every driver-thread exit (RAII).
+  See [COOP-CONNECTION.md](COOP-CONNECTION.md).
+- **Peer authentication on the side-channel.** The rung-2 handshake now authenticates the peer with a
+  password-keyed proof before linking: `Hello` carries a per-session 16-byte nonce, a new `Auth`
+  message carries a domain-separated SHA-256 proof, and a peer is **not linked** (no `ConfigSync` /
+  session action / forwarded log honored) until its proof verifies; a wrong password raises a
+  plain-voice auth banner and never links. Wire format `VERSION` 5→6; `MIN_PASSWORD_LEN` 5→8 (the
+  proof is a fast hash, so a short password is offline-brute-forceable). The two password-keyed hashes
+  (auth proof + lobby discovery token, distinct domain tags) live together in
+  `unseamless-core/crypto.rs`.
+- **Actions-menu redesign.** Paired verbs collapse into one stateful row (Lock⇄Unlock; PvP / PvP teams
+  / Friendly fire show on/off and emit a single `Toggle*`), and inapplicable rows are **hidden**, not
+  greyed (solo → Open/Join; in-session host → Leave + the four toggles; joiner → Leave). The model is
+  `unseamless_core::menu::action_rows`. See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
+- **Overlay/debug polish.** The debug report is cached per publish-version (no per-frame deep clone);
+  the Debug tab's detail panes render independently of the summary panel (`report_wanted`); the ailment
+  display is fixed and **rig-confirmed** (gauges are resistance *remaining*, so buildup = `gauge_max -
+  gauge`); and rendered banner/toast strings are **ASCII-only** (the imgui overlay font has no glyph for
+  the em dash or ellipsis, so they render as `?`). Banners are now capped (`MAX_BANNERS`) like toasts.
 
-## Wave 2 — next (not started)
+## Wave 2 — in progress
+
+The out-of-band connection stack (rungs 1, 2, 4) is shipped and the connection UX, peer auth, and menu
+redesign landed this session. **Rung 3, driving the game's own session so players see each other
+in-world, is the headline-next** (see below). The one thing the rig can't do alone, the **two-player
+friend test**, is still pending (no second player available yet); it confirms the joiner-finds-host leg
+of rung 4 and the rung-2 link across two machines in one session. See
+[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 
 ### Solo / host-doable (no 2nd player needed)
 
@@ -69,8 +101,21 @@ Shipped to `main`, rig-verified where applicable:
   manual peer pairing — the side-channel is seeded by rung-4 lobby discovery, so this verification rides
   the lobby-discovery friend test (one player opens a world, the other joins) rather than a hand-entered
   peer. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
-- **Rung 3 — drive the session FSM** to put a peer in your world (the hard RE: the create/join
-  functions, the password-derived AES key). This is what unblocks in-world presence.
+- **Rung 3: drive the session FSM (the headline-next).** RE the create/join functions that move
+  `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
+  so players see each other in-world. This is the apply layer the rest of the UI is already waiting on,
+  and it unblocks:
+  - **The in-world session itself.** Open/Join/Leave already drive the connection layer (lobby + the
+    rung-2 side-channel), but they don't yet put players in one another's *world*; rung 3 is what makes
+    them place a peer in your session.
+  - **Wiring the inert toggle actions.** Lock/Unlock/PvP/PvP teams/Friendly fire are surfaced by the
+    overlay menu but still inert ("not wired up yet"); rung 3 connects them to real game calls.
+  - **Sourcing the menu's state bits.** `SessionContext.{world_locked, pvp_on, pvp_teams_on,
+    friendly_fire_on}` are always-`false` placeholders today; rung 3 must source them from the session
+    FSM so the collapsed toggle rows show real state.
+  - **In-world presence:** the game's own net sync takes over once `Ingame`.
+  - **Peer-map pruning on session-leave:** drop a departed peer from the side-channel's linked set when
+    the session roster shrinks.
 - **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password,
   evil session), PvP/friendly-fire/team toggles, rune-arc sharing, overhead player display
   (ping/SL/death-count), enemy/boss-rush modes, inbound-action host authorization. See [FEATURES.md](FEATURES.md).

@@ -241,6 +241,52 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
    richer design (per-peer colors, distance LOD to a dot, off-screen edge indicator, real
    name/ping/SL/death) rides on the co-op core. Full design + status: [NAMEPLATES.md](NAMEPLATES.md).
 
+## Shipped UI Behavior (Final State)
+
+How the rendered surfaces actually behave now, beyond the milestone plan above.
+
+### Actions tab: dynamic, collapsed, hidden-not-greyed
+
+The Actions tab renders from `unseamless_core::menu::action_rows(ctx) -> Vec<ActionRow>` (host-tested),
+**not** the static `Menu`. The rule is **hide by session state, disable by readiness**:
+
+- **Paired verbs collapse into one stateful row.** Lock⇄Unlock is a single row whose label *and* emitted
+  action flip on `ctx.world_locked`; PvP / PvP teams / Friendly fire each show `on`/`off` and emit the
+  single `Toggle*` action. So the player sees one row per concept, reflecting current state.
+- **Inapplicable rows are hidden, not greyed.** Solo (out of session) → `Open world` / `Join world`
+  (shown even at the title screen, enabled only once Steam is ready and in-game). In a session → `Leave
+  world`; as host, additionally the four collapsed toggles; a joiner sees only `Leave world`.
+- The toggle rows' state comes from `SessionContext.{world_locked, pvp_on, pvp_teams_on,
+  friendly_fire_on}`, which are **always-`false` placeholders** until rung 3 sources them from the
+  session FSM (see [COOP-CONNECTION.md](COOP-CONNECTION.md)). The actions themselves are still inert
+  pending rung 3.
+
+### Debug tab: detail panes independent of the summary
+
+The debug report is published by a game-thread feature only when the overlay says one is **wanted**
+(`crate::debug_panel::report_wanted`, true when the summary panel **or any detail pane** is showing),
+so the summary panel and a detail pane each light up the feed on their own; a detail pane no longer
+depends on the summary panel being open. The published snapshot is cached **per publish-version**: the
+publisher bumps a monotonic counter at its ~10 Hz cadence and the Present-thread overlay deep-clones a
+new report only when that counter advances, turning a per-frame clone of the whole report into a
+per-publish one.
+
+### Ailment display (rig-confirmed)
+
+The status section shows accrued ailment **buildup**, computed as `gauge_max - gauge` because
+`PlayerGameData.resistance_gauges[i]` is the resistance *remaining* (full at rest, depleting as buildup
+accrues), not the buildup itself. **Rig-confirmed:** a clean player reads "none building or active", and
+applying one ailment makes its buildup climb 0 → max. Only ailments that are building or procced are
+listed, so the panel stays quiet when clean.
+
+### Rendered strings are ASCII-only (font constraint)
+
+The overlay's crisp UI font is a **printable-ASCII subset of Spleen 8x16**, with no glyph for the em
+dash (`—`) or the ellipsis character (`…`), so either renders as a missing-glyph `?`. So **every
+user-facing banner/toast string must stay ASCII** (use `...`, not `…`; commas/parens, not em dashes).
+This is a standing constraint for anyone adding notification copy or diagnostic fields, and the
+diagnostic report is already built ASCII-only for the same reason (`crate::diag::build_report`).
+
 ## SDK Angle (At Pin `8c67a84`)
 
 - **No swapchain / Present / D3D12 / imgui / egui surface in the game-struct SDK** — confirmed by grep
@@ -269,9 +315,11 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
       ([ROADMAP.md](ROADMAP.md) > Won't-do). The call stays charted/callable (above) as a last-ditch
       escape hatch only.
 - [x] Wire `notifications.rs` into the render loop (shared state via `try_lock`; `tick` on a frame task).
-- [x] Wire `menu.rs` (actions) into the render loop + input (nav/activate → `MenuOutcome` → `actionq` →
-      game thread). Settings are shown read-only (synced/local); live editing deferred. Plus a live Log
-      tab (`logbuf`). **Backtick** toggles the window; text enlarged via `set_window_font_scale`.
+- [x] Wire the Actions tab into the render loop + input (nav/activate → `MenuOutcome` → `actionq` →
+      game thread). The tab renders from the dynamic `menu::action_rows(ctx)` (paired verbs collapsed,
+      inapplicable rows hidden; see "Shipped UI Behavior" above), not the static `Menu`. Settings are
+      shown read-only (synced/local); live editing deferred. Plus a live Log tab (`logbuf`). **Backtick**
+      toggles the window; text enlarged via `set_window_font_scale`.
 - [x] Decided egui vs imgui: **imgui via hudhook** (egui is hudhook-roadmap-only). Shipped on imgui;
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.

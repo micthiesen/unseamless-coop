@@ -104,6 +104,17 @@ the one genuinely hard step — driving the game's own session so players see ea
   handshake, `ConfigSync`, liveness, log-forward), already proven on `Loopback`/`TcpTransport`/the
   bridge. The driver mirrors received config into the live config and surfaces connect / version-
   mismatch / lost-contact events to the overlay ([`coop/notify`](../crates/unseamless-coop/src/notify.rs)).
+- **The handshake now authenticates the peer with a password-keyed proof before linking.** `Hello`
+  carries a per-session 16-byte `AuthNonce`; a new `Auth` message carries
+  `SHA-256(domain || verifier_id || prover_id || verifier_nonce || prover_nonce || password)`, which the
+  recipient recomputes and verifies. A peer is **not linked** (and none of its `ConfigSync` / session
+  actions / forwarded logs are honored) until its proof verifies; a wrong password raises a plain-voice
+  "Authentication failed with <peer> (wrong co-op password)" banner and never links. The proof is domain-separated
+  from the world-readable `lobby_discovery_token` (distinct domain tags), replay-resistant (fresh
+  per-session nonces) and reflection-resistant (bound to the directed peer-id pair). Both password-keyed
+  hashes live together in [`crypto.rs`](../crates/unseamless-core/src/crypto.rs); the wire `VERSION` is 6
+  (the `nonce` + `Auth` bumped it from 5), and `MIN_PASSWORD_LEN` is 8 (a short password is
+  offline-brute-forceable against this fast hash).
 - **Log-forwarding is now wired** ([`coop/forward.rs`](../crates/unseamless-coop/src/forward.rs)): a
   `ForwardLogger` tees records into a bounded queue that the driver drains through `Peer::forward_log`
   onto the wire (a forwarding *client* only; own-module lines are dropped to avoid a feedback loop).
@@ -122,6 +133,14 @@ the one genuinely hard step — driving the game's own session so players see ea
   given peer SteamID. Feed in the peer SteamID resolved by rung-4 lobby discovery; the **password
   derives the session AES key**.
 - This is what gives **in-world presence** (the game's own net sync takes over once `Ingame`).
+- **Rung 3 is also the apply layer for the UI that already ships.** The overlay's Open/Join/Leave
+  already drive the connection layer (lobby + the rung-2 side-channel), but they don't yet put players
+  in one another's *world*; that is rung 3. The host-only toggle verbs (Lock/Unlock/PvP/PvP
+  teams/Friendly fire) are surfaced but still **inert** ("not wired up yet"); rung 3 connects them to
+  real game calls. And the menu's collapsed toggle rows read `SessionContext.{world_locked, pvp_on,
+  pvp_teams_on, friendly_fire_on}`, which are always-`false` placeholders today; rung 3 must **source
+  those bits from the session FSM** so the rows show real state. Pruning a departed peer from the
+  side-channel's linked set on a roster shrink belongs here too.
 - Doable **without ERSC** via our own two instances + AOB-scan/hook of the `NetworkSession` vtable.
   ERSC observation stays an *optional accelerator* if blind RE stalls (restore the ERSC stack, watch
   one connect with external RE tooling — see [RUNTIME-RE.md](RUNTIME-RE.md)); the path does not

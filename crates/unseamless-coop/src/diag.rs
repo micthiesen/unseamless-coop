@@ -39,9 +39,9 @@ struct Vitals {
     fp: (u32, u32),
     stamina: (u32, u32),
     /// Status-ailment resistance *remaining* per ailment (indexed by [`AILMENTS`]) — `PlayerGameData`'s
-    /// `resistance_gauges`. RIG-INFERRED (not yet confirmed): this reads as the resistance LEFT, full at
-    /// rest and depleting as buildup accrues (procs near 0), NOT the accrued buildup. So accrued buildup =
-    /// `gauge_max - gauge`. See the open RIG-CONFIRM note in [`build_report`]'s status section.
+    /// `resistance_gauges`. RIG-CONFIRMED: this reads as the resistance LEFT, full at rest and depleting
+    /// as buildup accrues (procs near 0), NOT the accrued buildup. So accrued buildup = `gauge_max - gauge`.
+    /// See the rig-confirmed note in [`build_report`]'s status section.
     gauges: [u32; 7],
     /// Proc threshold (full resistance / max buildup) per ailment.
     gauge_max: [u32; 7],
@@ -227,13 +227,12 @@ pub fn build_report(title: &str) -> DiagnosticReport {
             // listed, so the panel stays quiet when you're clean and spotlights what's accumulating
             // during a test.
             //
-            // BUILDUP vs RESISTANCE-REMAINING, RIG-CONFIRM: `resistance_gauges[i]` is the resistance
-            // *remaining* (full at rest, depleting toward 0 as buildup accrues), NOT the accrued buildup —
-            // inferred from the rig observation that a clean player reads "312/312" on every ailment. So we
-            // display the accrued buildup `gauge_max - gauge` and only list an ailment once it's actually
-            // building (`buildup > 0`) or procced. To confirm on the rig: apply ONE ailment (e.g. stand in
-            // Scarlet Rot) and watch `buildup` climb 0 -> max. If it instead counts DOWN from max, the field
-            // is buildup-not-remaining and this `saturating_sub` must be inverted back to a raw read.
+            // BUILDUP vs RESISTANCE-REMAINING, RIG-CONFIRMED: `resistance_gauges[i]` is the resistance
+            // *remaining* (full at rest, depleting toward 0 as buildup accrues), NOT the accrued buildup.
+            // Confirmed on the rig: a clean player reads "312/312" on every ailment, and applying one
+            // ailment (standing in Scarlet Rot) makes the accrued buildup `gauge_max - gauge` climb 0 -> max
+            // as expected. So we display `gauge_max - gauge` and only list an ailment once it's actually
+            // building (`buildup > 0`) or procced.
             //
             // ORDER ASSUMED, rig-confirmable: the 7 gauges are labeled in the common ER status order
             // ([`AILMENTS`]). To verify/fix, watch which index climbs when that one ailment is applied —

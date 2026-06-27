@@ -30,6 +30,14 @@ Difficulty legend (rough, from our side of the rewrite):
 > overlay **menu** (`unseamless-core/menu.rs`). The actions below are the verbs; the trigger
 > mechanism is ours. See ARCHITECTURE.md > Divergences.
 
+> **Status: UI shipped, apply layer rung-3-gated.** The overlay Actions tab renders the live verbs from
+> `menu::action_rows(ctx)` (paired verbs collapsed into one stateful row, inapplicable rows hidden; see
+> [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). **Open World / Join world / Leave world are wired** to
+> the on-demand lobby-discovery connection (rungs 1/2/4; see [COOP-CONNECTION.md](COOP-CONNECTION.md)),
+> with a Steam-readiness gate. **Lock / Unlock / PvP / PvP teams / Friendly fire are surfaced but still
+> inert** ("not wired up yet"): rung 3 is the apply layer that connects them to real game calls and
+> sources their on/off state from the session FSM.
+
 From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
 - Open / Join / Lock / Unlock / Leave world
