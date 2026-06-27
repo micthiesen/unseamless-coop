@@ -114,8 +114,9 @@ don't *destroy* it (reset/stash/overwrite); it doesn't mean fence it out of your
 This repo can be developed as a one-orchestrator / many-worker fleet of Claude Code sessions over
 [rift](https://github.com/anomalyco/rift) copy-on-write workspaces, coordinated over tmux. **You are
 the orchestrator unless a worker role is injected** (workers launch with
-`--append-system-prompt-file docs/roles/worker.md`, which overrides this). The full design and the
-`scripts/fleet/` tooling are in [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The load-bearing split:
+`--append-system-prompt-file docs/roles/worker.md`, or `docs/roles/worker-solo.md` for a user-driven
+worker, which overrides this). The full design and the `scripts/fleet/` tooling are in
+[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The load-bearing split:
 
 - **Orchestrator (default, this session):** owns the rig, RE, and in-game validation; owns
   integration and the only commits to `main`; plans with Michael and manages the worker lifecycle

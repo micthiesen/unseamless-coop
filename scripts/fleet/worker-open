@@ -64,9 +64,16 @@ elif [ -d "$ws" ]; then
   hook_settings=()
   [ -f "$ws/scripts/fleet/hooks.settings.json" ] && \
     hook_settings=(--settings "$ws/scripts/fleet/hooks.settings.json")
+  # Re-apply the SAME overlay this worker spawned with. The role marker lives in the
+  # fleet dir (worker-new writes it); a solo (user-driven) worker must not be revived
+  # with the orchestrator-driven overlay. Absent marker == default worker (back-compat).
+  overlay_rel="docs/roles/worker.md"
+  if [ "$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)" = "solo" ]; then
+    overlay_rel="docs/roles/worker-solo.md"
+  fi
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-    claude -c "${hook_settings[@]}" --append-system-prompt-file "$ws/docs/roles/worker.md"
+    claude -c "${hook_settings[@]}" --append-system-prompt-file "$ws/$overlay_rel"
   pop_window
   # The revived instance is a fresh client, so its prompt-bar color was lost
   # (/color is per-session, never persisted) -- re-apply the worker's stable

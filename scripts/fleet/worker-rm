@@ -91,7 +91,7 @@ else
   echo "no workspace at $ws"
 fi
 
-rm -f "$FLEET_DIR/assignments/$name.md"
+rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
 # Drop the worker's message-transport registry (its maildir-style inbox dir + the
 # busy/idle state file the hooks stamp). Without this a torn-down worker lingers in
 # `inbox state` / `inbox ls` forever. Warn before discarding any mail that queued

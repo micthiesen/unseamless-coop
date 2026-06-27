@@ -30,10 +30,22 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   overrides the default framing. A worker owns: one lane of feature work, WIP commits to its own
   branch, and asking the orchestrator (by message) for anything serial. A worker **never** drives
   the rig and **never** commits to `main`.
+- **Solo worker** is the same overlay mechanism with a different file
+  (`docs/roles/worker-solo.md`, via `worker-new --solo`). It's **user-driven**: the human drives the
+  session interactively (no assignment file, no seed indirection), and it **stays silent toward the
+  orchestrator until the user says to hand off** — at which point it self-checks, consolidates to one
+  clean commit, and messages `usc-orch` (or, if none is running, reports the branch ready). Same
+  isolation, branch, and lifecycle as a normal worker (`worker-ls`/`open`/`integrate`/`rm` all work
+  on it unchanged); only the driver and the orchestrator-contact timing differ. This is the path for
+  *user-initiated* parallel work — carve a branch off, work it interactively, hand it back when ready
+  — without going through the orchestrator to start.
 
-The overlay files (`docs/roles/worker.md`, and any orchestrator-specific notes) are **tracked and
-read-only at runtime** (consumed via `--append-system-prompt-file`), so they COW into a workspace
-without ever being mutated there.
+The overlay files (`docs/roles/worker.md`, `docs/roles/worker-solo.md`, and any orchestrator-specific
+notes) are **tracked and read-only at runtime** (consumed via `--append-system-prompt-file`), so they
+COW into a workspace without ever being mutated there. Which overlay a worker spawned with is recorded
+in the `assignments/<name>.role` marker (in the shared fleet dir, **outside** every workspace, so it's
+never git-tracked and never COW-diverges) — `worker-open` reads it to revive a dead session with the
+right overlay, and `worker-rm` deletes it at teardown.
 
 ## Why rift, Not Git Worktrees
 
@@ -57,7 +69,8 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 ~/Code/unseamless-coop                      canonical repo  -> orchestrator (tmux: usc-orch)
 ~/Code/.rifts/unseamless-coop/<name>        worker workspace -> worker (tmux: usc-worker-<name>)
 ~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
-  ├─ assignments/<name>.md                  per-worker assignment (read at launch)
+  ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
+  ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
   ├─ inbox/<session>/<ts>-<pid>-<rand>.msg  per-session message inbox (maildir-style)
   ├─ state/<session>                        hook-stamped busy/idle + epoch
   └─ .msg.lock                              flock for serialized wake-pokes
@@ -236,7 +249,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 
 | Script | Does |
 |--------|------|
-| `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
+| `worker-new [--solo] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write a role marker, launch `claude` in `tmux usc-worker-<name>` with the worker overlay, then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file and seeds the session to read it. `--solo`: user-driven (`docs/roles/worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting for the user. |
 | `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): wakes any parked-idle session (worker or `usc-orch`) with the sentinel when its input box is empty, queues for a busy one or one with a draft in its box. Target restricted to `usc-*` sessions. |
 | `inbox {pop\|wait [timeout]\|ls\|state}` | `pop`/`wait` take messages off **your own** inbox (read-and-remove in one step — the only receive path; `wait` blocks until mail arrives, then pops); `ls` (pending counts) and `state` (busy/idle) are read-only. No command reads another session's bodies. |
 | `_hook <EVENT>` / `_inbox` | internal: the transport hook (drains inbox → `additionalContext` for the model + a user-only `systemMessage` on receive, stamps state) and the sourced primitives. Registered via `hooks.settings.json`; inert outside a fleet session. |

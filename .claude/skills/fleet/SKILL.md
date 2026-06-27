@@ -47,6 +47,25 @@ Keep workers in genuinely independent lanes when you can. They *may* touch the s
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
 
+### Solo (User-Driven) Workers
+
+```
+scripts/fleet/worker-new --solo <name> ["initial guidance"]
+```
+
+A **solo** worker is the same isolation, branch, and lifecycle, but **user-driven** instead of
+orchestrator-driven: Michael drives the session interactively, and it **stays silent toward you (the
+orchestrator) until he tells it to hand off** (its overlay is `docs/roles/worker-solo.md`). There's no
+assignment file and no "read your assignment" seed — guidance, if given, is passed as the session's
+first prompt directly; omit it to launch waiting for his first turn.
+
+This is Michael's path to spin up isolated parallel work himself without routing it through you. You
+mostly don't manage these — but when one hands off (it'll `msg` you `[worker:<name>] done: …; branch
+worker/<name> ready to integrate`, or Michael will point you at it), you integrate it **exactly like
+any other worker**: `worker-integrate <name>` → review → commit to `main`. `worker-ls`/`open`/`rm` all
+work on it unchanged (the `assignments/<name>.role` marker keeps `worker-open` reviving it with the
+right overlay).
+
 ## See What's Running
 
 ```
