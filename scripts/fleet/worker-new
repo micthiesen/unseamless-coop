@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# worker-new <name> [guidance...]
+# worker-new [--solo] <name> [guidance...]
 #
 # Materialize a worker: a rift copy-on-write workspace on its own branch, with a
 # Claude Code session running in a detached tmux session (popped open in
 # Alacritty), seeded to read its assignment. See docs/ORCHESTRATION.md.
 #
 #   worker-new boot-volume "Implement the boot_volume feature; see docs/FEATURES.md."
+#
+# --solo: a USER-DRIVEN worker. Michael drives the session interactively; it stays
+# silent toward the orchestrator until he hands off, revives with the worker-solo.md
+# overlay, and has no assignment file (guidance, if given, is its first prompt directly).
+#   worker-new --solo scratch
+#   worker-new --solo scratch "Start by refactoring the config loader."
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,10 +28,24 @@ else
   fleet_color_name() { :; }
 fi
 
+# --solo (user-driven) is an optional LEADING flag; everything after is the normal
+# <name> [guidance...].
+solo=0
+if [ "${1:-}" = "--solo" ]; then
+  solo=1; shift
+fi
+
 name="${1:-}"; shift || true
 if [ -z "$name" ]; then
-  echo "usage: worker-new <name> [guidance...]" >&2
+  echo "usage: worker-new [--solo] <name> [guidance...]" >&2
   exit 2
+fi
+
+# Role overlay (injected via --append-system-prompt-file) + the .role marker below:
+# solo (user-driven) vs the default orchestrator-driven worker.
+overlay_rel="docs/roles/worker.md"
+if [ "$solo" -eq 1 ]; then
+  overlay_rel="docs/roles/worker-solo.md"
 fi
 if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   echo "worker-new: name must be kebab-case [a-z0-9_-], got '$name'" >&2
@@ -85,34 +105,50 @@ else
   echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
 fi
 
-echo "==> assignment"
+# Role marker (outside the workspace, so it survives the COW copy): lets worker-open
+# revive with the right overlay and worker-ls/worker-prune tell solo from orchestrator.
 mkdir -p "$FLEET_DIR/assignments"
-assignment="$FLEET_DIR/assignments/$name.md"
-{
-  echo "# Worker Assignment: $name"
-  echo
-  echo "- **Your name:** \`$name\` (sign messages \`[worker:$name]\`)"
-  echo "- **Workspace:** \`$ws\`"
-  echo "- **Branch:** \`$branch\` (WIP-commit here freely; never commit to \`main\`)"
-  echo "- **Reach the orchestrator:** \`scripts/fleet/msg usc-orch \"[worker:$name] ...\"\`"
-  echo
-  echo "## Task"
-  echo
-  if [ -n "$guidance" ]; then
-    echo "$guidance"
-  else
-    echo "_(none provided at launch; the orchestrator will message you.)_"
-  fi
-} >"$assignment"
-echo "    $assignment"
+if [ "$solo" -eq 1 ]; then echo solo; else echo worker; fi >"$FLEET_DIR/assignments/$name.role"
+
+if [ "$solo" -eq 1 ]; then
+  # Solo: user-driven, no assignment-file indirection. Guidance (if any) is the first
+  # prompt directly; with none, the session launches waiting for Michael's first turn.
+  echo "==> solo (user-driven) worker; no assignment file"
+  seed="$guidance"
+else
+  echo "==> assignment"
+  assignment="$FLEET_DIR/assignments/$name.md"
+  {
+    echo "# Worker Assignment: $name"
+    echo
+    echo "- **Your name:** \`$name\` (sign messages \`[worker:$name]\`)"
+    echo "- **Workspace:** \`$ws\`"
+    echo "- **Branch:** \`$branch\` (WIP-commit here freely; never commit to \`main\`)"
+    echo "- **Reach the orchestrator:** \`scripts/fleet/msg usc-orch \"[worker:$name] ...\"\`"
+    echo
+    echo "## Task"
+    echo
+    if [ -n "$guidance" ]; then
+      echo "$guidance"
+    else
+      echo "_(none provided at launch; the orchestrator will message you.)_"
+    fi
+  } >"$assignment"
+  echo "    $assignment"
+  seed="Read $assignment for your assignment (you are worker:$name). Then begin."
+fi
 
 echo "==> launching Claude Code in tmux session $sess"
-if [ ! -f "$ws/docs/roles/worker.md" ]; then
-  echo "worker-new: $ws/docs/roles/worker.md missing -- the worker role overlay won't load." >&2
-  echo "            Commit docs/roles/worker.md so rift copies it into workspaces, then retry." >&2
+if [ ! -f "$ws/$overlay_rel" ]; then
+  echo "worker-new: $ws/$overlay_rel missing -- the worker role overlay won't load." >&2
+  echo "            Commit $overlay_rel so rift copies it into workspaces, then retry." >&2
   exit 1
 fi
-seed="Read $assignment for your assignment (you are worker:$name). Then begin."
+# The seed (set above per solo/non-solo) launches as a prompt ARG so it's never dropped.
+# Optional via seed_args so an empty solo seed passes nothing (not an empty "") and the
+# session launches waiting for the user's first turn.
+seed_args=()
+if [ -n "$seed" ]; then seed_args=("$seed"); fi
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
 # `--name` is a display badge only (prompt box / window title / resume picker); it
 # never resumes, so every spawn is a fresh session regardless of the badge.
@@ -129,7 +165,7 @@ tmux new-session -d -s "$sess" -c "$ws" \
   env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
   BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
   claude --name "usc-$name" \
-  --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
+  --append-system-prompt-file "$ws/$overlay_rel" "${seed_args[@]}"
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
@@ -149,13 +185,20 @@ if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
 fi
 
 echo
-echo "worker '$name' is up."
-echo "  message it:  scripts/fleet/msg $sess \"[orchestrator] ...\""
-echo "  integrate:   scripts/fleet/worker-integrate $name"
-echo "  remove:      scripts/fleet/worker-rm $name"
+if [ "$solo" -eq 1 ]; then
+  echo "solo (user-driven) worker '$name' is up. Drive it directly in its window."
+  echo "  integrate:   scripts/fleet/worker-integrate $name   (when you hand it off)"
+  echo "  remove:      scripts/fleet/worker-rm $name"
+  # No usc-orch nag: a solo worker intentionally stays silent toward the orchestrator.
+else
+  echo "worker '$name' is up."
+  echo "  message it:  scripts/fleet/msg $sess \"[orchestrator] ...\""
+  echo "  integrate:   scripts/fleet/worker-integrate $name"
+  echo "  remove:      scripts/fleet/worker-rm $name"
 
-if ! tmux has-session -t usc-orch 2>/dev/null; then
-  echo
-  echo "  NOTE: no 'usc-orch' session is running, so this worker's messages to the"
-  echo "        orchestrator will fail until you start one:  scripts/fleet/orch-start"
+  if ! tmux has-session -t usc-orch 2>/dev/null; then
+    echo
+    echo "  NOTE: no 'usc-orch' session is running, so this worker's messages to the"
+    echo "        orchestrator will fail until you start one:  scripts/fleet/orch-start"
+  fi
 fi

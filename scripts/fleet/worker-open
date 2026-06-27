@@ -44,7 +44,13 @@ if tmux has-session -t "$sess" 2>/dev/null; then
   echo "$sess is live; opening a window."
   pop_window
 elif [ -d "$ws" ]; then
-  echo "$sess is dead; reviving in $ws (claude -c)."
+  # Revive with the SAME overlay this worker spawned with (the .role marker worker-new
+  # wrote outside the workspace): a solo worker must not come back orchestrator-driven.
+  # Absent marker == default worker (back-compat).
+  role="$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)"; [ -n "$role" ] || role="worker"
+  overlay_rel="docs/roles/worker.md"
+  if [ "$role" = "solo" ]; then overlay_rel="docs/roles/worker-solo.md"; fi
+  echo "$sess is dead; reviving the $role worker in $ws (claude -c)."
   # Re-trust the workspace path so the worker's .claude/settings.json allow rules
   # load (an untrusted path drops them).
   trust_json="$HOME/.claude.json"
@@ -66,7 +72,7 @@ elif [ -d "$ws" ]; then
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-    claude -c --append-system-prompt-file "$ws/docs/roles/worker.md"
+    claude -c --append-system-prompt-file "$ws/$overlay_rel"
   pop_window
   # The revived instance is a fresh client, so its prompt-bar color was lost
   # (/color is per-session, never persisted) -- re-apply the worker's stable

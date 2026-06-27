@@ -47,6 +47,15 @@ Keep workers in genuinely independent lanes when you can. They *may* touch the s
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
 
+### Solo Workers
+
+Michael sometimes spins up his own **solo** (user-driven) workers alongside yours. You don't manage
+these — they stay silent toward you and just show up in `worker-ls` with ROLE `solo`. Leave them be
+until one hands off (it'll `msg` you that its branch is ready, or Michael will point you at it); then
+integrate it **exactly like any other worker** (`worker-integrate <name>` → review → commit to `main`)
+and **`worker-rm` it once integrated** — a solo lane is done when its work lands, so tear it down
+automatically unless Michael says to keep it.
+
 ## See What's Running
 
 ```

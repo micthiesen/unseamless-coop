@@ -30,10 +30,18 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   overrides the default framing. A worker owns: one lane of feature work, WIP commits to its own
   branch, and asking the orchestrator (by message) for anything serial. A worker **never** drives
   the rig and **never** commits to `main`.
+- **Solo worker** is the same overlay mechanism with a different file
+  (`docs/roles/worker-solo.md`, via `worker-new --solo`). It's **user-driven**: Michael drives the
+  session interactively (no assignment file; guidance, if any, is its first prompt directly), and it
+  **stays silent toward the orchestrator until he hands off** — then it's integrated like any other
+  worker. Same isolation, branch, and lifecycle (`worker-ls`/`open`/`integrate`/`rm`/`prune` all work
+  on it). Which overlay a worker spawned with is recorded in `assignments/<name>.role` (in the shared
+  fleet dir, outside every workspace, so it never COW-diverges) — `worker-open` reads it to revive
+  with the right overlay; `worker-rm`/`worker-prune` clean it.
 
-The overlay files (`docs/roles/worker.md`, and any orchestrator-specific notes) are **tracked and
-read-only at runtime** (consumed via `--append-system-prompt-file`), so they COW into a workspace
-without ever being mutated there.
+The overlay files (`docs/roles/worker.md`, `docs/roles/worker-solo.md`, and any orchestrator-specific
+notes) are **tracked and read-only at runtime** (consumed via `--append-system-prompt-file`), so they
+COW into a workspace without ever being mutated there.
 
 ## Why rift, Not Git Worktrees
 
@@ -57,7 +65,8 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 ~/Code/unseamless-coop                      canonical repo  -> orchestrator (tmux: usc-orch)
 ~/Code/.rifts/unseamless-coop/<name>        worker workspace -> worker (tmux: usc-worker-<name>)
 ~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
-  ├─ assignments/<name>.md                  per-worker assignment (read at launch)
+  ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
+  ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
   └─ insp/<session>.sock                    per-session inspector socket (messaging endpoint, 0700 dir)
 ```
 
@@ -212,14 +221,15 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 
 | Script | Does |
 |--------|------|
-| `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
+| `worker-new [--solo] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write a `.role` marker, launch `claude` in `tmux usc-worker-<name>` under `BUN_INSPECT` with the worker overlay, then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file + seeds the session to read it. `--solo`: user-driven (`worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting. |
 | `msg <session> "<text>"` | deliver the message as a live **user turn** in the target via its inspector socket (see Messaging): instant, queues if the target is mid-turn, preserves any draft in its box. Target restricted to `usc-*` sessions; fails loudly if the target has no live socket. |
 | `_inject` | internal: the one complex piece. Connects to a session's inspector socket, walks the live React tree to the prompt component, and calls `onSubmit` to submit a message (or a `/slash` command), saving+restoring the draft. `--selftest <session>` checks the structural anchors and exits nonzero if a Claude Code update moved them. |
 | `_color-inject <session> <color>` | internal, best-effort, detached: waits for the session's socket + prompt to be ready, then sends `/color <name>` through `_inject`. |
-| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. |
+| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. A **ROLE** column (`worker`/`solo`/`-`, from the `.role` marker) shows which are solo. |
 | `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
-| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
+| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the registry (assignment + `.role` marker + inspector socket). Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
 | `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
+| `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry (assignment + `.role` + inspector socket), for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
 
