@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# _hook <EVENT>   (Claude Code hook JSON on stdin)
+#
+# The drain side of the fleet message transport (see _inbox). Registered for a
+# fleet Claude session via `--settings scripts/fleet/hooks.settings.json`, which
+# runs `"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook" <EVENT>` on each lifecycle event.
+# It stamps the session's busy/idle state and drains the inbox into the model as
+# `additionalContext`, so a message is delivered without ever being typed into the
+# TTY.
+#
+# EVENT is one of: UserPromptSubmit | PostToolUse | Stop | SessionStart.
+#
+# Hard rule: ALWAYS exit 0 with (at most) a JSON object on stdout. A nonzero exit
+# or stray stderr from a hook can disrupt the session, and this hook fires on
+# every turn of every fleet session. It is also inert (immediate exit 0) outside a
+# fleet session -- gated on $UNSEAMLESS_FLEET_SESSION -- so committing the settings
+# can't affect ordinary Claude sessions in this repo.
+set -uo pipefail
+
+event="${1:-}"
+
+# Inert unless this is a fleet session, or if we can't format JSON safely. When we
+# bail we do NOT drain, so the inbox is preserved for a later, capable drain.
+[ -n "${UNSEAMLESS_FLEET_SESSION:-}" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/fleet/_inbox
+. "$SELF/_inbox"
+
+sess="$UNSEAMLESS_FLEET_SESSION"
+
+emit_context() {  # <event> <text>
+  jq -nc --arg ev "$1" --arg ctx "$2" \
+    '{hookSpecificOutput:{hookEventName:$ev, additionalContext:$ctx}}'
+}
+
+# Frame drained messages as inbound fleet mail. Conversational, not an out-of-band imperative
+# ("Act now" reads as an injected command and can trip Claude's prompt-injection defense).
+framed() {
+  printf '[fleet] You have message(s) from another fleet session. Read and respond to them:\n\n%s' "$1"
+}
+
+case "$event" in
+  PostToolUse)
+    # Keep the busy stamp fresh through a long turn so `msg` never mistakes an
+    # in-progress turn for a stalled one. No drain mid-turn (Stop handles that).
+    fleet_state_write "$sess" busy
+    exit 0
+    ;;
+
+  UserPromptSubmit)
+    fleet_state_write "$sess" busy
+    if drained="$(fleet_inbox_drain "$sess")"; then
+      emit_context UserPromptSubmit "$(framed "$drained")"
+    else
+      # No mail. If this prompt is a stray wake sentinel (a poke that raced a
+      # Stop which already drained), swallow it so it doesn't start an empty turn.
+      input="$(cat 2>/dev/null || true)"   # only UserPromptSubmit needs the stdin JSON
+      prompt="$(jq -r '.prompt // ""' <<<"$input" 2>/dev/null || true)"
+      if [ "$prompt" = "$FLEET_WAKE_SENTINEL" ]; then
+        jq -nc '{decision:"block", reason:"fleet: inbox already drained; nothing to deliver"}'
+      fi
+    fi
+    exit 0
+    ;;
+
+  Stop)
+    fleet_state_write "$sess" idle
+    # Drain on turn end. Returning additionalContext continues the conversation so the model
+    # acts on the mail (verified live on 2.1.195); when empty we emit nothing and the turn ends
+    # normally. Loop-safe because the drain removes the mail: the continuation's next Stop sees
+    # an empty inbox and stops.
+    if drained="$(fleet_inbox_drain "$sess")"; then
+      emit_context Stop "$(framed "$drained")"
+    fi
+    exit 0
+    ;;
+
+  SessionStart)
+    fleet_state_write "$sess" idle
+    if drained="$(fleet_inbox_drain "$sess")"; then
+      emit_context SessionStart "$(framed "$drained")"
+    fi
+    exit 0
+    ;;
+
+  *)
+    exit 0
+    ;;
+esac

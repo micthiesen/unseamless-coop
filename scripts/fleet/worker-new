@@ -86,7 +86,7 @@ else
 fi
 
 echo "==> assignment"
-mkdir -p "$FLEET_DIR/assignments" "$FLEET_DIR/payloads"
+mkdir -p "$FLEET_DIR/assignments"
 assignment="$FLEET_DIR/assignments/$name.md"
 {
   echo "# Worker Assignment: $name"
@@ -113,13 +113,27 @@ if [ ! -f "$ws/docs/roles/worker.md" ]; then
   exit 1
 fi
 seed="Read $assignment for your assignment (you are worker:$name). Then begin."
+# Fleet message-transport hooks (scripts/fleet/_hook), loaded only for this
+# session via --settings so they don't touch ordinary repo sessions. Guard the
+# path: if the workspace predates these files (uncommitted), just skip them --
+# msg still delivers via the inbox, only the auto-wake/idle-stamp is unavailable.
+hook_settings=()
+if [ -f "$ws/scripts/fleet/hooks.settings.json" ]; then
+  hook_settings=(--settings "$ws/scripts/fleet/hooks.settings.json")
+else
+  echo "    NOTE: $ws/scripts/fleet/hooks.settings.json missing; fleet hooks not loaded (commit them, then recreate)." >&2
+fi
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
 # `--name` is a display badge only (prompt box / window title / resume picker); it
 # never resumes, so every spawn is a fresh session regardless of the badge.
+# `env UNSEAMLESS_FLEET_SESSION=...` tags the session so _hook knows whose inbox to
+# drain; FLEET_DIR is propagated so the hook and msg agree on the same dir.
 # The seed stays a LAUNCH ARG so it can never be dropped; coloring (below) is
 # layered on separately and is purely best-effort.
 tmux new-session -d -s "$sess" -c "$ws" \
-  claude --name "usc-$name" --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
+  env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+  claude --name "usc-$name" "${hook_settings[@]}" \
+  --append-system-prompt-file "$ws/docs/roles/worker.md" "$seed"
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true

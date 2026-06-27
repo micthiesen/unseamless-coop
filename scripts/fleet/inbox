@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# inbox ls                 -- list pending message counts per session
+# inbox peek <session>     -- print pending messages for a session (non-destructive)
+# inbox state [<session>]  -- show the hook-stamped busy/idle state
+#
+# Read-only visibility into the fleet message transport (see _inbox). `peek` never
+# removes messages -- draining is the target session's job, via its hooks. Handy
+# for "what's queued for that worker?" and for debugging delivery.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/fleet/_inbox
+. "$SELF/_inbox"
+
+cmd="${1:-ls}"; shift || true
+
+case "$cmd" in
+  ls)
+    root="$UNSEAMLESS_FLEET_DIR/inbox"
+    [ -d "$root" ] || { echo "(no inboxes)"; exit 0; }
+    found=0
+    for d in "$root"/*/; do
+      [ -d "$d" ] || continue
+      sess="$(basename "$d")"
+      n="$(fleet_inbox_files "$sess" | wc -l | tr -d ' ')"
+      [ "$n" -gt 0 ] || continue
+      printf '%-28s %s pending\n' "$sess" "$n"
+      found=1
+    done
+    [ "$found" -eq 1 ] || echo "(all inboxes empty)"
+    ;;
+  peek)
+    sess="${1:-}"
+    [ -n "$sess" ] || { echo "usage: inbox peek <session>" >&2; exit 2; }
+    n=0
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      n=$((n + 1))
+      printf -- '--- message %d ---\n' "$n"
+      cat "$f"; printf '\n'
+    done < <(fleet_inbox_files "$sess")
+    [ "$n" -gt 0 ] || echo "(inbox empty for $sess)"
+    ;;
+  state)
+    sess="${1:-}"
+    if [ -n "$sess" ]; then
+      printf '%-28s %s\n' "$sess" "$(fleet_state_read "$sess")"
+    else
+      d="$UNSEAMLESS_FLEET_DIR/state"
+      [ -d "$d" ] || { echo "(no state recorded)"; exit 0; }
+      for f in "$d"/*; do
+        [ -f "$f" ] || continue
+        printf '%-28s %s\n' "$(basename "$f")" "$(cat "$f")"
+      done
+    fi
+    ;;
+  *)
+    echo "usage: inbox {ls | peek <session> | state [<session>]}" >&2
+    exit 2
+    ;;
+esac

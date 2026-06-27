@@ -11,6 +11,7 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 RIFTS="$HOME/Code/.rifts/$(basename "$REPO")"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 sess="usc-orch"
 
 # Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
@@ -30,10 +31,18 @@ if tmux has-session -t "$sess" 2>/dev/null; then
 fi
 
 cd "$REPO"
+# Fleet message-transport hooks, loaded only for this session (see worker-new).
+# The orchestrator drains its inbox via these hooks; msg never types into it.
+hook_settings=()
+if [ -f "$REPO/scripts/fleet/hooks.settings.json" ]; then
+  hook_settings=(--settings "$REPO/scripts/fleet/hooks.settings.json")
+fi
 # `--name` is a display badge only (never resumes); "$@" comes last so a
-# user-supplied --name overrides this default.
+# user-supplied --name overrides this default. `env UNSEAMLESS_FLEET_SESSION=...`
+# tags the session so _hook drains the orchestrator's inbox.
 tmux new-session -d -s "$sess" -c "$REPO" \
-  claude --name "usc-orch" --add-dir "$RIFTS" "$@"
+  env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+  claude --name "usc-orch" "${hook_settings[@]}" --add-dir "$RIFTS" "$@"
 # Reserved orchestrator color (red), best-effort and ONLY on a fresh start (this
 # branch) -- the attach-existing path above leaves a running session untouched.
 # Detached, so the attach below is never delayed by the injector's idle-wait.

@@ -11,6 +11,7 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
 # Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
 # source so a future merge that drops the helper can't break a revive.
@@ -57,9 +58,15 @@ elif [ -d "$ws" ]; then
   fi
   # Re-apply the worker overlay: --append-system-prompt-file is a launch-time
   # system prompt, NOT stored in the conversation, so `claude -c` alone would drop
-  # it and the revived session would fall back to the orchestrator default.
+  # it and the revived session would fall back to the orchestrator default. The
+  # fleet env tag + hook settings must also be re-applied (launch-time, not stored)
+  # so the revived worker drains its inbox; SessionStart drains anything pending.
+  hook_settings=()
+  [ -f "$ws/scripts/fleet/hooks.settings.json" ] && \
+    hook_settings=(--settings "$ws/scripts/fleet/hooks.settings.json")
   tmux new-session -d -s "$sess" -c "$ws" \
-    claude -c --append-system-prompt-file "$ws/docs/roles/worker.md"
+    env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+    claude -c "${hook_settings[@]}" --append-system-prompt-file "$ws/docs/roles/worker.md"
   pop_window
   # The revived instance is a fresh client, so its prompt-bar color was lost
   # (/color is per-session, never persisted) -- re-apply the worker's stable

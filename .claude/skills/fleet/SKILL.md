@@ -14,8 +14,8 @@ user_invocable: true
 # Fleet (Orchestrator Playbook)
 
 You are the **orchestrator** (the default role; see [CLAUDE.md](../../../CLAUDE.md) >
-"Orchestrator / worker fleet"). This is the operational how-to. The design and the invariants are in
-[docs/ORCHESTRATION.md](../../../docs/ORCHESTRATION.md); read it once if you haven't.
+"Orchestrator / worker fleet"). This is the operational how-to — everything you need to run the
+fleet is here.
 
 The whole point: **workers build features in parallel; you own everything serial** (the rig, RE,
 in-game validation, integration, and the only commits to `main`). Spawning workers is optional, not
@@ -75,10 +75,11 @@ scripts/fleet/msg usc-worker-<name> "[orchestrator] <text>"
 ```
 
 - Always prefix `[orchestrator]` so the worker knows it's you and not Michael typing.
-- Idle worker -> the message starts a new turn (wakes it). Busy worker -> it queues as the next
-  input. Both are fine; a message to a busy worker just isn't instant.
-- Long content is auto-spilled to a file with a short "read <path>" pointer, so paste freely.
-- Don't try to *interrupt/redirect* a busy worker by message (Esc-race). For a hard redirect, attach
+- Just use the CLI; `msg` handles delivery itself (you never manage waking a session). A message to
+  an idle worker arrives right away; to a busy worker it lands at the end of its current turn.
+- Inspect what's queued / who's busy: `scripts/fleet/inbox ls`, `inbox peek usc-worker-<name>`,
+  `inbox state`.
+- Don't *interrupt/redirect* a busy worker by message. For a hard redirect, attach
   (`tmux attach -t usc-worker-<name>`) and do it by hand.
 
 **Answering a worker's serial request is your core job.** When a worker messages you (it arrives in

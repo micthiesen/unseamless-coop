@@ -1,0 +1,17 @@
+{
+  "//": "Fleet message-transport hooks. Loaded only by fleet sessions via `claude --settings scripts/fleet/hooks.settings.json` (worker-new / orch-start / worker-open), so ordinary Claude sessions in this repo are unaffected. The hook command is also inert unless $UNSEAMLESS_FLEET_SESSION is set. $CLAUDE_PROJECT_DIR resolves to each session's own workspace, so a worker runs its own copy of _hook. See scripts/fleet/_hook and docs/ORCHESTRATION.md.",
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" UserPromptSubmit" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" PostToolUse" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" Stop" } ] }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/scripts/fleet/_hook\" SessionStart" } ] }
+    ]
+  }
+}

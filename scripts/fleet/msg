@@ -1,27 +1,40 @@
 #!/usr/bin/env bash
 # msg <tmux-session> <text...>   (or pipe text on stdin)
 #
-# Deliver a message to another Claude Code session by typing into its tmux pane
-# (the `wt claude send` pattern). An idle session starts a new turn (wakes it); a
-# busy session queues it as the next input. Multi-line or long messages are
-# spilled to a file in the shared fleet dir and replaced with a short "read <path>"
-# pointer, so a stray newline can't submit half a message and a giant paste can't
-# garble the input. A flock serializes concurrent sends to the same pane.
+# Deliver a message to another fleet Claude session. The message is written to the
+# target's **inbox** (a file), not typed into its TTY; a lifecycle hook (_hook)
+# drains the inbox into the model as injected context. So a worker message can
+# never clobber what you're typing into the orchestrator -- message content never
+# touches stdin.
 #
-# Convention: prefix cross-session messages with their source, e.g.
+# Delivery is guaranteed by the inbox: the target drains it on its next turn end
+# (Stop), next prompt submit (UserPromptSubmit), or next start (SessionStart). For
+# a *parked-idle worker* -- which no hook would otherwise fire on -- `msg` also
+# types a single fixed wake sentinel to start a turn (the only thing ever typed,
+# and only when it's safe). It never types into the orchestrator (the session a
+# human drives) and never into a session someone is actively composing in.
+#
+# The CLI is unchanged; callers don't think about waking anything. Convention:
 #   msg usc-orch         "[worker:auth] need a rig run for the save hook"
 #   msg usc-worker-auth  "[orchestrator] rig says the hook fired; proceed"
 set -euo pipefail
 
-FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/fleet/_inbox
+. "$SELF/_inbox"
+
+# A busy stamp newer than this many seconds is trusted (Stop will deliver, so no wake needed).
+# Older -> treat as possibly-stalled and wake anyway (a redundant wake to a still-busy session is
+# harmless: the stray sentinel is swallowed). Set well above the worst-case single tool call (a
+# release cross-compile / test run), since PostToolUse only refreshes the stamp *between* tools.
+BUSY_TTL=600
 
 sess="${1:-}"; shift || true
 if [ -z "$sess" ]; then
   echo "usage: msg <tmux-session> <text...>   (or pipe text on stdin)" >&2
   exit 2
 fi
-# Only ever target fleet sessions, so a typo/confusion can't type into an
-# unrelated shell pane (an auto-approved send-keys-into-anything primitive).
+# Only ever target fleet sessions, so a typo can't deliver into an unrelated pane.
 if ! [[ "$sess" =~ ^usc-(orch|worker-[a-z0-9][a-z0-9_-]*)$ ]]; then
   echo "msg: refusing target '$sess' -- only fleet sessions (usc-orch, usc-worker-<name>) allowed" >&2
   exit 2
@@ -29,28 +42,50 @@ fi
 if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 
+# 1) Durable delivery: append to the inbox first, always. Everything below is just
+#    deciding whether to actively wake the target sooner.
+printf '%s' "$text" | fleet_inbox_append "$sess"
+
 if ! tmux has-session -t "$sess" 2>/dev/null; then
-  echo "msg: no live tmux session '$sess'" >&2
-  exit 1
+  echo "msg: queued to $sess inbox (session offline; delivers on its next start)"
+  exit 0
 fi
 
-mkdir -p "$FLEET_DIR/payloads"
-exec 9>"$FLEET_DIR/.msg.lock"
-flock 9
+# The orchestrator is the human-attended session: never type into it. It drains on
+# its next turn end or your next prompt -- so it can't clobber your typing.
+if [ "$sess" = "usc-orch" ]; then
+  echo "msg: queued to usc-orch inbox (delivers on its next turn / your next prompt)"
+  exit 0
+fi
 
-send() {
-  # -l sends the text literally; -- stops tmux treating a message that starts
-  # with '-' as a flag (which would silently drop it).
-  tmux send-keys -t "$sess" -l -- "$1"
+# Worker: wake it only if it won't otherwise drain promptly. Pre-default so a torn/empty state
+# read can't abort under `set -e` and falls through to the (safe) wake path.
+st=idle; ts=0
+read -r st ts _ < <(fleet_state_read "$sess") || true
+now="$(date +%s)"
+if [ "$st" = "busy" ] && [ $((now - ts)) -lt "$BUSY_TTL" ]; then
+  echo "msg: queued to $sess inbox (worker busy; delivers at end of its current turn)"
+  exit 0
+fi
+
+if fleet_session_composing "$sess"; then
+  echo "msg: queued to $sess inbox (someone is typing in it; delivers on their submit)"
+  exit 0
+fi
+
+# Parked idle (or a stale busy stamp): start a turn so the UserPromptSubmit hook drains the inbox
+# now. The message is already durably queued, so a wake-poke failure is not a delivery failure --
+# degrade to success (it'll drain on the target's next lifecycle event). Serialize the keystrokes
+# against concurrent senders. -l sends literally; -- guards a leading '-'; Enter is a separate key
+# so the sentinel submits as its own input line.
+mkdir -p "$UNSEAMLESS_FLEET_DIR"
+if {
+  exec 9>"$UNSEAMLESS_FLEET_DIR/.msg.lock"
+  flock 9
+  tmux send-keys -t "$sess" -l -- "$FLEET_WAKE_SENTINEL"
   tmux send-keys -t "$sess" Enter
-}
-
-if [[ "$text" == *$'\n'* ]] || [ "${#text}" -gt 800 ]; then
-  f="$(mktemp "$FLEET_DIR/payloads/msg-XXXXXX.md")"
-  printf '%s\n' "$text" >"$f"
-  send "(message waiting) read $f and respond to it"
-  echo "msg: long message -> $f (pointer sent to $sess)"
+}; then
+  echo "msg: delivered to $sess inbox + woke it (was idle)"
 else
-  send "$text"
-  echo "msg: sent to $sess"
+  echo "msg: queued to $sess inbox (wake-poke failed; delivers on its next lifecycle event)"
 fi
