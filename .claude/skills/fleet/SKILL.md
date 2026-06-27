@@ -106,6 +106,22 @@ validation: run it yourself, serialized against the single rig (see the `/test-l
 `/reverse-engineer` skills), then reply with `msg usc-worker-<name> "[orchestrator] <result>"`. Never
 hand the rig to a worker.
 
+**Let Michael watch/control a worker from his phone.** When Michael asks to *watch*, *view*, *follow*,
+or *remote-control* a worker (especially "from my phone"), inject the remote-control command into that
+worker so he doesn't have to type a slash command on mobile:
+
+```
+scripts/fleet/msg usc-worker-<name> "/rc"
+```
+
+- **No `[orchestrator]` prefix** — this is the one exception to the always-prefix rule. `/rc` (alias
+  `/remote-control`) must arrive verbatim as the worker's input so it runs as a slash command; a prefix
+  turns it into plain text and it won't trigger. Send exactly `/rc` (or `/remote-control`), nothing else.
+- That command is what opens the worker for viewing/control from Michael's phone. Trigger on phrases
+  like "let me watch <name>", "I want to view the worker", "follow it from my phone", "remote into it".
+- It's just another `msg` injection (live turn), so the usual delivery rules apply (idle → instant,
+  busy → queued).
+
 ## Integrate A Worker's Branch
 
 When a worker says it's done:
