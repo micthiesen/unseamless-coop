@@ -12,8 +12,9 @@ talking to Steam.
 > log forwarding). The side-channel finds its peer by **password-keyed Steam lobby discovery** (rung 4):
 > both players share a password, the one who picks **Open World** creates the lobby and the one who picks
 > **Join world** enters it. The role is the user's **choice**, not derived — only the host ever creates a
-> lobby. (The joiner-finds-host leg across two machines is still pending the two-player friend test; solo
-> create+poll is rig-proven.) None of this yet puts players in one another's *world* — that's the
+> lobby. (The joiner-finds-host leg + the rung-2 link across two machines were **CONFIRMED in the
+> 2026-06-27 friend test**: `coop: linked … versions match`, sent 2674 / received 2011 messages.) None of
+> this yet puts players in one another's *world* — that's the
 > game-session RE (rung 3). This doc is the spec for the rest, written for session handoff. Everything
 > game-internal is grounded in the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the
 > rig (per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
@@ -158,7 +159,7 @@ the one genuinely hard step — driving the game's own session so players see ea
   [RIG-RUNBOOK.md](RIG-RUNBOOK.md) "observation run" becomes executable *with our mod*), and the
   side-channel can optionally migrate in-band to `broadcast_packet`.
 
-### Rung 4 — Discovery / lobby (the live connection path) — **SHIPPED (joiner leg pending the friend test)**
+### Rung 4 — Discovery / lobby (the live connection path) — **SHIPPED + CONFIRMED (2026-06-27 friend test)**
 - Password-keyed **Steam lobby** discovery, the **only** way the side-channel finds its peer (there is
   no manual SteamID exchange). The host (Open World) sets lobby data = password hash; the joiner (Join
   world) filters the lobby list by it. Steam's matchmaking lobby API makes this largely turnkey *at the
@@ -211,8 +212,9 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
   diagnostics when a poll comes back empty.)
 - **Rig-confirmed:** `CreateLobby` **succeeds in-process** — EResult OK, a real lobby id, polled out
   via `GetAPICallResult`. The host leg works. The **joiner-finds-host leg** (filter → list → join →
-  resolve owner SteamID) is authored but still needs the **two-player friend test** to confirm
-  end-to-end (see [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
+  resolve owner SteamID) is now **CONFIRMED end-to-end in the 2026-06-27 friend test**: the host
+  resolved the joiner on its password-keyed lobby and the side-channel linked (see
+  [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
 
 > Re-derive note (per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results"): to re-confirm
 > the dispatch model after a game update, dump `eldenring.exe`'s imports
@@ -242,8 +244,8 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
 3. ✅ **DLL hand-bind (shipped)** — the poll-based `ISteamUtils`/`ISteamMatchmaking` path is bound in
    `coop/steam.rs` (the register-based `CCallbackBase` machinery is gone), driven on demand by the
    Open World / Join world actions and feeding the resolved host SteamID + chosen role into the
-   side-channel. Solo `CreateLobby` is rig-proven; the **joiner-finds-host leg** is the one piece still
-   pending the two-player friend test.
+   side-channel. Solo `CreateLobby` is rig-proven, and the **joiner-finds-host leg is CONFIRMED** (the
+   2026-06-27 friend test linked two machines) — rung 4 is verified end-to-end.
 
 ## Steam integration: hand-bind the flat C API at runtime (do NOT take the crate)
 
@@ -344,21 +346,19 @@ path now exists and lights up the moment two modded games link.
 
 ## Concrete next step
 
-Rungs 1, 2, and 4 are shipped (`coop/steam.rs` + `coop/coop.rs` + `coop/forward.rs`); rung 4's solo
-half is rig-proven (`CreateLobby` succeeds, polled). The immediate next action is the **two-player
-friend test** — a *single* lobby-discovery run that exercises rungs 2 and 4 together (full recipe in
-[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)): both players set the **same password**, one opens a
-world (Open World) and the other joins it (Join world), and we confirm the joiner finds the host's
-lobby, the peer SteamID + role resolve, and the side-channel links — the `coop_connect` report should
-walk
-`linking → linked`, an overlay "Co-op partner connected" toast should fire, the client should adopt the
-host's config, and (with `forward_to_host`) the host's `LogBundle` should pick up the client's lines.
-Watch the NAT/auth open question (the peers may need to be Steam friends).
+Rungs 1, 2, and 4 are shipped and **CONFIRMED live across two machines** (2026-06-27 friend test): a
+single lobby-discovery run linked the side-channel (`coop: linked … versions match`; `coop_connect`
+showed lobby created, host-id resolved, handshake reached, sent 2674 / received 2011). The peers were
+Steam friends here; whether non-friends can link is still open but didn't block. So the
+out-of-band connection stack is done and verified.
 
-**That same friend session also feeds rung 3.** With two real instances connected, turn on
-`[debug.probes] session_probe` and Frida-watch our own `CSSessionManager.lobby_state` while the friend
-hosts once and joins once — charting the create/join initiation functions (the runbook folds this in).
-One good friend session moves rungs 2, 4, **and** 3.
+**Rung 3 did NOT come for free in that session, and we learned why.** "Open World / Join world" drive the
+*side-channel*, not the game's `CSSessionManager` FSM — it stayed `lobby=None`. We tried to trigger the
+game's own multiplayer (to chart create/join), but the **in-game multiplayer items are greyed out
+offline** (outside EAC, FromSoft matchmaking is unreachable, so ER disables the multiplayer UI). So the
+immediate rung-3 work is to **re-enable those items offline** (an RE/patch — the way ERSC does) so an
+item-use fires the FSM for the write-watch in `docs/SESSION-RE-RUNBOOK.md`, *or* drive the create/join
+functions directly. Until then, rung 3 stays the headline-next.
 
 Once the create/join functions are charted, build **rung 3** proper — drive the *game's* session
 (`CSSessionManager` → `Host`/`Client`) so players see each other in-world. Rungs 2+4 give us the linked

@@ -72,6 +72,15 @@ Correlate them by frame/timestamp — together they are the before/after of an i
 
 ### 0. Arrange the run
 
+> **Blocker found (2026-06-27 friend test):** triggering the FSM the *normal* way — using an in-game
+> multiplayer item (summon sign / Furled Finger) — does NOT work, because ER **greys those items out when
+> launched offline / outside EAC** (FromSoft matchmaking is unreachable, so the multiplayer UI is
+> disabled). "Open World / Join world" drive only our side-channel, not the game's `CSSessionManager`, so
+> they leave `lobby_state = None`. So before this recipe can fire, you need to either **re-enable the
+> offline multiplayer items** (find + patch ER's offline-disable check, the way ERSC does) so an item-use
+> moves the FSM, **or** drive the create/join functions directly. Re-enabling the items looks like the
+> cheaper unlock.
+
 - Set `[debug.probes] session_probe = true` in the seed config (`scripts/rig/seed-config.toml`), then
   `scripts/rig.sh apply` + launch. (`[debug] enabled = true` is already on in the seed, so the
   `session-probe:` lines — which are `info` — are captured.)

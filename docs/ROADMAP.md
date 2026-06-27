@@ -52,12 +52,16 @@ Shipped to `main`, rig-verified where applicable:
 
 ## Wave 2 — in progress
 
-The out-of-band connection stack (rungs 1, 2, 4) is shipped and the connection UX, peer auth, and menu
-redesign landed this session. **Rung 3, driving the game's own session so players see each other
-in-world, is the headline-next** (see below). The one thing the rig can't do alone, the **two-player
-friend test**, is still pending (no second player available yet); it confirms the joiner-finds-host leg
-of rung 4 and the rung-2 link across two machines in one session. See
-[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
+The out-of-band connection stack (rungs 1, 2, 4) is shipped and **now CONFIRMED live across two real
+machines** in the first two-player friend test (2026-06-27): the joiner-finds-host leg of rung 4 and the
+rung-2 side-channel link both work (`coop: linked … versions match`; the `coop_connect` report showed
+`lobby_created`, `host_id resolved`, `handshake reached`, `version match`, and sent 2674 / received 2011
+messages bidirectionally). So rungs 1, 2, 4 are done *and verified peer-to-peer*. **Rung 3, driving the
+game's own session so players see each other in-world, is the headline-next** (see below). Two findings
+from that session: the in-game multiplayer items are **greyed out offline** (outside EAC), so the rung-3
+FSM can't be triggered the normal way — the likely unlock is re-enabling them (an RE/patch, like ERSC);
+and the **overlay crashes on native Windows** (hudhook DX12), a pre-release blocker now under
+investigation. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 
 ### Solo / host-doable (no 2nd player needed)
 
@@ -81,8 +85,9 @@ of rung 4 and the rung-2 link across two machines in one session. See
   - ✅ **DLL hand-bind (shipped).** The **poll-based** `ISteamUtils`/`ISteamMatchmaking` path is bound in
     `coop/steam.rs` (the register-based `CCallbackBase` machinery is gone), driven on demand by the Open
     World / Join world actions and seeding the rung-2 side-channel from the resolved host SteamID + chosen
-    role. Solo `CreateLobby` is rig-proven; the **joiner-finds-host leg** is the one piece still pending
-    the two-player friend test (see [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
+    role. Solo `CreateLobby` is rig-proven, and the **joiner-finds-host leg is now CONFIRMED** in the
+    2026-06-27 friend test (the host resolved the joiner's lobby and linked) — rung 4 is fully verified
+    end-to-end (see [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
 - **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
   `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
@@ -96,11 +101,12 @@ of rung 4 and the rung-2 link across two machines in one session. See
 
 ### 2-player-gated (the co-op core + everything riding on it)
 
-- **Rung 2 verification** — confirm the private Steam P2P side-channel links across two machines
-  (NAT/auth; whether peers must be Steam friends). Implementation is done + harness-proven. There is no
-  manual peer pairing — the side-channel is seeded by rung-4 lobby discovery, so this verification rides
-  the lobby-discovery friend test (one player opens a world, the other joins) rather than a hand-entered
-  peer. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
+- **Rung 2 verification — DONE (2026-06-27 friend test).** The private Steam P2P side-channel links
+  across two real machines: the NAT/auth/handshake completed and versions matched (`coop: linked`),
+  with substantial bidirectional traffic (sent 2674 / received 2011). The peers were Steam friends in
+  this run; whether non-friends can link is still untested but didn't block here. No manual peer
+  pairing — the side-channel was seeded by rung-4 lobby discovery (one opened a world, the other
+  joined), exactly as designed. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 - **Rung 3: drive the session FSM (the headline-next).** RE the create/join functions that move
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on,

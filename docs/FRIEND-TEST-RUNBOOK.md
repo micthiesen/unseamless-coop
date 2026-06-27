@@ -1,5 +1,13 @@
 # Two-Player Friend-Test Runbook
 
+> **Status — first run done (2026-06-27):** rungs **2 + 4 CONFIRMED** (`coop: linked … versions match`;
+> `coop_connect` showed lobby created, host-id resolved, handshake reached, sent 2674 / received 2011).
+> **Rung 3 not captured** — the in-game multiplayer items are **greyed out offline** (outside EAC), so the
+> game's own session FSM couldn't be triggered the normal way; re-enabling those items (an RE/patch) is the
+> likely unlock. Also surfaced: the **overlay crashes on native Windows** (hudhook DX12) — the friend ran
+> `[debug] overlay = false` + `[debug] auto_session = "join"` (headless connect) to get around it; fixing
+> the overlay is a pre-release blocker (under investigation).
+
 The recipe for the **one** thing the rig can't do alone: a real second player. It is built to move
 three rungs in a single friend session —
 
