@@ -63,13 +63,18 @@ struct HookSite {
 // ---------------------------------------------------------------------------------------------------
 // RIG TODO (rung 3): the create/join initiation function entries are not charted by the SDK and can
 // only be found with the game running. Until then both sites are `None` and the hook half is inert
-// (the FSM logger above still works solo). To chart them, follow docs/SESSION-RE-RUNBOOK.md:
-//   1. Catch the instruction that writes `CSSessionManager.lobby_state` (struct offset +0xc; the
-//      vftable is 8 bytes + `unk8` u32, so the FSM pair is at +0xc/+0x10, NOT +0x8) to
-//      `TryToCreateSession` (1) / `TryToJoinSession` (4) — e.g. a `C7 4? 0C 01 00 00 00` /
-//      `C7 4? 0C 04 00 00 00` store, or via a Frida write-watch on `&lobby_state` (base + 0xc).
+// (the FSM logger above still works solo). A static pass (docs/SESSION-RE-FINDINGS.md) charted the
+// supporting anchors and proved this must be a *runtime write-watch*, not a static byte scan:
+//   - The live `CSSessionManager` is `[0x143d7a4d0]`, == the `base` the FSM logger prints below.
+//   - `lobby_state` (+0xc; the vftable is 8 bytes + `unk8` u32, so the FSM pair is at +0xc/+0x10, NOT
+//     +0x8) is written on the singleton by a *register* store, never an immediate — so scanning for
+//     `C7 4? 0C 01/04` finds only unrelated objects (it was tried; see the findings doc).
+// To chart, follow docs/SESSION-RE-RUNBOOK.md > step 2 (strategy A):
+//   1. Frida-watch a 4-byte write on `base + 0xc`; host once (→1 = create) and join once (→4 = join).
+//      The watch names the writing instruction on the first `None →` edge.
 //   2. Walk back to the enclosing function's prologue; translate ~16 unique entry bytes to a pelite
-//      pattern (one `?` per wildcard byte).
+//      pattern (one `?` per wildcard byte). Mind that the writer is a `this`-param callee — hook the
+//      outermost initiation entry the host/join path calls, per the captured stack.
 //   3. Set the const below to `Some(HookSite { landmark: pattern!("…"), offset: …, expect: 0x.. })`
 //      and rebuild. `install_hooks` then resolves + hooks it; watch for the `session-probe: hooked …`
 //      line, then the `session-probe: create-session initiated …` line on a real connect.

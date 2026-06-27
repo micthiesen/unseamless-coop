@@ -84,18 +84,31 @@ de-risks and times the next step).
 ### 2. Find the two initiation functions
 
 The goal is the entry point of the function that performs the `lobby_state` store to
-`TryToCreateSession` (1) / `TryToJoinSession` (4). Candidate strategies, cheapest first:
+`TryToCreateSession` (1) / `TryToJoinSession` (4).
 
-- **A — write-watch (most direct).** With Frida-gadget attached (RUNTIME-RE.md, Option B), set a
-  memory-write watch on `&CSSessionManager.lobby_state` = `base + 0xc` (the base is in the
-  `session-probe: FSM live …` line). Trigger a host/join; the watch reports the instruction that
-  writes `1`/`4`. Walk up to the enclosing function prologue → that entry is the hook site.
+> **Read [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) first.** A static pass (2026-06-27) already
+> charted the live `CSSessionManager` instance global (`G = 0x143d7a4d0`, so `[G]` is the manager;
+> equivalently the `base` the FSM probe prints), the constructor (`0x140cabb60`), and the field
+> offsets — and **proved strategy B below does not work on this build** (the transition is a register
+> store, not an immediate; the immediate `+0xc` stores all land on unrelated reflection/`"FACE"`
+> objects). So go straight to the write-watch; the findings doc hands you `base + 0xc` directly.
 
-- **B — store-site AOB.** Statically scan the runtime image for the store of the enum constant into
-  the field. A `mov dword ptr [reg+0xc], 1` is `C7 4? 0C 01 00 00 00` (and `… 04 …` for join); a
-  longer displacement form is `C7 8? 0C 00 00 00 01 00 00 00`. Disambiguate the right one by checking
-  that `[reg+0xc]` is the lobby field of *this* object (the function nearby also touches `+0x10` =
-  `protocol_state`, and `session_player_limit` at `+0x170`). Walk back to the prologue.
+Strategies, in the order that now actually pays off:
+
+- **A — write-watch (the route).** With Frida-gadget attached (RUNTIME-RE.md, Option B), set a 4-byte
+  memory-write watch on `&CSSessionManager.lobby_state` = `base + 0xc` (the `base` is in the
+  `session-probe: FSM live …` line, and equals `[0x143d7a4d0]`). Trigger a host/join; the watch
+  reports the instruction that writes `1`/`4` on the first `None →` edge (use the probe's transition
+  line to ignore later copies in the session-assignment family). Walk up to the enclosing function
+  prologue → that entry is the hook site. Solo reaches the **host/create** edge only; **join** needs
+  a peer (folds into the two-player friend test).
+
+- **B — store-site AOB (does NOT work on the current build; kept as a record).** Statically scanning
+  for `mov dword ptr [reg+0xc], 1` (`C7 4? 0C 01 00 00 00`, or the `C7 8? …` disp32 form) was the
+  original plan, but on the 2026-06-02 exe every such immediate store is on an unrelated object and
+  the real `lobby_state` writes are register stores in `this`-param callees — see
+  [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) > "Why static stops here." Don't burn time re-running
+  it unless a future patch changes how the field is written.
 
 - **C — ERSC accelerator (optional).** If blind RE stalls, restore the real ERSC stack
   (`scripts/rig.sh restore`) and Frida-watch the same `base + 0xc` write while ERSC connects, to see
