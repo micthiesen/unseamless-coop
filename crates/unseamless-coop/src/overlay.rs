@@ -178,8 +178,8 @@ struct Overlay {
     /// so the game-thread publisher only does work while it's shown. Present-thread only.
     show_debug: bool,
     /// Per-[`DEBUG_CATEGORIES`] toggles: whether each category's full detail is shown in the bottom-right
-    /// detail pane. All off by default; set from the Debug tab. Only has visible effect while `show_debug`
-    /// is on. Present-thread only.
+    /// detail pane. All off by default; set from the Debug tab. Each drives its pane independently of
+    /// `show_debug` — a detail pane can be up with the summary panel off, and vice versa. Present-thread only.
     debug_details: [bool; DEBUG_CATEGORIES.len()],
     /// Cursor into the Debug tab's row list — the debug-panel on/off toggle at index 0, then one row per
     /// [`DEBUG_CATEGORIES`] entry (the detail toggles). Like [`actions_sel`], owns selection so arrow/d-pad
@@ -284,11 +284,15 @@ impl Overlay {
         if !crate::playstate::in_gameplay() && !self.show_debug {
             self.draw_watermark(ui);
         }
-        // Live debug panel (bottom-left): shown whenever toggled on, including during gameplay (unlike
-        // the watermark). Mirror its visibility to the game thread every frame so the publisher only
-        // does work while it's shown; then draw from the snapshot it posts.
-        crate::debug_panel::set_visible(self.show_debug);
-        if self.show_debug {
+        // Live debug surfaces: the summary panel (bottom-left, gated on `show_debug`) and the per-
+        // category detail pane (bottom-right, gated on any detail toggle) render *independently* — one
+        // can be up without the other. A report is *wanted* whenever either surface is showing; mirror
+        // that to the game thread every frame so the publisher only does work while something needs the
+        // report, then draw from the snapshot it posts.
+        let any_detail = self.debug_details.iter().any(|&on| on);
+        let report_wanted = self.show_debug || any_detail;
+        crate::debug_panel::set_report_wanted(report_wanted);
+        if report_wanted {
             // Re-clone the published report only when its version advances: the publisher refreshes at
             // ~10 Hz while the Present hook runs far faster, so the same report would otherwise be
             // deep-cloned dozens of times per published version. A cheap atomic check gates the clone;
@@ -303,8 +307,11 @@ impl Overlay {
                 self.debug_report_version = version;
             }
             let report = self.debug_report.as_ref();
-            self.draw_debug_panel(ui, report);
-            // Opt-in per-category detail, balanced into the opposite (bottom-right) corner.
+            if self.show_debug {
+                self.draw_debug_panel(ui, report);
+            }
+            // Opt-in per-category detail, balanced into the opposite (bottom-right) corner; self-gates
+            // on the detail toggles, so it's a no-op when none are on.
             self.draw_debug_detail_pane(ui, report);
         }
         if self.open {
@@ -456,10 +463,11 @@ impl Overlay {
             });
     }
 
-    /// Draw the **debug detail pane** — a second passive surface, bottom-**right**, that appears only
-    /// when the debug panel is on and at least one [`DEBUG_CATEGORIES`] toggle is enabled (from the Debug
-    /// tab). It shows the *full* `fields` of each enabled category's sections, while the concise panel
-    /// (bottom-left) keeps showing their rollups — so detail is opt-in and balanced into the opposite
+    /// Draw the **debug detail pane** — a second passive surface, bottom-**right**, that appears
+    /// whenever at least one [`DEBUG_CATEGORIES`] toggle is enabled (from the Debug tab), independently
+    /// of the summary panel (bottom-left): a detail can be up with the summary panel off, and vice
+    /// versa. It shows the *full* `fields` of each enabled category's sections, while the concise panel
+    /// (when shown) keeps showing their rollups — so detail is opt-in and balanced into the opposite
     /// corner. Same passive/click-through styling, and renders the same shared snapshot the concise panel
     /// got; silently skips the frame when there's nothing enabled to show (so it never draws an empty box).
     fn draw_debug_detail_pane(&self, ui: &Ui, report: Option<&DiagnosticReport>) {
@@ -682,23 +690,23 @@ impl Overlay {
         }
     }
 
-    /// The **Debug** tab: a navigable list mirroring the Actions tab. Row 0 turns the whole debug panel
-    /// on/off (moved here from Actions — it's where it naturally belongs); rows 1..=N are one per
-    /// [`DEBUG_CATEGORIES`] entry, each toggling whether that category's full detail shows in the
-    /// bottom-right pane; the final row is "Export diagnostics" (also moved here from Actions). Detail
-    /// rows are greyed (non-selectable) while the panel is off, since they have no effect then — but the
-    /// panel toggle and Export stay enabled regardless, so a friend can export with the panel off. Up/down
-    /// (arrows or d-pad / left-stick) move the cursor, skipping disabled rows; Enter / the A button / a
-    /// click activates the selected row. Owns its own cursor ([`Overlay::debug_sel`]), like the Actions tab.
+    /// The **Debug** tab: a navigable list mirroring the Actions tab. Row 0 turns the bottom-left
+    /// summary panel on/off (moved here from Actions — it's where it naturally belongs); rows 1..=N are
+    /// one per [`DEBUG_CATEGORIES`] entry, each toggling whether that category's full detail shows in
+    /// the bottom-right pane; the final row is "Export diagnostics" (also moved here from Actions). Every
+    /// row is always selectable: each detail toggle drives its own pane independently of the summary
+    /// panel (a detail can be up with the panel off), and Export works regardless so a friend can export
+    /// with everything off. Up/down (arrows or d-pad / left-stick) move the cursor; Enter / the A button
+    /// / a click activates the selected row. Owns its own cursor ([`Overlay::debug_sel`]), like the Actions tab.
     fn draw_debug_tab(&mut self, ui: &Ui, pad: crate::input::PadEdges) {
-        // Rows: 0 = panel on/off (always enabled); 1..=N = per-category detail toggles (enabled only while
-        // the panel is on); the trailing `export_row` = Export diagnostics (always enabled). `show_debug`
-        // is captured into a local so the `enabled` closure doesn't borrow `self` across the toggle
-        // mutation below. Reuses the core menu's host-tested skip-disabled stepping.
+        // Rows: 0 = panel on/off; 1..=N = per-category detail toggles; the trailing `export_row` =
+        // Export diagnostics. Every row is always selectable — each detail toggle drives its own
+        // bottom-right pane independently of the summary panel, so none are gated on `show_debug`.
+        // Reuses the core menu's host-tested stepping (with an all-enabled predicate).
         let show_debug = self.show_debug;
         let export_row = 1 + DEBUG_CATEGORIES.len();
         let total = export_row + 1;
-        let enabled = |i: usize| i == 0 || i == export_row || show_debug;
+        let enabled = |_i: usize| true;
 
         if self.debug_sel >= total || !enabled(self.debug_sel) {
             self.debug_sel = unseamless_core::menu::first_enabled(total, enabled);
@@ -722,24 +730,16 @@ impl Overlay {
         }
 
         ui.separator();
-        if !show_debug {
-            ui.text_disabled("Turn the panel on to enable detail.");
-        }
-        // One detail toggle per category; greyed (non-selectable) while the panel is off.
+        // One detail toggle per category; each drives its bottom-right pane independently of the
+        // summary panel, so all are always selectable.
         for (i, cat) in DEBUG_CATEGORIES.iter().enumerate() {
             let row = i + 1;
-            let display = format!("Detail - {}: {}", cat.label, if self.debug_details[i] { "on" } else { "off" });
-            if show_debug {
-                // `###id` keeps a stable imgui identity as the on/off text flips; the selectable strips
-                // it from the visible label.
-                let label = format!("{display}###debug-detail-{i}");
-                if ui.selectable_config(&label).selected(self.debug_sel == row).build() {
-                    clicked = Some(row);
-                }
-            } else {
-                // `text_disabled` renders its string literally (no `###` id stripping), so pass the
-                // display text only — otherwise the raw `###debug-detail-N` id leaks into the row.
-                ui.text_disabled(&display);
+            let display = format!("{}: {}", cat.label, if self.debug_details[i] { "on" } else { "off" });
+            // `###id` keeps a stable imgui identity as the on/off text flips; the selectable strips
+            // it from the visible label.
+            let label = format!("{display}###debug-detail-{i}");
+            if ui.selectable_config(&label).selected(self.debug_sel == row).build() {
+                clicked = Some(row);
             }
         }
 

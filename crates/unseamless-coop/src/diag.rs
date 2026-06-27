@@ -13,7 +13,7 @@
 //!   an **event-flag scanner** — the reusable "which flag flips when I do X in-game" finder (e.g. the
 //!   death-debuff cure flag, by resting at a grace).
 //! - **Live panel feed** ([`debug_panel_feature`]): the same [`build_report`] published (not logged) to
-//!   the overlay's bottom-left debug panel each ~10 Hz while it's shown, via [`crate::debug_panel`]. So
+//!   the overlay's debug surfaces each ~10 Hz while one is shown, via [`crate::debug_panel`]. So
 //!   the report model drives the log *and* a live HUD; the only thing that differs is the sink.
 
 use eldenring::cs::{CSEventFlagMan, CSSessionManager, GameDataMan, WorldAreaTime};
@@ -293,14 +293,16 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
 }
 
 /// The game-thread feature that feeds the overlay's live debug panel. Always registered (it's not a
-/// `[debug.probes]` lever — the panel is a built-in surface), but inert unless the overlay says the
-/// panel is shown, so when off it costs a single atomic load per frame.
+/// `[debug.probes]` lever — the panel is a built-in surface), but inert unless the overlay says a
+/// report is wanted (summary panel or any detail pane showing), so when off it costs a single atomic
+/// load per frame.
 pub fn debug_panel_feature() -> Box<dyn Feature> {
     Box::new(DebugPanelProbe::new())
 }
 
-/// Publishes a live [`DiagnosticReport`] snapshot for the overlay's debug panel — but only while the
-/// panel is shown ([`crate::debug_panel::visible`]). Throttled to ~10 Hz: the panel is for reading,
+/// Publishes a live [`DiagnosticReport`] snapshot for the overlay's debug panel — but only while a
+/// report is wanted, i.e. the summary panel or any detail pane is showing
+/// ([`crate::debug_panel::report_wanted`]). Throttled to ~10 Hz: the panel is for reading,
 /// and 60 Hz churn would flicker the fast fields and waste allocations. Reuses [`build_report`] so the
 /// panel is a live view of the same diagnostic block the log dumps produce; a `runtime` (frame/fps)
 /// section is appended here since the per-tick frame/delta aren't available to `build_report` itself.
@@ -325,9 +327,10 @@ impl Feature for DebugPanelProbe {
     }
 
     fn on_frame(&mut self, tick: Tick) {
-        // Off costs one atomic load: do nothing unless the overlay says the panel is shown. The
-        // throttle only advances on visible frames, so its period is in shown-frames (which is fine).
-        if !crate::debug_panel::visible() || !self.throttle.tick() {
+        // Off costs one atomic load: do nothing unless the overlay says a report is wanted (summary
+        // panel or any detail pane showing). The throttle only advances on wanted frames, so its
+        // period is in wanted-frames (which is fine).
+        if !crate::debug_panel::report_wanted() || !self.throttle.tick() {
             return;
         }
         let mut report = build_report("debug");

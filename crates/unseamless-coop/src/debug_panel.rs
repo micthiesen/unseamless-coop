@@ -3,22 +3,24 @@
 //!
 //! The overlay must never read game singletons; it only reads *published* shared state non-blocking
 //! (same rule as [`crate::playstate`] / [`crate::state`]). So the live debug panel works in two
-//! halves: the overlay publishes whether the panel is *shown* (an atomic the game thread reads), and
-//! a game-thread probe ([`crate::diag`]'s `debug-panel` feature) — only when it's shown — publishes a
-//! [`DiagnosticReport`] snapshot here that the overlay reads non-blocking and renders.
+//! halves: the overlay publishes whether a report is *wanted* — i.e. the summary panel or any detail
+//! pane is showing — (an atomic the game thread reads), and a game-thread probe ([`crate::diag`]'s
+//! `debug-panel` feature) — only when one is wanted — publishes a [`DiagnosticReport`] snapshot here
+//! that the overlay reads non-blocking and renders.
 //!
-//! When the panel is off it's a single atomic load on the game thread (the publisher early-returns),
-//! so the panel costs nothing when not shown.
+//! When nothing wants the report it's a single atomic load on the game thread (the publisher
+//! early-returns), so the panel costs nothing when not shown.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 
 use unseamless_core::diagnostics::DiagnosticReport;
 
-/// Whether the debug panel is currently shown. Written by the overlay (Present thread), read by the
-/// game-thread publisher. `Relaxed` is correct: it only gates work and publishes no other memory
-/// through itself (same reasoning as [`crate::input`]'s block flag).
-static VISIBLE: AtomicBool = AtomicBool::new(false);
+/// Whether a diagnostic report is currently wanted — the overlay's summary panel or any detail pane
+/// is showing. Written by the overlay (Present thread), read by the game-thread publisher. `Relaxed`
+/// is correct: it only gates work and publishes no other memory through itself (same reasoning as
+/// [`crate::input`]'s block flag).
+static REPORT_WANTED: AtomicBool = AtomicBool::new(false);
 
 /// Latest published snapshot, or `None` before the first publish. A `Mutex` (like [`crate::state`]'s
 /// live config) read non-blocking from the Present thread.
@@ -37,14 +39,16 @@ pub fn init() {
     let _ = SNAPSHOT.set(Mutex::new(None));
 }
 
-/// Publish whether the debug panel is shown (overlay → game thread).
-pub fn set_visible(visible: bool) {
-    VISIBLE.store(visible, Ordering::Relaxed);
+/// Publish whether a diagnostic report is wanted — summary panel or any detail pane showing
+/// (overlay → game thread).
+pub fn set_report_wanted(wanted: bool) {
+    REPORT_WANTED.store(wanted, Ordering::Relaxed);
 }
 
-/// Whether the debug panel is shown — the gate the game-thread publisher checks before doing any work.
-pub fn visible() -> bool {
-    VISIBLE.load(Ordering::Relaxed)
+/// Whether a diagnostic report is wanted — the gate the game-thread publisher checks before doing any
+/// work.
+pub fn report_wanted() -> bool {
+    REPORT_WANTED.load(Ordering::Relaxed)
 }
 
 /// Publish the latest diagnostic snapshot (game thread). No-op before [`init`]. The lock is held only
