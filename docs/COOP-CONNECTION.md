@@ -100,7 +100,7 @@ is the one genuinely hard step; rung 4 is deferred.
   question (peers may need to be Steam friends), that both sides establish without us pumping the
   SessionRequest callback (we proactively `AcceptSessionWithUser`), and that the `coop` line in the
   diag report goes `linking → linked`.
-- Slots into the same `Transport` seam as `BridgeTransport`; the bridge (loopback) was the dev-host
+- Slots into the same `Transport` seam as `BridgeTransport`; the bridge (loopback) was the host-side
   rehearsal for exactly this.
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)

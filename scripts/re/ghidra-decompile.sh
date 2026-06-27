@@ -17,8 +17,15 @@ BIN="${1:?usage: ghidra-decompile.sh <binary> [function-name-or-addr]}"
 FUNC="${2:-}"
 [[ -f "$BIN" ]] || { echo "no such file: $BIN" >&2; exit 1; }
 
-HEADLESS="$(find /opt/homebrew/Caskroom/ghidra -name analyzeHeadless -type f 2>/dev/null | head -1)"
-[[ -n "$HEADLESS" ]] || { echo "analyzeHeadless not found — is the ghidra cask installed?" >&2; exit 1; }
+# Locate analyzeHeadless: honor $GHIDRA_HOME, else search common Linux install locations
+# (the Arch `ghidra` package and manual /opt installs).
+HEADLESS=""
+for d in "${GHIDRA_HOME:-}" /opt/ghidra /usr/share/ghidra /opt/ghidra*; do
+  [[ -n "$d" && -d "$d" ]] || continue
+  HEADLESS="$(find "$d" -name analyzeHeadless -type f 2>/dev/null | head -1)"
+  [[ -n "$HEADLESS" ]] && break
+done
+[[ -n "$HEADLESS" ]] || { echo "analyzeHeadless not found — is ghidra installed? (set GHIDRA_HOME)" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

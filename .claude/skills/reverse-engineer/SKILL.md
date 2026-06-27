@@ -60,8 +60,8 @@ This is how you locate a flag/field the SDK doesn't expose without ever reading 
 
 ## Dynamic RE on the rig
 
-Live observation (the game running) is the real RE channel here, and it happens on the rig, not
-the Mac. The full playbook — our own diagnostic DLL (preferred), Frida-gadget under Proton, and
+Live observation (the game running) is the real RE channel here, and it happens on the rig with
+the game running. The full playbook — our own diagnostic DLL (preferred), Frida-gadget under Proton, and
 network capture — is in [`docs/RUNTIME-RE.md`](../../../docs/RUNTIME-RE.md). The first concrete
 target (observing the session FSM to unblock the co-op core) is the
 [`/test-loop`](../test-loop/SKILL.md) skill's layer 4 + [`docs/RIG-RUNBOOK.md`](../../../docs/RIG-RUNBOOK.md).

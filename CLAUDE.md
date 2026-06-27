@@ -16,7 +16,7 @@ how to build, structure, load, or safely hook the game, read that repo first —
 
 > Status: **framework in place.** Cargo workspace (host-tested `unseamless-core` + the
 > `unseamless-coop` cdylib). Config parsing and scaling math are done and unit-tested on the
-> Mac; the cdylib loads config, registers `Feature`s as frame tasks, and ships a read-only
+> host; the cdylib loads config, registers `Feature`s as frame tasks, and ships a read-only
 > session observer. The co-op core (Layer 2) is RE-gated and waits on a rig observation run —
 > see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/RIG-RUNBOOK.md`](docs/RIG-RUNBOOK.md).
 
@@ -49,30 +49,26 @@ tools) use the **`/reverse-engineer`** skill; the feature surface is in
 
 ## Where things run (read this first)
 
-Development happens on a **macOS** laptop that **cannot run Elden Ring**. That's fine and
-expected — the workflow is deliberately split:
+Development and testing both happen on this **Linux gaming PC** — it builds the mod *and* runs
+Elden Ring. We cross-compile a **Windows DLL** from Linux (the `x86_64-pc-windows-gnu` target, the
+correct build approach regardless of host); the toolchain is mingw-w64 (`pacman -S mingw-w64-gcc`).
+The only split is build-vs-run, both on this one machine:
 
-- **On this Mac (the dev host):** edit code, cross-compile the DLL, run `cargo check`/`clippy`,
-  reason about the SDK and the reference `ersc.dll`. The full build toolchain works here
-  (`brew install mingw-w64` + the pinned cross target). **Everything in normal development is
-  doable here.**
-- **On a separate Linux + Proton rig (async, not this machine):** deploy the DLL, launch the
-  game, and watch the log to verify behavior. This is done **out of band** — do not expect to
-  launch the game or read a live log from the Mac. `scripts/deploy.sh` and the `/test-loop` skill
-  describe that rig, not this one.
+- **Build/check:** edit code, cross-compile the DLL, run `cargo check`/`clippy`, reason about the
+  SDK and the reference `ersc.dll`, and run `unseamless-core`'s tests natively on the host
+  (`scripts/test-core.sh`).
+- **Run/verify:** install the DLL, launch the game, and watch the log to verify behavior, all via
+  `scripts/rig.sh` and the `/test-loop` skill.
 
-> **When the rig IS the machine you're on (the gaming PC, not the Mac): install with
-> `scripts/rig.sh apply`, NEVER `scripts/deploy.sh`.** This PC runs the user's *real* ERSC + Elden
-> Mod Loader + own-mods stack. `rig.sh` snapshots that stack to a safe backup before standing in for
-> it (and `rig.sh restore` puts it back); `deploy.sh` is the bare install primitive with **no backup
-> safety**, so running it directly clobbers the real `dinput8.dll` (Elden Mod Loader) and launcher
-> with no way back. Same rule for launch/log/kill/restore: drive everything through `rig.sh` (see
-> the `/test-loop` skill, layer 4). `deploy.sh` is only for the Mac-builds-elsewhere handoff.
+> **Install with `scripts/rig.sh apply`, NEVER `scripts/deploy.sh`.** This PC runs the user's
+> *real* ERSC + Elden Mod Loader + own-mods stack. `rig.sh` snapshots that stack to a safe backup
+> before standing in for it (and `rig.sh restore` puts it back); `deploy.sh` is the bare install
+> primitive with **no backup safety**, so running it directly clobbers the real `dinput8.dll`
+> (Elden Mod Loader) and launcher with no way back. Same rule for launch/log/kill/restore: drive
+> everything through `rig.sh` (see the `/test-loop` skill, layer 4).
 
-So: never block on "let me run the game to check." Build, commit, and push from the Mac; the
-in-game verification happens separately and asynchronously. The log-line contract (install →
-heartbeat → effect lines) is the handoff between the two — write code so its behavior is
-legible from the log, since that's all the remote verifier sees.
+The log-line contract (install → heartbeat → effect lines) keeps behavior legible — write code so
+its effects show up in the log.
 
 ## Code layout (workspace)
 
@@ -80,8 +76,8 @@ Two crates, split by what can be verified where (full design in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)):
 
 - **`crates/unseamless-core`** — pure Rust, **no game/OS deps**. Config, scaling math, and
-  (later) the sync model + protocol types. **Runs its tests on macOS** — this is where logic is
-  *verified*, not just hoped. Keep decision logic here.
+  (later) the sync model + protocol types. **Runs its tests natively on the host (Linux)** — this
+  is where logic is *verified*, not just hoped. Keep decision logic here.
 - **`crates/unseamless-coop`** — the `cdylib`. Thin binding layer: `DllMain` → `app::install`
   loads config and registers `Feature`s as recurring tasks. Binds core to the live game via the
   SDK. Its correctness needs the rig.
@@ -162,7 +158,7 @@ cargo build --release        # default target is windows-gnu -> the DLL (see .ca
 cargo build --profile diag   # debugging build: keeps symbols + debug-assertions for readable
                              #   panic backtraces (the shipping build is stripped). Use when
                              #   chasing a crash; not for release.
-scripts/test-core.sh         # run unseamless-core's tests on the host triple (macOS-runnable)
+scripts/test-core.sh         # run unseamless-core's tests on the host triple (Linux-runnable)
 ```
 
 Testing beyond unit tests (the host harness, the rig) is the **`/test-loop`** skill.
@@ -173,14 +169,14 @@ self-describing, shareable log model is `unseamless-core/diagnostics.rs`.
 
 The shippable artifact is `target/x86_64-pc-windows-gnu/release/unseamless_coop.dll`. The
 default cargo target is the cross target, so a bare `cargo build`/`cargo check`/`cargo clippy`
-works on the Mac. The core crate has no windows deps, so `scripts/test-core.sh` compiles and
-runs its unit tests natively (a bare `cargo test` would target windows-gnu and can't execute on
-macOS).
+cross-compiles the DLL. The core crate has no windows deps, so `scripts/test-core.sh` compiles and
+runs its unit tests natively (a bare `cargo test` would target windows-gnu and can't execute on the
+Linux host).
 
 - The cross target is pinned in `rust-toolchain.toml` (`channel = "stable"`,
   `targets = ["x86_64-pc-windows-gnu"]`) so `rustup` installs it automatically.
-- The GNU target links with **mingw-w64**. Install it (`brew install mingw-w64` on macOS,
-  `pacman -S mingw-w64-gcc` on Arch); cargo finds `x86_64-w64-mingw32-gcc` on PATH.
+- The GNU target links with **mingw-w64**. Install it (`pacman -S mingw-w64-gcc` on Arch); cargo
+  finds `x86_64-w64-mingw32-gcc` on PATH.
 - Release profile: `panic = "unwind"`, `opt-level = "z"`, `codegen-units = 1`, `lto = true`,
   `strip = true`. **`unwind`, not `abort`** (the one divergence from `er-crit-coop`'s release
   profile): it's what makes the per-feature `catch_unwind` firewall real in the player's build (a
@@ -191,8 +187,7 @@ macOS).
   release `.dll` won't sha-match a local build. Compare `.text` size with
   `x86_64-w64-mingw32-objdump -h` to sanity-check equivalence.
 
-Building works on this Mac; running the game does not (see "Where things run"). The run/verify
-loop on the Linux + Proton rig is the **`/test-loop`** skill.
+The run/verify loop on the rig is the **`/test-loop`** skill (see "Where things run").
 
 ## Document how to re-derive RE results (AOBs, addresses, debug methods)
 

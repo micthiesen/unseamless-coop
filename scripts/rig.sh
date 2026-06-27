@@ -118,8 +118,8 @@ notify() {
     "$1" "${2:-}" 2>/dev/null || true
 }
 
-# Copy $1 to the system clipboard, best-effort. Wayland-native wl-copy first, then X fallbacks, then a
-# real pbcopy binary (macOS). Returns 1 if no tool is found. NOTE: detects real binaries — an
+# Copy $1 to the system clipboard, best-effort. Wayland-native wl-copy first, then X fallbacks
+# (xclip/xsel), then pbcopy. Returns 1 if no tool is found. NOTE: detects real binaries — an
 # interactive `pbcopy` *alias* (e.g. xsel) isn't visible in this non-interactive script. wl-copy forks
 # to hold the selection, so the value survives after rig.sh exits.
 clip_copy() {  # $1 = text

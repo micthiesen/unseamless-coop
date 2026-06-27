@@ -40,7 +40,7 @@ See **[docs/USAGE.md](docs/USAGE.md)** for the full walkthrough: what's in the b
 Cross-compiles to a Windows DLL — no Windows host needed:
 
 ```bash
-# needs mingw-w64 (macOS: brew install mingw-w64). The cross target is pinned in
+# needs mingw-w64 (pacman -S mingw-w64-gcc on Arch). The cross target is pinned in
 # rust-toolchain.toml and is the default (see .cargo/config.toml).
 cargo build --release      # -> target/x86_64-pc-windows-gnu/release/unseamless_coop.dll
                            #    (installed as dinput8.dll) + start_protected_game.exe
@@ -48,7 +48,7 @@ scripts/test-core.sh       # run the platform-independent core's unit tests on t
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`CLAUDE.md`](CLAUDE.md)
-for the SDK, safety invariants, and the build-here / verify-in-game-elsewhere split.
+for the SDK, safety invariants, and the build-and-verify-in-game workflow.
 
 ## Independent Reimplementation
 

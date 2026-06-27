@@ -1,16 +1,16 @@
 # Runtime / behavioral RE on the Proton rig
 
 How we observe live behavior — game state, hooked functions, network traffic — to drive the
-clean-room reimplementation. This is the work that can't happen on the macOS dev host because
-it needs the game running. It happens **asynchronously on the Linux + Proton rig**.
+clean-room reimplementation. This is the work that needs the game running, on the Linux + Proton
+rig.
 
-Read this alongside [DEVELOPMENT.md](DEVELOPMENT.md) (toolchain, the macOS/rig split) and
+Read this alongside [DEVELOPMENT.md](DEVELOPMENT.md) (toolchain, build/run workflow) and
 [FEATURES.md](FEATURES.md) (what we're trying to reproduce).
 
 ## First: what is NOT blocked on this
 
-Most development does not need any of this. Before reaching for runtime RE, note that on the
-macOS host alone we can already:
+Most development does not need any of this. Before reaching for runtime RE, note that without the
+game running we can already:
 
 - Build every **SDK-driven feature** (the `[SCALING]` params, `allow_summons`,
   `skip_splash_screens`, death debuffs, etc.). These are typed-field/param writes
@@ -68,8 +68,8 @@ Setup on the rig (one time):
   call graph quickly (e.g. "what does ERSC call when I press the open-world hotkey").
 - Cons: the Proton/gadget setup above is fiddly; payloads still need interpretation.
 
-> Frida scripts are just JavaScript — **I author and edit them on the macOS host**; they only
-> *run* on the rig. So Frida doesn't change the build-here / verify-there split.
+> Frida scripts are just JavaScript — edit them and reload without rebuilding the DLL; they hook
+> the game live once it's running on the rig.
 
 ### Option C — network capture (transport-level, complementary)
 
@@ -79,7 +79,7 @@ framed, so capture tells you *shape and timing*; the hooks (A or B) tell you *co
 
 ## Recommended approach for this project
 
-1. **M1 now, on the Mac** — SDK-driven features, no runtime RE.
+1. **M1 now** — SDK-driven features, no runtime RE.
 2. **M2 transport spike** — start with **Option A** (a diagnostic DLL that hooks the
    `steam_api64` networking calls and logs them) since we already have that toolchain. Add
    **Frida (Option B)** only if/when fast iterative hooking pays for the Proton setup cost.

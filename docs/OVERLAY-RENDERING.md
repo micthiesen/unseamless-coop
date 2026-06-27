@@ -61,7 +61,7 @@ What it is, from its own docs:
 dev profile and the shipping profile (`lto = true`, `opt-level = "z"`, `strip`; shipping is now
 `panic = "unwind"` — see docs/FFI-UNWIND-AUDIT.md), producing a valid stripped PE32+ DLL. It resolves `windows` **0.62.2**, which matches the cdylib's
 existing `windows = "0.62"` pin (no version split). So the overlay is buildable on our normal
-Mac/Linux cross-toolchain — no native-Windows build host needed.
+Linux cross-toolchain — no native-Windows build host needed.
 
 **Hard placement constraint this surfaced:** hudhook vendors **minhook (C)** and **imgui-sys (C++)**,
 both compiled via `cc`/`cc`-`g++` for the *Windows target only* (a native-host build of hudhook
@@ -113,7 +113,7 @@ this exact game, so the core "DX12 present-hook overlay over vkd3d-proton" path 
 title we target. hudhook's own README claiming "Runs on Windows and Wine/Proton" is corroborated by
 that.
 
-Where the friction lives (all to verify on the rig, since none of us can run the game on the Mac):
+Where the friction lives (all to verify on the rig, where the game actually runs):
 
 - **The command-queue scan over vkd3d's structs.** hudhook finds the command queue by scanning the
   *swapchain object's* memory layout. That layout is **vkd3d-proton's**, not Microsoft's DXGI, so the

@@ -36,8 +36,8 @@ On a stock install the save lives at, per platform:
 - **Linux + Proton (the rig):** the same path *inside the Proton prefix*. `AppData/Roaming` maps to
   `…/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing/<SteamID64>/`
   (ERSC's docs give the compatdata root; the `users/steamuser/AppData/Roaming/EldenRing/<SteamID64>`
-  tail is the standard Wine layout). **Rig-only:** any verification of the written file happens here, not
-  on the Mac.
+  tail is the standard Wine layout). **Rig-only:** any verification of the written file happens here,
+  in the running game.
 
 What's confirmed about the format (relevant only so we understand what we must *not* break):
 

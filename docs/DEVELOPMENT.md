@@ -5,19 +5,18 @@ How this mod is built, run, and verified. It's a Rust rewrite of Seamless Co-op 
 project `../er-crit-coop` — read that repo's `docs/DEVELOPMENT.md` for the original, more
 detailed write-up of the Linux/Proton tricks.
 
-## Two machines, one workflow
+## One machine: build and run
 
-Work is split across two hosts on purpose:
+Development and testing both happen on the **Linux + Proton rig** (the gaming PC). The only
+split is build-vs-run:
 
-- **macOS laptop (primary dev host).** Edit, cross-compile, `cargo check`/`clippy`, study the
-  SDK and the reference `ersc.dll` under `reference/`. The full build toolchain runs here. It
-  **cannot run Elden Ring** — and that's fine; nothing in normal development needs to.
-- **Linux + Proton rig (async verification).** Deploy the DLL, launch the game, watch the log.
-  Done out of band, not from the Mac. `scripts/deploy.sh` and the run/verify loop below target
-  this rig.
+- **Build/check.** Edit, cross-compile, `cargo check`/`clippy`, study the SDK and the reference
+  `ersc.dll` under `reference/`, and run `unseamless-core`'s tests natively on the host.
+- **Run/verify.** Deploy the DLL, launch the game, watch the log — via `scripts/rig.sh` and the
+  run/verify loop below.
 
-The handoff between them is the **log**: install line → per-frame heartbeat → effect lines.
-Write behavior so it's legible from the log, since that's what the remote verifier sees.
+The **log** is the contract between the two: install line → per-frame heartbeat → effect lines.
+Write behavior so it's legible from the log.
 
 ## Toolchain: cross-compiling a Windows DLL
 
@@ -25,8 +24,8 @@ No Windows host needed. The mod is a `cdylib` built for `x86_64-pc-windows-gnu`:
 
 - `rust-toolchain.toml` pins `channel = "stable"` and `targets = ["x86_64-pc-windows-gnu"]`,
   so `rustup` installs the target automatically.
-- The GNU target links with **mingw-w64** (`brew install mingw-w64` on macOS,
-  `pacman -S mingw-w64-gcc` on Arch); cargo finds `x86_64-w64-mingw32-gcc` on PATH.
+- The GNU target links with **mingw-w64** (`pacman -S mingw-w64-gcc` on Arch); cargo finds
+  `x86_64-w64-mingw32-gcc` on PATH.
 - `cargo build --release --target x86_64-pc-windows-gnu` →
   `target/.../release/unseamless_coop.dll`.
 
@@ -84,7 +83,7 @@ can't copy code you can't read.
 
 ### RE toolchain (all headless / CLI, no GUI)
 
-- **rizin** (`brew install rizin`) — primary static triage and disasm. Headless and scriptable;
+- **rizin** (`pacman -S rizin`) — primary static triage and disasm. Headless and scriptable;
   every command has a JSON form for piping to `jq`. Examples:
   ```bash
   rizin -q -c 'iSj' bin | jq -r '.[] | "\(.name)\t\(.size)\t\(.perm)"'   # sections
@@ -97,14 +96,13 @@ can't copy code you can't read.
   needed here: `ersc.dll` is Themida-packed (undecompilable) and `eldenring.exe` is already
   charted by the `fromsoftware-rs` SDK, so we seldom decompile anything ourselves. If a clean
   target ever needs it (a game function the SDK doesn't name, an unpacked dump), install on
-  demand (`brew install --cask ghidra`) and run `scripts/re/ghidra-decompile.sh <binary>
+  demand (`pacman -S ghidra`) and run `scripts/re/ghidra-decompile.sh <binary>
   [function]` — a CLI wrapper around `analyzeHeadless` + the `DumpDecomp.py` Jython post-script
   that prints decompiled C to stdout (no GUI, no MCP). The wrapper is committed and ready; it
   errors cleanly if Ghidra isn't present. A lighter alternative is a rizin decompiler plugin
   (`rz-ghidra`/`jsdec`). Project cache: `.ghidra-projects/` (gitignored).
-- **Frida** (dynamic instrumentation) — deferred. It belongs on the Linux + Proton rig where
-  the game actually runs (hook/trace at runtime), not on the macOS dev host. Set it up there
-  when M2/M3 behavioral work starts.
+- **Frida** (dynamic instrumentation) — deferred. It hooks/traces at runtime, so it's only
+  useful with the game running on the rig. Set it up when M2/M3 behavioral work starts.
 
 **Clean-room rule:** never paste decompiler/disassembler output into source or commits, and
 never redistribute upstream bytes (`reference/` stays gitignored). Read to understand, record

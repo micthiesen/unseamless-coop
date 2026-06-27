@@ -7,18 +7,18 @@ for *what* we're reproducing and [DEVELOPMENT.md](DEVELOPMENT.md) for the toolch
 ## Shape: a workspace split by verifiability
 
 ```
-unseamless-core   (lib, pure Rust, NO game/OS deps)   -> host-testable on macOS
+unseamless-core   (lib, pure Rust, NO game/OS deps)   -> host-testable (Linux)
 unseamless-coop   (cdylib, binds core to the game via fromsoftware-rs)
 ```
 
 The split is deliberate and is the main rearchitecture vs ERSC's single C++ DLL: **push every
 decision that can be expressed without the game into `unseamless-core`**, where `cargo test`
-runs natively on the dev Mac. Config parsing, scaling math, the session/sync state model, and
+runs natively on the host. Config parsing, scaling math, the session/sync state model, and
 (later) protocol message types all live there with real unit tests. The cdylib stays a thin,
 mostly-mechanical binding layer: read SDK singletons, call core, write back.
 
-Why it matters here specifically: we develop on a machine that can't run the game, so the more
-logic is host-testable, the more of the project is *verified* rather than *hoped*. The cdylib's
+Why it matters here specifically: the more logic is host-testable, the more of the project is
+*verified* rather than *hoped* — without needing a game launch to check it. The cdylib's
 correctness still needs the rig; the core's doesn't.
 
 ## Runtime spine (cdylib)
@@ -42,8 +42,8 @@ in the frame phase ordered against the state it touches.
 
 **Layer 1 — host-charted, buildable now.** Features whose game effect is a typed SDK
 read/write: scaling (params via `SoloParamRepository::get_mut`), splash-skip, summons, event
-flags, world time. The SDK *is* the contract; we build them on the Mac and batch-verify on the
-rig. Risk is bounded and per-feature.
+flags, world time. The SDK *is* the contract; we build them and batch-verify on the rig. Risk is
+bounded and per-feature.
 
 **Layer 2 — RE-gated, needs the rig.** The co-op core: relaxing session limits, persisting
 sessions across area transitions, getting players into one another's worlds, and state sync.
@@ -129,7 +129,7 @@ which is robust to whatever the rig reveals:
   and is rig-dependent (loss rate), since liveness is itself lossy and role-asymmetric.
 
 This whole layer is **host-testable** (`unseamless-core/{peer,transport}.rs` + the harness), with a
-seeded `FaultModel` proving convergence under drop/duplicate/reorder — so it's verified on the Mac
+seeded `FaultModel` proving convergence under drop/duplicate/reorder — so it's verified on the host
 before the rig, and the design holds whether the transport turns out reliable or not.
 
 One thing is deliberately **deferred to the rig**: a host *restart/migration* resets the host's
@@ -207,8 +207,8 @@ several places. Recorded here so future work doesn't pattern-match ERSC and undo
 | `coop/features/scaling.rs` (apply) | 1/2 | mechanism decided (SpEffect rate rows behind `MultiPlayCorrectionParam` — see [SCALING.md](SCALING.md)); row/ID map rig-gated |
 | `coop/net/*` (session relax, side-channel, sync) | 2 | gated on observer findings |
 
-## Where Mac-side work ends
+## Where host-only work ends
 
 When a piece needs to *observe or affect a live session* to proceed — the scaling application
-mechanism, session-limit relaxation, the side-channel, sync — it's Layer 2 and moves to the rig.
+mechanism, session-limit relaxation, the side-channel, sync — it's Layer 2 and needs a game launch.
 The handoff artifact is the observer log; the plan for producing it is [RIG-RUNBOOK.md](RIG-RUNBOOK.md).

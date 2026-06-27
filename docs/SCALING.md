@@ -145,7 +145,7 @@ the SpEffect-rate lever is correct where per-frame `NpcParam.hp` mutation is not
 
 - **The SDK can read/write all of this blind; the *row map* needs the rig.** `SoloParamRepository`
   (`get_mut`, `rows_mut`), `MultiPlayCorrectionParam`, `SpEffectParam`, `NpcParam`, and
-  `CSSessionManager.players` are all CHARTED at our pin. What's *not* knowable from the Mac: which
+  `CSSessionManager.players` are all CHARTED at our pin. What's *not* knowable without the rig: which
   concrete correction-row IDs and SpEffect IDs are "boss" vs "normal", and whether ER's
   multiplayer-correction SpEffects collide with the area/NG+ scaling SpEffects (ranges 7000–7200 /
   7400+ per Paramdex) — i.e. whether editing them in place would also perturb single-player NG+

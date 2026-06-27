@@ -2,7 +2,7 @@
 # Two-process TCP harness: a host + client run the real Peer/Session logic over a localhost socket
 # (real serialization, real cross-process concurrency). This is the host half of the planned
 # layer-3 debug bridge. The workspace default target is windows-gnu (for the DLL), which can't
-# execute on macOS, so we override to the host triple.
+# execute natively, so we override to the host triple.
 #   scripts/harness-tcp.sh [port]      # default port 47620
 set -euo pipefail
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"

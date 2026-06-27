@@ -56,7 +56,7 @@ The shared platform. For each, reconcile drift and apply the token map:
   `run_recurring` → `mem::forget`, phase-ordering safety). Sync the **pattern and its safety
   comments**, not the per-frame body.
 - **Docs:** `docs/DEVELOPMENT.md` and the shared sections of `CLAUDE.md` — "Where things run"
-  (macOS build / async Linux verify split), the SDK notes, and the **hard safety invariants**.
+  (the single Linux build+run machine), the SDK notes, and the **hard safety invariants**.
 - **Skills:** `.claude/skills/release/SKILL.md` and **this** `.claude/skills/sync/SKILL.md`
   (self-sync — if you improve the sync skill, propagate it).
 
@@ -79,7 +79,7 @@ The shared platform. For each, reconcile drift and apply the token map:
    token map. When two shared changes genuinely conflict and you can't tell which is the
    improvement, stop and ask rather than guess.
 4. **Verify each repo still builds:** `cargo build --release --target x86_64-pc-windows-gnu`
-   in both (this is the macOS-doable check; no game needed). Fix any token-rewrite slips.
+   in both (this is the host-doable check; no game needed). Fix any token-rewrite slips.
 5. **Commit on each changed repo** with a message naming what synced (e.g.
    `Sync platform from unseamless-coop: release.yml + logger`). Then **push both**
    (`git push origin main` in each) — it's safe to push both.

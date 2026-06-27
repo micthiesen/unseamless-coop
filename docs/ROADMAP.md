@@ -36,12 +36,12 @@ Shipped to `main`, rig-verified where applicable:
   - **Harness prototype (fully solo, zero rig).** The [`harness`](../crates/harness) crate is a normal
     native exe and *can* take `steamworks-rs`; prove `CreateLobby` → `SetLobbyData("usc_pw",
     hash(password))` + version tag → `AddRequestLobbyListStringFilter` → `RequestLobbyList` →
-    `JoinLobby` → read host SteamID, on the dev host (appid 480/Spacewar, not the game). Biggest de-risk
+    `JoinLobby` → read host SteamID, on the host (appid 480/Spacewar, not the game). Biggest de-risk
     for the least cost; validates the password-keyed scheme entirely off-rig.
   - **DLL hand-bind (writable solo, fires on the rig).** Bind the `RegisterCallResult` C++-ABI in
     `coop/steam.rs` (the `CCallbackBase*` vtable + three `extern "C"` thunks) and seed the rung-2
     side-channel (`[coop] peer_steam_id` + `is_host`) from the resolved host SteamID. Authorable +
-    `cargo check`/`clippy`-able on the Mac; only firing needs the rig.
+    `cargo check`/`clippy`-able without the game; only firing needs the rig.
   - **Cheap rig probe (rig, but *single-player*).** The one hard unknown: does ER pump Steam via legacy
     `RunCallbacks` (our registered call-results fire) or `ManualDispatch` (path blocked)? A one-machine
     experiment — register one harmless `CreateLobby` call-result and watch it fire under ER's pump. Gates

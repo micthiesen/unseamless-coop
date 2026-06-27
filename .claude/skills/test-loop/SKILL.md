@@ -5,16 +5,16 @@ description: How to test/verify the unseamless-coop mod — the layered test loo
 
 # Test loops for unseamless-coop
 
-Testing this mod is layered, because most of it can't run on the dev Mac (no game) and full co-op
+Testing this mod is layered, because most of it can run without the game and full co-op
 can't be automated at all (it needs two real Elden Ring instances in a real Steam session). The
 layers form a pyramid: fast/cheap/narrow at the bottom, slow/real/broad at the top. Use the
 lowest layer that can answer your question.
 
 | # | Loop | Where | Verifies | Who drives | Status |
 |---|------|-------|----------|-----------|--------|
-| 1 | Unit tests | Mac | pure core logic | assistant | **DONE** |
-| 2 | Two-peer harness | Mac, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
-| 2b | TCP two-process harness | Mac, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
+| 1 | Unit tests | host | pure core logic | assistant | **DONE** |
+| 2 | Two-peer harness | host, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
+| 2b | TCP two-process harness | host, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
 | 3 | Debug bridge | one game + harness | the side-channel `Session` against the live mod | assistant | **DONE** (`rig.sh` + `harness bridge-host`) |
 | 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **tooling DONE** (`scripts/rig.sh`); first run pending |
 | 5 | Real co-op | friends | actual co-op behavior | you, manual | ongoing; logs handed back |
@@ -44,7 +44,7 @@ scripts/harness.sh [scenario]   # handshake | version-mismatch | config-sync | s
 ```
 Wires a host + client (both running the real `unseamless_core::peer::Peer`) over an in-memory
 `Loopback` transport (`unseamless_core::transport`) and prints what happened. No game, no Steam,
-runs on the Mac in milliseconds.
+runs on the host in milliseconds.
 
 **Covers:** the version handshake, host→client `ConfigSync` convergence (`SharedSettings::apply_to`),
 session-action authorization by **sender role** (`SessionAction::is_host_only`), client→host log
@@ -114,9 +114,9 @@ features do — nor the game's own P2P player sync (still needs two real games, 
 
 ## Layer 4 — Local PC rig (`scripts/rig.sh`) — the game-binding loop
 
-This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md`, and it's now **this
-gaming PC** (which both builds and runs the game — the Mac/PC split collapses when you're working
-here). `scripts/rig.sh` is the driver; it builds, installs, launches, and reads logs, and — the
+This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md` — **this gaming PC**,
+which both builds and runs the game. `scripts/rig.sh` is the driver; it builds, installs, launches,
+and reads logs, and — the
 load-bearing part — does it **without destroying the machine's real ERSC + Elden Mod Loader + own-mods
 setup**.
 
@@ -167,8 +167,8 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
 
 The seed config (`scripts/rig/seed-config.toml`) sets `[debug] enabled = true` so the run captures
 verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts/deploy.sh` is the
-bare install primitive `rig.sh apply` is built on — kept for the Mac-builds-elsewhere handoff in
-RIG-RUNBOOK; on this machine prefer `rig.sh`.)
+bare install primitive `rig.sh apply` is built on — usable directly only on a clean rig with no real
+ERSC stack to protect, per RIG-RUNBOOK; otherwise prefer `rig.sh`.)
 
 **Solo-verifiable here (assistant drives end to end):** the DLL loads, registers its feature task,
 fires per frame (the `FrameBegin` heartbeat ticks even at the title screen), writes + reads config,

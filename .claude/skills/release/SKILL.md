@@ -10,8 +10,8 @@ This repo releases via an annotated tag: `.github/workflows/release.yml` trigger
 **tag's annotation message becomes the release notes**. Your job is to author those notes
 and create the tag. CI does the build + publish.
 
-Tagging/pushing happens on the macOS dev host; the actual DLL build + publish runs in CI. No
-game launch is involved in releasing.
+Tagging/pushing happens locally; the actual DLL build + publish runs in CI. No game launch is
+involved in releasing.
 
 Optional argument: an explicit version (e.g. `v0.2.0`). If omitted, propose one.
 
@@ -19,7 +19,7 @@ Optional argument: an explicit version (e.g. `v0.2.0`). If omitted, propose one.
 
 1. **Preflight.**
    - Ensure `gh` is installed and authed: `gh auth status`. If `gh` is missing, install it
-     (`brew install gh`).
+     (`pacman -S github-cli`).
    - Confirm we're on `main` with a clean tree (`git status --porcelain`). If there are
      uncommitted changes, stop and tell the user.
    - Sanity-build so we never tag something that doesn't compile:
