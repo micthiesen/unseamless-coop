@@ -8,14 +8,12 @@
 /dist
 scripts/dist/.shared-password
 
-# Fleet message-transport runtime (scripts/fleet/): per-session inboxes, busy/idle state stamps,
-# spilled message payloads, assignment files — live runtime data, never source. It MUST live in one
-# shared dir the orchestrator and every rift workspace can all see ($UNSEAMLESS_FLEET_DIR, default
-# ~/.local/share/unseamless-fleet, OUTSIDE the repo), so it's already out of tree; this is a backstop
-# so a fleet dir ever pointed inside the repo can't commit live messages. (`inbox/` matches a
-# *directory*, so the tracked scripts/fleet/inbox *file* is unaffected.)
+# Fleet runtime (scripts/fleet/): per-session inspector sockets (insp/<session>.sock) and assignment
+# files — live runtime data, never source. It MUST live in one shared dir the orchestrator and every
+# rift workspace can all see ($UNSEAMLESS_FLEET_DIR, default ~/.local/share/unseamless-fleet, OUTSIDE
+# the repo), so it's already out of tree; this is a backstop so a fleet dir ever pointed inside the
+# repo can't commit live runtime data.
 unseamless-fleet/
-inbox/
 
 # =============================================================================
 # Clean-room safety net  (see CLAUDE.md > "Clean-room hygiene")

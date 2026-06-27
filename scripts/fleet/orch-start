@@ -31,21 +31,19 @@ if tmux has-session -t "$sess" 2>/dev/null; then
 fi
 
 cd "$REPO"
-# Fleet message-transport hooks, loaded only for this session (see worker-new).
-# The orchestrator drains its inbox via these hooks; msg never types into it.
-hook_settings=()
-if [ -f "$REPO/scripts/fleet/hooks.settings.json" ]; then
-  hook_settings=(--settings "$REPO/scripts/fleet/hooks.settings.json")
-fi
 # `--name` is a display badge only (never resumes); "$@" comes last so a
-# user-supplied --name overrides this default. `env UNSEAMLESS_FLEET_SESSION=...`
-# tags the session so _hook drains the orchestrator's inbox.
+# user-supplied --name overrides this default. `BUN_INSPECT=...` opens the
+# orchestrator's inspector socket so workers can `msg usc-orch` into it (the same
+# transport workers use); inert until connected. Clear any stale socket first.
+mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
+rm -f "$FLEET_DIR/insp/$sess.sock"
 tmux new-session -d -s "$sess" -c "$REPO" \
-  env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-  claude --name "usc-orch" "${hook_settings[@]}" --add-dir "$RIFTS" "$@"
+  env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+  BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
+  claude --name "usc-orch" --add-dir "$RIFTS" "$@"
 # Reserved orchestrator color (red), best-effort and ONLY on a fresh start (this
 # branch) -- the attach-existing path above leaves a running session untouched.
-# Detached, so the attach below is never delayed by the injector's idle-wait.
+# Detached, so the attach below is never delayed while it waits for the socket.
 color="$(fleet_color_name "usc-orch" 2>/dev/null || true)"
 if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
   setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true

@@ -46,9 +46,9 @@ message the orchestrator and wait.
 scripts/fleet/msg usc-orch "[worker:<name>] <your request>"
 ```
 
-Always sign messages `[worker:<name>]` so the orchestrator knows the source. For long content,
-`scripts/fleet/msg` automatically spills multi-line or long messages to a file and sends a short
-"read <path>" pointer, so you can pass it freely.
+Always sign messages `[worker:<name>]` so the orchestrator knows the source. `msg` delivers the text
+as a live turn in the orchestrator's session, so multi-line and long messages arrive intact as one
+turn -- pass them freely (pipe on stdin, or quote inline).
 
 **Make rig requests batchable.** The orchestrator often runs one game launch for several lanes at
 once, so design any rig probe to be self-contained and inert-by-default (no writes until a value

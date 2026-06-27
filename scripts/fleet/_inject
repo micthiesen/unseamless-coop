@@ -1,0 +1,207 @@
+#!/usr/bin/env bun
+// _inject <session> <text>      deliver a message to a live fleet Claude as a real
+//                               user turn, in-process, WITHOUT touching its input box.
+// _inject --sock <path> <text>  same, but against an explicit inspector socket (testing).
+// _inject --selftest <session>  verify the injector can locate the prompt UI in the
+//                               target (a loud, fast check that a Claude Code update
+//                               hasn't broken the structural anchors). Exits 0 if OK.
+//
+// HOW IT WORKS (and how to re-derive it after a Claude Code update)
+// -----------------------------------------------------------------
+// Fleet Claudes are launched with BUN_INSPECT=ws+unix://<sock> (see worker-new /
+// orch-start), so each exposes a JSC/WebKit inspector on a per-session unix socket.
+// We connect, run JS in-process via Runtime.callFunctionOn, walk the live React
+// (Ink) fiber tree to the prompt-input component, and call its onSubmit handler --
+// the exact path a typed+entered line takes -- so the message lands as a normal
+// turn (and queues correctly if the target is mid-turn).
+//
+// Anchors are STRUCTURAL / SEMANTIC, never minified names or byte offsets, so they
+// survive minifier churn across versions:
+//   * app instance  = boundThis of process.stdin's 'readable' listener (Ink wires
+//                      its input reader as a bound method of the root App instance).
+//   * prompt fiber  = a fiber whose memoizedProps has onSubmit:function AND one of
+//                      messagesRef / commands / onAgentSubmit (the prompt input's
+//                      own props; these English names are stable).
+//   * input fiber   = a fiber with value:string + onChange:function (the controlled
+//                      text input). Its `value` IS the user's current draft.
+// onSubmit clears the box as part of its job, so to avoid clobbering a draft we
+// save `value` first and re-assert it via `onChange(draft)` after the clear settles.
+// React double-buffers fibers, so we also traverse `.alternate`; a brief retry
+// absorbs the window where the tree is mid-commit.
+//
+// If the prompt/input fibers stop being locatable (an update renamed the props or
+// restructured the tree), --selftest fails loudly (nonzero exit) so a fleet
+// smoke-test catches the most common breakage before it bites a real send. It does
+// NOT exercise the onSubmit call signature itself -- a real submit-and-verify would
+// have to inject into a live session -- so a signature change can still slip past it.
+
+import { existsSync } from "node:fs";
+
+function parseArgs(argv) {
+  const a = { mode: "send", sock: null, session: null, text: null };
+  const rest = [];
+  // Flags are only recognized before a `--` terminator; everything after `--` is
+  // literal text. Callers that pass arbitrary message text (msg, _color-inject) use
+  // `--` so a message that happens to be `--selftest`/`--sock` can't be misread as a
+  // flag (which would silently turn a real send into a no-op probe).
+  let endFlags = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (!endFlags && argv[i] === "--") { endFlags = true; }
+    else if (!endFlags && argv[i] === "--sock") { a.sock = argv[++i]; }
+    else if (!endFlags && argv[i] === "--selftest") { a.mode = "selftest"; }
+    else rest.push(argv[i]);
+  }
+  if (a.mode === "selftest") { a.session = rest[0]; }
+  else if (a.sock) { a.text = rest.join(" "); }
+  else { a.session = rest[0]; a.text = rest.slice(1).join(" "); }
+  return a;
+}
+
+// Resolve a fleet session name (e.g. "usc-orch") to its inspector socket path.
+// worker-new/orch-start put the socket at $UNSEAMLESS_FLEET_DIR/insp/<session>.sock.
+function sockForSession(session) {
+  const dir = process.env.UNSEAMLESS_FLEET_DIR;
+  if (!dir) throw new Error("UNSEAMLESS_FLEET_DIR not set");
+  return `${dir}/insp/${session}.sock`;
+}
+
+// ---- minimal WS + JSC inspector client over a unix socket ----
+function makeClient(sock) {
+  let buf = Buffer.alloc(0), up = false, socket = null, nid = 1;
+  let fragParts = [];   // reassembles a message split across continuation frames
+  const waiters = new Map();
+  function maskFrame(text) {
+    const p = Buffer.from(text, "utf8"), l = p.length; let h;
+    if (l < 126) h = Buffer.from([0x81, 0x80 | l]);
+    else if (l < 65536) { h = Buffer.alloc(4); h[0] = 0x81; h[1] = 0x80 | 126; h.writeUInt16BE(l, 2); }
+    else { h = Buffer.alloc(10); h[0] = 0x81; h[1] = 0x80 | 127; h.writeBigUInt64BE(BigInt(l), 2); }
+    const m = Buffer.from([1, 2, 3, 4]); const o = Buffer.alloc(l);
+    for (let i = 0; i < l; i++) o[i] = p[i] ^ m[i & 3];
+    return Buffer.concat([h, m, o]);
+  }
+  function* frames() {
+    while (buf.length >= 2) {
+      const b0 = buf[0], b1 = buf[1];
+      const fin = (b0 & 0x80) !== 0, opcode = b0 & 0x0f;
+      let l = b1 & 0x7f, off = 2;
+      if (l === 126) { if (buf.length < 4) return; l = buf.readUInt16BE(2); off = 4; }
+      else if (l === 127) { if (buf.length < 10) return; l = Number(buf.readBigUInt64BE(2)); off = 10; }
+      if (buf.length < off + l) return;
+      const payload = buf.subarray(off, off + l);
+      buf = buf.subarray(off + l);
+      if (opcode === 0x8 || opcode === 0x9 || opcode === 0xA) continue;  // close/ping/pong: ignore
+      fragParts.push(Buffer.from(payload));                              // text(0x1)/continuation(0x0)
+      if (fin) { const msg = Buffer.concat(fragParts).toString("utf8"); fragParts = []; yield msg; }
+    }
+  }
+  function call(method, params) {
+    const id = nid++;
+    return new Promise((res, rej) => {
+      waiters.set(id, { res, rej });
+      socket.write(maskFrame(JSON.stringify({ id, method, params: params || {} })));
+    });
+  }
+  function connect() {
+    return new Promise((resolve, reject) => {
+      Bun.connect({ unix: sock, socket: {
+        open(s) { s.write(`GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`); },
+        data(s, d) {
+          if (!up) {
+            const str = Buffer.from(d).toString("latin1"), i = str.indexOf("\r\n\r\n");
+            if (str.startsWith("HTTP/1.1 101") && i !== -1) { up = true; const rest = Buffer.from(d).subarray(i + 4); if (rest.length) buf = Buffer.concat([buf, rest]); socket = s; resolve(); }
+            return;
+          }
+          buf = Buffer.concat([buf, Buffer.from(d)]);
+          for (const txt of frames()) { let m; try { m = JSON.parse(txt); } catch { continue; } if (m.id && waiters.has(m.id)) { const w = waiters.get(m.id); waiters.delete(m.id); m.error ? w.rej(new Error(JSON.stringify(m.error))) : w.res(m.result); } }
+        },
+        error(s, e) { reject(new Error("inspector socket: " + (e?.message ?? e))); },
+      }}).catch(reject);
+    });
+  }
+  return { call, connect };
+}
+
+// The in-page routine (stringified, runs with this = Ink App instance). Locates the
+// prompt + input fibers structurally, submits `msg` via onSubmit, and restores the
+// user's draft. `probeOnly` returns what it found without submitting (for --selftest).
+function pageRoutine() {
+  return `function(msg, probeOnly){
+    let root = this._reactInternals || this._reactInternalFiber;
+    if (!root) return JSON.stringify({ok:false, err:"no react root on app instance"});
+    while (root.return) root = root.return;
+    // 1) the prompt fiber: onSubmit + a prompt-only prop (messagesRef/commands/onAgentSubmit).
+    let prompt=null; const seen=new Set();
+    (function v(f){ if(!f||seen.has(f)||prompt)return; seen.add(f);
+      let p; try{ p=f.memoizedProps; }catch(e){ p=null; }
+      if(p && typeof p==="object" && typeof p.onSubmit==="function" && (("messagesRef"in p)||("commands"in p)||("onAgentSubmit"in p))) { prompt=f; return; }
+      v(f.child); v(f.sibling); v(f.alternate);
+    })(root);
+    if(!prompt) return JSON.stringify({ok:false, err:"prompt fiber not found"});
+    // 2) the controlled text input, searched ONLY within the prompt's own subtree, so a
+    //    modal/permission text box elsewhere in the tree can't be mistaken for the draft.
+    let input=null; const seen2=new Set();
+    (function v(f){ if(!f||seen2.has(f)||input)return; seen2.add(f);
+      let p; try{ p=f.memoizedProps; }catch(e){ p=null; }
+      if(p && typeof p==="object" && typeof p.onChange==="function" && typeof p.value==="string") { input=f; return; }
+      v(f.child); v(f.sibling); v(f.alternate);
+    })(prompt.child);
+    if(probeOnly) return JSON.stringify({ok:true, foundPrompt:true, foundInput: !!input});
+    const draft = input ? (input.memoizedProps.value || "") : "";
+    const onChange = input ? input.memoizedProps.onChange : null;
+    const noop = new Proxy(function(){}, { get:()=>(()=>{}), apply:()=>{} });
+    try { prompt.memoizedProps.onSubmit(msg, noop, false, {}); }
+    catch(e){ return JSON.stringify({ok:false, err:"onSubmit threw: "+String(e&&e.message||e)}); }
+    if (draft && onChange) { setTimeout(()=>{try{onChange(draft);}catch(e){}},50); setTimeout(()=>{try{onChange(draft);}catch(e){}},160); }
+    return JSON.stringify({ok:true, submitted:true, draftLen:draft.length});
+  }`;
+}
+
+async function getAppInstanceId(call) {
+  const lis = await call("Runtime.evaluate", { expression: 'process.stdin.listeners("readable")[0]', objectGroup: "inject" });
+  if (!lis.result?.objectId) throw new Error("no stdin 'readable' listener (target not an interactive TUI?)");
+  const lp = await call("Runtime.getProperties", { objectId: lis.result.objectId, ownProperties: true });
+  const bt = (lp.internalProperties || []).find(p => /bound.?this/i.test(p.name));
+  if (!bt?.value?.objectId) throw new Error("stdin listener is not a bound method (Ink wiring changed)");
+  return bt.value.objectId;
+}
+
+async function run() {
+  const a = parseArgs(process.argv.slice(2));
+  const sock = a.sock || sockForSession(a.session);
+  if (!existsSync(sock)) { console.error(`_inject: no inspector socket at ${sock}`); process.exit(3); }
+
+  const { call, connect } = makeClient(sock);
+  const timeout = setTimeout(() => { console.error("_inject: timeout"); process.exit(4); }, 12000);
+  await connect();
+  await call("Runtime.enable");
+  const fn = pageRoutine();
+  const probeOnly = a.mode === "selftest";
+  if (!probeOnly && !a.text) { console.error("_inject: empty message"); process.exit(2); }
+
+  // One attempt = (re)find the app instance + run the page routine. BOTH the
+  // stdin-listener lookup and the fiber walk can transiently miss right after a
+  // launch / `claude -c` revive (Ink not fully wired yet), so retry the whole thing.
+  // Only retry on a *locate* failure -- an "onSubmit threw" never matches, so a
+  // message can't be double-submitted.
+  let out = { ok: false, err: "no attempt" };
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    try {
+      const appId = await getAppInstanceId(call);
+      const r = await call("Runtime.callFunctionOn", { objectId: appId, functionDeclaration: fn, arguments: [{ value: probeOnly ? "" : a.text }, { value: probeOnly }], returnByValue: true });
+      out = JSON.parse(r.result.value);
+    } catch (e) { out = { ok: false, err: String(e?.message ?? e) }; }
+    if (out.ok) break;
+    if (attempt < 6 && /not found|listener|bound method|no react root/i.test(out.err || "")) { await new Promise(z => setTimeout(z, 150)); continue; }
+    break;
+  }
+  clearTimeout(timeout);
+
+  if (probeOnly) {
+    if (out.ok) { console.log(`_inject selftest OK (prompt found, input ${out.foundInput ? "found" : "MISSING"})`); process.exit(out.foundInput ? 0 : 5); }
+    console.error("_inject selftest FAILED:", out.err); process.exit(5);
+  }
+  if (out.ok) { process.exit(0); }
+  console.error("_inject: " + out.err); process.exit(6);
+}
+
+run().catch(e => { console.error("_inject: " + (e?.message ?? e)); process.exit(7); });

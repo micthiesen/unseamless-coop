@@ -10,12 +10,9 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
-# Reuse the inbox/state path + enumeration contract instead of hand-rolling it, so
-# this cleanup can't drift from msg/_hook/inbox. Pin UNSEAMLESS_FLEET_DIR to the
-# resolved FLEET_DIR first so the helpers and this script agree on the location.
+# Pin UNSEAMLESS_FLEET_DIR to the resolved FLEET_DIR so the socket cleanup below
+# agrees with the launchers (worker-new/worker-open) that opened it.
 export UNSEAMLESS_FLEET_DIR="$FLEET_DIR"
-# shellcheck source=/dev/null
-. "$SELF/_inbox"
 
 name=""
 force=0
@@ -92,16 +89,10 @@ else
 fi
 
 rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
-# Drop the worker's message-transport registry (its maildir-style inbox dir + the
-# busy/idle state file the hooks stamp). Without this a torn-down worker lingers in
-# `inbox state` / `inbox ls` forever. Warn before discarding any mail that queued
-# but never drained -- the session is gone, so it never will.
-pending="$(fleet_inbox_files "$sess" | wc -l | tr -d ' ')"
-if [ "$pending" -gt 0 ]; then
-  echo "WARNING: discarding $pending undelivered message(s) from $sess's inbox" >&2
-fi
-rm -rf "$(fleet_inbox_dir "$sess")"
-rm -f "$(fleet_state_file "$sess")"
+# Drop the worker's inspector socket (its messaging-transport endpoint). Killing the
+# tmux session above already closed it; remove the file so a stale socket can't
+# linger into a future same-named worker.
+rm -f "$FLEET_DIR/insp/$sess.sock"
 # Drop the integration ref (created here for the cherry check, or earlier by
 # worker-integrate) -- the lane is gone, so it's just cruft now.
 git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true

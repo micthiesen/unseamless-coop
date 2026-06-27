@@ -3,7 +3,7 @@
 #
 # Bulk-clean SOLO (user-driven) workers you ctrl+d-exited and forgot about: trash
 # the rift workspace, kill any lingering tmux session, and drop the fleet registry
-# (assignment + .role marker + inbox + state). By default it only touches solo
+# (assignment + .role marker + inspector socket). By default it only touches solo
 # workers whose tmux session is NOT alive -- the abandoned ones -- so an actively
 # open solo session, and EVERY orchestrator-driven worker, is left alone. It also
 # kills orphan usc-worker-* tmux sessions whose workspace is already gone.
@@ -19,10 +19,6 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
-# Pin + reuse the inbox/state path contract so this can't drift from msg/_hook/rm.
-export UNSEAMLESS_FLEET_DIR="$FLEET_DIR"
-# shellcheck source=/dev/null
-. "$SELF/_inbox"
 
 all=0
 dry=0
@@ -79,13 +75,8 @@ prune_one() {  # <name>
     (cd "$REPO" && rift remove --force "$ws" >/dev/null 2>&1) || echo "  WARNING: rift remove failed for $ws" >&2
     echo "  trashed workspace $ws"
   fi
-  local pending; pending="$(fleet_inbox_files "$sess" | wc -l | tr -d ' ')"
-  if [ "$pending" -gt 0 ]; then
-    echo "  WARNING: discarding $pending undelivered message(s) from $sess" >&2
-  fi
   rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
-  rm -rf "$(fleet_inbox_dir "$sess")"
-  rm -f "$(fleet_state_file "$sess")"
+  rm -f "$FLEET_DIR/insp/$sess.sock"   # the new transport's per-session endpoint
   git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true
   echo "pruned solo '$name'"
   pruned=$((pruned + 1))

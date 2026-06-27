@@ -44,9 +44,7 @@ if tmux has-session -t "$sess" 2>/dev/null; then
   echo "$sess is live; opening a window."
   pop_window
 elif [ -d "$ws" ]; then
-  # Role from the marker (absent == default orchestrator-driven worker, back-compat).
-  role="$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)"; [ -n "$role" ] || role="worker"
-  echo "$sess is dead; reviving the $role worker in $ws (claude -c)."
+  echo "$sess is dead; reviving in $ws (claude -c)."
   # Re-trust the workspace path so the worker's .claude/settings.json allow rules
   # load (an untrusted path drops them).
   trust_json="$HOME/.claude.json"
@@ -60,21 +58,15 @@ elif [ -d "$ws" ]; then
   fi
   # Re-apply the worker overlay: --append-system-prompt-file is a launch-time
   # system prompt, NOT stored in the conversation, so `claude -c` alone would drop
-  # it and the revived session would fall back to the orchestrator default. The
-  # fleet env tag + hook settings must also be re-applied (launch-time, not stored)
-  # so the revived worker drains its inbox; SessionStart drains anything pending.
-  hook_settings=()
-  [ -f "$ws/scripts/fleet/hooks.settings.json" ] && \
-    hook_settings=(--settings "$ws/scripts/fleet/hooks.settings.json")
-  # Re-apply the SAME overlay this worker spawned with (the `$role` read above): a solo
-  # (user-driven) worker must not be revived with the orchestrator-driven overlay.
-  overlay_rel="docs/roles/worker.md"
-  if [ "$role" = "solo" ]; then
-    overlay_rel="docs/roles/worker-solo.md"
-  fi
+  # it and the revived session would fall back to the orchestrator default.
+  # BUN_INSPECT must also be re-set (launch-time, not stored) so the revived worker
+  # reopens its inspector socket and stays reachable by `msg`; clear any stale one.
+  mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
+  rm -f "$FLEET_DIR/insp/$sess.sock"
   tmux new-session -d -s "$sess" -c "$ws" \
-    env UNSEAMLESS_FLEET_SESSION="$sess" UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-    claude -c "${hook_settings[@]}" --append-system-prompt-file "$ws/$overlay_rel"
+    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+    BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
+    claude -c --append-system-prompt-file "$ws/docs/roles/worker.md"
   pop_window
   # The revived instance is a fresh client, so its prompt-bar color was lost
   # (/color is per-session, never persisted) -- re-apply the worker's stable

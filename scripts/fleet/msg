@@ -1,33 +1,23 @@
 #!/usr/bin/env bash
 # msg <tmux-session> <text...>   (or pipe text on stdin)
 #
-# Deliver a message to another fleet Claude session. The message is written to the
-# target's **inbox** (a file), not typed into its TTY; a lifecycle hook (_hook)
-# drains the inbox into the model as injected context. So a message can never
-# clobber what you're typing -- message content never touches stdin.
+# Deliver a message to another fleet Claude session. The message lands as a normal
+# user turn in the target, delivered in-process through its inspector socket by the
+# one complex piece, scripts/fleet/_inject (see that file for the mechanism). This
+# replaces the old inbox+lifecycle-hook+wake-sentinel transport: delivery is now
+# instant (no waiting for a Stop/SessionStart hook), the target need not be poked
+# with a typed sentinel, and a draft left in the target's input box is saved and
+# restored rather than gating delivery. If the target is mid-turn, the message
+# queues and runs at the end of the current turn, exactly like typing would.
 #
-# Delivery is guaranteed by the inbox: the target drains it on its next turn end
-# (Stop), next prompt submit (UserPromptSubmit), or next start (SessionStart). For
-# a *parked-idle session* -- which no hook would otherwise fire on -- `msg` also
-# types a single fixed wake sentinel to start a turn (the only thing ever typed).
-# This applies to every fleet session, the human-attended orchestrator included;
-# the one safety gate is the target's input box, which must be EMPTY before we type
-# (so the sentinel can't land on a draft you left sitting -- `fleet_input_empty`).
-#
-# The CLI is unchanged; callers don't think about waking anything. Convention:
-#   msg usc-orch         "[worker:auth] need a rig run for the save hook"
-#   msg usc-worker-auth  "[orchestrator] rig says the hook fired; proceed"
+# Targets must be launched with BUN_INSPECT (worker-new / orch-start do this); the
+# socket lives at $UNSEAMLESS_FLEET_DIR/insp/<session>.sock. Convention:
+#   msg usc-orch                 "[worker:auth] need a rig run for the save hook"
+#   msg usc-worker-auth          "[orchestrator] rig says the hook fired; proceed"
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/fleet/_inbox
-. "$SELF/_inbox"
-
-# A busy stamp newer than this many seconds is trusted (Stop will deliver, so no wake needed).
-# Older -> treat as possibly-stalled and wake anyway (a redundant wake to a still-busy session is
-# harmless: the stray sentinel is swallowed). Set well above the worst-case single tool call (a
-# release cross-compile / test run), since PostToolUse only refreshes the stamp *between* tools.
-BUSY_TTL=600
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
 sess="${1:-}"; shift || true
 if [ -z "$sess" ]; then
@@ -42,53 +32,18 @@ fi
 if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 
-# 1) Durable delivery: append to the inbox first, always. Everything below is just
-#    deciding whether to actively wake the target sooner.
-printf '%s' "$text" | fleet_inbox_append "$sess"
-
-if ! tmux has-session -t "$sess" 2>/dev/null; then
-  echo "msg: queued to $sess inbox (session offline; delivers on its next start)"
-  exit 0
+sock="$FLEET_DIR/insp/$sess.sock"
+if [ ! -S "$sock" ]; then
+  echo "msg: $sess is offline (no inspector socket at $sock); cannot deliver" >&2
+  exit 1
 fi
 
-# Wake the target only if it won't otherwise drain promptly. Pre-default so a torn/empty state
-# read can't abort under `set -e` and falls through to the (safe) inbox-only path.
-st=idle; ts=0
-read -r st ts _ < <(fleet_state_read "$sess") || true
-now="$(date +%s)"
-
-# Busy with a fresh stamp -> its own Stop hook drains at turn end; no wake needed. (This is the
-# common orchestrator case too: a message that lands mid-turn rides out on the next Stop.)
-if [ "$st" = "busy" ] && [ $((now - ts)) -lt "$BUSY_TTL" ]; then
-  echo "msg: queued to $sess inbox (busy; delivers at end of its current turn)"
-  exit 0
-fi
-
-# Parked idle (or a stale busy stamp). One rule for every session, worker and orchestrator alike:
-# wake it UNLESS the human left draft text in its input box -- in which case the wake-poke would
-# append the sentinel to that draft and submit it. The box being empty is the single signal that
-# protects both (it catches live typing and a stale draft alike). If we can't positively confirm
-# the box is empty (unreadable / mid-repaint), we fall back to inbox-only: the message is already
-# durably queued and drains on the target's next turn end or prompt submit. So a wake can never
-# clobber anything a human typed -- which is what makes it safe to do this to usc-orch at all.
-if ! fleet_input_empty "$sess"; then
-  echo "msg: queued to $sess inbox (draft in its input box, or state unreadable; delivers on its next turn / submit)"
-  exit 0
-fi
-
-# Empty box, safe to type: start a turn so the UserPromptSubmit hook drains the inbox
-# now. The message is already durably queued, so a wake-poke failure is not a delivery failure --
-# degrade to success (it'll drain on the target's next lifecycle event). Serialize the keystrokes
-# against concurrent senders. -l sends literally; -- guards a leading '-'; Enter is a separate key
-# so the sentinel submits as its own input line.
-mkdir -p "$UNSEAMLESS_FLEET_DIR"
-if {
-  exec 9>"$UNSEAMLESS_FLEET_DIR/.msg.lock"
-  flock 9
-  tmux send-keys -t "$sess" -l -- "$FLEET_WAKE_SENTINEL"
-  tmux send-keys -t "$sess" Enter
-}; then
-  echo "msg: delivered to $sess inbox + woke it (was idle)"
+# _inject does the work: connect, locate the prompt UI in the live React tree, submit
+# the message as a turn, preserve any draft. Its exit code is the delivery result.
+if bun "$SELF/_inject" --sock "$sock" -- "$text"; then
+  echo "msg: delivered to $sess (live turn)"
 else
-  echo "msg: queued to $sess inbox (wake-poke failed; delivers on its next lifecycle event)"
+  rc=$?
+  echo "msg: delivery to $sess failed (rc=$rc); is it mid-restart? retry shortly" >&2
+  exit "$rc"
 fi

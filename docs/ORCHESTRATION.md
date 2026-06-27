@@ -30,22 +30,10 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   overrides the default framing. A worker owns: one lane of feature work, WIP commits to its own
   branch, and asking the orchestrator (by message) for anything serial. A worker **never** drives
   the rig and **never** commits to `main`.
-- **Solo worker** is the same overlay mechanism with a different file
-  (`docs/roles/worker-solo.md`, via `worker-new --solo`). It's **user-driven**: the human drives the
-  session interactively (no assignment file, no seed indirection), and it **stays silent toward the
-  orchestrator until the user says to hand off** — at which point it self-checks, consolidates to one
-  clean commit, and messages `usc-orch` (or, if none is running, reports the branch ready). Same
-  isolation, branch, and lifecycle as a normal worker (`worker-ls`/`open`/`integrate`/`rm` all work
-  on it unchanged); only the driver and the orchestrator-contact timing differ. This is the path for
-  *user-initiated* parallel work — carve a branch off, work it interactively, hand it back when ready
-  — without going through the orchestrator to start.
 
-The overlay files (`docs/roles/worker.md`, `docs/roles/worker-solo.md`, and any orchestrator-specific
-notes) are **tracked and read-only at runtime** (consumed via `--append-system-prompt-file`), so they
-COW into a workspace without ever being mutated there. Which overlay a worker spawned with is recorded
-in the `assignments/<name>.role` marker (in the shared fleet dir, **outside** every workspace, so it's
-never git-tracked and never COW-diverges) — `worker-open` reads it to revive a dead session with the
-right overlay, and `worker-rm` deletes it at teardown.
+The overlay files (`docs/roles/worker.md`, and any orchestrator-specific notes) are **tracked and
+read-only at runtime** (consumed via `--append-system-prompt-file`), so they COW into a workspace
+without ever being mutated there.
 
 ## Why rift, Not Git Worktrees
 
@@ -69,67 +57,52 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 ~/Code/unseamless-coop                      canonical repo  -> orchestrator (tmux: usc-orch)
 ~/Code/.rifts/unseamless-coop/<name>        worker workspace -> worker (tmux: usc-worker-<name>)
 ~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
-  ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
-  ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
-  ├─ inbox/<session>/<ts>-<pid>-<rand>.msg  per-session message inbox (maildir-style)
-  ├─ state/<session>                        hook-stamped busy/idle + epoch
-  └─ .msg.lock                              flock for serialized wake-pokes
+  ├─ assignments/<name>.md                  per-worker assignment (read at launch)
+  └─ insp/<session>.sock                    per-session inspector socket (messaging endpoint, 0700 dir)
 ```
 
 The shared dir must live **outside** every rift workspace. Anything inside a workspace is
-COW-copied per worker and diverges, so a shared mailbox in the tree would fork. Its absolute path
+COW-copied per worker and diverges, so a shared endpoint in the tree would fork. Its absolute path
 goes in `.claude/settings.json` under `additionalDirectories`, which COW-propagates read/write
 access to every worker.
 
 ## Messaging
 
-The transport is an **inbox drained by Claude Code lifecycle hooks**, not typing into the target's
-TTY. `msg` writes the message to the target's `inbox/<session>/` as a file; a hook
-(`scripts/fleet/_hook`, registered for fleet sessions via `claude --settings
-scripts/fleet/hooks.settings.json`) drains the inbox into the model as injected `additionalContext`
-on the session's next lifecycle event. **Message content never goes through stdin**, so a worker
-message can't clobber what you're typing into `usc-orch`. (This replaced the original raw
-`send-keys` transport, whose fatal flaw was exactly that interleaving.)
+The transport is **direct in-process injection through each session's inspector socket** — not typing
+into the target's TTY, and not a polled mailbox. Every fleet session launches under
+`BUN_INSPECT=ws+unix://…/insp/<session>.sock` (worker-new / orch-start / worker-open), which exposes a
+JSC/WebKit inspector on a per-session unix socket. `msg <session> "<text>"` calls
+`scripts/fleet/_inject`, which connects to that socket, walks the live Ink/React fiber tree to the
+prompt-input component, and calls its `onSubmit` — so the message lands as a normal **user turn**,
+instantly, with nothing typed over the TTY. `_inject` is the one complex piece; `msg` is a thin
+wrapper over it.
 
-Two responsibilities, kept separate:
+What this buys:
 
-- **Delivery correctness = the inbox.** `msg` appends there first, always. The target drains it on
-  its next turn end (`Stop`), next prompt submit (`UserPromptSubmit`), or next start
-  (`SessionStart`). So a message is delivered the next time *any* lifecycle event fires — nothing is
-  lost if a wake is skipped.
-- **Wake latency = a single fixed sentinel.** A *parked-idle* session (which no hook would otherwise
-  fire on) is the only case needing a nudge: `msg` types one fixed wake sentinel (`$FLEET_WAKE_SENTINEL`,
-  the *only* thing ever sent over the TTY) to start a turn, whose `UserPromptSubmit` hook then drains
-  the inbox. A stray sentinel that races an already-drained inbox is recognised and swallowed
-  (`UserPromptSubmit` → `decision:block`), so it never starts an empty turn.
-
-`msg` decides whether to wake with **one rule for every session — worker and the human-attended
-orchestrator alike** — keyed off the hook-stamped `state/` plus a read of the target's input box:
-
-- **Busy** (fresh `busy` stamp) → queued; the session's own `Stop` hook delivers at turn end.
-- **Parked idle (or a stale busy stamp)** → woken with the sentinel **unless the target's input box
-  holds draft text**. `msg` reads the box (`fleet_input_empty`, anchored on the `❯` prompt glyph): a
-  non-empty box means a human is typing *or* left a draft sitting, so we don't type into it and let
-  their next submit drain the inbox. An empty box is the one signal that's safe for both a worker and
-  `usc-orch`, which is why the orchestrator is no longer a special "never type into it" case — it gets
-  woken too, so a worker's reply no longer strands when you step away from an idle orchestrator. If the
-  box can't be read (mid-repaint / atypical TUI state) we conservatively treat it as non-empty and fall
-  back to inbox-only.
+- **Instant.** Delivery happens the moment `msg` runs. A *mid-turn* target is fine: `onSubmit` queues
+  the message and it runs when the current turn ends, exactly like typing would.
+- **Never clobbers a draft.** Before submitting, `_inject` reads the target's input-box draft (the
+  prompt's `value`) and re-asserts it via `onChange` after `onSubmit` clears the box, so a draft you
+  (or a worker's human) left sitting survives. This holds for **every session, the human-attended
+  `usc-orch` included** — there's no "empty box" gate and no special-casing the orchestrator.
+- **Receive is visible for free.** The message arrives as a user turn in the target, so anyone
+  watching that session sees it (and the response) appear — no separate notification layer.
+- **Resilient by structure.** `_inject`'s anchors are semantic React props (`onSubmit` +
+  `messagesRef`/`commands`; `value` + `onChange`), never minified names or offsets, so they survive
+  minifier churn. `_inject --selftest <session>` verifies them and exits nonzero if a Claude Code
+  update moved them — wire it into the smoke test. The `_inject` header documents the mechanism and how
+  to re-derive the anchors after an update.
 
 Still true: **prefix every cross-session message** with its source (`[orchestrator] ...` /
 `[worker:<name>] ...`) for attribution, and we don't script *interrupting* a busy session — for a hard
-redirect, attach and do it by hand. `scripts/fleet/inbox` gives `ls` (pending counts) and `state`
-(busy/idle) for read-only visibility, plus `pop` / `wait [timeout]` to take messages off **your own**
-inbox (read-and-remove in one step — the only way to receive; nothing hand-deletes a `.msg`). An
-autonomous `usc-orch` that needs to block on a worker reply mid-turn can still use `inbox wait`; an
-idle one now just gets woken by the wake-poke like any other session. There is intentionally no command
-to read *another* session's message bodies — that would steal its undelivered mail.
+redirect, attach and do it by hand. There is intentionally no "read another session's messages"
+command: a message is delivered into the target as a turn, not parked in a mailbox someone could rifle.
+A target with no live socket (offline, or mid-restart) can't be reached — `msg` fails loudly rather
+than queuing, since an offline fleet session is being torn down anyway.
 
-The hooks are **inert outside a fleet session** (gated on `$UNSEAMLESS_FLEET_SESSION`, which the
-launchers set) and loaded only via `--settings`, so they never touch ordinary Claude sessions in the
-repo. The input-box read closes the old "stale draft" edge (a draft left sitting used to be invisible
-to the activity-only check): a wake-poke now never lands on draft text, in a worker *or* the
-orchestrator — if the box isn't empty, `msg` just queues.
+The same socket carries prompt-bar coloring: `_color-inject` sends `/color <name>` through `_inject`
+(a slash command is just a message whose text starts with `/`), so there's a single delivery path and
+no `send-keys` anywhere. The socket is an in-process code-exec surface, so its dir is mode `0700`.
 
 ## Writing a worker assignment
 
@@ -228,37 +201,25 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 - **Orchestrator-only** (launch flag, kept OUT of settings files so workers stay isolated):
   `--add-dir ~/Code/.rifts/unseamless-coop` so the orchestrator can reach worker repos to
   integrate. Workers must not see each other's workspaces.
-- **Fleet hooks** (launch flag on *both* orch and workers): `--settings
-  scripts/fleet/hooks.settings.json` registers two hooks, and `env UNSEAMLESS_FLEET_SESSION=<session>`
-  tags the session so they know whose inbox they belong to. Deliberately loaded via `--settings`,
-  **not** the checked-in `.claude/settings.json`, so ordinary (non-fleet) Claude sessions in this repo
-  never run them; both are also self-gated on the env var. `$CLAUDE_PROJECT_DIR` resolves to each
-  session's own workspace copy.
-  - `_hook` — the message **transport**: drains the inbox into the model's context
-    (`additionalContext`) at turn boundaries and stamps busy/idle state.
-  - `_ux` — the user-facing **visibility** layer (`PreToolUse`/`PostToolUse` on Bash): renders
-    user-only `systemMessage` notices for fleet sends/receives/waits and worker lifecycle. These are
-    shown in the terminal but **never enter the model's context**, so the operator can watch what a
-    session is doing without that text feeding back into the model. The full message body is shown
-    only on a *receive*; everything else is a one-liner. Receives have two paths that each render
-    once: the manual CLI receive (`inbox pop`/`wait`) is rendered by `_ux`; the auto receive (a
-    message drained at a turn boundary) is rendered by `_hook` (which adds a `systemMessage` next to
-    its `additionalContext`). A message is drained exactly once, so it renders exactly once.
+- **Inspector socket** (launch flag on *both* orch and workers): `BUN_INSPECT=ws+unix://…/insp/<session>.sock`
+  opens the per-session inspector that `msg`/`_inject`/coloring deliver through (see Messaging). `env
+  UNSEAMLESS_FLEET_DIR=<dir>` is propagated so the session and `msg` agree on the socket dir. Opening
+  the inspector is inert until something connects, and the socket dir is mode `0700` (the socket is an
+  in-process code-exec surface). No `--settings` and no lifecycle hooks: the socket is the whole
+  transport.
 
 ## Scripts (`scripts/fleet/`)
 
 | Script | Does |
 |--------|------|
-| `worker-new [--solo] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write a role marker, launch `claude` in `tmux usc-worker-<name>` with the worker overlay, then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file and seeds the session to read it. `--solo`: user-driven (`docs/roles/worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting for the user. |
-| `msg <session> "<text>"` | append the message to the target's inbox, then wake it only if needed (see Messaging): wakes any parked-idle session (worker or `usc-orch`) with the sentinel when its input box is empty, queues for a busy one or one with a draft in its box. Target restricted to `usc-*` sessions. |
-| `inbox {pop\|wait [timeout]\|ls\|state}` | `pop`/`wait` take messages off **your own** inbox (read-and-remove in one step — the only receive path; `wait` blocks until mail arrives, then pops); `ls` (pending counts) and `state` (busy/idle) are read-only. No command reads another session's bodies. |
-| `_hook <EVENT>` / `_inbox` | internal: the transport hook (drains inbox → `additionalContext` for the model + a user-only `systemMessage` on receive, stamps state) and the sourced primitives. Registered via `hooks.settings.json`; inert outside a fleet session. |
-| `_ux <pre\|post>` | internal: the user-facing visibility hook (`PreToolUse`/`PostToolUse` on Bash). Emits user-only `systemMessage` notices for fleet sends/receives/waits/lifecycle — never seen by the model. Silent for any non-fleet command; inert outside a fleet session. |
-| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. A **ROLE** column (`worker`/`solo`/`-`, from the `.role` marker) shows which are solo. |
+| `worker-new <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write an assignment file, launch `claude` in `tmux usc-worker-<name>` with the worker overlay seeded to read the assignment, then pop an Alacritty window. |
+| `msg <session> "<text>"` | deliver the message as a live **user turn** in the target via its inspector socket (see Messaging): instant, queues if the target is mid-turn, preserves any draft in its box. Target restricted to `usc-*` sessions; fails loudly if the target has no live socket. |
+| `_inject` | internal: the one complex piece. Connects to a session's inspector socket, walks the live React tree to the prompt component, and calls `onSubmit` to submit a message (or a `/slash` command), saving+restoring the draft. `--selftest <session>` checks the structural anchors and exits nonzero if a Claude Code update moved them. |
+| `_color-inject <session> <color>` | internal, best-effort, detached: waits for the session's socket + prompt to be ready, then sends `/color <name>` through `_inject`. |
+| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. |
 | `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
 | `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the assignment file. Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
 | `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
-| `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry, for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
 
@@ -305,8 +266,8 @@ clobbering real edits. Do **not** use `rift create --copy-all` for this — it w
 ## Open Items
 
 - **Agent Teams.** If Claude Code's experimental Agent Teams matures, its native lead/teammate
-  messaging could replace the inbox/hook transport (and its tmux wake-poke); rift already supplies
-  the isolation Teams lacks. Pilot separately before betting the workflow on an experimental flag.
+  messaging could replace our inspector-injection transport; rift already supplies the isolation
+  Teams lacks. Pilot separately before betting the workflow on an experimental flag.
 - **Warm-cache measurement.** Confirm whether a copied `target/` ever gives cargo a usable cache
   before reconsidering the "one cold build per worker" stance.
 
@@ -314,7 +275,7 @@ clobbering real edits. Do **not** use `rift create --copy-all` for this — it w
 
 Implemented: the worker overlay (`docs/roles/worker.md`), `scripts/fleet/`
 (`worker-new`/`worker-ls`/`worker-open`/`worker-rm`/`worker-integrate`/`msg`/`orch-start`, plus the
-inbox/hook transport: `inbox`/`_hook`/`_inbox`/`hooks.settings.json`), `.rift.toml`, the
+inspector-injection transport: `_inject`/`_color-inject`), `.rift.toml`, the
 `.claude/settings.json` allowlist + `additionalDirectories`, workspace-trust wiring, the `CLAUDE.md`
 role preamble, and the `/fleet` orchestrator skill.
 

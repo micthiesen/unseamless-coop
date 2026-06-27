@@ -47,15 +47,6 @@ Keep workers in genuinely independent lanes when you can. They *may* touch the s
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
 
-### Solo Workers
-
-Michael sometimes spins up his own **solo** (user-driven) workers alongside yours. You don't manage
-these — they stay silent toward you and just show up in `worker-ls` with ROLE `solo`. Leave them be
-until one hands off (it'll `msg` you that its branch is ready, or Michael will point you at it); then
-integrate it **exactly like any other worker** (`worker-integrate <name>` → review → commit to `main`)
-and **`worker-rm` it once integrated** — a solo lane is done when its work lands, so tear it down
-automatically unless Michael says to keep it.
-
 ## See What's Running
 
 ```
@@ -84,38 +75,21 @@ scripts/fleet/msg usc-worker-<name> "[orchestrator] <text>"
 ```
 
 - Always prefix `[orchestrator]` so the worker knows it's you and not Michael typing.
-- Just use the CLI; `msg` handles delivery itself (you never manage waking a session). A message to
-  an idle worker arrives right away; to a busy worker it lands at the end of its current turn.
-- Overview / who's busy: `scripts/fleet/inbox ls` (pending counts) and `inbox state` (busy/idle).
-  Both are read-only; there is no command to read *another* session's message bodies (that would
-  steal its undelivered mail).
+- Just use the CLI; `msg` injects the message as a live turn in the target through its inspector
+  socket (you never manage waking anything). To an idle worker it arrives instantly; to a busy one it
+  queues and runs at the end of its current turn. A draft sitting in the target's input box is
+  preserved.
+- Overview / who's running: `scripts/fleet/worker-ls`. There is no command to read another session's
+  messages — a message is delivered into the target as a turn, not parked in a mailbox.
 - Don't *interrupt/redirect* a busy worker by message. For a hard redirect, attach
   (`tmux attach -t usc-worker-<name>`) and do it by hand.
 
-**Receiving a worker's reply.** Your `usc-orch` session is itself a fleet session, so its lifecycle
-hooks **pop your inbox automatically** at every turn boundary: a worker's `[worker:<name>] ...`
-message is delivered into your conversation as soon as you next take a turn. So the normal flow is
-just *end your turn* — don't poll. If you're sitting **idle** when a worker messages you, `msg` now
-wakes you too (it types the sentinel to start a turn, but only when your input box is empty, so it
-can't clobber a draft) — so a reply no longer strands while you're parked. You only need to reach for
-explicit receive when you're running **autonomously and want to block** on a reply mid-turn (no human,
-no Stop hook firing yet):
-
-```
-scripts/fleet/inbox wait [timeout]   # blocks until your inbox has mail, pops it, prints it (exit 3 = timed out)
-scripts/fleet/inbox pop              # non-blocking: pop whatever's there now (exit 1 = empty)
-```
-
-`pop` is read-and-remove in one step (the only way to take a message) — never hand-delete a `.msg`
-file. Don't sit in a hand-rolled `sleep`/`grep` poll loop; `inbox wait` *is* that loop, with clean
-exit codes.
-
-**Operator visibility (you won't see it, Michael does).** A `_ux` hook renders user-only
-`[fleet …]` notices to whoever's watching a session — sends, waits, receives, and worker lifecycle —
-shown in the terminal but kept out of *your* context on purpose. Nothing for you to manage; just know
-each fleet CLI call surfaces a clean one-liner for the operator (the full message body shows only on
-a receive). Keep `msg`/`inbox wait`/`inbox pop` as their own commands rather than burying them deep
-in a compound pipeline, so those notices stay legible.
+**Receiving a worker's reply.** A worker's `msg` to you arrives **as a turn in your `usc-orch`
+session** — `[worker:<name>] ...` shows up as user input, exactly as if it were typed. If you're
+mid-turn it queues and runs when you finish; if you're idle it starts a turn right away. So the normal
+flow is just *do your work and end your turn* — the reply lands on its own. There's nothing to poll and
+no explicit receive command; running autonomously is the same (end the turn, the reply comes in as the
+next one).
 
 **Answering a worker's serial request is your core job.** When a worker messages you (it arrives in
 your `usc-orch` session as `[worker:<name>] ...`) asking for a rig run, an RE probe, or in-game
