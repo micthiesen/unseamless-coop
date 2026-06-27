@@ -113,7 +113,7 @@ const NAMEPLATE_EDGE_DOT_R: f32 = 4.5;
 const NAMEPLATE_DOT_OUTLINE: f32 = 1.5;
 
 /// One inset, in pixels, from the viewport edge, shared by every overlay surface: the top-left
-/// notifications (left + top), the top-right watermark (right + top), and the utility window's
+/// watermark (left + top), the top-right notifications (right + top), and the utility window's
 /// default top edge. Tweak here to move them all together.
 const OVERLAY_MARGIN: f32 = 24.0;
 
@@ -298,9 +298,13 @@ impl Overlay {
         }) else {
             return;
         };
-        // Top-left, the opposite corner from the watermark (top-right) and Steam's toasts (bottom-right).
+        // Top-right, the opposite corner from the watermark (top-left). Anchored by the window's own
+        // top-right corner (pivot 1,0) so it stays put regardless of the auto-sized content width.
+        // Shares the right edge with Steam's bottom-right toasts but sits at the top, clear of them.
+        let disp = ui.io().display_size;
         ui.window("##unseamless-notifications")
-            .position([OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
+            .position([disp[0] - OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
+            .position_pivot([1.0, 0.0])
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
@@ -357,18 +361,16 @@ impl Overlay {
     }
 
     /// Draw the branded corner stamp — mod name + version + the backtick hint — anchored to the
-    /// top-right. Stands in for the vanilla "App Ver. / OFFLINE" version block (which we can't edit:
-    /// its text is FMG, uncharted by the SDK at our pin), but sits top-right rather than the vanilla
-    /// bottom-right so it doesn't overlap Steam's own bottom-right notifications. Gated by the caller
-    /// to off-the-playfield only. Borderless and input-transparent like the notifications surface;
-    /// uses our crisp menu font.
+    /// top-left. Stands in for the vanilla "App Ver. / OFFLINE" version block (which we can't edit:
+    /// its text is FMG, uncharted by the SDK at our pin). Sits top-left, the opposite corner from the
+    /// notifications (top-right) and clear of Steam's own bottom-right notifications. Gated by the
+    /// caller to off-the-playfield only. Borderless and input-transparent like the notifications
+    /// surface; uses our crisp menu font.
     fn draw_watermark(&self, ui: &Ui) {
-        let disp = ui.io().display_size;
-        // Anchor by the window's own top-right corner (pivot 1,0) at a fixed inset from the viewport's
-        // top-right, so it stays put regardless of the auto-sized text width.
+        // Anchor by the window's own top-left corner (default pivot 0,0) at a fixed inset from the
+        // viewport's top-left.
         ui.window("##unseamless-watermark")
-            .position([disp[0] - OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
-            .position_pivot([1.0, 0.0])
+            .position([OVERLAY_MARGIN, OVERLAY_MARGIN], Condition::Always)
             .bg_alpha(PASSIVE_BG_ALPHA)
             .flags(passive_window_flags())
             .build(|| {
@@ -394,7 +396,7 @@ impl Overlay {
     /// debug builds or when toggled from the Actions tab via [`Overlay::show_debug`]). If you ever make
     /// this panel visible by default on release, revisit that — it would then leak identity on stream.
     ///
-    /// Bottom-left is the one free corner (notifications top-left, watermark top-right,
+    /// Bottom-left is the one free corner (watermark top-left, notifications top-right,
     /// Steam's toasts bottom-right). Anchored by its own bottom-left corner (pivot 0,1) so it grows
     /// upward from a fixed inset and never runs off the bottom. Borderless + input-transparent like the
     /// other passive surfaces; reads the snapshot non-blocking and skips the frame before the first
