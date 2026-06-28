@@ -90,8 +90,15 @@ is the real peer **content** and tuning the *feel* with a partner at a real dist
       2-player.*
 
 Still gated on the **co-op/session core** (rung 3 — real peer feed + identity), then **2-player**:
-- [ ] **Real label content** — name + ping + soul level + death count on `NameplateLabel`, driven by
-      [`OverheadDisplay`].
+- [ ] **Real label content** — name + ping + soul level + death count, driven by [`OverheadDisplay`]. The
+      *formatting* is done + host-tested: [`nameplate::nameplate_text`] turns a per-peer `PeerLabelData`
+      (name + optional ping/SL/death-count) into the drawable label, and the cdylib already renders peers
+      through that seam ([`features::nameplates::gather_labels`]). All that's left at rung 3 is filling the
+      real `PeerLabelData` fields (today: placeholder name, every stat `None` → name-only labels). *Draw
+      gap:* a multi-stat label is multiple lines joined with `\n`; the overlay's `draw_nameplates` centers
+      a plate by its *widest* line (one `add_text` call), so the stat lines under the name will sit
+      left-aligned within that block, not each individually centered. Single-line (name-only) labels —
+      everything drawn today — are unaffected; revisit per-line centering when stats actually land.
 - [ ] **Stable color by SteamID** — swap the per-peer color key from the phantom pointer to the SteamID.
 
 Pure-logic pieces (palette, clamp, LOD threshold, edge-bearing) are host-tested in `unseamless-core` so
@@ -104,6 +111,8 @@ the remaining work is real content + visual tuning, not new math.
 
 [`NameplateLabel`]: ../crates/unseamless-coop/src/nameplates.rs
 [`OverheadDisplay`]: ../crates/unseamless-core/src/config.rs
+[`nameplate::nameplate_text`]: ../crates/unseamless-core/src/nameplate.rs
+[`features::nameplates::gather_labels`]: ../crates/unseamless-coop/src/features/nameplates.rs
 [`palette::peer_color`]: ../crates/unseamless-core/src/palette.rs
 [`unseamless_core::palette`]: ../crates/unseamless-core/src/palette.rs
 [`projection::clamp_ndc_to_edge`]: ../crates/unseamless-core/src/projection.rs

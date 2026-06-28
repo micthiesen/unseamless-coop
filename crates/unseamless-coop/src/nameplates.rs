@@ -14,10 +14,12 @@ use std::sync::{Mutex, OnceLock, TryLockError};
 /// One projected nameplate ready to draw: where (screen NDC) and what (text). The game thread fills
 /// these; the overlay converts [`ndc`](NameplateLabel::ndc) to pixels and draws [`text`](NameplateLabel::text).
 ///
-/// Per-peer extras the design calls for — ping, soul level, death count — become more fields here once
-/// the real remote-peer feed lands (they need the co-op/session core, which is rig-gated); for now a
-/// label is just the peer's name (or a placeholder). Keeping the projected NDC on this struct means
-/// the overlay never touches the camera or any game state.
+/// Per-peer extras the design calls for (ping, soul level, death count)
+/// are formatted into [`text`](NameplateLabel::text) by the host-tested core
+/// ([`unseamless_core::nameplate`]) from a per-peer `PeerLabelData`, so this struct stays a flat
+/// "where + what to draw" with no content logic; for now those stats are unavailable (rig-gated co-op
+/// core) so a label is just the peer's name (or a placeholder). Keeping the projected NDC on this
+/// struct means the overlay never touches the camera or any game state.
 #[derive(Debug, Clone)]
 pub struct NameplateLabel {
     /// Screen position in normalized device coords (`x,y ∈ [-1, 1]`, `+x` right, `+y` up). For a

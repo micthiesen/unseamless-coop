@@ -12,8 +12,11 @@
 //! ping, soul level, death count — the content [`OverheadDisplay`] selects) needs the session layer.
 //! So today:
 //!  - we iterate `player_chr_set` phantoms (the other players in a real session), skipping the local
-//!    player, and label each with a placeholder — **TODO: wire real per-peer identity** when the
-//!    co-op core arrives, and carry ping/SL/death-count on [`NameplateLabel`];
+//!    player, and build a [`PeerLabelData`](unseamless_core::nameplate::PeerLabelData) per peer whose
+//!    `name` is a placeholder and whose stats are all `None`; the label text is formatted by the
+//!    host-tested core ([`nameplate::nameplate_text`](unseamless_core::nameplate::nameplate_text)).
+//!    **TODO: fill the real per-peer identity + ping/SL/death-count at that one seam** when the co-op
+//!    core arrives;
 //!  - solo, `player_chr_set` holds only the local player, so that yields nothing — the
 //!    `[nameplates] show_self` debug knob draws a label over your *own* head so the projection + draw
 //!    are exercisable solo on the rig before any session exists.
@@ -36,15 +39,18 @@
 //!  - **Off-screen edge indicator** — an off-screen / behind-camera peer is published as an
 //!    [`Edge`](NameplateKind::Edge) at a border-clamped NDC ([`edge_indicator_ndc`](Camera::edge_indicator_ndc)).
 //!
-//! Still gated on the real peer feed (rung 3) + a 2-player rig: real label **content** (name/ping/SL/
-//! death-count), swapping the color key from the pointer to the SteamID, and tuning the LOD/edge
-//! thresholds so the transitions *feel* right with a partner at a real distance.
+//! Still gated on the real peer feed (rung 3) + a 2-player rig: the real label **content** values
+//! (name/ping/SL/death-count) — the *formatting* of those values is done and host-tested in
+//! [`unseamless_core::nameplate`], so only the field values remain — swapping the color key from the
+//! pointer to the SteamID, and tuning the LOD/edge thresholds so the transitions *feel* right with a
+//! partner at a real distance.
 
 use eldenring::cs::{
     CSCamExt, CSCamera, CSTaskGroupIndex, ChrIns, ChrLoadStatus, ChrSet, WorldChrMan,
 };
 use fromsoftware_shared::Subclass;
 use unseamless_core::config::OverheadDisplay;
+use unseamless_core::nameplate::{self, PeerLabelData};
 use unseamless_core::projection::Camera;
 use unseamless_core::util::Latch;
 
@@ -116,7 +122,7 @@ impl Feature for Nameplates {
         let labels = camera
             .and_then(|camera| {
                 crate::sdk::with_instance::<WorldChrMan, _>(|wcm| {
-                    gather_labels(wcm, &camera, max_dist, show_self)
+                    gather_labels(wcm, &camera, mode, max_dist, show_self)
                 })
             })
             .unwrap_or_default();
@@ -184,7 +190,13 @@ where
 }
 
 /// Project every peer (and optionally the local player) into the on-screen, in-range label set.
-fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: bool) -> Vec<NameplateLabel> {
+fn gather_labels(
+    wcm: &WorldChrMan,
+    camera: &Camera,
+    mode: OverheadDisplay,
+    max_dist: u32,
+    show_self: bool,
+) -> Vec<NameplateLabel> {
     let mut labels = Vec::new();
 
     // Identify the local player so we can skip it in the phantom roster (it's also an entry there) and
@@ -192,8 +204,11 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
     let main_ptr =
         wcm.main_player.as_ref().map(|p| std::ptr::from_ref::<ChrIns>((**p).superclass()) as usize);
 
-    // Remote-peer roster (real session only). TODO(co-op core): replace the placeholder label with the
-    // peer's real name + ping/SL/death-count once the session layer can map a phantom to an identity.
+    // Remote-peer roster (real session only). The label *content* is formatted by the host-tested core
+    // ([`nameplate::nameplate_text`]) from a per-peer [`PeerLabelData`]; today we can only fill `name`
+    // (a `Player N` placeholder) and leave every stat `None`, so labels degrade to name-only.
+    // TODO(co-op core): fill the real `name` + `ping_ms`/`soul_level`/`death_count` at this one seam
+    // once the session layer can map a phantom to an identity — the formatting is already done.
     let mut peer_n = 0;
     // `active_characters` already skips any entry whose `chr_load_status` isn't `Active`, so each
     // `base` here is safe to deref (its modules are wired) — see the helper's docs for why that's the
@@ -212,11 +227,19 @@ fn gather_labels(wcm: &WorldChrMan, camera: &Camera, max_dist: u32, show_self: b
         // TODO(co-op core): swap `ptr` for the peer's SteamID once the session layer maps phantom→identity.
         let color = unseamless_core::palette::peer_color_for_id(ptr as u64);
         peer_n += 1;
-        push_label(&mut labels, camera, base, max_dist, format!("Player {peer_n}"), color);
+        // TODO(co-op core): populate the stats here once the session layer attaches an identity.
+        let peer = PeerLabelData::named(format!("Player {peer_n}"));
+        // `nameplate_text` is `None` only for `OverheadDisplay::None`, which already disables the whole
+        // feature upstream (`active` in `on_frame`), so this skip is defensive — a peer always has text
+        // by the time we get here today.
+        if let Some(text) = nameplate::nameplate_text(mode, &peer) {
+            push_label(&mut labels, camera, base, max_dist, text, color);
+        }
     }
 
     // Debug/solo self-nameplate: makes the projection + draw verifiable with no session (the only case
-    // that produces a visible nameplate solo). Off in normal play — you don't label yourself.
+    // that produces a visible nameplate solo). Off in normal play — you don't label yourself. It deliberately
+    // bypasses the per-peer content formatter (you label yourself by name only, never with stats).
     if show_self
         && let Some(p) = wcm.main_player.as_ref()
     {

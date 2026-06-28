@@ -27,6 +27,7 @@ pub mod game_state;
 pub mod guide;
 pub mod loader;
 pub mod menu;
+pub mod nameplate;
 pub mod notifications;
 pub mod pad;
 pub mod palette;
