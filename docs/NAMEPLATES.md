@@ -94,17 +94,20 @@ Still gated on the **co-op/session core** (rung 3 — real peer feed + identity)
       *formatting* is done + host-tested: [`nameplate::nameplate_text`] turns a per-peer `PeerLabelData`
       (name + optional ping/SL/death-count) into the drawable label, and the cdylib already renders peers
       through that seam ([`features::nameplates::gather_labels`]). All that's left at rung 3 is filling the
-      real `PeerLabelData` fields (today: placeholder name, every stat `None` → name-only labels). *Draw
-      gap:* a multi-stat label is multiple lines joined with `\n`; the overlay's `draw_nameplates` centers
-      a plate by its *widest* line (one `add_text` call), so the stat lines under the name will sit
-      left-aligned within that block, not each individually centered. Single-line (name-only) labels —
-      everything drawn today — are unaffected; revisit per-line centering when stats actually land.
+      real `PeerLabelData` fields (today: placeholder name, every stat `None` → name-only labels).
+      *Multi-line centering — done:* a multi-stat label is multiple lines joined with `\n`, and the overlay
+      now centers **each line independently** on the projected point (`draw_nameplates` measures each line
+      and places it via the host-tested [`projection::centered_line_origin`]), so the stat lines sit
+      centered under the name rather than left-aligned within the widest line's block. Single-line
+      (name-only) labels — everything drawn today — land pixel-identically (no regression). *Still
+      2-player-gated:* the visual feel of a real multi-stat plate at distance.
 - [ ] **Stable color by SteamID** — swap the per-peer color key from the phantom pointer to the SteamID.
 
 Pure-logic pieces (palette, clamp, LOD threshold, edge-bearing) are host-tested in `unseamless-core` so
 the remaining work is real content + visual tuning, not new math.
 
 [`palette::peer_color_for_id`]: ../crates/unseamless-core/src/palette.rs
+[`projection::centered_line_origin`]: ../crates/unseamless-core/src/projection.rs
 [`projection::is_dot_lod`]: ../crates/unseamless-core/src/projection.rs
 [`projection::DEFAULT_DOT_DISTANCE_M`]: ../crates/unseamless-core/src/projection.rs
 [`Camera::edge_indicator_ndc`]: ../crates/unseamless-core/src/projection.rs

@@ -600,10 +600,21 @@ impl Overlay {
                     if unseamless_core::projection::is_dot_lod(n.depth, unseamless_core::projection::DEFAULT_DOT_DISTANCE_M) {
                         draw_nameplate_dot(&dl, p, NAMEPLATE_DOT_R, color);
                     } else {
-                        // Center the text horizontally on the projected point.
-                        let x = p[0] - ui.calc_text_size(&n.text)[0] * 0.5;
-                        dl.add_text([x + NAMEPLATE_SHADOW_OFFSET, p[1] + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, &n.text);
-                        dl.add_text([x, p[1]], color, &n.text);
+                        // Center EACH line of a (possibly multi-line) label on the projected point and
+                        // stack them downward: a label is the peer's name plus optional stat lines joined
+                        // with '\n' (`unseamless_core::nameplate::nameplate_text`), and a single `add_text`
+                        // of the whole block left-aligns the narrower lines under the widest one. Measure
+                        // each line's width and place it via the host-tested `centered_line_origin` (the
+                        // single-line name-only label drawn today lands pixel-identically). The vertical
+                        // advance is one font line height (constant for the baked font), measured once so it
+                        // matches imgui's own internal line advance for a multi-line string.
+                        let line_height = ui.calc_text_size("X")[1];
+                        for (i, line) in n.text.lines().enumerate() {
+                            let width = ui.calc_text_size(line)[0];
+                            let origin = unseamless_core::projection::centered_line_origin(p, width, line_height, i);
+                            dl.add_text([origin[0] + NAMEPLATE_SHADOW_OFFSET, origin[1] + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, line);
+                            dl.add_text(origin, color, line);
+                        }
                     }
                 }
             }

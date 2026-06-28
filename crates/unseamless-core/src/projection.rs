@@ -114,6 +114,23 @@ pub fn ndc_to_screen(ndc: [f32; 2], viewport: [f32; 2]) -> [f32; 2] {
     [(ndc[0] * 0.5 + 0.5) * viewport[0], (1.0 - (ndc[1] * 0.5 + 0.5)) * viewport[1]]
 }
 
+/// Top-left draw position (pixels) for line `index` of a vertically-stacked, **per-line
+/// horizontally-centered** text block — the layout for a multi-line overhead nameplate.
+///
+/// The block is anchored at `anchor` = `[center_x, top_y]` (the peer's projected head point): every
+/// line is centered on `center_x` *independently* using its own measured `line_width`, and line `index`
+/// sits `index * line_height` pixels below `top_y`. Centering each line on its own width (rather than
+/// drawing the whole `"\n"`-joined string in one call, which imgui left-aligns under the widest line)
+/// is what keeps a name + stat-line label centered as a column instead of ragged-left.
+///
+/// `line_width`/`line_height` come from the overlay's font measurement (`calc_text_size`), so this stays
+/// pure + host-testable while the pixel sizes live on the Present thread. The single-line case
+/// (`index == 0`) is exactly `[center_x - line_width / 2, top_y]`, identical to the prior one-line draw —
+/// no regression for today's name-only labels.
+pub fn centered_line_origin(anchor: [f32; 2], line_width: f32, line_height: f32, index: usize) -> [f32; 2] {
+    [anchor[0] - line_width * 0.5, anchor[1] + index as f32 * line_height]
+}
+
 /// Clamp an NDC point to the screen border in the direction of the point from screen-center, for an
 /// **off-screen indicator** — a dot pinned to the edge pointing at an off-screen teammate (the design
 /// in `docs/NAMEPLATES.md`). A point already within `limit` on both axes is on-screen and returned
@@ -412,6 +429,42 @@ mod tests {
         assert!(close(cam.distance_to([3.0, 4.0, 0.0]), 5.0), "3-4-5 radial distance");
         assert!(close(cam.distance_to([0.0, 0.0, -10.0]), 10.0), "behind the camera still has a distance");
         assert!(!cam.distance_to([f32::NAN, 0.0, 0.0]).is_finite(), "NaN world → non-finite distance to cull");
+    }
+
+    #[test]
+    fn centered_line_origin_centers_each_line_independently() {
+        // Anchor (peer's projected head) at x=100, top y=50; uniform 16px line height.
+        let anchor = [100.0, 50.0];
+        let lh = 16.0;
+        // A wide name (60px) and a narrow stat line (20px). Each centers on its OWN width, so the
+        // narrow line's left edge sits further right than the wide line's — the whole point of the fix
+        // (a single block-draw would left-align the narrow line under the wide one instead).
+        let name = centered_line_origin(anchor, 60.0, lh, 0);
+        let stat = centered_line_origin(anchor, 20.0, lh, 1);
+        assert_eq!(name, [70.0, 50.0], "name: centered on its 60px width at the top");
+        assert_eq!(stat, [90.0, 66.0], "stat: centered on its 20px width, one line down");
+        // Both lines' centers land back on the anchor x (left edge + half width).
+        assert!(close(name[0] + 60.0 / 2.0, anchor[0]));
+        assert!(close(stat[0] + 20.0 / 2.0, anchor[0]));
+    }
+
+    #[test]
+    fn centered_line_origin_single_line_matches_legacy_draw() {
+        // The name-only label drawn today: index 0 must be exactly the prior one-line formula
+        // (`x = center - width/2`, `y = top`) so there's no pixel regression.
+        let anchor = [640.0, 360.0];
+        let width = 48.0;
+        assert_eq!(centered_line_origin(anchor, width, 16.0, 0), [anchor[0] - width / 2.0, anchor[1]]);
+    }
+
+    #[test]
+    fn centered_line_origin_stacks_lines_downward() {
+        // Successive lines advance by exactly `line_height` in +y (pixels grow downward), same x rule.
+        let anchor = [0.0, 0.0];
+        for i in 0..4 {
+            let o = centered_line_origin(anchor, 10.0, 12.0, i);
+            assert_eq!(o, [-5.0, i as f32 * 12.0], "line {i}");
+        }
     }
 
     #[test]
