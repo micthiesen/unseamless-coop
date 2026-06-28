@@ -42,8 +42,9 @@ What the spike established (all rig-confirmed):
       **disc** per player ([`native_draw::draw_billboard_disc`]) — a shape, *not* in-world text, and no
       distance LOD (deliberate: the debug font is dead and a colored dot is what we want here). Each
       player reads as its palette color; floats above the head; depth-tested; present-hook-free.
-- [x] **Screen-space 2D substrate** (`ScreenSpace` / `draw_screen_rect` / `draw_filled_quad`) — proven by
-      the probe, in `native_draw.rs` (not yet wired to a real surface).
+- [x] **Screen-space 2D substrate** (`ScreenSpace` / `draw_screen_rect` / `draw_filled_quad` /
+      `draw_text_screen`) in `native_draw.rs` — a near-plane camera-locked billboard with aspect-correct
+      bitmap text. Wired by native toasts (below); the menu will build on it too.
 - [x] **Bitmap font -> draw-shapes** (`unseamless_core::bitmap_font`): `shape(text, Face) -> rects` from
       precomputed static glyph->merged-rects (Spleen Menu 8x16 / Compact 6x12), with ASCII-art unit
       tests. The enabler for native text.

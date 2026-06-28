@@ -134,10 +134,10 @@ lock = false
 hour = 12
 minute = 0
 
-# SPIKE (temporary): evaluate native world-space nameplates drawn by the game's own CSEzDraw text
-# renderer (no overlay). `native_spike` labels your own head + phantoms via the game renderer;
-# `enabled = false` keeps the imgui-overlay nameplates off so the native draw is seen in isolation.
-# Revert this section before committing the spike.
+# Native rendering (the imgui-replacement experiment): `native_spike = true` enables the native
+# CSEzDraw surfaces — a colored disc marker over each player + notification toasts drawn from the
+# bitmap font — so a rig run exercises them. `enabled = false` keeps the imgui-overlay nameplates off
+# so the native marker is seen in isolation. Intended rig state; the shipped default is both off.
 [nameplates]
 enabled = false
 native_spike = true

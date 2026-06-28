@@ -76,11 +76,12 @@ impl Feature for NativeToasts {
             let line_h = bitmap_font::metrics(Face::Compact).line_height as f32;
             let mut y = TOP_NDC;
             for t in &toasts {
-                let (w_px, h_px) = bitmap_font::measure(&t.message, Face::Compact);
-                let tlx = RIGHT_NDC - w_px as f32 * SCALE; // right-align
+                // Right-align: anchor the run's left edge so its right edge sits at RIGHT_NDC.
+                let tlx = RIGHT_NDC - crate::native_draw::text_width_ndc(&ss, &t.message, Face::Compact, SCALE);
                 crate::native_draw::draw_text_screen(ez, &ss, &t.message, Face::Compact, [tlx, y], SCALE, severity_rgba(t.severity, fade(t)));
                 // Stack downward by the rendered text height (multi-line aware) plus a gap.
-                y -= (h_px as f32).max(line_h) * SCALE + GAP_NDC;
+                let lines = t.message.lines().count().max(1) as f32;
+                y -= lines * line_h * SCALE + GAP_NDC;
             }
         });
     }

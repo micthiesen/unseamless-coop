@@ -5,17 +5,20 @@
 //!
 //! What's here:
 //!  - [`draw_billboard_disc`] — a camera-facing filled disc (the colored overhead nameplate marker).
-//!  - [`draw_filled_quad`] / [`ScreenSpace`] / [`draw_screen_rect`] — the screen-space 2D layer (a
+//!  - [`ScreenSpace`] / [`draw_screen_rect`] / [`draw_filled_quad`] — the screen-space 2D layer (a
 //!    near-plane billboard), the substrate for native toasts/menus. `CSEzDraw` geometry is world-space,
 //!    so 2D UI is drawn on a plane locked just in front of the camera.
+//!  - [`draw_text_screen`] / [`text_width_ndc`] — screen-space bitmap text: real Spleen glyphs
+//!    ([`unseamless_core::bitmap_font`]) rasterized to filled quads. This is the working native text path.
 //!  - [`draw_text_world`] — a wrapper over the game's `CSEzDraw::draw_text` that we RE'd. **It does not
 //!    work in retail** (kept only as the RE record); see its docs.
 //!
 //! ## Cost model (rig-measured 2026-06-28)
-//! `CSEzDraw` charges **per primitive** (~3µs/quad on the rig; caching the resolved fn pointer did not
-//! change it, so it's the game's debug-renderer enqueue/render, likely unbatched). Cheap for a handful
-//! of shapes (nameplate markers) and small transient text (toasts); a dense always-redrawn surface (a
-//! big menu) costs real frame time, so keep primitive counts down (merge rects, gate to when shown).
+//! `CSEzDraw` charges **per primitive** (~3µs/quad on the rig; the cost is the game's debug-renderer
+//! enqueue/render, likely unbatched — caching the resolved draw fn pointer made no measurable
+//! difference, so we just call the SDK's draw per primitive). Cheap for a handful of shapes (nameplate
+//! markers) and small transient text (toasts); a dense always-redrawn surface (a big menu) costs real
+//! frame time, so keep primitive counts down (merge rects, gate to when shown).
 
 use std::sync::OnceLock;
 
@@ -35,16 +38,6 @@ fn rgba_to_vec4(rgba: [u8; 4]) -> F32Vector4 {
     )
 }
 
-/// Cached `CSEzDraw::draw_triangle` (RVA `0x264fb10`, from the SDK bundle). The SDK's `ez.draw_triangle`
-/// re-resolves the address via `Program::current().rva_to_va()` on **every** call — fine for a few debug
-/// shapes, wasteful at many quads/frame. Resolve once and call directly.
-type FnDrawTriangle = extern "C" fn(*const CSEzDraw, *const Triangle);
-fn draw_triangle_fn() -> Option<FnDrawTriangle> {
-    static RESOLVED: OnceLock<Option<usize>> = OnceLock::new();
-    let addr = *RESOLVED.get_or_init(|| Program::current().rva_to_va(0x264fb10).ok().map(|v| v as usize));
-    addr.map(|a| unsafe { std::mem::transmute::<usize, FnDrawTriangle>(a) })
-}
-
 /// Build a `Triangle` (origin + two edge vectors) from three world points.
 fn tri(a: &HavokPosition, b: &HavokPosition, c: &HavokPosition) -> Triangle {
     Triangle {
@@ -61,12 +54,14 @@ fn set_fill(ez: &mut CSEzDraw, rgba: [u8; 4]) {
 }
 
 /// Draw a solid quad (two filled triangles) with corners `a,b,c,d` in winding order (e.g. TL,TR,BR,BL).
+/// Uses the SDK's `CSEzDraw::draw_triangle` directly — it resolves through the SDK's version-detected
+/// RVA bundle (panics, caught by the per-task firewall, on an unsupported game build) rather than a
+/// hardcoded literal. Its per-call re-resolution is not the bottleneck (rig-measured: the per-primitive
+/// cost is the game's enqueue/render, see the cost note above).
 pub fn draw_filled_quad(ez: &mut CSEzDraw, a: &HavokPosition, b: &HavokPosition, c: &HavokPosition, d: &HavokPosition, rgba: [u8; 4]) {
     set_fill(ez, rgba);
-    let Some(draw) = draw_triangle_fn() else { return };
-    let (t1, t2) = (tri(a, b, c), tri(a, c, d));
-    draw(ez as *const CSEzDraw, &t1);
-    draw(ez as *const CSEzDraw, &t2);
+    ez.draw_triangle(&tri(a, b, c));
+    ez.draw_triangle(&tri(a, c, d));
 }
 
 /// Draw a filled **camera-facing disc** (a clean colored "dot") of world-`radius` meters at `center`, in
@@ -74,7 +69,6 @@ pub fn draw_filled_quad(ez: &mut CSEzDraw, a: &HavokPosition, b: &HavokPosition,
 /// the world by the game. This is the native overhead nameplate marker — no text, no font, no LOD.
 pub fn draw_billboard_disc(ez: &mut CSEzDraw, center: &HavokPosition, right: [f32; 3], up: [f32; 3], radius: f32, rgba: [u8; 4], segments: u32) {
     set_fill(ez, rgba);
-    let Some(draw) = draw_triangle_fn() else { return };
     let segments = segments.max(3);
     // Rim point at angle `ang` (radians) in the camera plane.
     let rim = |ang: f32| {
@@ -90,8 +84,7 @@ pub fn draw_billboard_disc(ez: &mut CSEzDraw, center: &HavokPosition, right: [f3
     for i in 1..=segments {
         let ang = std::f32::consts::TAU * (i as f32) / (segments as f32);
         let cur = rim(ang);
-        let t = tri(center, &prev, &cur);
-        draw(ez as *const CSEzDraw, &t);
+        ez.draw_triangle(&tri(center, &prev, &cur));
         prev = cur;
     }
 }
@@ -128,6 +121,12 @@ impl ScreenSpace {
         Self { pos: cam.pos, right: cam.right, up: cam.up, fwd: cam.fwd, half_w, half_h, dist }
     }
 
+    /// Screen aspect (width/height). A given NDC extent covers `aspect`× more screen pixels in x than
+    /// in y, so anything that must stay square on screen (text glyphs) divides its x scale by this.
+    pub fn aspect(&self) -> f32 {
+        if self.half_h != 0.0 { self.half_w / self.half_h } else { 1.0 }
+    }
+
     /// World point for screen NDC (`nx,ny` in -1..1).
     pub fn point(&self, nx: f32, ny: f32) -> HavokPosition {
         let sx = nx * self.half_w;
@@ -150,23 +149,35 @@ pub fn draw_screen_rect(ez: &mut CSEzDraw, ss: &ScreenSpace, cx: f32, cy: f32, h
     draw_filled_quad(ez, &tl, &tr, &br, &bl, rgba);
 }
 
-/// Draw `text` (bitmap `face`) as filled quads at screen-NDC top-left `(tlx, tly)`, `scale` NDC per
-/// font-pixel, with a 1-pixel dark shadow for contrast on any background. The font's top-left-origin,
-/// y-down pixel rects ([`bitmap_font::shape`]) map to y-up NDC. This is the native text primitive that
-/// replaces imgui text: real Spleen glyphs rasterized to `CSEzDraw` solid quads.
+/// Draw `text` (bitmap `face`) as filled quads at screen-NDC top-left `anchor`, `scale` NDC per
+/// font-pixel (in y), with a 1-pixel dark shadow for contrast on any background. The x scale is divided
+/// by the screen aspect so glyphs stay square on screen rather than stretching with the viewport (NDC
+/// is non-uniform: a unit covers more screen px in x than y). Font pixels are top-left-origin, y-down
+/// ([`bitmap_font::shape`]) and map to y-up NDC. The native text primitive that replaces imgui text:
+/// real Spleen glyphs rasterized to `CSEzDraw` solid quads. Use [`text_width_ndc`] to right-align.
 pub fn draw_text_screen(ez: &mut CSEzDraw, ss: &ScreenSpace, text: &str, face: Face, anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
     let rects = bitmap_font::shape(text, face);
+    let sx = scale / ss.aspect(); // aspect-correct horizontal scale
+    let sy = scale;
     let shadow = [0, 0, 0, (rgba[3] as u16 * 4 / 5) as u8];
-    blit_rects(ez, ss, &rects, [anchor[0] + scale, anchor[1] - scale], scale, shadow);
-    blit_rects(ez, ss, &rects, anchor, scale, rgba);
+    blit_rects(ez, ss, &rects, [anchor[0] + sx, anchor[1] - sy], sx, sy, shadow);
+    blit_rects(ez, ss, &rects, anchor, sx, sy, rgba);
 }
 
-/// Fill each shaped glyph rect at NDC top-left `anchor` scaled by `scale` (NDC per font-pixel).
-fn blit_rects(ez: &mut CSEzDraw, ss: &ScreenSpace, rects: &[PositionedRect], anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
+/// On-screen NDC width of `text` at `scale` (matching [`draw_text_screen`]'s aspect-correct x scale).
+/// For right-aligning a run: `anchor_x = right_edge - text_width_ndc(...)`.
+pub fn text_width_ndc(ss: &ScreenSpace, text: &str, face: Face, scale: f32) -> f32 {
+    let (w_px, _) = bitmap_font::measure(text, face);
+    w_px as f32 * scale / ss.aspect()
+}
+
+/// Fill each shaped glyph rect at NDC top-left `anchor`, scaled by `scale_x`/`scale_y` (NDC per
+/// font-pixel; x and y differ to keep glyphs square on a non-square viewport).
+fn blit_rects(ez: &mut CSEzDraw, ss: &ScreenSpace, rects: &[PositionedRect], anchor: [f32; 2], scale_x: f32, scale_y: f32, rgba: [u8; 4]) {
     for r in rects {
-        let cx = anchor[0] + (r.x as f32 + r.w as f32 * 0.5) * scale;
-        let cy = anchor[1] - (r.y as f32 + r.h as f32 * 0.5) * scale; // y-down px -> y-up NDC
-        draw_screen_rect(ez, ss, cx, cy, r.w as f32 * 0.5 * scale, r.h as f32 * 0.5 * scale, rgba);
+        let cx = anchor[0] + (r.x as f32 + r.w as f32 * 0.5) * scale_x;
+        let cy = anchor[1] - (r.y as f32 + r.h as f32 * 0.5) * scale_y; // y-down px -> y-up NDC
+        draw_screen_rect(ez, ss, cx, cy, r.w as f32 * 0.5 * scale_x, r.h as f32 * 0.5 * scale_y, rgba);
     }
 }
 
