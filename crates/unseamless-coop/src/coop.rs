@@ -40,7 +40,8 @@ use unseamless_core::config::Config;
 use unseamless_core::diagnostics::{ConnectReport, LobbyProgress, LobbyRole, VersionCheck, peer_tag};
 use unseamless_core::notifications::Severity;
 use unseamless_core::peer::{
-    CONFIG_SYNCED_MESSAGE, Peer, Session, lost_contact_message, version_mismatch_message,
+    CONFIG_SYNCED_MESSAGE, PEER_ARRIVED_MESSAGE, PEER_DEPARTED_MESSAGE, PEER_RETURNED_MESSAGE, Peer,
+    Session, lost_contact_message, version_mismatch_message,
 };
 use unseamless_core::protocol::{PROTOCOL_VERSION, SharedSettings};
 use unseamless_core::transport::{PeerId, Transport};
@@ -633,6 +634,9 @@ fn run_session(
             // so a superseded driver can't publish CONNECTED over a newer session's state.
             SESSION.store(SessionState::Connected.as_u8(), Ordering::Relaxed);
             clear_banner(BANNER_SESSION);
+            // In-world presence (an *effect*, so ER-voiced): announce the partner's arrival alongside —
+            // not replacing — the plain "connected" confirmation `update_link_status` just toasted.
+            toast(Severity::Info, PEER_ARRIVED_MESSAGE);
         }
 
         // Handshake never landed within budget: give up rather than hang. (Once linked, liveness — not
@@ -728,9 +732,17 @@ fn update_link_status(
             if now_lost {
                 PHASE.store(Phase::Lost.as_u8(), Ordering::Relaxed);
                 set_banner(BANNER_LIVENESS, Severity::Warning, lost_contact_message(peer_id));
+                // In-world presence (an *effect*, so ER-voiced): additive to the plain "Lost contact"
+                // banner above — the banner keeps its plain diagnostic voice; this is the lore-voice
+                // companion announcing the departure.
+                toast(Severity::Info, PEER_DEPARTED_MESSAGE);
             } else {
                 PHASE.store(Phase::Linked.as_u8(), Ordering::Relaxed);
                 clear_banner(BANNER_LIVENESS);
+                // Symmetric to the departure toast: a transient liveness blip never un-links the peer,
+                // so coming back is a *return*, not a fresh arrival. Without this the lore voice would
+                // only ever say "departed" on a flapping connection and never welcome them back.
+                toast(Severity::Info, PEER_RETURNED_MESSAGE);
             }
         }
     }

@@ -87,6 +87,30 @@ fn liveness_banner_key(peer: PeerId) -> String {
 /// [`version_mismatch_message`].
 pub const CONFIG_SYNCED_MESSAGE: &str = "Session settings synced from host";
 
+/// ER-voiced in-world presence toast shown when a co-op partner's handshake lands — the lore-register
+/// counterpart to the plain "connected" confirmation, emitted *alongside* it (see `coop/coop.rs`).
+/// Player join/leave is an *effect*, so per CLAUDE.md's "Message voice" rule it's worded in
+/// FromSoft's terse, weighty register and carries **no raw mechanical values** — no SteamID, no peer
+/// tag: presence reads fine without an identity, and leaving it out keeps a player's id off the
+/// overlay. Single-sourced like [`CONFIG_SYNCED_MESSAGE`] so core and the overlay can't drift.
+/// ("Cooperator" is the game's own term for a summoned co-op phantom, so it stays in register.)
+pub const PEER_ARRIVED_MESSAGE: &str = "A cooperator has arrived in your world.";
+
+/// ER-voiced presence toast shown when a linked partner falls silent (the liveness "lost" edge). The
+/// lore-voice companion to the plain diagnostic "Lost contact" banner — purely **additive**, it does
+/// not replace the banner or change its plain voice. Identity-free and value-free for the same
+/// reasons as [`PEER_ARRIVED_MESSAGE`].
+pub const PEER_DEPARTED_MESSAGE: &str = "A cooperator has departed your world.";
+
+/// ER-voiced presence toast shown when a partner we'd flagged as silent is heard from again (the
+/// liveness *recovery* edge). The liveness flag flaps lost↔recovered on a jittery connection, so
+/// [`PEER_DEPARTED_MESSAGE`] alone would read as the partner "departing" repeatedly and never coming
+/// back; this is its symmetric companion so the presence pair stays balanced. (Distinct from
+/// [`PEER_ARRIVED_MESSAGE`], the once-per-session *first* link — a transient liveness blip never
+/// un-links a peer, so a recovery is a return, not a fresh arrival.) Additive to clearing the plain
+/// "Lost contact" banner; identity- and value-free like the rest.
+pub const PEER_RETURNED_MESSAGE: &str = "A cooperator has returned to your world.";
+
 /// Per-sender monotonic sequence gate: accepts a frame only if its `seq` advances past everything
 /// seen from that sender, so a duplicated or reordered-old frame is rejected. The session-action
 /// and log-forward dedups share this one tested concept rather than open-coding the comparison
@@ -723,6 +747,27 @@ mod tests {
         let banners = client.peer().notifications().banners();
         assert_eq!(banners.len(), 1);
         assert!(banners[0].message.contains("version mismatch"));
+    }
+
+    #[test]
+    fn presence_messages_are_er_voiced_and_value_free() {
+        // Presence (join/leave) is an in-world EFFECT, so its messages stay in the lore register:
+        // non-empty, no raw mechanical values (no digits, no SteamID/peer tag), and identity-free for
+        // privacy. This deliberately differs from the *diagnostic* helpers (lost_contact_message etc.),
+        // which DO carry a peer tag — these presence lines must not, so pin that here.
+        let all = [PEER_ARRIVED_MESSAGE, PEER_DEPARTED_MESSAGE, PEER_RETURNED_MESSAGE];
+        for msg in all {
+            assert!(!msg.is_empty(), "presence message must say something");
+            assert!(
+                !msg.chars().any(|c| c.is_ascii_digit()),
+                "lore voice carries no raw values: {msg:?}"
+            );
+            assert!(msg.contains("cooperator"), "names the in-world presence in-register: {msg:?}");
+        }
+        // Arrival, departure, and return must each read differently — the recovery toast in
+        // particular must not duplicate the first-arrival one.
+        let unique: std::collections::BTreeSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "the three presence lines must be distinct");
     }
 
     #[test]
