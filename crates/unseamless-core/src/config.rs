@@ -290,6 +290,23 @@ pub struct Gameplay {
     /// (no-op + logged) if the AOB drifts, exactly like the patches above. Remove or promote once the
     /// rig settles which signal is the gate.
     pub force_online_menu_mode: bool,
+    /// **EXPERIMENTAL / UNVERIFIED** rung-3 lever for *driving a session directly*. A direct call to
+    /// the game's create-session wrapper (`0x140cad4c0`) returns `false` offline and the FSM moves
+    /// `lobby_state None → FailedToCreateSession` **synchronously** — even with
+    /// [`enable_offline_multiplayer`] (`is_offline()` forced false) applied. Static RE found why: the
+    /// create inner (`0x140cb1f70`) and the join inner (`0x140cb2470`) both call a **shared,
+    /// Arxan-encrypted availability gate** (`0x140cb4b50(this)`) *before* building params, and bail to
+    /// `FailedToCreate`/`FailedToJoin` if it returns false. That gate takes only `this` (so our
+    /// `flag`/`mode`/`settings` args can't affect it) and runs *before* `is_offline()` (which lives in
+    /// the params builder and only sets fields, never rejects) — which is exactly why forcing
+    /// `is_offline()` false was insufficient. This flag patches the create call site so the gate's
+    /// **veto is ignored** (the gate still runs; its `false` result no longer fails the create),
+    /// letting the create proceed to the network-session create so we can see whether the gate was the
+    /// reject. Ships **off by default** purely as a rig-testable lever — flip it on, relaunch, and
+    /// re-drive create (watch `lobby_state` for `TryToCreateSession` instead of `FailedToCreateSession`).
+    /// Fail-safe (no-op + logged) if the AOB drifts, exactly like the patches above. Full RE write-up:
+    /// `docs/SESSION-DRIVE.md` > "Why a direct create fails offline".
+    pub bypass_session_create_gate: bool,
     pub append_steam_id: bool,
     pub always_spectate_on_death: bool,
     /// Opt-in for [`boot_master_volume`]: when off (the default) the mod never touches the
@@ -415,6 +432,7 @@ impl Default for Gameplay {
             skip_splash_screens: true,
             enable_offline_multiplayer: true,
             force_online_menu_mode: false,
+            bypass_session_create_gate: false,
             append_steam_id: false,
             always_spectate_on_death: false,
             boot_master_volume_enabled: false,

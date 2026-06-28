@@ -26,6 +26,13 @@ enable_offline_multiplayer = true
 # live read of 0x144588afc FIRST — only flip this true to test if that read shows the getter is false
 # outside EAC. See docs/OFFLINE-ITEMS-FINDINGS.md > "Item-gate follow-up pass".
 force_online_menu_mode = false
+# EXPERIMENTAL / UNVERIFIED rung-3 lever. A direct create returns false offline because the create/join
+# inners call a shared Arxan-encrypted availability gate (0x140cb4b50) before building params and bail to
+# FailedToCreate/FailedToJoin. This patches the create call site so the gate's veto is ignored, letting
+# create proceed to the network create. Left OFF: do the runtime-verify FIRST (write-watch on [G]+0x24 to
+# see whether the gate or the network create is the reject). See docs/SESSION-DRIVE.md > "Why a direct
+# create fails offline".
+bypass_session_create_gate = false
 append_steam_id = false
 always_spectate_on_death = false
 # On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's

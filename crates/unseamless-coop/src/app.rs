@@ -473,6 +473,46 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
             &[0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90],
         );
     }
+
+    if config.gameplay.bypass_session_create_gate {
+        // EXPERIMENTAL / UNVERIFIED rung-3 lever. A direct call to the create-session wrapper
+        // (0x140cad4c0) returns false offline and the FSM moves `lobby_state None ->
+        // FailedToCreateSession` synchronously — even with `enable_offline_multiplayer` applied. Static
+        // RE (docs/SESSION-DRIVE.md > "Why a direct create fails offline") found the create inner
+        // (0x140cb1f70) and join inner (0x140cb2470) both call a shared, Arxan-encrypted availability
+        // gate `0x140cb4b50(this)` *before* building params and bail to FailedToCreate/FailedToJoin if
+        // it returns false. The gate takes only `this` and runs before `is_offline()` (which lives in
+        // the params builder and only sets fields, never rejects) — which is why forcing `is_offline()`
+        // false is insufficient. At the create call site the gate's bool feeds:
+        //   0x140cb202b  lea  rcx, [rsp+0x30]      (48 8D 4C 24 30)
+        //   0x140cb2030  test al, al              (84 C0)
+        //   0x140cb2032  jne  0x140cb203b         (75 07)   <- success edge; fall-through = fail
+        // Flipping that `jne` (75) to an unconditional `jmp` (EB) makes create always take the success
+        // path, so the gate still *runs* (its side effects, whatever they are, are preserved) but its
+        // `false` verdict no longer fails the create — control proceeds to the network-session create.
+        // If the gate was the reject, the FSM now reaches `TryToCreateSession`; if the gate was
+        // load-bearing for network-create readiness, the failure simply moves to the network create
+        // (still `FailedToCreateSession`) — the orchestrator's re-drive + a write-watch on `[G]+0x24`
+        // distinguishes these (see the doc's runtime-verify recipe). The landmark spans the gate's
+        // call rel32 (`E8 26 2B 00 00`, create-specific — the join site's rel32 differs, so this stays
+        // unique to create), then `nop` + the lea/test/jne; the `jne` is at offset 13. Fail-safe
+        // (no-op + logged) on miss/ambiguous/drift, like the patches above.
+        //
+        // Re-derive after a game update: the create inner is the `mov [this+0xc], 1` function in the
+        // CSSessionManager method block; the gate is the bool-returning call it makes right after the
+        // `lobby_state` guards and before the params builder (0x140cb20d0). Take the call + the
+        // following `nop; lea rcx,[rsp+0x30]; test al,al; jne rel8` as the landmark (the concrete call
+        // rel32 keeps it create-specific) and flip the `75` at offset 13 to `EB`.
+        const CREATE_GATE_CALLSITE: &[pelite::pattern::Atom] =
+            pelite::pattern!("E8 26 2B 00 00 90 48 8D 4C 24 30 84 C0 75 07");
+        crate::patch::overwrite_landmark(
+            "bypass_session_create_gate",
+            CREATE_GATE_CALLSITE,
+            13,
+            0x75,
+            &[0xEB],
+        );
+    }
 }
 
 /// Wait for the game's task system (`CSTaskImp`), tolerating our early DLL load.
