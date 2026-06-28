@@ -2,11 +2,11 @@
 //! by the game's own `CSEzDraw` renderer ([`crate::native_draw`]) from a frame task, with **no overlay
 //! and no present-hook**. The game composites each disc, depth-tested, into the 3D scene itself.
 //!
-//! This is the native replacement for the imgui-overlay nameplates, deliberately scoped to a *shape*
-//! (a colored dot), not in-world text: the game's debug text font isn't available in retail (see
-//! [`crate::native_draw::draw_text_world`]), and a per-player colored marker is what we actually want
+//! This is a native alternative to the imgui-overlay nameplates, deliberately scoped to a *shape* (a
+//! colored dot), not in-world text: there's no usable in-world game text (the debug text font isn't
+//! loaded in retail; see `docs/RE-GAME-UI.md`), and a per-player colored marker is what we actually want
 //! here — no perspective text, no distance LOD. Each player reads as a distinct palette color; richer
-//! per-peer info (name/ping/SL) belongs on a screen-space surface, not floating in the world.
+//! per-peer info (name/ping/SL) belongs on a screen-space surface (the imgui overlay), not in the world.
 //!
 //! Config-gated by `[nameplates] native_spike` (config-file-only, off by default; coexists with the
 //! overlay nameplates feature so the two renderers can be compared). Marks **your own head** too, so
