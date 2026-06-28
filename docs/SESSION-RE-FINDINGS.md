@@ -356,3 +356,213 @@ then a large `sub rsp,0x3c0` frame; hooking the **wrapper** is preferable (clean
 3. **Confirm identity:** each inner reads `[this+0xc]` as a guard, and the shared builder it calls
    reads `[this+0x25c]`/`[this+0x240]` — re-anchor the singleton via the `+0x25c=1` fingerprint if `G`
    moved.
+
+---
+
+# Summon-sign → session-start trace (top-down, static, 2026-06-27, worker `summon-sign-trace`)
+
+Companion to the keystone pass above. That pass came at the session FSM from the *state* side
+(found `G`, the ctor, the offsets, and proved the `lobby_state` write can't be tied to an initiation
+entry by an immediate-store scan). The sibling worker `session-init-re` is charting the
+initiation **bottom-up** from the `lobby_state` write. **This pass comes top-down from the
+multiplayer-item use**, to (1) document *what using a summon-sign item actually does* (so we can
+remove the items and drive the session directly — Michael's plan), and (2) hand `session-init-re` a
+precise meeting point.
+
+Static-only on the same pinned **2026-06-02 `eldenring.exe`** (image base `0x140000000`). Behavioral
+notes are in my own words; all addresses are facts about the binary; no decompiler output or upstream
+ERSC code is reproduced (CLAUDE.md > Clean-room). Grounded throughout in the pinned `fromsoftware-rs`
+SDK (`8c67a84`): `cs/sos_sign_man.rs`, `cs/multiplay_type.rs`, `cs/net_man.rs`.
+
+## TL;DR — the headline finding
+
+**Item-use does NOT synchronously call a "start session" function.** There is no
+`use item → … → CSSessionManager::create` call stack. Instead the whole summon system is a
+**job/request state machine** that `CSNetMan`'s recurring update task drives across many frames,
+with a **FromSoft matchmaking-server round-trip in the middle**:
+
+```
+item use (EzState) ─▶ SosSignMan request ─▶ a CSSosSign*Job is enqueued ─▶ CSNetMan update task
+   ─▶ FromNet server request (matchmaking) ─▶ [server reply, frames later] ─▶ next job ─▶ …
+   ─▶ a sign entry is *processed* ─▶ (gated by MultiplayPropertyEntry.disable_session_creation)
+   ─▶ CSSessionManager leaves lobby_state = None   ← the create/join, session-init-re's target
+```
+
+The single load-bearing SDK fact that ties signs to session-start is the flag
+`MultiplayPropertyEntryFlags::disable_session_creation` (`cs/multiplay_type.rs`), documented as:
+*"Whether this multiplayer type should not create session when its entry in `SosSignMan::signs` is
+processed."* So **the session is created while a `signs` entry is processed in the net update task**,
+not inside the item-use handler and not inside the summon job itself (verified below). That is why
+the create can't be pinned from the item side by a call trace — and why both prior immediate-store
+scans missed it.
+
+**Consequence for "drive the session without the items":** we don't need to call one hidden
+function. We need to either (a) enqueue the same request the item enqueues (and let the net task run
+it — but that needs the matchmaking server we don't have offline), or (b) drive the job/session
+layer directly, bypassing the FromNet server step. The items are greyed offline precisely because
+their first job (`CSSosSignCreateSignJob` / `CSSosSignDownloadSignListJob`) issues a `FromNet`
+matchmaking request that can't complete without FromSoft's servers — this is the same gate the
+`offline-items` lane is chasing from the availability-check side (see
+[OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)); here it's seen from the *function* side.
+
+## What each item does (mechanic, in my own words)
+
+The canonical ELDEN RING summon mechanic, mapped to the FSM roles. **Note a label swap vs. the lane
+brief:** in real ER the *sign placer* becomes the summoned **guest (Client)** and the one who
+*reveals + interacts with* the sign becomes the **host (Host)** — the reverse of the brief's
+"place ⇒ HOST / reveal ⇒ JOIN". The accurate mapping:
+
+- **Tarnished's Furled Finger — "write summon sign".** Registers *your own* white sign in the sign
+  pool, making you summonable. Internally this is the **`CSSosSignCreateSignJob`** path (a
+  `FromNet` "create sign" matchmaking request). The placer is offering to be a **cooperator
+  (guest)** → ends at `lobby_state None → TryToJoinSession → Client` *when later summoned and they
+  accept*.
+- **Furlcalling Finger Remedy — "see summon signs".** Reveals nearby cooperator signs (lifts the
+  murk) by pulling the area's sign list. Internally the **`CSSosSignDownloadSignListJob` /
+  `CSSosSignDownloadMatchAreaSignListJob`** path (a `FromNet` "get sign list" request). This only
+  *reveals*; it doesn't start a session by itself.
+- **Summon-sign acceptance (the actual session start).** The world owner walks onto a revealed sign
+  and interacts → **`CSSosSignSummonJob`** → the owner becomes **host**
+  (`None → TryToCreateSession → Host`); the sign owner gets the "you are being summoned, accept?"
+  prompt and on accept **joins** (`None → TryToJoinSession → Client`). The host create and the guest
+  join are the two FSM walks the runbook wants.
+
+## The pinned anchors (facts on the 2026-06-02 exe)
+
+**Summon-sign manager.** `SosSignMan` (RTTI `.?AVSosSignMan@CS@@`): primary **vtable `0x142a8a500`**,
+**ctor `0x1406f6e90`** (stores the vtable, then inits its two `DLMap` trees `signs`@`+0x08` /
+`sign_sfx`@`+0x20` via the allocator singleton at `0x143d87308` — confirms the SDK layout). The ctor
+is called from exactly one site inside the net-init function **`0x140b05a30`**, so `SosSignMan` is
+constructed during `CSNetMan` setup (the SDK reaches it as a `CSNetMan` member).
+
+**The summon-sign job family** (each an RTTI-named `CS::CSSosSign*Job`; this is the complete catalog,
+read from the RTTI type-descriptor names):
+
+| job | role | vtable | builder fn | builder's one caller (request entry) |
+|---|---|---|---|---|
+| `CSSosSignCreateSignJob` | place own sign (Tarnished's Furled Finger) | `0x142b3a9c8` | `0x140a13930` | `0x140a1e4a0` (RequestCreateSign) |
+| `CSSosSignDownloadSignListJob` | reveal/download signs (Furlcalling Finger Remedy) | `0x142b3aa70` | `0x140a13a30` | `0x140a19ce0` (RequestDownloadSignList) |
+| `CSSosSignSummonJob` | summon a sign → start session | `0x142b3aaa8` | `0x140a13ba0` | `0x140a1a110` (RequestSummon) |
+
+(siblings, not separately chased: `CSSosSignCreateMatchAreaSignJob`,
+`CSSosSignDownloadMatchAreaSignListJob`, `CSSosSignUpdateSignJob`, `CSSosSignRemoveSignJob`,
+`CSSosSignRejectJob` — RTTI names at `0x143ce4ed8…0x143ce5050`.) Each builder has **exactly one**
+caller — clean request wrappers. The invasion side mirrors this with a `BreakIn*Job` family whose
+RTTI literally includes **`BreakInJoinSessionJob`** (`0x143ce4bb8`) and `BreakInRequestJob`
+(`0x143ce4228`) — useful confirmation that "join session" is a job, and a second route to the same
+create/join if the sign route stalls.
+
+**EzState bridge.** `CSEventSosSignCtrl` (RTTI `.?AVCSEventSosSignCtrl@CS@@`, **vtable
+`0x142a752d8`**) is the event-script controller for sign interaction — the bridge from the
+in-world/EzState item action into the `SosSignMan` requests above.
+
+**Server request.** `FromNet::RequestSummonSignParams` (debug-name string at `0x143087048`) and the
+`CSNotifyLog<RequestSummonSignResultLogParams>` RTTI (`0x143ce6b50`) are the matchmaking request/-
+result for the sign flow — the FromSoft-server step that fails offline.
+
+**The request entry points climb into the net update task, then stop at virtuals** (no `E8` caller =
+dispatched by the task/step system), confirming the "polled state machine, not a call stack" model:
+
+- RequestCreateSign `0x140a1e4a0` ← `0x140a19ca0` / `0x140a19e30` ← `0x1401d74e0` / `0x1401d8550`
+- RequestDownloadSignList `0x140a19ce0` ← `0x1401d6e30` ← `0x1401d20c0` ← `0x1401cf740` ← `0x1401cfc60`
+- RequestSummon `0x140a1a110` ← `0x1401d5b40` ← `0x1401d9570` ← `0x1401d3ae0` (a vtable method, ptr
+  at `0x1406ff7e9`) ← `0x1406ff190`
+
+## Where the create actually is (the meeting point for `session-init-re`)
+
+Found **no direct (E8-reachable) create in the summon job** — which, given the create is virtually
+dispatched (below), is the most a static reachability scan can establish here. From
+`CSSosSignSummonJob`'s vtable methods the *only* `CSSessionManager`-module functions reached are
+**`0x140caf2a0`** (21 callers) and **`0x140cadd40`** (4 callers) — both widely-used **accessors**,
+reached from the job's diagnostic method **`0x140a52650`** (it is wall-to-wall `FD4Singleton`
+access-asserts — a state-logging method, not the worker).
+
+So, consistent with the `disable_session_creation` semantics, the `None→TryTo*` write lives in the
+net update task's "process a `signs` entry" step — the cluster of multiplayer step virtuals in
+`~0x1401cXXXX…0x1401dXXXX` and `~0x140a3XXXX` that load `G` (`0x143d7a4d0`) and are dispatched
+(caller-count 0). This top-down narrowing **converged with `session-init-re`'s bottom-up pass**: its
+CREATE **driver is `0x140a23010`**, which was already in my sign/net `G`-referencing candidate list
+(I had it flagged as `0x140a23010`, 2 `G`-refs, 1 caller). Top-down and bottom-up met at the same
+function. The confirmed initiation functions (from `session-init-re`, now also in this doc/main):
+
+- **CREATE:** wrapper **`0x140cad4c0`**`(this, u8, u32, void*)` → inner **`0x140cb1f70`** → store
+  `[G+0xc]=1` (`TryToCreateSession`) at `0x140cb208e`. Solo "no-peer" driver: **`0x140a23010`**.
+- **JOIN:** wrapper **`0x140cae640`**`(this, u8, void*, u32, void*)` → inner **`0x140cb2470`** →
+  store `[G+0xc]=4` (`TryToJoinSession`) at `0x140cb25f0` (the wrapper's own `=5` write is the
+  `FailedToJoinSesion` failure path).
+
+## Arg construction for driving create/join directly (the direct-drive recipe)
+
+The high-value deliverable for the co-op core: **what the item/sign path passes into the create/join
+wrappers**, so we can call them directly (drive the session without the items). Charted statically by
+reading each call site's register setup; all are facts about the 2026-06-02 exe.
+
+### CREATE — `bool create(CSSessionManager* this, u8 flag, u32 mode, void* settings)` @ `0x140cad4c0`
+
+The wrapper is a thin shim: it reloads `flag` and forwards `mode`(`r8d`)/`settings`(`r9`) untouched
+to inner `0x140cb1f70`, which does the work and stores `lobby_state=1`; **on failure the wrapper sets
+`lobby_state=2` (`FailedToCreateSession`) + cleanup**, so calling the wrapper (not the inner) gets you
+the failure handling for free. The inner **guards on current `lobby_state`** — it bails if already in
+`{1,3}` (creating/host) or `{4,6}` (joining/client), so you must call it from `None`.
+
+Two call sites build the args; the **sign/host summon path is the clean template** because its args
+are near-constant:
+
+| site (enclosing fn) | `flag` (`dl`) | `mode` (`r8d`) | `settings` (`r9`) |
+|---|---|---|---|
+| **`0x1406f7b75`** (sign/host summon, `0x1406f7ac3`) | `byte [SosSignData + 0x2e]` (`rdx` = the sign being summoned) | **`4`** | `&{ u16 @0 = 0; u32 @4 = 2 }` — an **8-byte** stack blob |
+| `0x140a23066` (no-peer driver `0x140a23010`) | `byte [this+0x68]` | `u32 [this+0x6c]` | `&this[0x70]` (settings inline in the driver object) |
+
+So the **minimal direct create** is: `this = [G]` (the live `CSSessionManager*`),
+`flag = <a byte from the sign; the no-peer driver passes its own +0x68>`, `mode = 4`, and an 8-byte
+`settings = {u16:0, u32:2}`. The inner forwards `mode`+`settings` into the session-request builder
+**`0x140cb20d0`** (which is where the `settings` fields are actually consumed and the async create is
+issued via a vtable call; success there gates the `=1` store).
+
+> **Offline gate caveat (ties to [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)):** the
+> create-request builder `0x140cb20d0` **calls `is_offline()` (`0x140e55180`) twice**. So even a
+> direct-drive create runs through the offline check — the already-landed, benign
+> `enable_offline_multiplayer` patch (force `is_offline()` false) is plausibly a *prerequisite* for the
+> direct create to proceed, which matches that doc's note that `is_offline()` gates the session FSM
+> even though it does **not** gate the item greying. Confirm on the rig.
+
+### JOIN — `bool join(CSSessionManager* this, u8 flag, void* a, u32 b, void* c)` @ `0x140cae640`
+
+Same wrapper shape (forwards to inner `0x140cb2470`, which stores `lobby_state=4`; wrapper handles
+the failure/`5` + cleanup). Join is **peer-directed**, so its args are *not* constants — at the one
+call site `0x1406faac3` (in `0x1406fa850`) they thread through from that function's own params:
+`flag = byte [local+0x68]`, `a (r8) = r15` (caller's 3rd param), `b (r9d) = r14d` (caller's 4th
+param), and a 5th stack arg `= [rsp+0x80]` (a locally-built object). This is why **solo reaches only
+create** (join needs the peer/sign payload these args carry); chart join's exact payload during the
+two-player friend test, feeding the rung-4-resolved peer in.
+
+## Net for the rewrite
+
+To drive co-op without the items we replicate the **summon path's effect**, skipping the FromNet
+server leg: stand up the peer over our own side-channel (rungs 2+4, done), then **call the create
+wrapper `0x140cad4c0` directly** for the host — `this=[G]`, `flag`, `mode=4`, an 8-byte
+`settings={u16:0,u32:2}` (the arg recipe above) — and the join wrapper `0x140cae640` for the guest
+once its peer payload is charted on the two-player test. The items are harness for exactly this
+job/request machine; the create/join entry and (for create) its full arg set are now known, so the
+co-op core can drive the FSM rather than only observe it. Open items for the rig: (1) does the
+`is_offline()` check inside `0x140cb20d0` block a direct create offline (the `enable_offline_multiplayer`
+patch likely clears it); (2) join's exact peer payload (`a`/`b`/stack5), charted with a real peer.
+
+## Re-derivation after a game update
+
+- **The job family:** scan RTTI type-descriptor names for `.?AVCSSosSign` (and `.?AVBreakIn`); each
+  `…Job@CS@@` name walks (name → TypeDescriptor at name−0x10 → Complete-Object-Locator holding that
+  TD's RVA at COL+0xC → the 8-byte absolute pointer to the COL is `vtable−8`) to the job's vtable.
+  The single `lea reg,[vtable]` xref is the builder; the builder's single `E8` caller is the request
+  entry.
+- **SosSignMan:** RTTI `.?AVSosSignMan@CS@@`; vtable via the same RTTI walk; ctor = the one function
+  whose `lea` loads that vtable into `[rcx]`; its sole `E8` caller is net-init.
+- **The session tie:** the SDK flag `MultiplayPropertyEntryFlags::disable_session_creation` is the
+  authority that "processing a `SosSignMan::signs` entry" is where the session is created — re-read it
+  if the call topology shifts.
+- Tooling: this pass's reusable helpers are now committed as **`scripts/re/static.py`** — a PE
+  section map, ascii/utf16/byte search, the rip-relative xref finder, the `E8` call-site finder,
+  `.pdata` function-bounds, an **RTTI-name → vtable walker** (`static.py vtable '.?AV…@CS@@'`), and a
+  **single-function capstone disassembler that annotates call targets + rip-relative refs**
+  (`static.py fn 0x…`). All the addresses above were (re-)found with it; it's the first stop for the
+  next session re-deriving them after a patch.
