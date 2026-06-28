@@ -6,10 +6,11 @@
 //! What's here:
 //!  - [`draw_billboard_disc`] — a camera-facing filled disc (the colored overhead nameplate marker).
 //!  - [`ScreenSpace`] / [`draw_screen_rect`] / [`draw_filled_quad`] — the screen-space 2D layer (a
-//!    near-plane billboard), the substrate for native toasts/menus. `CSEzDraw` geometry is world-space,
-//!    so 2D UI is drawn on a plane locked just in front of the camera.
-//!  - [`draw_text_screen`] / [`text_width_ndc`] — screen-space bitmap text: real bitmap-font glyphs
-//!    ([`unseamless_core::bitmap_font`]) rasterized to filled quads. This is the working native text path.
+//!    near-plane billboard). `CSEzDraw` geometry is world-space, so 2D UI is drawn on a plane locked
+//!    just in front of the camera.
+//!  - [`draw_list`] / [`ui_viewport`] — rasterize a `ui::render` `DrawList` (filled rects + bitmap text)
+//!    into that screen-space layer. **This is the bridge every native UI surface (toasts/banners/menu)
+//!    draws through** — the `ui::render` library lays out the widgets; this paints the result.
 //!  - [`draw_text_world`] — a wrapper over the game's `CSEzDraw::draw_text` that we RE'd. **It does not
 //!    work in retail** (kept only as the RE record); see its docs.
 //!
@@ -27,7 +28,7 @@ use eldenring::position::HavokPosition;
 use fromsoftware_shared::program::Program;
 use fromsoftware_shared::{F32Vector4, Triangle};
 use pelite::pe64::Pe; // brings `rva_to_va` into scope on `Program`
-use unseamless_core::bitmap_font::{self, Face, PositionedRect};
+use unseamless_core::bitmap_font;
 use unseamless_core::ui::render::{DrawCmd, DrawList};
 
 fn rgba_to_vec4(rgba: [u8; 4]) -> F32Vector4 {
@@ -144,7 +145,6 @@ impl ScreenSpace {
 /// Compute the UI layout viewport (px) for a `design_height` that keeps glyphs square: width =
 /// `design_height * aspect`. A `ui::render` surface lays out in this viewport and hands the resulting
 /// `DrawList` (+ this viewport) to [`draw_list`], so pixels map uniformly to screen (no x/y distortion).
-#[allow(dead_code)]
 pub fn ui_viewport(ss: &ScreenSpace, design_height: f32) -> [f32; 2] {
     [design_height * ss.aspect(), design_height]
 }
@@ -154,7 +154,6 @@ pub fn ui_viewport(ss: &ScreenSpace, design_height: f32) -> [f32; 2] {
 /// ss.aspect()` and pixels map uniformly (glyphs stay square). Each `Rect` cmd becomes a filled screen
 /// rect; each `Text` cmd is shaped via `bitmap_font` and its glyph rects filled the same way. Painter's
 /// order is preserved. This is the one bridge every native UI surface (toasts/banners/menu) draws through.
-#[allow(dead_code)]
 pub fn draw_list(ez: &mut CSEzDraw, ss: &ScreenSpace, viewport: [f32; 2], dl: &DrawList) {
     for cmd in dl.cmds() {
         match cmd {
@@ -189,38 +188,6 @@ pub fn draw_screen_rect(ez: &mut CSEzDraw, ss: &ScreenSpace, cx: f32, cy: f32, h
     let br = ss.point(cx + hw, cy - hh);
     let bl = ss.point(cx - hw, cy - hh);
     draw_filled_quad(ez, &tl, &tr, &br, &bl, rgba);
-}
-
-/// Draw `text` (bitmap `face`) as filled quads at screen-NDC top-left `anchor`, `scale` NDC per
-/// font-pixel (in y), with a 1-pixel dark shadow for contrast on any background. The x scale is divided
-/// by the screen aspect so glyphs stay square on screen rather than stretching with the viewport (NDC
-/// is non-uniform: a unit covers more screen px in x than y). Font pixels are top-left-origin, y-down
-/// ([`bitmap_font::shape`]) and map to y-up NDC. The native text primitive that replaces imgui text:
-/// real bitmap-font (Proggy) glyphs rasterized to `CSEzDraw` solid quads. Use [`text_width_ndc`] to right-align.
-pub fn draw_text_screen(ez: &mut CSEzDraw, ss: &ScreenSpace, text: &str, face: Face, anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
-    let rects = bitmap_font::shape(text, face);
-    let sx = scale / ss.aspect(); // aspect-correct horizontal scale
-    let sy = scale;
-    let shadow = [0, 0, 0, (rgba[3] as u16 * 4 / 5) as u8];
-    blit_rects(ez, ss, &rects, [anchor[0] + sx, anchor[1] - sy], sx, sy, shadow);
-    blit_rects(ez, ss, &rects, anchor, sx, sy, rgba);
-}
-
-/// On-screen NDC width of `text` at `scale` (matching [`draw_text_screen`]'s aspect-correct x scale).
-/// For right-aligning a run: `anchor_x = right_edge - text_width_ndc(...)`.
-pub fn text_width_ndc(ss: &ScreenSpace, text: &str, face: Face, scale: f32) -> f32 {
-    let (w_px, _) = bitmap_font::measure(text, face);
-    w_px as f32 * scale / ss.aspect()
-}
-
-/// Fill each shaped glyph rect at NDC top-left `anchor`, scaled by `scale_x`/`scale_y` (NDC per
-/// font-pixel; x and y differ to keep glyphs square on a non-square viewport).
-fn blit_rects(ez: &mut CSEzDraw, ss: &ScreenSpace, rects: &[PositionedRect], anchor: [f32; 2], scale_x: f32, scale_y: f32, rgba: [u8; 4]) {
-    for r in rects {
-        let cx = anchor[0] + (r.x as f32 + r.w as f32 * 0.5) * scale_x;
-        let cy = anchor[1] - (r.y as f32 + r.h as f32 * 0.5) * scale_y; // y-down px -> y-up NDC
-        draw_screen_rect(ez, ss, cx, cy, r.w as f32 * 0.5 * scale_x, r.h as f32 * 0.5 * scale_y, rgba);
-    }
 }
 
 // --- CSEzDraw::draw_text (RE record; non-functional in retail) -------------------------------------

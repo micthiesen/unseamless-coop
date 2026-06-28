@@ -1,32 +1,39 @@
-//! Native **toasts** — the notification toasts ([`crate::notify`] / `unseamless_core::notifications`)
-//! drawn by the game's own `CSEzDraw` renderer ([`crate::native_draw`]) in screen space, instead of the
-//! imgui overlay. Real bitmap-font glyphs (`unseamless_core::bitmap_font`, ProggyTiny via `Face::Compact`)
-//! are rasterized to solid quads on a near-plane billboard — no overlay, no present-hook.
+//! Native **notifications** — toasts *and* banners ([`crate::notify`] /
+//! `unseamless_core::notifications`) drawn by the game's own `CSEzDraw` renderer
+//! ([`crate::native_draw`]) in screen space, instead of the imgui overlay. The layout + styling come
+//! from the pure, host-tested UI library (`unseamless_core::ui::render`): we read the live
+//! notifications, lay them out into a [`DrawList`](unseamless_core::ui::render::DrawList) with that
+//! library's widgets (`toast_stack` for the corner toast stack, `Banner` for the top-center banner
+//! strip), and hand each list to [`native_draw::draw_list`] to rasterize via `CSEzDraw` — real
+//! bitmap-font glyphs on a near-plane billboard, no overlay, no present-hook.
 //!
 //! This is the first screen-space surface to move off imgui (the path to dropping it entirely; see
-//! `docs/NAMEPLATES.md` > native rendering). Gated by `[nameplates] native_spike` (the native-rendering
-//! experiment flag), off by default; coexists with the overlay's toasts. Each toast right-aligns at the
-//! top, stacks downward, is colored by severity, and fades with its remaining lifetime.
+//! `docs/NAMEPLATES.md` > native rendering, and `docs/UI-LIBRARY.md`). Gated by
+//! `[nameplates] native_spike` (the native-rendering experiment flag), off by default; coexists with
+//! the overlay's notifications. Toasts stack down the top-right corner, colored + faded by the UI
+//! library (`ToastView`); banners stack top-center, colored by severity (`Banner`).
 
 use eldenring::cs::{CSCamExt, CSCamera, CSTaskGroupIndex, RendMan};
-use unseamless_core::bitmap_font::{self, Face};
-use unseamless_core::notifications::Severity;
+use unseamless_core::ui::render::{
+    anchor, draw, toast_stack, Align, Anchor, Banner, Rect, Stack, Theme, Widget,
+};
 use unseamless_core::util::Latch;
 
 use crate::feature::{Feature, Tick};
-use crate::native_draw::{CamFrame, ScreenSpace};
+use crate::native_draw::{self, CamFrame, ScreenSpace};
 
 /// Distance (m) of the screen-space plane in front of the camera (just clears the near plane; apparent
 /// size is distance-independent).
 const PLANE_DIST_M: f32 = 0.5;
-/// NDC units per font-pixel — sets the on-screen text size (the Compact face, ProggyTiny, is 10px tall).
-const SCALE: f32 = 0.0035;
-/// Right edge / top edge anchors in NDC, and the gap between stacked toasts.
-const RIGHT_NDC: f32 = 0.96;
-const TOP_NDC: f32 = 0.9;
-const GAP_NDC: f32 = 0.015;
+/// Virtual layout canvas height (px). The UI library lays out in a `DESIGN_HEIGHT`-tall canvas whose
+/// width is `DESIGN_HEIGHT * aspect` (so glyphs stay square — see [`native_draw::ui_viewport`]), and
+/// `native_draw` scales that uniformly to the real viewport. 1080 is the standard 1080p virtual canvas
+/// (`docs/UI-LIBRARY.md`); a smaller value would enlarge the on-screen UI (the orchestrator can tune
+/// it on the rig if the text reads too small).
+const DESIGN_HEIGHT: f32 = 1080.0;
 
-/// Draws notification toasts with the native renderer. No-op unless `[nameplates] native_spike`.
+/// Draws notifications (toasts + banners) with the native renderer. No-op unless
+/// `[nameplates] native_spike`.
 pub struct NativeToasts {
     active: Latch<bool>,
 }
@@ -56,10 +63,11 @@ impl Feature for NativeToasts {
             return;
         }
 
-        // Snapshot the live toasts (cheap clone, skip when empty — the steady-state cost when nothing's
-        // showing). `notifications.rs::tick` ages them on a separate frame task, as today.
-        let toasts = match crate::notify::try_read(|n| n.toasts().to_vec()) {
-            Some(t) if !t.is_empty() => t,
+        // Snapshot the live notifications under one non-blocking read (cheap clones). `notifications.rs`
+        // ages toasts on a separate frame task. Skip all work when there's nothing to show — the
+        // steady-state cost when idle.
+        let (toasts, banners) = match crate::notify::try_read(|n| (n.toasts().to_vec(), n.banners().to_vec())) {
+            Some((t, b)) if !(t.is_empty() && b.is_empty()) => (t, b),
             _ => return,
         };
 
@@ -73,33 +81,31 @@ impl Feature for NativeToasts {
             }
             let ez = r.debug_ez_draw.as_mut();
             let ss = ScreenSpace::new(&frame, PLANE_DIST_M);
-            let line_h = bitmap_font::metrics(Face::Compact).line_height as f32;
-            let mut y = TOP_NDC;
-            for t in &toasts {
-                // Right-align: anchor the run's left edge so its right edge sits at RIGHT_NDC.
-                let tlx = RIGHT_NDC - crate::native_draw::text_width_ndc(&ss, &t.message, Face::Compact, SCALE);
-                crate::native_draw::draw_text_screen(ez, &ss, &t.message, Face::Compact, [tlx, y], SCALE, severity_rgba(t.severity, fade(t)));
-                // Stack downward by the rendered text height (multi-line aware) plus a gap.
-                let lines = t.message.lines().count().max(1) as f32;
-                y -= lines * line_h * SCALE + GAP_NDC;
+            // The UI library lays out in this px viewport; `draw_list` maps it back to screen space.
+            let vp = native_draw::ui_viewport(&ss, DESIGN_HEIGHT);
+            let viewport = Rect::new(0, 0, vp[0] as i32, vp[1] as i32);
+            let theme = Theme::default();
+            // Cell-aligned margins/gaps from the theme (one menu cell of inter-element gap).
+            let (margin, gap) = (theme.gap, theme.gap);
+
+            // Toasts: a top-right corner stack, faded + severity-striped by the UI library.
+            if !toasts.is_empty() {
+                let dl = toast_stack(&theme, &toasts, viewport, Anchor::TopRight, margin, gap);
+                native_draw::draw_list(ez, &ss, vp, &dl);
+            }
+
+            // Banners: a top-center stack of severity-colored strips (persistent until cleared).
+            if !banners.is_empty() {
+                let mut stack = Stack::vertical().spacing(gap).cross_align(Align::Center);
+                for b in &banners {
+                    stack = stack.child(Banner::new(b.message.clone(), b.severity));
+                }
+                let bounds = anchor(stack.measure(&theme), viewport, Anchor::TopCenter, margin);
+                let dl = draw(&stack, &theme, bounds);
+                native_draw::draw_list(ez, &ss, vp, &dl);
             }
         });
     }
-}
-
-/// Alpha factor (0..=1) from a toast's remaining lifetime, so it fades as it expires.
-fn fade(t: &unseamless_core::notifications::Toast) -> f32 {
-    if t.duration > 0.0 { (t.remaining / t.duration).clamp(0.0, 1.0) } else { 1.0 }
-}
-
-/// Toast color by severity, with `alpha` (0..=1) applied. ER-plain palette: warm white / amber / red.
-fn severity_rgba(sev: Severity, alpha: f32) -> [u8; 4] {
-    let [r, g, b] = match sev {
-        Severity::Info => [235, 235, 245],
-        Severity::Warning => [255, 200, 80],
-        Severity::Error => [255, 90, 90],
-    };
-    [r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8]
 }
 
 /// Full camera frame from the composited render camera (`pers_cam_1`). `None` when the sub-camera
