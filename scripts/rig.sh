@@ -42,10 +42,10 @@ SEED_CONFIG="$ROOT/scripts/rig/seed-config.toml"
 #   - window placement: reposition_window then nudges that window to the top-left.
 # Override any of these via env.
 WINDOW_MARGIN="${WINDOW_MARGIN:-24}"
-# Rig render size: 0.75x the 3440x1440 native panel, same 21:9 aspect (so no stretch), clean
-# integers. One natural step up from the old 0.5x (1720x720), a bit roomier without going fullscreen.
-RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-2580}"
-RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-1080}"
+# Rig render size: 1440x900 (16:10). A compact window that leaves room on the 3440x1440 panel for
+# the terminal/logs alongside the game; the gamescope wrapper renders at this real resolution.
+RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-1440}"
+RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-900}"
 # One-shot flag handed to gamescope-wrapper.sh. MUST match the wrapper's FLAG (same env, same default).
 RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
 # Minimize the game window the moment it appears and keep it hidden until reposition_window places it,
