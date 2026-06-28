@@ -442,6 +442,40 @@ gate still *runs* but its `false` verdict no longer fails the create:
   parallel bypass would flip that `jne`, but join is the two-player leg and not solo-confirmable, so
   this lane wires create only.
 
+### Leg B charted (2026-06-28): the network-create dispatch + its three synchronous rejects
+
+With leg B confirmed as the real blocker, I resolved and read it. **Resolving the vmethod (live, sudo-free
+pointer walk):** leg B is `[ *( *(this+0x60) + 0x710 ) + 8 ]` — the create inner does
+`lea rcx,[this+0x60]; call 0x1423f1930` (a 3-instruction getter: `rax=[rcx]; rax+=0x710; ret`), then
+`r9 = *(rax)` (a vtable ptr), and `call [r9+8]` with `this' = *(this+0x60)+0x710`. So: `this`=`[G]` →
+`P = *(this+0x60)` → the embedded `NetworkSession` sub-object sits at `P+0x710` → its vtable `VT = *(P+0x710)`
+→ leg B = `VT[1] = *(VT+8)`. **Walked on the live game:** `P = 0x143dcd470` (stable across a run; a
+`.data` singleton), `VT = 0x1431f9140` (`.rdata`), **leg-B vmethod = `0x1423f5c00`** (`.text`). (A
+post-failure transient can leave `this+0x60` pointing at `0x143dcd450`, whose `+0x710` resolves into
+`.data` garbage — ignore it; the valid `.text` chain is the `0x143dcd470` one. The walk is
+`scripts/re/watch-write.py --peek`-able; `/tmp/walk-legb.py` did it.)
+
+**Leg B is CLEAN, not Arxan-encrypted** (entropy 5.30; disassembles to real x86), so unlike the gate it
+can be read statically. Its return value is `esi`: the success path sets `esi` = the result of the
+session-register call `0x1423fab40` (nonzero), and **every early reject jumps to `0x1423f5cf9: xor esi,esi`**
+→ returns 0 → the inner returns false → wrapper sets `FailedToCreateSession`. There are **three early
+synchronous rejects**, in order, any of which is the likely offline culprit:
+
+1. **`*(NetworkSession+0x10) == 0`** — `lea rcx,[this+0x10]; call 0x141eba210` where `0x141eba210` is just
+   `mov eax,[rcx]; ret` (a getter for the dword at `+0x10`); `test eax,eax; je fail` at `0x1423f5c4f`. A
+   simple readiness/enabled flag on the NetworkSession.
+2. **`this->vtable[0xe8](this, params, true) == false`** — virtual at `0x1423f5c61`; `je fail` at
+   `0x1423f5c69`.
+3. **`this->vtable[0x108](this, params, true) == null`** — virtual at `0x1423f5c7b` returning a pointer;
+   `je fail` at `0x1423f5c87`. (On success this pointer `rdi` is the new session object, then registered.)
+
+**NEXT (precise):** hook `0x1423f5c00` (or watch its three branch sites) on a `bypass`+`drive_create` run
+and see **which** of `0x1423f5c4f` / `0x1423f5c69` / `0x1423f5c87` is taken offline — that names the exact
+offline-reject. Then satisfy it (e.g. if reject #1, write `NetworkSession+0x10`; if a vmethod, RE that
+vmethod's offline condition). The vmethod offsets `0xe8`/`0x108` and the readiness getter `0x141eba210`
+are the sub-targets. This is the same shape as ERSC "re-enable what offline disables" — but now localized
+to a clean, readable function instead of the encrypted gate.
+
 ### Tooling / re-derivation
 
 Found with `scripts/re/static.py` (the committed PE workhorse): `fn` to disassemble the inner/builder,

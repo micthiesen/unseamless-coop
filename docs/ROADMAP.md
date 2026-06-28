@@ -132,10 +132,13 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   > `0x140cb2083`), so control **reaches the network-create vmethod (leg B)** — which returns `eax=0`
   > offline → `FailedToCreateSession`. (The earlier "gate still rejects, `[G]+0x24=0`" note was a
   > *peek* artifact: peek can't tell never-written from leg-B-wrote-`0`; the write-watch can, and shows
-  > leg B ran.) **NEXT: RE leg B — the network-session create vmethod `[netsession_vtable+8]`** (create
-  > dispatch `0x140cb207f`): hook the call site to capture the resolved vmethod address, then trace it to
-  > see what it needs offline (live `NetworkSession`/Steam-session object, EAC/entitlement, transport)
-  > and satisfy/stub it. Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
+  > leg B ran.) **Leg B now captured + charted:** the create vmethod is **`0x1423f5c00`** (resolved live
+  > via `this→*(this+0x60)→+0x710→VT=*()→VT[1]`; CLEAN, not Arxan), and it returns 0 on any of **three
+  > early rejects** — `*(NetworkSession+0x10)==0` (@`0x1423f5c4f`), `vtable[0xe8](…)==false` (@`0x1423f5c69`),
+  > or `vtable[0x108](…)==null` (@`0x1423f5c87`); see [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
+  > **NEXT (narrow): hook `0x1423f5c00` on a `bypass`+`drive_create` run and see which of those three
+  > branches is taken offline** — that names the exact offline-reject to satisfy/stub. Keep
+  > `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
   > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
   > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real
   > two-player in-world test still need a friend; **create** is solo-confirmable on the rig.
