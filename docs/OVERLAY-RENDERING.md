@@ -437,10 +437,33 @@ so its survival is already implied whenever that line is present.) Either way it
 Michael's key insight: **the rig prints the same two errors, it just doesn't crash** — so most of the
 loop is runnable here.
 
-1. **Rig baseline (orchestrator, vkd3d).** Run the rig at `level = "trace"` and record the *healthy*
-   sequence: `ExecuteCommandLists invoked` → `Found command queue pointer … at offset +0x…` →
-   (context Complete) → render, and confirm `Call … Present trampoline` prints on *every* present.
-   This is the vkd3d reference to diff native against.
+1. **Rig baseline (orchestrator, vkd3d) — CAPTURED 2026-06-28.** Ran the rig (diag build, current
+   `main`) at `level = "trace"`, boot to title (no in-game input needed — the present hook fires as
+   soon as frames flow). The *healthy* sequence, in order, is now the reference to diff native against:
+
+   ```
+   hudhook::hooks::dx12: IDXGISwapChain::Present = 0x…                (dx12.rs:380, present hook found)
+   overlay: DX12 present-hook installed; waiting for the swapchain
+   [ERROR] Initialization context incomplete                          (dx12.rs:176 — frame-1 gap)
+   [ERROR] Render error: Error { code: HRESULT(0xFFFFFFFF) … }        (dx12.rs:235 — same gap)
+   Call IDXGISwapChain::Present trampoline                             (dx12.rs:238 — DECISIVE: survives)
+   ID3D12CommandQueue::ExecuteCommandLists(…) invoked                  (dx12.rs:272 — CQ hook firing)
+   Found command queue pointer in swap chain struct at offset +0x8    (vkd3d's CQ offset)
+   Found command queue matching swap chain … (context will Complete)
+   overlay: hudhook initialize() reached (baking fonts)               (our init ran)
+   overlay: first render frame reached (render_inner)                 (our render ran)
+   …then `Call … Present trampoline` every present, steady, no crash.
+   ```
+
+   Three baseline facts this nails down: (a) **both `[ERROR]` lines print on the rig too** at frame 1,
+   then recovery — confirms they are the harmless structural gap (§"Anatomy"), not the crash; (b) on
+   vkd3d the CQ is found at **offset +0x8** (native NVIDIA may differ — hudhook's scan is
+   offset-agnostic, so a *different* native offset is fine, but `Found command queue pointer` never
+   appearing is the tell); (c) `Call … Present trampoline` prints on **every** present and the process
+   lives — so on native, if that line is the *last* before death, the crash is in the game's original
+   Present (hypothesis #1); if `initialize() reached` / `first render frame reached` are absent on
+   native, the context never completed (matching the friend's older logs). The breadcrumb build +
+   per-record fsync (`#[cfg(debug_assertions)]`, already shipped) make the native run's tail trustworthy.
 2. **Friend native run (current build `7c8c746`, breadcrumbs on), `level = "trace"`, once — with
    per-record log flushing forced** (else the decisive tail line is lost, as in 3/4 of the first
    logs). Capture: do `initialize() reached` / `first render frame reached` appear? Is `Call … Present

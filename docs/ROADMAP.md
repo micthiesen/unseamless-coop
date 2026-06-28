@@ -60,8 +60,12 @@ messages bidirectionally). So rungs 1, 2, 4 are done *and verified peer-to-peer*
 game's own session so players see each other in-world, is the headline-next** (see below). Two findings
 from that session: the in-game multiplayer items are **greyed out offline** (outside EAC), so the rung-3
 FSM can't be triggered the normal way — the likely unlock is re-enabling them (an RE/patch, like ERSC);
-and the **overlay crashes on native Windows** (hudhook DX12), a pre-release blocker now under
-investigation. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
+and the **overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. Investigated blind
+(no Windows box): the anatomy is charted and the healthy **vkd3d trace baseline is now captured**
+(2026-06-28) as the reference to diff a native trace against (see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
+> "Native-Windows Crash" > Validation plan). What's left needs a Windows box (one friend trace run on
+the current breadcrumb+fsync build) — until then the shippable mitigation is `[debug] overlay = false`.
+See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 
 ### Solo / host-doable (no 2nd player needed)
 
@@ -93,11 +97,14 @@ investigation. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
   Accelerates the co-op core below. See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md),
   [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
-- **Overhead nameplates** — *projection rig-confirmed (2026-06-26)* + base styling (alpha, shadow,
-  per-peer palette tint) shipped; the color palette + off-screen edge-clamp math are host-tested
-  utilities ready to wire. The rest (stable per-peer colors, distance LOD text→dot, off-screen edge
-  indicator, real name/ping/SL/death content) rides on the co-op core's peer feed and needs 2-player to
-  verify. Full design in [NAMEPLATES.md](NAMEPLATES.md).
+- **Overhead nameplates** — *projection rig-confirmed (2026-06-26)*, base styling shipped, **and the
+  rendering geometry is now wired** (commit `6c377ce`): stable per-peer color (keyed off a stable peer
+  handle, not iteration order), distance LOD (text→colored dot past a depth threshold), and the
+  off-screen/behind-camera edge indicator all draw against the host-tested core math. What remains is
+  purely co-op-core + 2-player gated: **real label content** (name/ping/SL/death, driven by
+  `OverheadDisplay`) and **swapping the color key from the phantom pointer to the SteamID** once the
+  session core maps phantom→identity — plus tuning the LOD threshold / dot size with a partner at a real
+  distance. No solo wiring left. Full design in [NAMEPLATES.md](NAMEPLATES.md).
 
 ### 2-player-gated (the co-op core + everything riding on it)
 
