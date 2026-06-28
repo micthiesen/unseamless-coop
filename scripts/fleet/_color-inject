@@ -1,48 +1,18 @@
 #!/usr/bin/env bash
 # _color-inject <session> <color>
 #
-# Best-effort: set a Claude Code session's prompt-bar color via the `/color` slash
-# command, delivered through the fleet's own inspector transport (scripts/fleet/_inject)
-# -- the same mechanism `msg` uses, so there's one way messages reach a session and
-# no tmux send-keys anywhere. The fleet scripts spawn this DETACHED (setsid), so it
-# never blocks a spawn and is fully decoupled from the worker's seed prompt.
-#
-# `/color` is just a message whose text is a slash command: _inject submits it, and
-# if the worker is mid-turn (it is, from t=0, running its seed) it QUEUES and applies
-# when that turn ends -- the same "color after the first turn" timing the old
-# idle-wait produced, without the polling or the keystrokes. Any failure is SILENT:
-# a coloring failure must never affect the session (hence no `set -e`).
+# Thin wrapper over _cmd-inject (the generic injector): set a Claude Code session's
+# prompt-bar color via the `/color` slash command, delivered through the fleet's own
+# inspector transport -- the same mechanism `msg` uses, so there's one way messages reach
+# a session and no tmux send-keys anywhere. Kept as a named entry point for the worker
+# spawn/revive paths (worker-new / worker-open); the readiness-wait + submit logic lives
+# in _cmd-inject. Any failure is SILENT (no `set -e`) -- coloring must never affect a
+# session.
 set -uo pipefail
 
 sess="${1:-}"; color="${2:-}"
 [ -n "$sess" ] && [ -n "$color" ] || exit 0
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
-sock="$FLEET_DIR/insp/$sess.sock"
-command -v bun >/dev/null 2>&1 || exit 0
-
-# Wait for the inspector socket to appear AND the prompt UI to mount (the React tree
-# comes up a few seconds after launch; --selftest confirms _inject can find it). Cap
-# the wait so a session that never boots doesn't leave a poller lingering.
-maxwait="${UNSEAMLESS_COLOR_IDLE_MAXWAIT:-300}"
-i=0
-ready=0
-# `env -u BUN_INSPECT`: this runs inside a fleet Claude whose env binds its inspector
-# socket, and bun honors BUN_INSPECT in every child -- an un-scrubbed `bun _inject`
-# would re-bind (clobber) the caller's own socket. The injector only connects to the
-# target's --sock, never needs its own inspector. (Same guard as scripts/fleet/msg.)
-while [ "$i" -lt "$maxwait" ]; do
-  if [ -S "$sock" ] && env -u BUN_INSPECT bun "$SELF/_inject" --selftest --sock "$sock" >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 2
-  i=$(( i + 2 ))
-done
-[ "$ready" -eq 1 ] || exit 0   # never became injectable within the window -> no color, no harm
-
-# Submit the command once. onSubmit queues it if the worker is busy, so it applies
-# when the current turn ends; a draft in the box is preserved by _inject either way.
-env -u BUN_INSPECT bun "$SELF/_inject" --sock "$sock" -- "/color $color" >/dev/null 2>&1 || exit 0
-exit 0
+[ -x "$SELF/_cmd-inject" ] || exit 0
+exec "$SELF/_cmd-inject" "$sess" "/color $color"

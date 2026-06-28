@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# _cmd-inject <session> <slash-command>
+#
+# Best-effort: deliver a single slash command to a live fleet Claude session via the
+# fleet's own inspector transport (scripts/fleet/_inject) -- the same mechanism `msg`
+# uses, so there's one way messages reach a session and no tmux send-keys anywhere. The
+# fleet scripts spawn this DETACHED (setsid), so it never blocks a spawn and is fully
+# decoupled from a worker's seed prompt. Fire it once per command (the orchestrator fires
+# it twice on a fresh start: once for `/color`, once for `/remote-control`).
+#
+# The command is just a message whose text is a slash command: _inject submits it, and if
+# the session is mid-turn (it is, from t=0, running its seed) it QUEUES and applies when
+# that turn ends -- the same "after the first turn" timing the old idle-wait produced,
+# without the polling or the keystrokes. Any failure is SILENT: an injection failure must
+# never affect the session (hence no `set -e`).
+set -uo pipefail
+
+sess="${1:-}"; cmd="${2:-}"
+[ -n "$sess" ] && [ -n "$cmd" ] || exit 0
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+sock="$FLEET_DIR/insp/$sess.sock"
+command -v bun >/dev/null 2>&1 || exit 0
+
+# Wait for the inspector socket to appear AND the prompt UI to mount (the React tree
+# comes up a few seconds after launch; --selftest confirms _inject can find it). Cap
+# the wait so a session that never boots doesn't leave a poller lingering.
+maxwait="${UNSEAMLESS_COLOR_IDLE_MAXWAIT:-300}"
+i=0
+ready=0
+# `env -u BUN_INSPECT`: this runs inside a fleet Claude whose env binds its inspector
+# socket, and bun honors BUN_INSPECT in every child -- an un-scrubbed `bun _inject`
+# would re-bind (clobber) the caller's own socket. The injector only connects to the
+# target's --sock, never needs its own inspector. (Same guard as scripts/fleet/msg.)
+while [ "$i" -lt "$maxwait" ]; do
+  if [ -S "$sock" ] && env -u BUN_INSPECT bun "$SELF/_inject" --selftest --sock "$sock" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 2
+  i=$(( i + 2 ))
+done
+[ "$ready" -eq 1 ] || exit 0   # never became injectable within the window -> no command, no harm
+
+# Submit the command once. onSubmit queues it if the session is busy, so it applies when
+# the current turn ends; a draft in the box is preserved by _inject either way.
+env -u BUN_INSPECT bun "$SELF/_inject" --sock "$sock" -- "$cmd" >/dev/null 2>&1 || exit 0
+exit 0

@@ -53,12 +53,16 @@ tmux new-session -d -s "$sess" -c "$REPO" \
   env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
   BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
   claude --name "usc-orch" --add-dir "$RIFTS" "$@"
-# Reserved orchestrator color (red), best-effort and ONLY on a fresh start (this
-# branch) -- the attach-existing path above leaves a running session untouched.
-# Detached, so the attach below is never delayed while it waits for the socket.
+# Reserved orchestrator color (red) + the `/remote-control` bootstrap, both best-effort
+# and ONLY on a fresh start (this branch) -- the attach-existing path above leaves a
+# running session untouched. Two detached injectors over the same inspector transport
+# `msg` uses, so the attach below is never delayed while they wait for the socket; each
+# queues as its own turn once the prompt UI mounts. `/remote-control` is orchestrator-only
+# (workers stay color-only).
 color="$(fleet_color_name "usc-orch" 2>/dev/null || true)"
-if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
-  setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
+if [ -x "$SELF/_cmd-inject" ]; then
+  [ -n "$color" ] && setsid -f "$SELF/_cmd-inject" "$sess" "/color $color" >/dev/null 2>&1 || true
+  setsid -f "$SELF/_cmd-inject" "$sess" "/remote-control" >/dev/null 2>&1 || true
 fi
 place_self
 exec tmux attach -t "$sess"
