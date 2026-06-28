@@ -71,6 +71,11 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
   (client→host only; the manual export is the fallback until the link is up).
 - `[debug.probes] session_probe = true` — turns on the rung-3 FSM rising-edge logger + the create/join
   entry hooks (`session-probe:` prefix). See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md).
+- **For Part B (the rung-3 create-drive test), also set on BOTH machines:** `[debug.probes] drive_create
+  = true`, `[debug.probes] force_netsession_ready = true`, `[gameplay] bypass_session_create_gate = true`,
+  `[gameplay] enable_offline_multiplayer = true`. These drive the charted create directly past the Arxan
+  gate + reject #1, so the only open question is whether a **real peer** satisfies leg B's deeper session
+  registry lookup (the solo drive's failure point). See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
 - The **friend-capture export** is always available (the overlay button); no flag needed.
 - `[debug] guide = "<name>"` — **when this session is to validate something specific, always ship a
   guide.** An in-overlay guide pins the test steps on-screen so the friend(s) **and** you follow the
@@ -140,48 +145,60 @@ itself a result worth recording.
 **Regardless of outcome, have the friend hit Export and send the one file** — the connect report makes
 even a *failed* attempt fully diagnosable without a second session.
 
-## Part B — Capture the rung-3 create/join initiation (same session)
+## Part B — Rung-3 create-drive test (does a real peer unblock create?)
 
-The same two connected instances are exactly what rung 3 needs. While you have the friend, chart the
-two session-initiation functions — **instrument our side; the friend is just the peer.**
+> **This supersedes the old "capture the create/join initiation functions" leg — that's done.** The
+> create wrapper is charted (`0x140cad4c0`), the Arxan availability gate is bypassed, and leg B (the
+> network-create vmethod `0x1423f5c00`) is charted down to a deep session **registry/init lookup**
+> (`0x1423fa1b0`) that yields nothing in a **solo** drive. The one open question this leg answers: **does
+> a real connected peer satisfy that lookup so create reaches `Host`/`Client`?** Full trace:
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
 
-**The on-screen procedure for this leg is the `rung3-create-chart` guide** (the flagship; switch
-`[debug] guide` to it for the host-once/join-once leg, or run the friend test in two passes). With
-`session_probe = true` staged, its steps drive the host/join and **auto-finish on the FSM signal** —
-the rising-edge logger logging the host walking `None → TryToCreateSession → Host` and the joiner
-`None → TryToJoinSession → Client`, each frame-stamped, with the live `CSSessionManager @0x…` base
-printed once. Have the friend **host once, then join once** so both initiation paths fire on *our*
-machine. The guide's ordered steps live only in `guides.rs`; the procedure and outcomes are
-[SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) — don't duplicate either here.
+With Part A linked (rung-4 lobby + rung-2 side-channel up) and the Part B probes staged on **both**
+machines (`drive_create`, `force_netsession_ready`, `bypass_session_create_gate`,
+`enable_offline_multiplayer`), the `session-create-driver` fires once per machine the moment it's in-game
+with `lobby_state == None` — i.e. **with the peer present** this time, not solo. No item, no menu action
+needed for the drive itself; the lobby just needs to be up (Open World on one, Join world on the other)
+so a real peer/match context exists when create runs.
 
-The orchestrator-side capture is separate from the guide: set a **Frida write-watch on
-`&CSSessionManager.lobby_state` (`base + 0xc`)** — the base comes from the `session-probe: FSM live …`
-line. The watch reports the instruction that writes `1` (create) / `4` (join); walk up to the
-enclosing function prologue → that entry is the hook site. (Full strategy, the store-site AOB fallback,
-and the scaffold to fill are in [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) > "Find the two
-initiation functions".)
+**Read these `session-probe:` lines on each machine's log (`scripts/rig.sh log -f` on the rig side; the
+friend hits Export):**
 
-> **Privacy:** the create/join hook register dumps (`rdx`/`r8`/`r9`) may carry a raw peer SteamID64,
-> which resolves straight to a Steam profile. Keep those `debug!` lines out of any shared log — scrub
-> or `peer_tag` them, exactly as [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) warns. The
-> `coop_connect` report and the Export bundle are already scrubbed; the raw `session-probe:` register
-> lines are not.
+| Line | Solo result (known) | What a PASS looks like with a peer |
+|---|---|---|
+| `NetworkSession+0x10 (reject#1 flag) = N before create` | `0` | `0` (forced to `1` next line either way) |
+| `forced NetworkSession+0x10 = 1` | present | present |
+| `drive-create returned <bool> — lobby_state now <state>` | `false` → `FailedToCreateSession` | **`true` → `TryToCreateSession`/`Host`** |
+| `FSM … lobby None->…` | `None->FailedToCreateSession` | **`None->TryToCreateSession->Host`** (joiner: `->TryToJoinSession->Client`) |
 
-This is behavioral RE — watch *what* writes the state and *which* function the game runs, then
-implement our own driver from that. Never paste decompiler output into source/commits
-([CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
+- **PASS** (`lobby_state` reaches `Host`/`Client`, `protocol_state` advances toward `Ingame`) ⇒ the
+  registry lookup needed a real peer; rung-3 create is unblocked. Next: wire the driver into the real
+  Open/Join actions (replace the probe), establish the password-derived AES key, and source the menu's
+  session-state bits from the FSM.
+- **STILL `FailedToCreateSession`** ⇒ a real peer isn't sufficient either. Capture both machines' logs and
+  hand back; the fallback is to keep tracing leg B's registry chain (`0x1423fa1b0 →
+  [new_session_vtable+0xd8] → 0x1423fa100`) to its root, or ERSC-style session neutralization.
+
+> **Privacy:** `session-probe:` register/SteamID dumps can carry a raw peer SteamID64 (resolves to a Steam
+> profile). Keep those `debug!` lines out of any shared log — the `coop_connect` report + Export bundle are
+> scrubbed; the raw `session-probe:` lines are not. ([SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) warns of this.)
+
+This stays behavioral RE — read *what the game does*, implement our own driver from that, never paste
+decompiler output into source/commits ([CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
 
 ## After the session
 
 - **Collect:** the friend's `unseamless-coop-diagnostics.txt` (Export button) + our own rig log.
 - **Rung 4/2 verdict:** did `coop_connect` reach `linked`? If not, the per-stage report names the
   failing stage (use the table above). Record whether peers had to be Steam friends.
-- **Rung 3 verdict:** did the FSM logger capture both transitions, and did the write-watch point at
-  the two initiation entries? If so, fill the `SESSION_CREATE_SITE` / `SESSION_JOIN_SITE` scaffold
-  (per SESSION-RE-RUNBOOK) with the landmark AOBs + the confirmed register→meaning mapping, documented
-  inline per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results".
-- **Then:** flip on lobby discovery for keeps (rung 4 done), and hand the charted initiation entries
-  to the co-op core to *drive* a session (rung 3).
+- **Rung 3 verdict (the create-drive test):** did `drive-create` return `true` with the peer present —
+  `lobby_state` reaching `TryToCreateSession`/`Host` (joiner: `Client`) instead of the solo
+  `FailedToCreateSession`? If **PASS**, rung-3 create is unblocked by a real peer: next is wiring the
+  driver into the real Open/Join actions (drop the probe), the password-derived AES key, and sourcing the
+  menu's `SessionContext` bits from the FSM. If **STILL fails**, the peer isn't sufficient — keep tracing
+  leg B's registry chain (`0x1423fa1b0` →…) per [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted", or
+  fall back to ERSC-style session neutralization. Document any new finding inline per
+  [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results".
 
 ## Cross-references
 

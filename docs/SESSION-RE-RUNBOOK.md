@@ -1,5 +1,15 @@
 # Session create/join RE runbook (rung 3)
 
+> **STATUS (2026-06-28) — the "find the two initiation functions" task below is DONE; don't re-run it.**
+> The create wrapper (`0x140cad4c0`) and the network-create dispatch (leg B, `0x1423f5c00`) are charted,
+> the Arxan availability gate is bypassed, and the blocker has moved **past** initiation into leg B's deep
+> session **registry/init lookup** (`0x1423fa1b0`), which fails in a *solo* drive. The current state, the
+> full trace, and the **next real move (a 2-player create-drive test)** live in
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted", [COOP-CONNECTION.md](COOP-CONNECTION.md) > "Rung 3",
+> and [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test". The
+> write-watch recipe below is kept for re-derivation after a game update (addresses shift), not as the
+> current to-do.
+
 The exact recipe for the **one networking gap the SDK doesn't chart**: the internal functions that
 start a co-op session. This is rig-gated RE — it can only be done with the game running, ideally with
 two instances we control. It hands the rig operator (the orchestrator) a self-contained, batchable

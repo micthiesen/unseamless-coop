@@ -138,6 +138,31 @@ the one genuinely hard step — driving the game's own session so players see ea
   rehearsal for exactly this.
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
+
+> **STATE (2026-06-28) — the create/join initiation is CHARTED; the blocker moved deep, and the next
+> real move needs two players.** Progress since this section was written: the create wrapper
+> (`0x140cad4c0`) is charted and **direct-drive is rig-proven to fire** (drives `lobby_state` off
+> `None`); the Arxan availability gate (`0x140cb4b50`) is **bypassed** (`bypass_session_create_gate`,
+> branch flip — rig-confirmed via a hardware write-watch to reach leg B); and **leg B (the network-create
+> vmethod `0x1423f5c00`) is charted** — three early rejects, two eliminated statically, leaving reject #1
+> (`*(NetworkSession+0x10)==0`). Reject #1 is **real but insufficient**: forcing it (`force_netsession_ready`
+> probe) did **not** unblock — create still `FailedToCreateSession`. The offline failure is deeper, in leg
+> B's **session registry/init chain** (`0x1423fab40 → 0x1423fa1b0`, a lookup/insert several vmethods deep on
+> the freshly-created session object), which yields nothing in a *solo* drive. Full trace +
+> re-derivation: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
+>
+> **NEXT REAL MOVE — a 2-player create test (needs a friend / second machine):** the registry lookup most
+> likely needs a real **peer/match context** a solo drive can't provide. On **both** machines set
+> `[debug.probes] drive_create = true` + `[debug.probes] force_netsession_ready = true` +
+> `[gameplay] bypass_session_create_gate = true` (+ `enable_offline_multiplayer = true`), open a rung-4
+> lobby + join (one Open World, one Join world), then let `drive_create` fire with the peer present and
+> read the `session-probe: drive-create returned …` / FSM lines — does `lobby_state` now reach
+> `TryToCreateSession`/`Host` instead of `FailedToCreateSession`? Procedure in
+> [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real peer still
+> doesn't satisfy the registry lookup, the fallback is to keep tracing the chain
+> (`0x1423fa1b0 → [new_session_vtable+0xd8] → 0x1423fa100`) to its root, or the heavier ERSC-style session
+> neutralization. **`create` is solo-confirmable up to this point; past it needs the peer.**
+
 > **What it takes to *call* the session is specified in [SESSION-DRIVE.md](SESSION-DRIVE.md)** — the
 > minimal create/host + join calls, the args/state/keys each needs, and the loud SDK-survey result
 > (the SDK charts the session object + FSM + transport but exposes **no** callable create/host/join, so
@@ -359,17 +384,21 @@ showed lobby created, host-id resolved, handshake reached, sent 2674 / received 
 Steam friends here; whether non-friends can link is still open but didn't block. So the
 out-of-band connection stack is done and verified.
 
-**Rung 3 did NOT come for free in that session, and we learned why.** "Open World / Join world" drive the
-*side-channel*, not the game's `CSSessionManager` FSM — it stayed `lobby=None`. We tried to trigger the
-game's own multiplayer (to chart create/join), but the **in-game multiplayer items are greyed out
-offline** (outside EAC, FromSoft matchmaking is unreachable, so ER disables the multiplayer UI). So the
-immediate rung-3 work is to **re-enable those items offline** (an RE/patch — the way ERSC does) so an
-item-use fires the FSM for the write-watch in `docs/SESSION-RE-RUNBOOK.md`, *or* drive the create/join
-functions directly. Until then, rung 3 stays the headline-next.
+**Rung 3 create-drive is charted and solo-proven to fire; the blocker is now deep and needs a peer.**
+Since the friend test we stopped relying on the greyed multiplayer items entirely and **drove
+`CSSessionManager` directly**: the create wrapper (`0x140cad4c0`) fires, the Arxan availability gate
+(`0x140cb4b50`) is bypassed, and leg B (the network-create vmethod `0x1423f5c00`) is charted down to a
+single residual reject (#1) that proved **insufficient** — the offline failure lives deeper, in leg B's
+session registry/init lookup (`0x1423fa1b0`), which yields nothing in a *solo* drive. Full state +
+re-derivation: the **Rung 3 STATE callout above** and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
 
-Once the create/join functions are charted, build **rung 3** proper — drive the *game's* session
-(`CSSessionManager` → `Host`/`Client`) so players see each other in-world. Rungs 2+4 give us the linked
-coordination channel ("both go now") and two instances we control to RE against.
+**The concrete next step is now a 2-player create-drive test** (needs a friend / second machine): with
+`drive_create` + `force_netsession_ready` + `bypass_session_create_gate` set on both peers, open+join a
+rung-4 lobby and let create fire **with a real peer present** — the registry lookup most likely needs that
+peer/match context. Does `lobby_state` reach `TryToCreateSession`/`Host`? Step-by-step in
+[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real peer still doesn't
+satisfy it, keep tracing the registry chain or fall back to ERSC-style session neutralization. Rungs 2+4
+give the linked coordination channel ("both go now") and the two instances to drive against.
 
 ## Cross-references
 
