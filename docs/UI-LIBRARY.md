@@ -92,6 +92,21 @@ disabled/dim, and `Severity` → info/warning/error colors, reusing the spirit o
 > `native_draw`), not a screen-space UI widget. It stays in native_draw; the `Marker` widget here is only
 > for any screen-space dot/icon use. Don't try to fold world-space nameplates into this 2D library.
 
+## Won't-do (for now) — features we get free from imgui and are OK to drop
+
+Michael confirmed these are droppable; we can revisit if we ever want them. Keeping them out is what
+makes a small native lib tractable:
+
+- **Window move / resize / snapping** — panels are **static, viewport-anchored** (fixed positions). No
+  dragging, no resize handles, no the-main-menu home-snap. The layout system anchors to corners/edges
+  and centers modals; it does not move windows.
+- **Fade-in / fade-out animations** (and similar motion polish). Toasts may use a plain per-frame alpha
+  derived from remaining lifetime (a static value, not an animation), but there is no animation/tween
+  system, no easing, no transitions.
+- **Other imgui polish** in that vein (hover states, drag affordances, ghost-box snap previews, etc.).
+
+If we later want any of these, they layer on top of the static base without reshaping it.
+
 ## Conventions (both lanes)
 
 - **Pure**: no game/OS/SDK deps. Lives under `crates/unseamless-core/src/ui/`. Runs on the host via
