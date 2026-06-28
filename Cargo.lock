@@ -253,7 +253,7 @@ checksum = "898f5a568a84989b6c0f8caa50a93074b97dbdc58fc6d9543157bb4562758933"
 
 [[package]]
 name = "harness"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "sha2",
  "steamworks",
@@ -349,7 +349,7 @@ checksum = "a257582fdcde896fd96463bf2d40eefea0580021c0712a0e2b028b60b47a837a"
 
 [[package]]
 name = "launcher"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "unseamless-core",
  "windows 0.62.2",
@@ -899,7 +899,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unseamless-coop"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "eldenring",
  "fromsoftware-shared",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "unseamless-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "log",
  "num_enum",
