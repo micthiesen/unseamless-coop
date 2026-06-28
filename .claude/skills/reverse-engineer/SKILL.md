@@ -1,6 +1,6 @@
 ---
 name: reverse-engineer
-description: How to reverse-engineer Elden Ring / ERSC behavior for the rewrite — the behavioral-RE strategy, the static-triage and diagnostic patterns, and the rig tools (rizin, the Ghidra wrapper, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida", "diagnostic mode", "what offset is".
+description: How to reverse-engineer Elden Ring / ERSC behavior for the rewrite — the behavioral-RE strategy, the static-triage and diagnostic patterns, and the tool decision table (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida/capstone", "diagnostic mode", "what offset is".
 ---
 
 # Reverse-engineering for unseamless-coop
@@ -24,6 +24,33 @@ nothing to reverse — just use it. Prefer named SDK fields over raw offsets alw
 to byte reads for investigation (below). Pin `eldenring` + `fromsoftware-shared` to the **same**
 commit; layouts are revision-specific.
 
+## Pick the tool (decision table)
+
+All headless/CLI, no GUI. Match the *goal*, not habit — most RE here is behavioral, so the bottom
+rows do more work than the top ones.
+
+| Goal | Tool | Notes |
+|------|------|-------|
+| "What is this binary?" (sections, imports/exports, strings, quick disasm) | **rizin** / `rz-bin` | JSON form (`-j`) pipes to `jq`. First stop for triage. |
+| "Where in `eldenring.exe` is byte-pattern / AOB X?" | **capstone + numpy** (installed) | Throwaway Python over the raw PE; numpy scans, capstone disasms the hits (base `0x140000000`). |
+| "Quick decompile while I'm already in rizin" | **rz-ghidra** `pdg` (installed) | `rizin -q -c 'aaa; s <addr>; pdg' bin`. Ghidra decompiler core, no JVM; rizin-fed analysis (lower fidelity). |
+| "I need to *read* a hard function as good C" | **Ghidra/PyGhidra** (installed) | `scripts/re/ghidra-decompile.sh <bin> [func]`. Best fidelity; clean targets only (not `ersc.dll`). |
+| "What instruction writes this live address?" | **`scripts/re/watch-write.py`** | Native ptrace HW watchpoint (exe at `0x140000000` under Wine). Root needed. No Frida. |
+| "What flag/field flips when event X happens?" | **diagnostic DLL** | Our own mod, rising-edge bit observer (below). The default for unknown game state. |
+| "Map an unknown call graph / hook live, iterating fast" | **Frida** (frida-gadget) | Host CLI + matching gadget staged (`.re-tools/frida/`); placing it in the rig is a rig action ([RUNTIME-RE.md](../../../docs/RUNTIME-RE.md) > B). |
+| "What's on the wire?" (shape/timing) | **`ss` / `tcpdump` / `tshark`** | Payloads are Steam-framed/encrypted; pair with a hook for contents. |
+
+Full bullets and install state: [`docs/DEVELOPMENT.md`](../../../docs/DEVELOPMENT.md) > "RE toolchain".
+
+**Grow the committed RE scripts — don't re-inline.** `scripts/re/` (`decompile.py`,
+`watch-write.py`, …) is shared, extensible tooling, and improving it is *in* your lane, not out of
+it. If you find yourself pasting the same pyghidra boilerplate, ad-hoc capstone scan, or ptrace
+tweak more than once, **add a flag or a helper to the script** instead — e.g. teach `decompile.py`
+to list xrefs-to-a-string or dump a function's callers (pyghidra is full CPython, so it can do far
+more than decompile). Two rules of thumb: keep each script runnable headless with no GUI, and keep
+genuinely throwaway one-off scans in `/tmp` (only promote the reusable shape into `scripts/re/`).
+Leave the next agent a sharper tool than you found.
+
 ## Static triage (metadata only, safe)
 
 `ersc.dll` lives under `reference/` (gitignored). What static triage *can* tell us (factual
@@ -40,9 +67,18 @@ rz-bin -E ersc.dll          # exports
 # JSON form for scripting: rz-bin -ilSj ersc.dll | jq …
 ```
 
-A C decompiler is **optional/on-demand** (`ersc.dll` is undecompilable; `eldenring.exe` is
-already SDK-charted). If a clean target ever needs one, `scripts/re/ghidra-decompile.sh <bin>
-[function]` wraps Ghidra's headless analyzer (no GUI). See DEVELOPMENT.md > "RE toolchain".
+For locating something in a clean binary, two scriptable tools beyond rz-bin (full bullets in
+[`docs/DEVELOPMENT.md`](../../../docs/DEVELOPMENT.md) > "RE toolchain"):
+
+- **capstone + numpy** (installed) — throwaway Python scan scripts over the raw PE: numpy
+  vectorizes AOB/byte scanning across the whole image, capstone disassembles the hits offline
+  (base `0x140000000`). The workhorse for "where in `eldenring.exe` is X" — see
+  `docs/SESSION-RE-FINDINGS.md` / `docs/OFFLINE-TITLE-SCREEN.md` for worked passes.
+- **Ghidra headless via PyGhidra** (installed) — break-glass *readable C* when raw asm isn't
+  enough: `scripts/re/ghidra-decompile.sh <bin> [function]` bootstraps a pyghidra venv and prints
+  decompiled C, no GUI. Point it at CLEAN targets only — `ersc.dll` is Themida-virtualized
+  (you'd decompile the unpacker stub), and `eldenring.exe` is mostly SDK-charted, so this is
+  occasional, not the default.
 
 ## Finding unknown game state (the diagnostic pattern)
 

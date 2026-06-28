@@ -91,18 +91,40 @@ can't copy code you can't read.
   rizin -q -c 'iij' bin | jq                                             # imports
   rizin -q -c 'aa; s entry0; pd 20' bin                                  # analyze + disasm
   ```
-  This subsumes `pefile`/`capstone` for our purposes, so we don't install those.
-- **Ghidra headless** — **optional / not installed by default.** A C decompiler is rarely
-  needed here: `ersc.dll` is Themida-packed (undecompilable) and `eldenring.exe` is already
-  charted by the `fromsoftware-rs` SDK, so we seldom decompile anything ourselves. If a clean
-  target ever needs it (a game function the SDK doesn't name, an unpacked dump), install on
-  demand (`pacman -S ghidra`) and run `scripts/re/ghidra-decompile.sh <binary>
-  [function]` — a CLI wrapper around `analyzeHeadless` + the `DumpDecomp.py` Jython post-script
-  that prints decompiled C to stdout (no GUI, no MCP). The wrapper is committed and ready; it
-  errors cleanly if Ghidra isn't present. A lighter alternative is a rizin decompiler plugin
-  (`rz-ghidra`/`jsdec`). Project cache: `.ghidra-projects/` (gitignored).
-- **Frida** (dynamic instrumentation) — deferred. It hooks/traces at runtime, so it's only
-  useful with the game running on the rig. Set it up when M2/M3 behavioral work starts.
+  Reach for rizin first for "what is this binary" (sections, imports/exports, strings, a quick disasm).
+- **capstone + numpy** (`pacman -S python-capstone python-numpy`, installed) — ad-hoc Python
+  static-scan scripts over the **raw PE**: numpy vectorizes byte/AOB scanning across the whole
+  mapped image (find a pattern, candidate regions, `.pdata` bounds) and capstone disassembles the
+  hits offline (`rva_to_va` + read bytes, base `0x140000000`). This is the workhorse for "where in
+  `eldenring.exe` is X" when rizin's whole-program `aa` is too slow or too coarse — see
+  `docs/SESSION-RE-FINDINGS.md` and `docs/OFFLINE-TITLE-SCREEN.md` for worked passes. (Write these
+  as throwaway scripts in `/tmp`, not committed tooling.)
+- **Ghidra headless via PyGhidra** (`pacman -S ghidra`, installed: 12.1.2 at `/opt/ghidra`) —
+  the **break-glass decompiler** for when you need *readable C*, not just instructions: a gnarly
+  `eldenring.exe` function the SDK doesn't name, an unpacked runtime dump, or sanity-checking our
+  own DLL. Complements capstone/numpy (scanning + raw asm) — Ghidra adds structure, types, and
+  xrefs. Run `scripts/re/ghidra-decompile.sh <binary> [function]`; it bootstraps a pyghidra venv
+  (the wheel ships inside Ghidra) and prints decompiled C to stdout, no GUI. Gotcha worth knowing:
+  Ghidra 12.1 dropped Jython from the default install, so the script drives **PyGhidra** (CPython
+  via JPype), and the Ghidra project cache must live outside this dotted rift path (ProjectLocator
+  rejects path elements starting with `.`) — it defaults to a temp dir, override `$GHX_PROJECT_DIR`.
+  Don't bother pointing it at `ersc.dll` (Themida-virtualized → you'd decompile the unpacker stub).
+- **rz-ghidra** (`pacman -S rz-ghidra`, installed) — the Ghidra decompiler core *inside* rizin:
+  `rizin -q -c 'aaa; s <addr>; pdg' bin` decompiles to C with no JVM spin-up. It's the middle rung
+  between raw asm and full Ghidra: faster and in the rizin workflow, but fed by rizin's (weaker)
+  analysis, so for a genuinely hard function the standalone `ghidra-decompile.sh` above still wins
+  on output quality. Use `pdg` for a quick look, the full wrapper when you need to actually read it.
+- **Native ptrace watchpoint** (`scripts/re/watch-write.py`) — for live RE on the rig *without*
+  Frida: the exe loads at its preferred base `0x140000000` under Wine, so a Linux-native ptrace
+  hardware write-watch (DR0/DR7) on an absolute address reports the RIP of each writing
+  instruction. This is how the session-FSM store sites were found (see
+  `docs/SESSION-RE-RUNBOOK.md`). Needs root (Yama `ptrace_scope=1`).
+- **Frida** (frida-gadget under Proton) — heavier dynamic instrumentation for fast iterative
+  hooking when the native watchpoint isn't enough. Host CLI installed (`pipx install frida-tools`),
+  a version-matched gadget + config staged at `.re-tools/frida/`; placing it in the rig's `mods/`
+  and connecting is a rig action. Full workflow: [RUNTIME-RE.md](RUNTIME-RE.md) > Option B.
+- **Wire capture** — `tshark` (Wireshark CLI, installed), `tcpdump`, `ss` for Steam relay vs. P2P
+  shape/timing; payloads are Steam-framed so pair with a hook for contents ([RUNTIME-RE.md](RUNTIME-RE.md) > Option C).
 
 **Clean-room rule:** never paste decompiler/disassembler output into source or commits, and
 never redistribute upstream bytes (`reference/` stays gitignored). Read to understand, record

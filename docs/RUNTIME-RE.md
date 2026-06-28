@@ -47,19 +47,16 @@ Frida from the Linux host to the process does **not** work the normal way. The w
 **frida-gadget**: a Windows DLL loaded *into* the game (same injection path we already use)
 that opens a local Frida server you connect to.
 
-Setup on the rig (one time):
+Bring-up (mostly done — the host CLI is installed and a version-matched gadget is staged):
 
-1. **Install the host CLI** (Linux): `pipx install frida-tools` (gives `frida`, `frida-trace`).
-2. **Get the gadget** matching the game arch: download `frida-gadget-<ver>-windows-x86_64.dll`
-   from the Frida releases, rename to something like `frida-gadget.dll`, and drop it in `mods/` —
-   our own `dinput8.dll` proxy loads DLL mods from there.
-3. **Configure it** with a sibling `frida-gadget.config` (same basename), listen mode:
-   ```json
-   { "interaction": { "type": "listen", "address": "127.0.0.1", "port": 27042,
-       "on_load": "wait" } }
-   ```
-   Wine uses host networking, so the port is reachable on the Linux host's localhost.
-4. **Connect from the host** and run a script:
+1. **Host CLI** (Linux): installed via `pipx install frida-tools` (gives `frida`, `frida-trace`
+   on `~/.local/bin`). Check `frida --version`.
+2. **Gadget**: a matching `frida-gadget.dll` + `frida-gadget.config` (listen mode,
+   `127.0.0.1:27042`, `on_load: wait`) are staged at `.re-tools/frida/` (gitignored; see its
+   README). It must match `frida --version` — re-fetch if pipx upgrades frida-tools.
+3. **Place it on the rig** (a rig/orchestrator action): copy both files into the rig's `mods/`
+   dir — our `dinput8.dll` proxy loads DLL mods from there.
+4. **Connect from the host** (Wine uses host networking, so the port is on localhost):
    ```bash
    frida -H 127.0.0.1:27042 -l trace-steamnet.js   # or: frida-trace -H ... -i 'SteamNetworking*'
    ```
@@ -73,9 +70,10 @@ Setup on the rig (one time):
 
 ### Option C — network capture (transport-level, complementary)
 
-For the wire side specifically, capture alongside hooking: `ss -tunp`, `tcpdump`/Wireshark on
-the rig to see Steam relay vs. direct P2P, ports, and volume. Payloads are encrypted/Steam-
-framed, so capture tells you *shape and timing*; the hooks (A or B) tell you *contents*.
+For the wire side specifically, capture alongside hooking: `ss -tunp`, `tcpdump`/`tshark`
+(Wireshark CLI, installed) on the rig to see Steam relay vs. direct P2P, ports, and volume.
+Payloads are encrypted/Steam-framed, so capture tells you *shape and timing*; the hooks (A or B)
+tell you *contents*.
 
 ## Recommended approach for this project
 

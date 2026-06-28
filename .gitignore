@@ -91,6 +91,10 @@ SeamlessCoop*.ini
 **/locale/*.json
 **/lang/*.json
 
+# --- RE tooling staging (3rd-party binaries, not redistributable) ------------
+# frida-gadget DLL + config staged for the rig; fetched per docs/RUNTIME-RE.md.
+/.re-tools
+
 # --- Decompiler / disassembler PROJECTS & databases --------------------------
 # Ghidra (.gpr/.rep/.gzf), IDA (.idb/.i64/.id0-2/.nam/.til), Binary Ninja (.bndb),
 # rizin/Cutter (.rzdb), Hopper (.hop), JEB (.jdb2).
