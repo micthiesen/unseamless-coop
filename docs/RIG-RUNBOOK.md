@@ -165,6 +165,23 @@ For anything the observer log can't answer (e.g. *which* function relaxes a limi
 runtime instrumentation per [RUNTIME-RE.md](RUNTIME-RE.md): a diagnostic build of our own DLL
 (preferred) or frida-gadget.
 
+## Rig constraints & gotchas
+
+- **The rig can't run two ELDEN RING instances at once** (one game install, one Steam). So any
+  RE/test that needs a *real connect* (the rung-3 **join** leg — driving `lobby_state` to `Client`
+  for a peer) needs a **friend / second machine**. The **create/host** leg is solo-confirmable (drive
+  the create fn on `[G]` with no peer — see [SESSION-DRIVE.md](SESSION-DRIVE.md)), and the rung-4
+  `RunCallbacks`/`CreateLobby` probe is solo too; only the two-modded-games link waits for a friend.
+- **Periodic in-game FPS stalls during rig tests are almost always the worker fleet's `cargo` builds,
+  not a mod regression.** The gaming PC both builds and runs ELDEN RING, and the rig renders small /
+  GPU-light, so concurrent release/clippy/diag builds across worker sessions spike all 16 threads and
+  the game lags exactly during that window. Before treating an FPS drop as a bug, check whether workers
+  are mid-build; for a clean framerate read, quiesce the fleet and retest on an idle machine.
+- **`rig.sh cycle` reaches in-game autonomously** (apply + launch + a ydotool popup-dismiss that
+  overshoots into Continue → a loaded save), which makes the drive-probe / in-game RE solo-runnable. It
+  needs the KWin + ydotool stack healthy; if a run sticks at the popups, a manual `scripts/rig.sh
+  dismiss` clears them. Tune with `RIG_DISMISS_PRESETTLE` / `RIG_DISMISS_PRESSES`.
+
 ## Feeding results back
 
 Record findings as behavioral notes **in our own words** (clean-room — see CLAUDE.md), update

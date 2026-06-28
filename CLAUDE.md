@@ -66,6 +66,12 @@ The only split is build-vs-run, both on this one machine:
 > primitive with **no backup safety**, so running it directly clobbers the real `dinput8.dll`
 > (Elden Mod Loader) and launcher with no way back. Same rule for launch/log/kill/restore: drive
 > everything through `rig.sh` (see the `/test-loop` skill, layer 4).
+>
+> **`apply`/`cycle` freely; `restore` only when Michael explicitly asks.** Apply and re-launch as
+> often as a work session needs (the snapshot is taken once and is repeatable); leave the mod applied
+> when you finish a chunk. Don't swap his real ERSC stack back on your own initiative — he keeps
+> iterating across many cycles and will say when he wants it restored. `cycle` reliably lands in-game
+> autonomously (it reaches a loaded save via the ydotool popup-dismiss).
 
 The log-line contract (install → heartbeat → effect lines) keeps behavior legible — write code so
 its effects show up in the log.
@@ -95,6 +101,12 @@ then apply the surviving findings. Do **not** carve work into smaller pieces to 
 larger holistic chunks review better than a trickle of fragments, so build the whole coherent thing
 first, then ultracheck the lot. (Unlike the global stacking workflow, we ship one chunk per commit
 to `main`, so the ultracheck happens per-chunk, not per-PR.)
+
+**Ship a capability, then sweep its usage + align docs.** A recurring pattern Michael wants: when you
+land a new capability (a guide engine, a choice modal, an overlay surface), follow up by *sweeping where
+it should be used* — retrofit the call sites/guides/features that should adopt it — and *aligning the
+docs/skills* so it's referenced and encouraged. Don't leave a capability shipped-but-stranded; the
+follow-through (adopt + document) is part of the work, not optional polish.
 
 **Concurrent sessions.** There are often other Claude sessions building in this repo at the same
 time. Michael tries to scope each session to independent work so they don't collide, so by default
@@ -149,6 +161,18 @@ concurrent-sessions guidance above.
   capitalize it (not "Unseamless-Coop", not "Unseamless Coop"), including in Markdown headers.
 - Otherwise use **title case for Markdown headers** in the README/docs (e.g. "Install & Play",
   "What's in the Bundle"). Keep `ELDEN RING` in caps (the game's own styling).
+
+## Project knowledge lives in the repo, not personal memory
+
+**Do not use project-specific personal/auto memory for this project.** All durable knowledge — design
+decisions, RE findings, rig conventions, preferences, gotchas — belongs in the **repo**, where the
+worker fleet and every future session can see it: the right `docs/*.md`, this `CLAUDE.md`, or a skill
+under `.claude/skills/`. Personal memory is invisible to workers, drifts from the code, and silos what
+should be shared. When you learn something worth keeping, **augment the appropriate doc / skill /
+instruction here** instead of writing a memory. (A few homes: rig conventions + gotchas →
+[`docs/RIG-RUNBOOK.md`](docs/RIG-RUNBOOK.md); RE findings → the relevant `docs/*-FINDINGS.md` / design
+doc; orchestration → [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md); cross-cutting rules + preferences
+→ this file.)
 
 ## Deliberate divergences from ERSC (don't "fix" back)
 
@@ -284,6 +308,13 @@ intensity with a word: `Afflicted by Hopelessness`, `Your afflictions deepen`, `
 A **diagnostic/technical** message (version mismatch, connection lost, a feature disabled by a panic,
 config-clamp warning) stays plain and literal — dressing those up obscures a real problem. Lore voice
 for effects, plain voice for diagnostics.
+
+**Toasts are a valued, first-class surface — keep and expand them.** Michael likes the in-game toasts
+(the `unseamless-core/notifications.rs` model rendered by `coop/overlay.rs`) and called them out
+unprompted on the rig; treat the notifications model as first-class, not a debug afterthought. When a
+feature has a notable state change, consider whether a toast/banner fits, and don't strip or quiet them.
+The side-channel already toasts connect/version/liveness, and the ER-voiced **player join/leave/return**
+presence toasts shipped; keep adding useful session-event toasts as the co-op layer grows.
 
 [`guard::fatal`]: crates/unseamless-coop/src/guard.rs
 
