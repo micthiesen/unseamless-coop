@@ -36,10 +36,25 @@ fn rung3_create_chart() -> Guide {
     Guide::new("rung3-create-chart")
         .step("boot", "Boot to a loaded save: load a character into the world.")
         .done_when(game_state_is(GameState::InGame))
+        // The offline-multiplayer-item re-enable patch (enable_offline_multiplayer) must have taken,
+        // or there's no way to drive the FSM. Whether the items are greyed is a UI state the mod can't
+        // read, so it's an irreducibly human-perceptual check — and it branches (no point hosting if
+        // the patch didn't take), so it's a choice step. The answer is logged for the record.
+        .step(
+            "items-enabled",
+            "Open your pouch/inventory and look at the online multiplayer items (Tarnished's Furled \
+             Finger, Furlcalling Finger Remedy). Are they selectable — NOT greyed out?",
+        )
+        .choice(&[
+            ("Yes — selectable", Advance::Next),
+            ("No — still greyed", Advance::To("patch-failed")),
+        ])
+        .default_branch(Advance::To("patch-failed"))
         .step(
             "host",
-            "Use a multiplayer item (e.g. a summon sign / Furlcalling Finger Remedy) to host a \
-             session. Watching for the lobby FSM to move to TryToCreateSession.",
+            "Use TARNISHED'S FURLED FINGER to host (place your summon sign). Watching the lobby FSM \
+             for TryToCreateSession. If a 'network error / return to title' popup appears instead of \
+             the sign placing, SKIP this step (that's the broad-patch risk — tell the orchestrator).",
         )
         // Catch the transition either by reading the live FSM, or by the session-probe transition
         // line in the log (robust if the state is transient and the live read misses the exact frame).
@@ -57,13 +72,18 @@ fn rung3_create_chart() -> Guide {
         .default_branch(Advance::To("retry"))
         .step(
             "captured",
-            "Captured: the lobby FSM reached TryToCreateSession (hosting drives the create FSM). \
-             Note the frame from the session-probe line for the write-watch correlation.",
+            "Captured: the lobby FSM reached TryToCreateSession (hosting drives the create FSM). The \
+             orchestrator's write-watch now has the writing instruction — you're done.",
+        )
+        .step(
+            "patch-failed",
+            "Items still greyed: the offline re-enable patch didn't take. Tell the orchestrator to \
+             check the boot log for the 'patched enable_offline_multiplayer' line.",
         )
         .step(
             "retry",
-            "Hosting did not move the FSM to TryToCreateSession. Try placing or answering a summon \
-             sign instead, then watch the session-probe log.",
+            "Hosting did not move the FSM (or a network error fired). Try placing/answering a summon \
+             sign another way, or report the network-error popup to the orchestrator.",
         )
 }
 
@@ -259,12 +279,13 @@ mod tests {
     #[test]
     fn flagship_is_solo_runnable_to_completion() {
         // The create-RE flagship must be drivable on a Solo machine (create is solo-capable): every
-        // step is untagged, so a Solo runner walks boot -> host -> captured/retry -> done.
+        // step is untagged, so a Solo runner can walk the whole guide by skipping. Skip escapes a
+        // choice step too (taking its default_branch), so the never-trap guarantee holds end to end.
         use crate::guide::{ControlHints, GuideRunner, Role};
         let hints = ControlHints { done: "D", skip: "S" };
         let mut r = GuideRunner::start(rung3_create_chart(), Role::Solo, hints);
         let state = crate::guide::RigState::default();
-        // boot -> host (skip), host -> retry (skip default branch), retry -> done (skip).
+        // Skip path: boot -> items-enabled -> patch-failed (choice default_branch) -> retry -> done.
         let mut input = crate::guide::GuideInput {
             delta: 0.1,
             state: &state,
@@ -273,8 +294,8 @@ mod tests {
             skip_held: true,
             choice: crate::guide::ChoiceInput::default(),
         };
-        // Three skips walk it to the end (each is a fresh rising edge after a release).
-        for _ in 0..6 {
+        // Four skips walk it to the end (each is a fresh rising edge after a release).
+        for _ in 0..10 {
             let r1 = r.tick(&input);
             if r1.finished_now {
                 return;
@@ -291,14 +312,20 @@ mod tests {
         // TryToCreateSession, the "host" step auto-finishes and branches to "captured" (not "retry").
         // Guards the predicate + branch wiring (incl. the `To("captured")` target) that the skip-walk
         // test can't reach.
-        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyState, RigState, Role};
+        use crate::guide::{ChoiceInput, ControlHints, GuideInput, GuideRunner, LobbyState, RigState, Role};
         let hints = ControlHints { done: "D", skip: "S" };
         let mut r = GuideRunner::start(rung3_create_chart(), Role::Solo, hints);
 
-        // boot auto-finishes on InGame -> the host step.
+        // boot auto-finishes on InGame -> the items-enabled choice step (a choice renders as a modal:
+        // banner is None, the prompt rides on the choice view).
         let in_game = RigState { game_state: GameState::InGame, ..Default::default() };
-        let boot = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() };
-        assert!(r.tick(&boot).banner.unwrap().contains("multiplayer item"), "boot -> host");
+        let boot = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: ChoiceInput::default() };
+        let view = r.tick(&boot).choice.expect("boot -> items-enabled choice modal");
+        assert!(view.prompt.contains("greyed"), "items-enabled prompt, got: {}", view.prompt);
+
+        // items-enabled: confirm the first option ("Yes — selectable") -> Advance::Next -> the host step.
+        let yes = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: ChoiceInput { up: false, down: false, confirm: true, note: "" } };
+        assert!(r.tick(&yes).banner.unwrap().contains("summon sign"), "items-enabled (Yes) -> host");
 
         // host: lobby reaches TryToCreateSession -> auto-finish -> branch to "captured".
         let hosting = RigState {
