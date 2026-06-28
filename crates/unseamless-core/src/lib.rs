@@ -15,7 +15,6 @@
 /// the launcher, never as a persistent user environment variable (that would disarm the guard).
 pub const LAUNCH_MARKER: &str = "UNSEAMLESS_LAUNCH";
 
-pub mod bitmap_font;
 pub mod config;
 pub mod crypto;
 pub mod death_debuffs;
@@ -39,5 +38,4 @@ pub mod saves;
 pub mod scaling;
 pub mod settings;
 pub mod transport;
-pub mod ui;
 pub mod util;

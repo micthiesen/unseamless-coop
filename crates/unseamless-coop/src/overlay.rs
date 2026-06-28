@@ -279,32 +279,21 @@ impl Overlay {
         // nav). Computed every frame regardless of open-state so the chord can *open* the menu, not just
         // navigate it. The raw snapshot comes from the XInput hook; the pure edge/repeat logic lives in
         // `unseamless_core::pad`.
-        // Refresh the config snapshot first so the native-UI-mode gating below sees the live value.
-        if let Some(cfg) = crate::state::try_snapshot() {
-            self.config = cfg;
-        }
-        // Native UI mode (`[nameplates] native_spike`): the native CSEzDraw features own the menu +
-        // notifications + input suppression, so the imgui overlay *yields* those surfaces (and never
-        // touches the shared `set_blocked` global, which the native menu drives). The overlay's other
-        // surfaces (watermark, debug panel, rig guide) still draw.
-        let native_ui = self.config.nameplates.native_spike;
         let (buttons, lx, ly) = crate::input::pad_snapshot();
         let pad = self.pad.update(buttons, lx, ly, ui.io().delta_time);
-        if !native_ui {
-            // Toggle on backtick or the RB+L3+R3 chord (no-repeat: one open/close per press).
-            if ui.is_key_pressed_no_repeat(TOGGLE_KEY) || pad.toggle {
-                self.open = !self.open;
-                if self.open {
-                    // Home the Actions cursor; `draw_actions_tab` repairs it to the first enabled row (0
-                    // can be a disabled action when opened mid-session, e.g. Open world at the title).
-                    self.actions_sel = 0;
-                }
+        // Toggle on backtick or the RB+L3+R3 chord (no-repeat: one open/close per press).
+        if ui.is_key_pressed_no_repeat(TOGGLE_KEY) || pad.toggle {
+            self.open = !self.open;
+            if self.open {
+                // Home the Actions cursor; `draw_actions_tab` repairs it to the first enabled row (0
+                // can be a disabled action when opened mid-session, e.g. Open world at the title screen).
+                self.actions_sel = 0;
             }
-            // Esc or B (Back/Cancel) closes the menu while open — when closed they're game inputs (Esc =
-            // pause, B = game action). Esc is intentionally NOT advertised in the title hint.
-            if self.open && (pad.cancel || ui.is_key_pressed_no_repeat(Key::Escape)) {
-                self.open = false;
-            }
+        }
+        // Esc or B (Back/Cancel) closes the menu while open — when closed they're game inputs (Esc =
+        // pause, B = game action). Esc is intentionally NOT advertised in the title hint.
+        if self.open && (pad.cancel || ui.is_key_pressed_no_repeat(Key::Escape)) {
+            self.open = false;
         }
         // Rig-guide view (debug-only): snapshot it once *before* setting input suppression — a choice
         // modal takes input focus like the utility window even when the window itself is closed, so it
@@ -323,12 +312,12 @@ impl Overlay {
         // Mirror the open-state into the input suppressor every frame: while the window is open OR a
         // choice modal is up, the game doesn't see keyboard/mouse (but imgui still gets them via
         // hudhook's WndProc hook), and dropping both restores game input immediately.
-        // In native UI mode the native features own input suppression + notifications — don't touch
-        // `set_blocked` (avoids a cross-thread fight over the global) and don't draw imgui notifications.
-        if !native_ui {
-            crate::input::set_blocked(self.open || choice_active);
-            self.draw_notifications(ui);
+        crate::input::set_blocked(self.open || choice_active);
+        // Refresh the config snapshot non-blocking; keep the last good one on contention.
+        if let Some(cfg) = crate::state::try_snapshot() {
+            self.config = cfg;
         }
+        self.draw_notifications(ui);
         // Overhead peer nameplates: screen-space labels the game-thread feature
         // (`crate::features::nameplates`) projected and published to `crate::nameplates`. Drawn over
         // the world but behind our own windows; a no-op when nothing's published (off / no peers).
@@ -381,7 +370,7 @@ impl Overlay {
         // The utility window yields to an active choice modal (the modal owns focus and drives its own
         // nav, so drawing the window too would double-handle the arrows). `choice_active` is always
         // false on release, so this is just `self.open` there.
-        if !native_ui && self.open && !choice_active {
+        if self.open && !choice_active {
             self.draw_utility_window(ui, pad);
             draw_cursor_marker(ui);
         }

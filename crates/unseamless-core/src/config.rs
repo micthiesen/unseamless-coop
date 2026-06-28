@@ -74,12 +74,12 @@ pub struct Nameplates {
     /// label yourself), but it makes the projection + draw verifiable solo on the rig before the real
     /// remote-peer feed lands. Default off.
     pub show_self: bool,
-    /// **Native rendering (debug/config-only):** draw UI via the game's own `CSEzDraw` renderer instead
-    /// of the imgui overlay — no present-hook. Gates two surfaces: overhead nameplate **markers** (a
-    /// colored billboarded disc per player) and notification **toasts** (the bitmap font rasterized to
-    /// `CSEzDraw` quads in screen space). Draws over your own head + phantoms so it's verifiable solo on
-    /// the rig. Off by default; never in the settings menu (like [`show_self`]). The experiment toward
-    /// moving our UI off the overlay — see `docs/NAMEPLATES.md` > native rendering.
+    /// **Native nameplate dots (debug/config-only):** draw a colored **disc** over each player via the
+    /// game's own `CSEzDraw` renderer (world-space, depth-tested, no present-hook) instead of the imgui
+    /// overlay's projected labels. Draws over your own head + phantoms so it's verifiable solo on the rig.
+    /// Off by default; never in the settings menu (like [`show_self`]). The lone native UI surface kept
+    /// after the native-UI exploration (toasts/banners/menu are the imgui overlay) — see
+    /// `docs/NAMEPLATES.md` > Outcome.
     pub native_spike: bool,
 }
 

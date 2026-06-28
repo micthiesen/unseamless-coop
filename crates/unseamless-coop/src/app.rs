@@ -18,9 +18,7 @@ use crate::features::boot_volume::BootVolume;
 use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::nameplates::Nameplates;
-use crate::features::native_menu::NativeMenu;
 use crate::features::native_nameplates::NativeNameplates;
-use crate::features::native_toasts::NativeToasts;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
@@ -258,15 +256,10 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
         // camera + positions only). Reads live config; no-op (publishes nothing) when off.
         Box::new(Nameplates::new()),
-        // Spike: overhead nameplate markers drawn natively via CSEzDraw (no overlay/present-hook).
-        // Config-file-only (`[nameplates] native_spike`); no-op when off.
+        // Overhead nameplate dots drawn natively via CSEzDraw (world-space, present-hook-free) — the one
+        // native UI surface we kept; toasts/banners/menu are the imgui overlay. Config-file-only
+        // (`[nameplates] native_spike`); no-op when off. See docs/UI-LIBRARY.md > OUTCOME.
         Box::new(NativeNameplates::new()),
-        // Spike: notification toasts + banners drawn natively via CSEzDraw + the UI library (no overlay).
-        // Same `native_spike` gate; no-op when off or when nothing's active.
-        Box::new(NativeToasts::new()),
-        // Spike: the tabbed utility menu drawn natively via the UI library (ui::render + ui::input),
-        // no overlay. Same `native_spike` gate; no-op when off / not open.
-        Box::new(NativeMenu::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
         // Writes the per-player enemy/boss scaling curve into the multiplayer SpEffect rate rows

@@ -134,10 +134,9 @@ lock = false
 hour = 12
 minute = 0
 
-# Native rendering (the imgui-replacement experiment): `native_spike = true` enables the native
-# CSEzDraw surfaces — a colored disc marker over each player + notification toasts drawn from the
-# bitmap font — so a rig run exercises them. `enabled = false` keeps the imgui-overlay nameplates off
-# so the native marker is seen in isolation. Intended rig state; the shipped default is both off.
+# Nameplates: `native_spike = true` draws the native CSEzDraw disc over each player (the kept native
+# UI surface); `enabled = false` keeps the imgui-overlay projected-label nameplates off so the disc is
+# the only nameplate. Toasts/banners/menu are the imgui overlay. Shipped default is both off.
 [nameplates]
 enabled = false
 native_spike = true
