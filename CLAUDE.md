@@ -329,6 +329,9 @@ These are loaded only when relevant (not in this always-on file):
   rig tools (rizin / Ghidra wrapper / Frida): the **`/reverse-engineer`** skill (+
   [`docs/RUNTIME-RE.md`](docs/RUNTIME-RE.md)).
 - **Cutting a release** — tag-driven CI: the **`/release`** skill.
+- **Driving a Steam Deck / second machine as player 2** (over SSH, for two-player networking tests):
+  the **`/steam-deck`** skill (`scripts/deck.sh` + `scripts/deck/deck-remote.sh`). The local rig is
+  player 1; the Deck is a near-stateless player 2 we build-here-and-push-to.
 
 ## Safety / legitimacy
 

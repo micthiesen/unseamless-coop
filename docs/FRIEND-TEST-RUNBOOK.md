@@ -15,12 +15,18 @@ three rungs in a single friend session —
   rig-proven solo).
 - **Rung 2** — the private Steam P2P side-channel links over the discovered peer (`coop_connect`
   walks `linking → linked`).
-- **Rung 3** — capture the game's own create/join initiation while the friend hosts once and joins
-  once, so the session-FSM RE can proceed.
+- **Rung 3** — the **create-drive test**: with a real peer present, drive the charted create and see
+  whether it walks past leg B's deep registry lookup to `Host`/`Client` (see "Part B" below; the
+  initiation functions are already charted, so this is no longer a capture task).
 
 One good friend session pays for all three. Stage everything below **up front** so a single launch
 captures the lot; the friend is a low-effort peer (set a password, press Play, host once, join once,
 send one file).
+
+> **Player 2 can be a Steam Deck you drive over SSH** (a throwaway account), not just a human friend — see
+> the [`/steam-deck`](../.claude/skills/steam-deck/SKILL.md) skill (`scripts/deck.sh`). It applies this
+> same seed config (same password) + save and reaches gameplay on the Deck, so the assistant handles the
+> player-2 *mechanics* and only a human-in-the-world is needed for actual co-op.
 
 Read alongside [COOP-CONNECTION.md](COOP-CONNECTION.md) (the rung model + the Steam decisions) and
 [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) (the rung-3 create/join RE in full). The connection

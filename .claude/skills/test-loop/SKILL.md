@@ -203,7 +203,12 @@ log file.
 
 ## Layer 5 — Real co-op (ongoing, manual)
 
-Two or more real players. Can't be automated, but **ship a role-tagged guide so it isn't hand-driven**:
+Two or more real players. **Player 2 can be assistant-driven over SSH** — a Steam Deck / second Linux box
+on a throwaway account, via `scripts/deck.sh` (the [`/steam-deck`](../steam-deck/SKILL.md) skill): the
+assistant builds here, pushes the mod + the *same* seed config + save to the Deck, launches it, and pulls
+its logs, so a two-player run no longer needs a human at the second machine for the mechanics (only an
+in-game human for the actual play). Can't be fully automated, but **ship a role-tagged guide so it isn't
+hand-driven**:
 `two-player-join` walks both machines through the connect, each step auto-finishing off the run log (set
 `[debug] guide`; each machine's role is derived from its Open/Join action, so leave `[debug] rig_role` at
 `solo` — it's just an override/solo fallback; see the "Ship a guide" box above and FRIEND-TEST-RUNBOOK).
