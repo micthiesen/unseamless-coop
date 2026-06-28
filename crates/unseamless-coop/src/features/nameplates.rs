@@ -167,7 +167,7 @@ fn camera_from(cam: &CSCamera) -> Option<Camera> {
 /// form CLAUDE.md prescribes), not the in-`ChrIns` `is_active` flag, because the two aren't guaranteed
 /// to flip in lockstep for a joining network peer (a rig-confirm item). Mirrors the SDK's own entry
 /// walk, reading the status alongside the pointer.
-fn active_characters<T>(set: &ChrSet<T>) -> impl Iterator<Item = &mut T> + '_
+pub(crate) fn active_characters<T>(set: &ChrSet<T>) -> impl Iterator<Item = &mut T> + '_
 where
     T: Subclass<ChrIns> + 'static,
 {

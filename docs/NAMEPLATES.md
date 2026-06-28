@@ -5,6 +5,54 @@ order; the projection math is `crates/unseamless-core/src/projection.rs`, the fe
 `crates/unseamless-coop/src/features/nameplates.rs`, and the draw is in `coop/overlay.rs`
 (`draw_nameplates`). See also [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) for the overlay it draws on.
 
+## Native rendering (no overlay) — spike 2026-06-28
+
+We spiked rendering nameplates (and eventually more UI) **natively** via the game's own `CSEzDraw`
+debug renderer (`RendMan.debug_ez_draw`) from a frame task, instead of the hudhook/imgui present-hook.
+Motivation: it sidesteps the present-hook entirely (so it renders even where the overlay crashes — the
+native-Windows RTX-3080 case in OVERLAY-RENDERING.md), and it's a path toward dropping imgui. The
+substrate is `coop/native_draw.rs`; the marker feature is `coop/features/native_nameplates.rs`, gated by
+`[nameplates] native_spike` (config-only, off by default, coexists with the overlay nameplates).
+
+What the spike established (all rig-confirmed):
+
+- **Native geometry works.** `CSEzDraw` draws untextured, depth-tested colored geometry (`draw_line`,
+  `draw_sphere`, and **filled `draw_triangle`**, all confirmed in retail) that the game composites into
+  the 3D scene. Lines/spheres/quads/discs all render.
+- **Native *text* via `CSEzDraw::draw_text` is DEAD in retail.** We RE'd the call (RVA `0x264efd0`, see
+  `native_draw.rs` for the derivation) and it enqueues fine, but the game **hard-faults at render** (a
+  native access violation `catch_unwind` can't catch) because the debug text **font isn't initialized in
+  the shipping build** — same in world- and screen-space coord modes; the whole `draw_text` path has a
+  single caller and is debug-only. The real UI fonts (`FontRepository`, `GUIFont@GuiFramework`,
+  `CSScaleformSystem`) are debug-only or menu/Scaleform-pipeline-locked, so there's no standalone
+  "draw a string" primitive. **Conclusion: render text as a bitmap font rasterized to filled quads**
+  (one+ solid rects per glyph), not via any game font.
+- **Screen-space 2D works** via a near-plane billboard (`native_draw::ScreenSpace`): `CSEzDraw` geometry
+  is world-space, so 2D UI (toasts/menus) is drawn on a plane locked just in front of the camera. Filled
+  quads + bitmap-as-quads text render crisp and screen-locked (the blocky bitmap look Michael wants).
+- **Cost model: per-primitive (~3µs/quad on the rig), linear, not fixable by caching** (it's the game's
+  debug-renderer enqueue/render, likely unbatched). So: nameplate markers (a few discs) are ~free; small
+  transient toasts are fine; a **dense always-redrawn menu** costs real frame time (~1.7k quads ≈ -12fps;
+  ~11.5k ≈ 60→20fps). Mitigations: rect-merging (fewer quads), keep menus compact, gate work to when
+  shown (the steady-state cost when nothing's drawn is one bool check).
+
+### Plan / status
+
+- [x] **Native nameplate markers (shipped behind `native_spike`).** A colored, camera-facing filled
+      **disc** per player ([`native_draw::draw_billboard_disc`]) — a shape, *not* in-world text, and no
+      distance LOD (deliberate: the debug font is dead and a colored dot is what we want here). Each
+      player reads as its palette color; floats above the head; depth-tested; present-hook-free.
+- [x] **Screen-space 2D substrate** (`ScreenSpace` / `draw_screen_rect` / `draw_filled_quad`) — proven by
+      the probe, in `native_draw.rs` (not yet wired to a real surface).
+- [ ] **Bitmap font -> draw-shapes** (in progress, `unseamless-core`): convert our font(s) to precomputed
+      static glyph->merged-rects, `shape(text) -> rects`, with rect-merging + ASCII-art unit tests. This
+      is the enabler for native text.
+- [ ] **Native toasts/banners** on the screen-space substrate + bitmap font (next, once the font lands).
+- [ ] **Native menu** — the perf-sensitive surface; needs the bitmap font + a layout pass + native input;
+      accept a small fps dip while open. This is the gating step for fully dropping imgui.
+
+[`native_draw::draw_billboard_disc`]: ../crates/unseamless-coop/src/native_draw.rs
+
 ## Status
 
 - **Projection — rig-confirmed (2026-06-26).** Solo `show_self` check on the rig: the label is upright,

@@ -43,6 +43,7 @@ mod logbuf;
 mod logger;
 mod mods;
 mod nameplates;
+mod native_draw;
 mod notify;
 mod overlay;
 mod patch;

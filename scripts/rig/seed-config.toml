@@ -133,3 +133,11 @@ max_intensity_percent = 300
 lock = false
 hour = 12
 minute = 0
+
+# SPIKE (temporary): evaluate native world-space nameplates drawn by the game's own CSEzDraw text
+# renderer (no overlay). `native_spike` labels your own head + phantoms via the game renderer;
+# `enabled = false` keeps the imgui-overlay nameplates off so the native draw is seen in isolation.
+# Revert this section before committing the spike.
+[nameplates]
+enabled = false
+native_spike = true

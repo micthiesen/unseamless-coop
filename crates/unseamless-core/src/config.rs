@@ -74,11 +74,22 @@ pub struct Nameplates {
     /// label yourself), but it makes the projection + draw verifiable solo on the rig before the real
     /// remote-peer feed lands. Default off.
     pub show_self: bool,
+    /// **Spike (debug/config-only):** render nameplates with the game's own world-space text renderer
+    /// (`CSEzDraw::draw_text`) instead of the imgui overlay — the game projects + draws the label in
+    /// 3D, no present-hook involved. Draws over your own head + any phantoms so it's verifiable solo on
+    /// the rig. Off by default; never in the settings menu (like [`show_self`]). Evaluating whether to
+    /// move nameplates (and later all UI) off the overlay — see `docs/NAMEPLATES.md`.
+    pub native_spike: bool,
 }
 
 impl Default for Nameplates {
     fn default() -> Self {
-        Self { enabled: false, max_distance_m: DEFAULT_NAMEPLATE_DISTANCE, show_self: false }
+        Self {
+            enabled: false,
+            max_distance_m: DEFAULT_NAMEPLATE_DISTANCE,
+            show_self: false,
+            native_spike: false,
+        }
     }
 }
 
