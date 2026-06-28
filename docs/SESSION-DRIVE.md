@@ -529,6 +529,60 @@ order of expected value:
 The reject-#1 lever (`[debug.probes] force_netsession_ready`) stays in the tree as a charted, default-off
 probe — it proved reject #1 is real and not the whole story.
 
+### Leg-B re-charted (2026-06-28, orchestrator, static): a **4th gate** the earlier pass missed; the finalize/registry chain is **NOT** the offline blocker
+
+Following option (2) above, I read the whole leg-B tail statically (clean target, same 2026-06-02 image).
+Two corrections to the note above, both load-bearing:
+
+**(A) There is a 4th synchronous gate between reject #3 and the finalize — the earlier charting stopped at
+three.** After reject #3 returns the new `0x5f8` session object (`rdi`), leg B does **`call
+[new_obj_vtable + 8](new_obj)`** at `0x1423f5c8f` and `jne` to the register path only if it returns
+**true** (`0x1423f5c92: test al,al; jne 0x1423f5cab`). A false return falls through to cleanup → `esi=0` →
+`FailedToCreateSession`, exactly like a reject. So leg B has **four** offline-relevant gates, not three,
+and this 4th one runs **before** the finalize/register call.
+
+- The new object's vtable is **`0x1431fa248`** (installed by the constructor `0x1423fd300`: `mov [obj],
+  0x1431fa248`). Its slot `+0x8` = **`0x1423fd7a0`** (the 4th gate), slot `+0xd8` = **`0x1423fdfa0`** (the
+  registry-key vmethod the earlier note fingered).
+- **4th gate `0x1423fd7a0`** returns false if **both** `[new_obj+0x3b0]==0` **and** `[new_obj+0x3b4]==0`;
+  otherwise it calls helper **`0x1423faf60`** and returns false if that does. **`0x1423faf60` bails false
+  if any of five dwords `[new_obj+0x68], +0x6c, +0x70, +0x74, +0x78` is zero**, then runs a vmethod
+  (`[[new_obj+0x58]]+0x8`) and three `0x1423fd110` sub-checks that all must pass. These are clearly
+  **session-configuration fields** (seat counts / peer slots / match params) populated from real session
+  setup — all zero in a freshly-constructed object with no peer/match context.
+
+**(B) The finalize/registry chain only fails on OOM — it is not an offline gate.** I read the chain the
+earlier note blamed:
+
+- **`0x1423fab40`** (finalize) → calls `0x1423fa1b0(this=new_obj, cmp=0x1423fc6a0, mode)`; returns 0 only
+  if that returns null.
+- **`0x1423fa1b0`** has two null-return points: the `[new_obj_vtable+0xd8]` vmethod (`0x1423fdfa0`) and the
+  secondary `0x1423fa100`. **Both only return null on allocation failure:** `0x1423fdfa0` allocates `0x60`
+  bytes via `0x141eb9ed0` and returns null *iff that alloc fails* (else constructs an entry and returns it);
+  `0x1423fa100` is the same shape (allocates `0x58`, returns null only on alloc/`0x1423f7290` failure). So
+  `0x1423fa1b0` (hence finalize) **always succeeds offline barring OOM** — it is not where create dies.
+
+**Conclusion / correction to the prior NEXT.** The earlier note's "create dies in the session-object
+registry/init chain" is **wrong** — that chain is OOM-only. The earlier `force_netsession_ready` run forced
+reject #1 and then static-traced *past* the unseen 4th gate straight to finalize. The real synchronous
+offline stop after reject #1 is almost certainly the **4th gate `0x1423fd7a0` / helper `0x1423faf60`**,
+which need a wall of peer/session-config fields (`[new_obj+0x3b0|0x3b4]` and `[new_obj+0x68..0x78]`)
+nonzero. (Static-strong, not yet runtime-confirmed — see the probe below.)
+
+**This sharpens, not changes, the top recommendation.** All of reject #1, the 4th gate, and its helper read
+fields that only a **real peer/match context** populates; a solo drive leaves them zero by construction.
+Forcing them one-by-one is whack-a-mole (we already saw forcing reject #1 just exposes the next gate) and
+risks building a malformed session object that crashes once `Ingame`. So **the 2-player drive (option 1)
+remains highest-EV**, and this pass tells us *what to expect/force there*: the create path needs the new
+session object's config fields filled, which is exactly what a live peer supplies.
+
+**Remaining solo-doable, non-destructive step (precise):** extend `session_probe` with a **leg-B entry
+tracer** — hook the new object's gate vmethods (or `0x1423f5c00` itself) to log, on a real `drive_create`
+fire, the runtime values of `[new_obj+0x3b0]`, `[new_obj+0x3b4]`, `[new_obj+0x68..0x78]`, and the `al` of
+the 4th gate — to **confirm at runtime which gate fails first** and capture the exact zero fields. That's
+the right artifact to have *before* the friend test, so the 2-player run knows precisely what to verify.
+(`[new_obj_vtable+8]=0x1423fd7a0`, `[+0xd8]=0x1423fdfa0`; vtable `0x1431fa248`; constructor `0x1423fd300`.)
+
 ### Tooling / re-derivation
 
 Found with `scripts/re/static.py` (the committed PE workhorse): `fn` to disassemble the inner/builder,
