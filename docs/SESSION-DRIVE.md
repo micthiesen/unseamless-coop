@@ -469,12 +469,29 @@ synchronous rejects**, in order, any of which is the likely offline culprit:
 3. **`this->vtable[0x108](this, params, true) == null`** — virtual at `0x1423f5c7b` returning a pointer;
    `je fail` at `0x1423f5c87`. (On success this pointer `rdi` is the new session object, then registered.)
 
-**NEXT (precise):** hook `0x1423f5c00` (or watch its three branch sites) on a `bypass`+`drive_create` run
-and see **which** of `0x1423f5c4f` / `0x1423f5c69` / `0x1423f5c87` is taken offline — that names the exact
-offline-reject. Then satisfy it (e.g. if reject #1, write `NetworkSession+0x10`; if a vmethod, RE that
-vmethod's offline condition). The vmethod offsets `0xe8`/`0x108` and the readiness getter `0x141eba210`
-are the sub-targets. This is the same shape as ERSC "re-enable what offline disables" — but now localized
-to a clean, readable function instead of the encrypted gate.
+**Reject #2 and #3 eliminated statically → by elimination the offline blocker is reject #1.** Read the two
+vmethods (resolved from the static `.rdata` vtable `VT=0x1431f9140`: `[0xe8]→0x1423f6fb0`,
+`[0x108]→0x1423f7070`):
+
+- **Reject #2 vmethod `0x1423f6fb0` is `mov al,1; ret`** — it *always* returns true. It can never reject,
+  online or off.
+- **Reject #3 vmethod `0x1423f7070`** allocates a `0x5f8`-byte session object (`call 0x141eb9ed0(ecx=0x5f8,
+  edx=8)`), and returns null **only if that allocation fails** (OOM), else bumps a counter `[this+0xa8]`,
+  constructs the object (`0x1423fd300`), and returns it. Not an offline gate — it succeeds normally.
+
+So the only synchronous reject that can fire offline is **reject #1: `*(NetworkSession+0x10) == 0`** — the
+dword at `*([G]+0x60)+0x710 + 0x10`, read by the trivial getter `0x141eba210` (`mov eax,[rcx]; ret`). A
+readiness/enabled flag the game leaves 0 outside an online session. **This is the whole rung-3 create
+wall, narrowed to one 4-byte flag.**
+
+**NEXT (build + solo-test, no friend needed):** satisfy reject #1 — resolve `NetworkSession =
+*([G]+0x60)+0x710` and **set `[NetworkSession+0x10]` nonzero just before the `bypass`+`drive_create`
+call**, then check whether create now walks `None → TryToCreateSession → Host` instead of
+`FailedToCreateSession`. Caveats to watch on the rig: the flag may need to be a *meaningful* value (a real
+handle/count) rather than a bare `1`, and even if create reaches `Host`, the session may fault deeper when
+it tries to actually network without a real Steam session — that's the next layer if this flag clears.
+This is the same shape as ERSC "re-enable what offline disables," now localized to a clean readable
+function instead of the encrypted gate.
 
 ### Tooling / re-derivation
 
