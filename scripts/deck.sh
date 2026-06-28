@@ -25,6 +25,7 @@ DECK_APPID="${DECK_APPID:-1245620}"
 TRIPLE="x86_64-pc-windows-gnu"
 SEED_CONFIG="${SEED_CONFIG:-$ROOT/scripts/rig/seed-config.toml}"
 REMOTE_HELPER_SRC="$ROOT/scripts/deck/deck-remote.sh"
+TAP_SRC="$ROOT/scripts/deck/uinput-tap.c"  # the dismiss key-tapper; built static here, pushed to the Deck
 # Remote paths (defaults derive off the resolved remote $HOME in resolve_paths — see below — so they're
 # correct for any Deck user, not just `deck`; override for an SD-card install or non-standard layout).
 DECK_HELPER_DIR="${DECK_HELPER_DIR:-}"     # default: <remote-home>/.local/share/unseamless-deck
@@ -74,7 +75,7 @@ resolve_paths() {
 remote_env() {
   local out="" v val
   for v in DECK_APPID DECK_STEAM_ROOT DECK_GAME_DIR DECK_SAVE_ROOT DECK_HELPER_DIR DECK_STAGING \
-           DECK_STEAM_ID64 DECK_DISMISS_PRESSES DECK_DISMISS_INTERVAL DECK_DISMISS_KEY DECK_YDOTOOL_SOCKET; do
+           DECK_STEAM_ID64 DECK_DISMISS_PRESSES DECK_DISMISS_INTERVAL DECK_DISMISS_KEY; do
     val="${!v:-}"
     [[ -n "$val" ]] && out+="$v=$(qsh "$val") "
   done
@@ -105,6 +106,31 @@ rsync_to() {  # $1 = local file, $2 = remote absolute path
   rsync -azs -e "ssh ${SSH_OPTS[*]}" "$1" "$DECK_HOST:$2"
 }
 
+# Build the uinput key-tapper here (native x86_64 -> the Deck is x86_64) and push it to the Deck's helper
+# bin dir for `dismiss`. Rebuilds only when the source is newer. Needs gcc here, not on the Deck. See the
+# gcc invocation below for why it's dynamic + note-stripped (CachyOS x86-64-v4 vs the Deck's Zen 2).
+build_and_push_tap() {
+  resolve_paths
+  local bin="$ROOT/target/deck/uinput-tap"
+  if [[ ! -f "$bin" || "$TAP_SRC" -nt "$bin" ]]; then
+    command -v gcc >/dev/null 2>&1 || die "gcc needed to build uinput-tap (the dismiss tapper) — install gcc, or skip dismiss"
+    mkdir -p "$(dirname "$bin")"
+    # DYNAMIC, not static: this dev box (CachyOS) ships an x86-64-v4 glibc (AVX-512), so a STATIC link
+    # bakes those AVX-512 libc routines into the binary and it SIGILLs on the Deck's Zen 2 APU (no
+    # AVX-512). A dynamic binary instead binds the *Deck's own* (CPU-correct) glibc at runtime. Our code is
+    # baseline ISA (-march=x86-64) and -std=gnu11 keeps the required glibc symbol versions old (<=2.34,
+    # well under the Deck's 2.41), so there's no version skew. The Deck has no toolchain, only glibc — fine.
+    gcc -O2 -march=x86-64 -mtune=generic -std=gnu11 -o "$bin" "$TAP_SRC" || die "uinput-tap build failed"
+    # CachyOS's crt startup objects carry an x86-64-v4 ISA-requirement note (GNU property), so the Deck's
+    # loader rejects the binary ("CPU ISA level is lower than required") even though our code is baseline.
+    # Strip the note: the startup objects' actual instructions are baseline, only the marking is v4.
+    objcopy --remove-section .note.gnu.property "$bin" 2>/dev/null || true
+  fi
+  ssh_base "mkdir -p $(qsh "$DECK_HELPER_DIR/bin")"
+  rsync_to "$bin" "$DECK_HELPER_DIR/bin/uinput-tap"
+  ssh_base "chmod +x $(qsh "$DECK_HELPER_DIR/bin/uinput-tap")"
+}
+
 # ---- build (local; mirrors rig.sh) --------------------------------------------------------------
 build() {
   local profile="$1"
@@ -127,6 +153,8 @@ cmd_setup() {
   push_helper
   ok "pushed helper -> $REMOTE_HELPER"
   deck_remote mark-throwaway        # the apply guard: marks this host as an explicit throwaway rig
+  build_and_push_tap
+  ok "seeded uinput-tap -> $DECK_HELPER_DIR/bin/uinput-tap (dismiss)"
   deck_remote check || true
   say "Next: scripts/deck.sh apply   (build + push the mod), then launch / cycle."
 }
@@ -149,6 +177,7 @@ cmd_apply() {
   [[ -f "$launcher" ]] || die "missing $launcher — build first (drop --no-build)."
 
   push_helper
+  build_and_push_tap        # keep the dismiss tapper fresh alongside the mod
   say "Staging artifacts -> $DECK_HOST:$DECK_STAGING"
   ssh_base "mkdir -p $(qsh "$DECK_STAGING")"
   rsync_to "$dll" "$DECK_STAGING/unseamless_coop.dll"
@@ -183,6 +212,7 @@ cmd_seed_save() {
   deck_remote seed-save-staged "$ext"
 }
 
+cmd_seed_input() { resolve_paths; build_and_push_tap; ok "seeded uinput-tap -> $DECK_HELPER_DIR/bin/uinput-tap"; }
 cmd_launch()  { deck_remote launch; }
 cmd_dismiss() { deck_remote dismiss; }
 cmd_kill()    { deck_remote kill; }
@@ -217,7 +247,7 @@ cmd_cycle() {
   deck_remote wait-framework 150 "$before" || warn "framework didn't report up in time — check 'deck.sh log'"
   say "Settling, then dismissing startup popups…"
   sleep "${DECK_DISMISS_PRESETTLE:-10}"
-  cmd_dismiss || warn "dismiss failed (ydotool not set up on the Deck?) — dismiss manually or see the skill"
+  cmd_dismiss || warn "dismiss failed (/dev/uinput not accessible? no active session?) — dismiss manually or see the skill"
 }
 
 cmd_shell() { need_host; exec ssh "${SSH_OPTS[@]}" "$DECK_HOST"; }
@@ -230,8 +260,9 @@ deck.sh — remote rig over SSH (player 2). Set DECK_HOST=user@host first.
   apply [--release] [--no-build] [--keep-config]
                         build the DLL here, rsync it + the launcher + seed config, install on the Deck
   seed-save [file]      push a save (default: the local rig's seeded ER0000.<ext>) into the Deck's prefix
+  seed-input            (re)build + push the static uinput-tap key-tapper that dismiss uses (setup does this too)
   launch                start the game on the Deck via the running Steam
-  dismiss               ydotool the startup popups away (click into gameplay) — needs ydotool on the Deck
+  dismiss               tap Enter via the bundled uinput-tap to clear popups + select Continue (no daemon)
   kill                  stop the game + launcher on the Deck
   cycle [apply-opts]    apply -> kill -> launch -> wait -> dismiss (the solo-on-Deck smoke test)
   log [-f]              print/follow the latest Deck log
@@ -250,6 +281,7 @@ main() {
     setup)      cmd_setup "$@" ;;
     apply)      cmd_apply "$@" ;;
     seed-save)  cmd_seed_save "$@" ;;
+    seed-input) cmd_seed_input "$@" ;;
     launch)     cmd_launch "$@" ;;
     dismiss)    cmd_dismiss "$@" ;;
     kill)       cmd_kill "$@" ;;

@@ -39,13 +39,14 @@ warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---- popup-dismiss tuning (mirrors rig.sh; the popups are MODAL in-engine dialogs) --------------
-DISMISS_PRESSES="${DECK_DISMISS_PRESSES:-30}"   # match rig.sh's default (outlasts the ~10-15s offline popup)
-DISMISS_INTERVAL="${DECK_DISMISS_INTERVAL:-0.4}"
-DISMISS_KEY="${DECK_DISMISS_KEY:-28}"           # 28 = Enter (the menu-confirm key, as on the local rig)
+DISMISS_PRESSES="${DECK_DISMISS_PRESSES:-30}"          # match rig.sh's default (outlasts the ~10-15s offline popup)
+DISMISS_INTERVAL_MS="${DECK_DISMISS_INTERVAL_MS:-400}" # 400ms == rig.sh's 0.4s
+DISMISS_KEY="${DECK_DISMISS_KEY:-28}"                  # 28 = Enter (the menu-confirm key, as on the local rig)
+TAP_BIN="$HELPER_DIR/bin/uinput-tap"                   # the bundled static uinput key-tapper (deck.sh seeds it)
 
 # ---- session-env lift ---------------------------------------------------------------------------
 # Lift the graphical-session env (XDG_RUNTIME_DIR / DBUS / WAYLAND_DISPLAY / DISPLAY / XAUTHORITY) out of
-# the running Steam process so SSH-launched commands (the game launch, ydotool) reach the live session —
+# the running Steam process so SSH-launched commands (the game launch) reach the live session —
 # over SSH we don't inherit it. Picks the NEWEST steam pid (an older lingering one can carry dead-session
 # vars). Returns non-zero if it can't even resolve XDG_RUNTIME_DIR (no live session).
 lift_session_env() {
@@ -92,18 +93,21 @@ cmd_paths() {
 
 cmd_check() {
   say "deck-remote check on $(uname -n) ($(uname -s))"
-  local have_steam have_ydotool have_game
+  local have_steam have_tap have_game uinput_w
   have_steam="$(command -v steam || echo MISSING)"
-  have_ydotool="$(command -v ydotool || echo MISSING)"
+  have_tap=missing; [[ -x "$TAP_BIN" ]] && have_tap=present
+  uinput_w=no; [[ -w /dev/uinput ]] && uinput_w=yes
   have_game=missing; [[ -f "$GAME_DIR/eldenring.exe" ]] && have_game=present
   printf '  steam        %s\n' "$have_steam"
-  printf '  ydotool      %s  (dismiss/click-into-gameplay)\n' "$have_ydotool"
+  printf '  uinput-tap   %s  (dismiss/click-into-gameplay)\n' "$have_tap"
+  printf '  /dev/uinput  writable=%s\n' "$uinput_w"
   printf '  game exe     %s  (%s/eldenring.exe)\n' "$have_game" "$GAME_DIR"
   printf '  game dir     %s\n' "$([[ -d "$GAME_DIR" ]] && echo present || echo missing)"
   printf '  throwaway    %s\n' "$([[ -f "$THROWAWAY_SENTINEL" ]] && echo yes || echo 'no (run setup before apply)')"
   printf '  applied      %s\n' "$([[ -f "$MARKER" ]] && echo yes || echo no)"
   [[ "$have_steam" == MISSING ]] && warn "steam not found — launch will fail (is this the Deck, logged into Game Mode?)"
-  [[ "$have_ydotool" == MISSING ]] && warn "ydotool not found — 'dismiss' (auto click-into-gameplay) unavailable; see the steam-deck skill for the static-binary setup"
+  [[ "$have_tap" == missing ]] && warn "uinput-tap not seeded — 'dismiss' unavailable until 'scripts/deck.sh setup' (or seed-input)"
+  [[ "$uinput_w" == no ]] && warn "/dev/uinput not writable — dismiss needs an active Game Mode session"
   return 0   # the trailing `[[ ]] && warn` above must not become this function's (failing) exit status
 }
 
@@ -172,20 +176,17 @@ cmd_launch() {
   ok "handed off to Steam (steam://rungameid/$APPID). The applied launcher starts the game outside EAC."
 }
 
+# Tap Enter through our bundled static uinput key-tapper to clear the modal startup popups and select
+# Continue → gameplay. No daemon/socket (unlike ydotool): the tapper writes /dev/uinput directly, which
+# the SteamOS session ACL grants the `deck` user while Game Mode is up. One process, the whole sequence.
 cmd_dismiss() {
-  command -v ydotool >/dev/null 2>&1 || { warn "ydotool not installed — cannot auto-dismiss; see the steam-deck skill"; return 1; }
+  [[ -x "$TAP_BIN" ]] || { warn "uinput-tap not seeded ($TAP_BIN) — run 'scripts/deck.sh setup' (or 'seed-input')"; return 1; }
   [[ "$DISMISS_PRESSES" =~ ^[0-9]+$ ]] || die "DECK_DISMISS_PRESSES must be a number (got '$DISMISS_PRESSES')"
-  lift_session_env || warn "couldn't lift the Steam session env — the ydotool socket guess may be wrong"
-  local sock="${DECK_YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
-  [[ -S "$sock" ]] || warn "ydotool socket $sock missing — is ydotoold running? (the skill covers starting it)"
-  say "Dismissing startup popups: $DISMISS_PRESSES presses of key $DISMISS_KEY every ${DISMISS_INTERVAL}s"
-  local i
-  for ((i=0; i<DISMISS_PRESSES; i++)); do
-    YDOTOOL_SOCKET="$sock" ydotool key "$DISMISS_KEY:1" "$DISMISS_KEY:0" \
-      || { warn "ydotool failed — is ydotoold running and the socket correct?"; return 1; }
-    sleep "$DISMISS_INTERVAL"
-  done
-  ok "sent $DISMISS_PRESSES presses"
+  [[ -w /dev/uinput ]] || warn "/dev/uinput not writable by $(whoami) — needs an active session (Game Mode up on the Deck)"
+  say "Dismissing startup popups: $DISMISS_PRESSES taps of key $DISMISS_KEY every ${DISMISS_INTERVAL_MS}ms (uinput-tap)"
+  "$TAP_BIN" "$DISMISS_KEY" "$DISMISS_PRESSES" "$DISMISS_INTERVAL_MS" \
+    || { warn "uinput-tap failed — is /dev/uinput accessible? (active Game Mode session?)"; return 1; }
+  ok "sent $DISMISS_PRESSES taps"
 }
 
 cmd_kill() {

@@ -31,10 +31,10 @@ away from ready.
   on SSH port `2222`** — so `DECK_HOST=deck@10.10.1.57 DECK_PORT=2222`. (`DECK_PORT` defaults to 22; it
   flows to both ssh and rsync. The SteamOS default user is `deck`.) Confirmed reachable; recon showed
   Steam present + running, `/dev/uinput` writable by `deck`, rsync/setsid/pgrep present, ELDEN RING at the
-  internal default path — only ydotool needs seeding (see below).
+  internal default path. **`setup` is done** (helper + `uinput-tap` seeded, host marked throwaway).
 - The game **installed** on the Deck (we don't install ELDEN RING, just our mod over it).
-- For `launch`: the Deck **logged into Game Mode** (a running Steam). For `dismiss`/click-into-gameplay:
-  **ydotool** available on the Deck (see "ydotool on SteamOS" below).
+- For `launch`: the Deck **logged into Game Mode** (a running Steam). `dismiss` needs nothing extra — the
+  static `uinput-tap` key-tapper is bundled and seeded by `setup`/`apply` (see "Click into gameplay" below).
 
 ## Verbs (all `scripts/deck.sh <verb>`)
 
@@ -44,7 +44,7 @@ away from ready.
 | `apply [--release] [--no-build] [--keep-config]` | Build the DLL here (default `diag`), rsync it + our launcher + the seed config, install on the Deck (dll→`dinput8.dll`, launcher→`start_protected_game.exe`, config, marker; empties `mods/`). Safe to repeat. |
 | `seed-save [file]` | Push a save into the Deck's Proton prefix as `ER0000.<ext>` (ext from the seed config's `file_extension`). Default source: the local rig's seeded save; or pass a file. |
 | `launch` | Start the game on the Deck via the running Steam (`steam://rungameid/<appid>`). Our applied launcher starts it **outside EAC** with the marker, same as the local rig. |
-| `dismiss` | ydotool the startup popups away and select Continue → **lands in gameplay** (same Enter-spam approach as the local rig's `dismiss`). |
+| `dismiss` | Tap Enter via the bundled `uinput-tap` to clear popups + select Continue → **lands in gameplay** (no daemon; same Enter-spam idea as the local rig). |
 | `kill` | Stop the game + launcher (bracket-trick `pkill`, SIGTERM→SIGKILL). |
 | `cycle [apply-opts]` | `apply → kill → launch → wait-for-framework → dismiss`. The solo-on-Deck smoke test. |
 | `log [-f]` | Print/follow the latest Deck log over SSH. |
@@ -109,34 +109,33 @@ Over SSH we don't inherit the Deck's graphical session, so `deck-remote.sh launc
 **running Steam process's** `/proc/<pid>/environ` (newest match) and fires `steam://rungameid/<appid>` at
 it, detached (`setsid`) so the closing SSH session can't kill the handoff. So Steam must already be
 running (Game Mode logged in). If launch can't resolve a live session, it errors instead of pretending to
-succeed. (`dismiss` lifts the same env so its ydotool socket guess is right.)
+succeed.
 
-### ydotool on SteamOS (the click-into-gameplay piece)
-`dismiss` injects key presses via **ydotool** (uinput-level virtual input, so it reaches the game under
-gamescope). SteamOS has an immutable root and ships no ydotool, so seed it into the (writable) helper
-dir — this keeps the Deck stateless-ish and survives SteamOS updates better than `pacman` on the
-unlocked root:
+### Click into gameplay (`uinput-tap`, no daemon)
+`dismiss` taps Enter to clear ELDEN RING's modal startup popups and select **Continue** → gameplay. It
+uses **`uinput-tap`** — a tiny self-contained static key-tapper (`scripts/deck/uinput-tap.c`) that writes
+`/dev/uinput` directly. No daemon, no socket (vs ydotool): one process creates a virtual keyboard, taps
+the key N times, and exits. `setup`/`apply` build it here and rsync it to `~/.local/share/unseamless-deck/bin/`
+(or `deck.sh seed-input` to (re)push just it). **No sudo:** SteamOS's `60-cecd-uinput.rules` grants the
+active-session user an ACL on `/dev/uinput`, so the tapper opens it unprivileged while Game Mode is up.
 
-1. Put a **statically-linked `ydotool` + `ydotoold`** in `~/.local/share/unseamless-deck/bin/` on the
-   Deck (build static on this PC, or grab a static release; musl static binaries run on SteamOS).
-2. Run `ydotoold` — **no sudo needed.** SteamOS's `60-cecd-uinput.rules` grants the active-session user
-   an ACL on `/dev/uinput` (confirmed: `test -w /dev/uinput` is YES for `deck` while Game Mode is up), so
-   ydotoold opens it unprivileged. (That access is tied to an active session — which a launch needs
-   anyway — so it's a non-issue. passwordless sudo is off on this Deck regardless.)
-3. Point `dismiss` at it: `DECK_YDOTOOL_SOCKET=<socket>` and ensure the `bin/` dir is on `PATH` for the SSH
-   command (or extend `deck-remote.sh` to prefer `$DECK_HELPER_DIR/bin`).
+**Build gotcha (handled, but know it):** this dev box is CachyOS on the **x86-64-v4** repo, so its glibc +
+crt objects use AVX-512 the Deck's **Zen 2** APU lacks. `deck.sh` therefore builds `uinput-tap`
+**dynamic** (`-march=x86-64 -std=gnu11`, so it binds the Deck's own CPU-correct glibc 2.41 at runtime) and
+**strips `.note.gnu.property`** (else the Deck's loader rejects it with "CPU ISA level is lower than
+required" from the v4 marking on CachyOS's crt). Validated on the Deck: device create + event write +
+destroy all succeed as `deck`. If you ever move to a different build host, re-confirm the tapper runs there.
 
-Until ydotool is set up, `dismiss` warns and no-ops; drive the menu by hand (or with the controller) that
-run. The dismiss key is `DECK_DISMISS_KEY` (default 28 = Enter, same as the local rig); tune
-`DECK_DISMISS_PRESSES`/`DECK_DISMISS_INTERVAL` if the Deck's popup timing differs.
+Tuning: `DECK_DISMISS_KEY` (default 28 = Enter), `DECK_DISMISS_PRESSES` (30), `DECK_DISMISS_INTERVAL_MS`
+(400). `dismiss` warns (doesn't crash) if `/dev/uinput` isn't writable (no active session).
 
-> **This is the one part that needs the real hardware to finalize** — launch and ydotool can only be
-> validated on a Deck in Game Mode. The file/apply/config/save/log/SSH plumbing is validated end-to-end
-> against a plain headless Linux box (see below).
+> **What still needs a live Game-Mode run to confirm:** the actual `launch` (Steam URL handoff) and that
+> the `dismiss` taps land in ELDEN RING to reach gameplay. The file/apply/config/save/log/SSH plumbing —
+> and the `uinput-tap` mechanism itself — are validated end-to-end (against the Deck and a headless box).
 
 ## Validate without a Deck
 
-Everything except the actual Steam launch + ydotool works against any SSH box — point the env at a scratch
+Everything except the actual Steam launch + uinput key injection works against any SSH box — point the env at a scratch
 dir:
 
 ```bash
@@ -150,7 +149,7 @@ scripts/deck.sh setup && scripts/deck.sh apply --no-build && scripts/deck.sh sta
 scripts/deck.sh seed-save /path/to/any/ER0000.uco
 ```
 
-`launch`/`dismiss` fail gracefully there (no Steam/ydotool); `apply`/`seed-save`/`status`/`log`/`pull-logs`
+`launch`/`dismiss` fail gracefully there (no Steam; no writable /dev/uinput without a session); `apply`/`seed-save`/`status`/`log`/`pull-logs`
 all exercise the real code paths. (This is exactly how the tooling was first validated, against
 `michael@10.10.1.100:/home/michael/working`.)
 
