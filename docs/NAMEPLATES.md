@@ -36,24 +36,25 @@ What the spike established (all rig-confirmed):
   ~11.5k ≈ 60→20fps). Mitigations: rect-merging (fewer quads), keep menus compact, gate work to when
   shown (the steady-state cost when nothing's drawn is one bool check).
 
-### Plan / status
+### Outcome (2026-06-28): nameplate dots kept native; everything else reverted to imgui
 
-- [x] **Native nameplate markers (shipped behind `native_spike`).** A colored, camera-facing filled
-      **disc** per player ([`native_draw::draw_billboard_disc`]) — a shape, *not* in-world text, and no
-      distance LOD (deliberate: the debug font is dead and a colored dot is what we want here). Each
-      player reads as its palette color; floats above the head; depth-tested; present-hook-free.
-- [x] **Screen-space 2D substrate** (`ScreenSpace` / `draw_screen_rect` / `draw_filled_quad` /
-      `draw_text_screen`) in `native_draw.rs` — a near-plane camera-locked billboard with aspect-correct
-      bitmap text. Wired by native toasts (below); the menu will build on it too.
-- [x] **Bitmap font -> draw-shapes** (`unseamless_core::bitmap_font`): `shape(text, Face) -> rects` from
-      precomputed static glyph->merged-rects (Proggy: Menu = ProggyClean 7x13, Compact = ProggyTiny 6x10), with ASCII-art unit
-      tests. The enabler for native text.
-- [x] **Native toasts** (`coop/features/native_toasts.rs`, behind `native_spike`): the live
-      notification toasts drawn screen-space via [`native_draw::draw_text_screen`] (real Proggy glyphs ->
-      `CSEzDraw` quads), right-aligned + stacked + severity-colored + lifetime-faded, with a contrast
-      shadow. Rig-confirmed. Banners are the same pattern (TODO).
-- [ ] **Native menu** — the perf-sensitive surface; needs the bitmap font + a layout pass + native input;
-      accept a small fps dip while open. This is the gating step for fully dropping imgui.
+After building native toasts/banners + a tabbed menu on a `CSEzDraw` + `ui::render` stack, we reverted
+all of those to the imgui overlay and kept **only the native nameplate dot**. The deciding facts (full
+rationale in [UI-LIBRARY.md](UI-LIBRARY.md) > OUTCOME): screen-space CSEzDraw UI **swims** (it's a
+camera-billboard; no screen-space geometry mode — [RE-SCREENSPACE.md](RE-SCREENSPACE.md)) and is
+**per-primitive-slow** for dense text; there's no reachable game text primitive except the `CSFeMan` HUD
+channels, which work but we chose not to pursue ([RE-GAME-UI.md](RE-GAME-UI.md)); and imgui is simply the
+right tool for a dense custom menu.
+
+**Final state:**
+- [x] **Native nameplate dots — KEPT.** A colored, camera-facing filled **disc** per player
+      ([`native_draw::draw_billboard_disc`]) — world-space (so it doesn't swim), depth-tested,
+      present-hook-free, no LOD; appropriate as a dot. The one surface where CSEzDraw is a good fit.
+      Gated by `[nameplates] native_spike`.
+- [reverted] **Native toasts / banners / menu** → back to the imgui overlay. The `ui::render`/`ui::input`
+      libraries + the bitmap-font/Proggy pipeline + the screen-space bits of `native_draw` were removed
+      (in git history if revived). The CSEzDraw `draw_text` finding (RVA `0x264efd0`, font-dead in retail)
+      is recorded above and in [RE-GAME-UI.md](RE-GAME-UI.md).
 
 [`native_draw::draw_billboard_disc`]: ../crates/unseamless-coop/src/native_draw.rs
 

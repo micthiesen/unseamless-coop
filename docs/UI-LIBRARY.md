@@ -1,5 +1,32 @@
 # Native UI Library (`unseamless_core::ui`)
 
+> ## ⚠️ OUTCOME (2026-06-28): superseded — reverted to imgui, except nameplate dots.
+>
+> We built this library + a CSEzDraw renderer and wired toasts, banners, and a tabbed menu onto it,
+> then reverted to the imgui overlay for all of them. **Net final state:** imgui draws the menu /
+> toasts / banners; the only native (CSEzDraw) surface kept is the **overhead nameplate dot**
+> (`coop/features/native_nameplates.rs` + the slimmed `coop/native_draw.rs::draw_billboard_disc`) —
+> a world-space marker where CSEzDraw is a genuinely good fit. The `ui::render`/`ui::input` libraries
+> and the bitmap-font/Proggy pipeline were removed (they live in git history if ever revived).
+>
+> **Why we reverted (don't re-explore without new information):**
+> - **CSEzDraw can't do good 2D UI.** It draws only world-space geometry, so screen-space UI is a
+>   billboard in front of the camera that **swims** with camera motion (parallax; far placement helps
+>   but isn't good enough), and it's **per-primitive ~3µs/quad**, so dense text (a menu) tanks fps and
+>   can overrun the command buffer. No screen-space geometry mode exists — see
+>   [RE-SCREENSPACE.md](RE-SCREENSPACE.md).
+> - **No reachable game text primitive.** The game's pixel-perfect text is Scaleform retained-mode (no
+>   free-placed "draw string at x,y"); the CSEzDraw debug font isn't loaded in retail. The one viable
+>   game-native path is writing `CSFeMan` HUD channels (`summon_msg_queue`, `friendly_chr_tag_displays`)
+>   — **works but not pursued** (we're fine with imgui toasts) — see [RE-GAME-UI.md](RE-GAME-UI.md).
+> - **imgui is simply the best tool for a dense, custom, interactive menu** (pixel-perfect + GPU
+>   textured), and once it's present the hybrid adds no value. Tradeoff accepted: the present-hook crash
+>   on some machines is mitigated by the `[debug] overlay = false` kill-switch (those machines lose the
+>   in-game menu but the game runs).
+>
+> The rest of this doc is the (now-historical) design of the library that was built. Kept for the
+> record + in case the calculus changes (e.g. if `CSFeMan` is later pursued).
+
 A small, composable, **pure + host-tested** UI library that replaces the hudhook/imgui overlay. It
 emits a renderer-agnostic **draw list** (rectangles + text runs) that the cdylib's
 [`coop/native_draw.rs`](../crates/unseamless-coop/src/native_draw.rs) rasterizes via the game's own
