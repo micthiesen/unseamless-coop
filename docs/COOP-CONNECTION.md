@@ -138,6 +138,13 @@ the one genuinely hard step — driving the game's own session so players see ea
   rehearsal for exactly this.
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
+> **What it takes to *call* the session is specified in [SESSION-DRIVE.md](SESSION-DRIVE.md)** — the
+> minimal create/host + join calls, the args/state/keys each needs, and the loud SDK-survey result
+> (the SDK charts the session object + FSM + transport but exposes **no** callable create/host/join, so
+> the two initiation function entries remain the one genuine RE gap). Read it alongside the RE recipe
+> below: SESSION-RE-RUNBOOK.md is *how to find* the two functions, SESSION-DRIVE.md is *how to drive*
+> them once found.
+
 - With two instances we control + the rung-2 channel to coordinate ("both call join now") + observer
   instrumentation, RE the create/join functions that move `CSSessionManager` to `Host`/`Client` for a
   given peer SteamID. Feed in the peer SteamID resolved by rung-4 lobby discovery; the **password
@@ -371,6 +378,8 @@ coordination channel ("both go now") and two instances we control to RE against.
 - [SDK-COVERAGE.md](SDK-COVERAGE.md) — per-subsystem charted/gap inventory (networking/session).
 - [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) — the two-player smoke test: lobby-discovery
   connect (rungs 2+4) plus the folded-in rung-3 create/join capture, in one friend session.
+- [SESSION-DRIVE.md](SESSION-DRIVE.md) — the rung-3 "drive a session directly" call spec: the minimal
+  create/join calls + the args/state/keys each needs + the SDK-survey result (no callable initiation).
 - [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) — the rung-3 create/join RE recipe: the gated
   `session-probe` instrumentation (`coop/session_probe`) and the exact "find these two initiation
   functions" task for the rig.
