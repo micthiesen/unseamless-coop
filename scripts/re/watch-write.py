@@ -62,11 +62,12 @@ DEBUGREG_OFF = 848
 # struct user_regs_struct field order (x86-64): rip is index 16 -> byte offset 128.
 RIP_OFF = 16 * 8
 
-# DR7: enable a local 4-byte write watch in slot 0.
+# DR7: enable a local 4-byte data watch in slot 0.
 #   L0  = bit 0            (local enable, slot 0)
-#   RW0 = bits 16-17 = 01b (break on data write)
+#   RW0 = bits 16-17       (01b = write only; 11b = read OR write — x86 has no read-only)
 #   LEN0= bits 18-19 = 11b (4 bytes)
 DR7_WRITE_4B_SLOT0 = (1 << 0) | (0b01 << 16) | (0b11 << 18)
+DR7_RW_4B_SLOT0 = (1 << 0) | (0b11 << 16) | (0b11 << 18)  # fires on read too (a stable byte => read)
 
 IMAGE_BASE = 0x140000000
 SESSION_MANAGER_GLOBAL = 0x143D7A4D0  # G: [G] is the live CSSessionManager*
@@ -125,12 +126,12 @@ def get_rip(tid):
     return struct.unpack_from("<Q", bytes(buf), RIP_OFF)[0]
 
 
-def arm_thread(tid, addr):
-    """Attach to one thread and arm DR0/DR7 for a 4-byte write watch on addr."""
+def arm_thread(tid, addr, dr7=DR7_WRITE_4B_SLOT0):
+    """Attach to one thread and arm DR0/DR7 for a 4-byte data watch on addr."""
     ptrace(PTRACE_ATTACH, tid, 0, 0)
     os.waitpid(tid, __WALL)  # wait for the attach-stop
     ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 0 * 8, addr)            # DR0 = addr
-    ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 7 * 8, DR7_WRITE_4B_SLOT0)  # DR7
+    ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 7 * 8, dr7)             # DR7
     ptrace(PTRACE_CONT, tid, 0, 0)
 
 
@@ -142,16 +143,17 @@ def disarm_thread(tid):
         pass
 
 
-def watch(pid, addr, max_hits):
+def watch(pid, addr, max_hits, access="write"):
+    dr7 = DR7_RW_4B_SLOT0 if access == "rw" else DR7_WRITE_4B_SLOT0
     if addr % 4 != 0:
         print(f"warning: addr {addr:#x} is not 4-byte aligned; a LEN=4 watch needs alignment",
               file=sys.stderr)
-    print(f"watch: pid={pid} addr={addr:#x} 4-byte write, max_hits={max_hits}", file=sys.stderr)
+    print(f"watch: pid={pid} addr={addr:#x} 4-byte {access}, max_hits={max_hits}", file=sys.stderr)
     threads = list_threads(pid)
     armed = []
     for tid in threads:
         try:
-            arm_thread(tid, addr)
+            arm_thread(tid, addr, dr7)
             armed.append(tid)
         except OSError as e:
             print(f"  warn: could not arm tid {tid}: {e}", file=sys.stderr)
@@ -206,7 +208,10 @@ def main():
     ap.add_argument("--watch-lobby", action="store_true",
                     help="watch base+0xc (lobby_state); reads base from G")
     ap.add_argument("--addr", type=lambda s: int(s, 0), default=None,
-                    help="explicit absolute address to watch (4-byte write)")
+                    help="explicit absolute address to watch (4-byte)")
+    ap.add_argument("--access", choices=["write", "rw"], default="write",
+                    help="watch on write only (default) or read-or-write (rw) — rw catches reads of a "
+                         "stable byte, i.e. who consults it")
     ap.add_argument("--peek", type=lambda s: int(s, 0), default=None,
                     help="read --peek-len bytes at this absolute address and exit (no watch)")
     ap.add_argument("--peek-len", type=int, default=1)
@@ -241,7 +246,7 @@ def main():
         return
 
     if args.addr is not None:
-        watch(pid, args.addr, args.max_hits)
+        watch(pid, args.addr, args.max_hits, args.access)
         return
 
     ap.error("pick a mode: --read-base | --watch-lobby | --addr ADDR")

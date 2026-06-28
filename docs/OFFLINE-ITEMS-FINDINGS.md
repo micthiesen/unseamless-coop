@@ -318,6 +318,19 @@ honest confidence and paired with the runtime check that settles it.
 
 ## TL;DR — the narrowed Frida target
 
+> **RIG RESULT (orchestrator, 2026-06-28): this chain is ALSO ruled out — it's not on the item-grey
+> path.** First the cheap peek: with a save loaded and the greyed Tarnished's Furled Finger highlighted,
+> the cached bytes `0x143d6a840` and `0x143d87228` both read `01` (available) — identical to their
+> title-screen baseline, no flip. Then the decisive probe: a **read-watch** (`watch-write.py --addr
+> 0x143d6a840 --access rw`, a 4-byte read-or-write hardware watchpoint, armed on all 104 game threads)
+> fired **zero times** across full inventory navigation onto/off the greyed item. So the menu-grey
+> decision **never reads this bool** — the chain is consulted, but not by the item-availability path.
+> Three static candidate families are now rig-eliminated (mode enum / `is_offline()`, `IsEnableOnlineMode`,
+> this online-available chain). The read-watch is proven as a clean "is global X on the item-grey path?"
+> probe — but the gate is a signal none of the static passes have found. **Next is a runtime EXECUTION
+> trace** (Frida-stalker / hooking the inventory item-availability draw, or the EquipParamGoods "usable
+> now" check) to see what the grey decision actually branches on — static guessing is exhausted here.
+
 Found a **lazily-cached "online-play-available" boolean chain that is genuinely distinct from both
 eliminated signals** (it does not read the mode enum nor the `IsEnableOnlineMode` byte), and that is
 **reached from the multiplayer-menu code** that the prior pass had only loosely flagged. The chain
