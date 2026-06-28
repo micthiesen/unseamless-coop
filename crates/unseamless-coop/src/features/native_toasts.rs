@@ -22,9 +22,12 @@ use unseamless_core::util::Latch;
 use crate::feature::{Feature, Tick};
 use crate::native_draw::{self, CamFrame, ScreenSpace};
 
-/// Distance (m) of the screen-space plane in front of the camera (just clears the near plane; apparent
-/// size is distance-independent).
-const PLANE_DIST_M: f32 = 0.5;
+/// Distance (m) of the screen-space plane in front of the camera. Apparent size is distance-independent
+/// (the fov term cancels in [`ScreenSpace`]), so this is purely a *stability* knob: a close plane (0.5m)
+/// swims wildly as the camera moves (huge parallax per unit motion), while a far plane is as stable as a
+/// distant world point (like the nameplates). Far enough to not swim; the tradeoff is close geometry can
+/// occlude it (proper fix: depth-disabled draw — a follow-up).
+const PLANE_DIST_M: f32 = 10.0;
 /// Virtual layout canvas height (px). The UI library lays out in a `DESIGN_HEIGHT`-tall canvas whose
 /// width is `DESIGN_HEIGHT * aspect` (so glyphs stay square — see [`native_draw::ui_viewport`]), and
 /// `native_draw` scales that uniformly to the real viewport. 1080 is the standard 1080p virtual canvas

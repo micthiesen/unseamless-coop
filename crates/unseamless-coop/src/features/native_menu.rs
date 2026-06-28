@@ -47,7 +47,7 @@ use crate::native_draw::{CamFrame, ScreenSpace, draw_list, ui_viewport};
 
 /// Distance (m) of the screen-space plane in front of the camera — mirrors the toasts; apparent size
 /// is distance-independent (the fov term cancels in [`ScreenSpace`]).
-const PLANE_DIST_M: f32 = 0.5;
+const PLANE_DIST_M: f32 = 10.0;
 /// Virtual canvas height (px) the menu lays out in. [`ui_viewport`] derives the width from the screen
 /// aspect so glyphs stay square, and [`draw_list`] maps this whole canvas across the screen — so the
 /// number is a *size* knob (bigger ⇒ smaller on-screen chrome), not a resolution. Text is rasterized
