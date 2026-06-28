@@ -39,7 +39,11 @@ warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---- popup-dismiss tuning (mirrors rig.sh; the popups are MODAL in-engine dialogs) --------------
-DISMISS_PRESSES="${DECK_DISMISS_PRESSES:-30}"          # match rig.sh's default (outlasts the ~10-15s offline popup)
+# 100 taps x 400ms = a ~40s window — deliberately longer than rig.sh's 30: the Deck runs UNATTENDED and
+# ELDEN RING's Proton cold-start can show the popups well after the mod's framework loads, so we spam
+# generously to be sure we outlast them (extra taps after reaching gameplay are harmless). Same 400ms
+# frequency, so each modal popup still gets cleared the moment it appears.
+DISMISS_PRESSES="${DECK_DISMISS_PRESSES:-100}"
 DISMISS_INTERVAL_MS="${DECK_DISMISS_INTERVAL_MS:-400}" # 400ms == rig.sh's 0.4s
 DISMISS_KEY="${DECK_DISMISS_KEY:-28}"                  # 28 = Enter (the menu-confirm key, as on the local rig)
 TAP_BIN="$HELPER_DIR/bin/uinput-tap"                   # the bundled static uinput key-tapper (deck.sh seeds it)

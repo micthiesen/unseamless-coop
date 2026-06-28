@@ -126,8 +126,10 @@ crt objects use AVX-512 the Deck's **Zen 2** APU lacks. `deck.sh` therefore buil
 required" from the v4 marking on CachyOS's crt). Validated on the Deck: device create + event write +
 destroy all succeed as `deck`. If you ever move to a different build host, re-confirm the tapper runs there.
 
-Tuning: `DECK_DISMISS_KEY` (default 28 = Enter), `DECK_DISMISS_PRESSES` (30), `DECK_DISMISS_INTERVAL_MS`
-(400). `dismiss` warns (doesn't crash) if `/dev/uinput` isn't writable (no active session).
+Tuning: `DECK_DISMISS_KEY` (default 28 = Enter), `DECK_DISMISS_PRESSES` (**100** — a ~40s window, longer
+than the local rig's 30 on purpose, since the Deck is unattended and Proton's cold-start shows the popups
+late; extra taps after gameplay are harmless), `DECK_DISMISS_INTERVAL_MS` (400). `dismiss` warns (doesn't
+crash) if `/dev/uinput` isn't writable (no active session).
 
 > **What still needs a live Game-Mode run to confirm:** the actual `launch` (Steam URL handoff) and that
 > the `dismiss` taps land in ELDEN RING to reach gameplay. The file/apply/config/save/log/SSH plumbing —
