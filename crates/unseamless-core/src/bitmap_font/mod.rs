@@ -12,11 +12,11 @@
 //!
 //! The glyph→rectangles data is **precomputed**, not rasterised at runtime. The `gen-bitmap-font`
 //! generator binary parses the vendored Proggy [`bdf`] bitmaps, merges each glyph's lit pixels into
-//! the fewest possible rectangles ([`merge`] — fewer rectangles, fewer draw calls), and emits the
-//! static tables in `generated.rs`. At runtime [`shape`] just *positions* those cached rectangles by
-//! advancing a pen across the text. Output is in glyph-cell-local **integer pixel** coordinates with
-//! the origin at the top-left and `y` increasing downward; the renderer maps pixels to screen space,
-//! so this module stays renderer-agnostic.
+//! as few non-overlapping rectangles as practical ([`merge`] — fewer rectangles, fewer draw calls),
+//! and emits the static tables in `generated.rs`. At runtime [`shape`] just *positions* those cached
+//! rectangles by advancing a pen across the text. Output is in glyph-cell-local **integer pixel**
+//! coordinates with the origin at the top-left and `y` increasing downward; the renderer maps pixels
+//! to screen space, so this module stays renderer-agnostic.
 //!
 //! # The two faces
 //!
@@ -360,9 +360,11 @@ mod tests {
                 "face {face:?} glyph {ch:?} (U+{:04X}): generated rects don't match the BDF source",
                 g.codepoint
             );
-            // And independently: merging the raw bitmap is lossless.
-            let remerged = merge::rasterize(&merge::merge(raw), raw.width, raw.height);
-            assert_eq!(&remerged, raw, "merge changed pixels for {ch:?}");
+            // And independently, charset-wide: merging the raw bitmap is both lossless *and*
+            // non-overlapping. Disjointness is the load-bearing invariant (overlapping quads would
+            // double-blend faded toast text), so it gets the same every-glyph coverage as exactness
+            // here — not just the focused sample below.
+            merge::assert_exact_and_disjoint(&merge::merge(raw), raw);
         }
     }
 
@@ -374,5 +376,25 @@ mod tests {
     #[test]
     fn compact_face_matches_proggy_tiny_bdf() {
         assert_generated_matches_bdf(Face::Compact, PROGGY_TINY_BDF);
+    }
+
+    /// Focused merge check: for a sample of glyphs across **both** faces — including the
+    /// crossing-stroke shapes (`# + T I`) that are the hardest exactness/disjointness cases — `merge`
+    /// of the raw BDF bitmap rasterises back to exactly that bitmap with no overlapping rectangles.
+    /// Pixel-exactness keeps text legible; non-overlap keeps faded toast text from double-blending its
+    /// shared crossbar pixels (see `merge`'s docs). `assert_generated_matches_bdf` already asserts both
+    /// properties for the *whole* charset; this is a named, explicit, per-face regression test of the
+    /// merge on the glyphs where its output differs most, so a regression reads unambiguously.
+    #[test]
+    fn merge_is_pixel_exact_and_disjoint_sample() {
+        let sample = ['#', '+', 'T', 'I', '1', 'e', '@', 'A', 'g', 'W', '0', 'x'];
+        for (face, src) in [(Face::Menu, PROGGY_CLEAN_BDF), (Face::Compact, PROGGY_TINY_BDF)] {
+            let font = bdf::parse(src).unwrap();
+            for ch in sample {
+                let g = font.glyphs.iter().find(|g| g.codepoint == ch as u32).unwrap();
+                let raw = &g.bitmap;
+                merge::assert_exact_and_disjoint(&merge::merge(raw), raw);
+            }
+        }
     }
 }

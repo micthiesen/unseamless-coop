@@ -5,8 +5,8 @@
 //!     --features gen-bitmap-font --target x86_64-unknown-linux-gnu
 //!
 //! Source: vendored Proggy BDF bitmaps under `assets/fonts/` (MIT, Tristan Grimmer).
-//! Each glyph's lit pixels are merged into maximal rectangles so the native renderer draws
-//! the fewest filled quads per glyph.
+//! Each glyph's lit pixels are merged into a few non-overlapping rectangles so the native
+//! renderer draws the fewest filled quads per glyph.
 #![allow(clippy::all)]
 use super::{FaceData, Glyph, Rect};
 
@@ -50,7 +50,7 @@ pub static MENU: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 1, y: 5, w: 6, h: 1 }, Rect { x: 1, y: 7, w: 6, h: 1 }] }, // U+003D '='
         Glyph { rects: &[Rect { x: 1, y: 4, w: 2, h: 1 }, Rect { x: 3, y: 5, w: 2, h: 1 }, Rect { x: 5, y: 6, w: 2, h: 1 }, Rect { x: 3, y: 7, w: 2, h: 1 }, Rect { x: 1, y: 8, w: 2, h: 1 }] }, // U+003E '>'
         Glyph { rects: &[Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 2 }, Rect { x: 3, y: 6, w: 1, h: 2 }, Rect { x: 1, y: 3, w: 1, h: 1 }, Rect { x: 4, y: 5, w: 1, h: 1 }, Rect { x: 3, y: 9, w: 1, h: 1 }] }, // U+003F '?'
-        Glyph { rects: &[Rect { x: 0, y: 4, w: 1, h: 4 }, Rect { x: 4, y: 4, w: 1, h: 4 }, Rect { x: 2, y: 9, w: 4, h: 1 }, Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 6, y: 4, w: 1, h: 3 }, Rect { x: 2, y: 5, w: 1, h: 2 }, Rect { x: 1, y: 3, w: 1, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 1 }, Rect { x: 3, y: 4, w: 1, h: 1 }, Rect { x: 3, y: 7, w: 1, h: 1 }, Rect { x: 5, y: 7, w: 1, h: 1 }, Rect { x: 1, y: 8, w: 1, h: 1 }] }, // U+0040 '@'
+        Glyph { rects: &[Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 1, y: 3, w: 1, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 1 }, Rect { x: 3, y: 4, w: 2, h: 1 }, Rect { x: 6, y: 4, w: 1, h: 3 }, Rect { x: 2, y: 5, w: 1, h: 2 }, Rect { x: 4, y: 5, w: 1, h: 2 }, Rect { x: 0, y: 4, w: 1, h: 4 }, Rect { x: 3, y: 7, w: 3, h: 1 }, Rect { x: 1, y: 8, w: 1, h: 1 }, Rect { x: 2, y: 9, w: 4, h: 1 }] }, // U+0040 '@'
         Glyph { rects: &[Rect { x: 3, y: 2, w: 2, h: 2 }, Rect { x: 2, y: 6, w: 4, h: 1 }, Rect { x: 1, y: 7, w: 1, h: 3 }, Rect { x: 6, y: 7, w: 1, h: 3 }, Rect { x: 2, y: 4, w: 1, h: 2 }, Rect { x: 5, y: 4, w: 1, h: 2 }] }, // U+0041 'A'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 5, w: 4, h: 1 }, Rect { x: 2, y: 9, w: 4, h: 1 }, Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 6, y: 6, w: 1, h: 3 }, Rect { x: 5, y: 3, w: 1, h: 2 }] }, // U+0042 'B'
         Glyph { rects: &[Rect { x: 1, y: 4, w: 1, h: 4 }, Rect { x: 3, y: 2, w: 3, h: 1 }, Rect { x: 3, y: 9, w: 3, h: 1 }, Rect { x: 2, y: 3, w: 1, h: 1 }, Rect { x: 6, y: 3, w: 1, h: 1 }, Rect { x: 2, y: 8, w: 1, h: 1 }, Rect { x: 6, y: 8, w: 1, h: 1 }] }, // U+0043 'C'
@@ -59,7 +59,7 @@ pub static MENU: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 2, w: 4, h: 1 }, Rect { x: 2, y: 5, w: 3, h: 1 }] }, // U+0046 'F'
         Glyph { rects: &[Rect { x: 1, y: 4, w: 1, h: 4 }, Rect { x: 3, y: 2, w: 3, h: 1 }, Rect { x: 4, y: 6, w: 3, h: 1 }, Rect { x: 3, y: 9, w: 3, h: 1 }, Rect { x: 6, y: 7, w: 1, h: 2 }, Rect { x: 2, y: 3, w: 1, h: 1 }, Rect { x: 6, y: 3, w: 1, h: 1 }, Rect { x: 2, y: 8, w: 1, h: 1 }] }, // U+0047 'G'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 6, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 5, w: 4, h: 1 }] }, // U+0048 'H'
-        Glyph { rects: &[Rect { x: 3, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 2, w: 1, h: 1 }, Rect { x: 4, y: 2, w: 1, h: 1 }, Rect { x: 2, y: 9, w: 1, h: 1 }, Rect { x: 4, y: 9, w: 1, h: 1 }] }, // U+0049 'I'
+        Glyph { rects: &[Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 3, y: 3, w: 1, h: 6 }, Rect { x: 2, y: 9, w: 3, h: 1 }] }, // U+0049 'I'
         Glyph { rects: &[Rect { x: 4, y: 2, w: 1, h: 7 }, Rect { x: 1, y: 9, w: 3, h: 1 }, Rect { x: 2, y: 2, w: 2, h: 1 }] }, // U+004A 'J'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 3, y: 5, w: 1, h: 2 }, Rect { x: 6, y: 2, w: 1, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 1 }, Rect { x: 4, y: 4, w: 1, h: 1 }, Rect { x: 2, y: 6, w: 1, h: 1 }, Rect { x: 4, y: 7, w: 1, h: 1 }, Rect { x: 5, y: 8, w: 1, h: 1 }, Rect { x: 6, y: 9, w: 1, h: 1 }] }, // U+004B 'K'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 9, w: 4, h: 1 }] }, // U+004C 'L'
@@ -70,7 +70,7 @@ pub static MENU: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 1, y: 4, w: 1, h: 4 }, Rect { x: 6, y: 4, w: 1, h: 4 }, Rect { x: 3, y: 2, w: 2, h: 1 }, Rect { x: 3, y: 9, w: 2, h: 1 }, Rect { x: 6, y: 9, w: 1, h: 2 }, Rect { x: 2, y: 3, w: 1, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 1 }, Rect { x: 2, y: 8, w: 1, h: 1 }, Rect { x: 5, y: 8, w: 1, h: 1 }] }, // U+0051 'Q'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 8 }, Rect { x: 2, y: 2, w: 3, h: 1 }, Rect { x: 5, y: 3, w: 1, h: 3 }, Rect { x: 2, y: 6, w: 3, h: 1 }, Rect { x: 4, y: 7, w: 1, h: 1 }, Rect { x: 5, y: 8, w: 1, h: 1 }, Rect { x: 6, y: 9, w: 1, h: 1 }] }, // U+0052 'R'
         Glyph { rects: &[Rect { x: 2, y: 2, w: 4, h: 1 }, Rect { x: 2, y: 9, w: 4, h: 1 }, Rect { x: 1, y: 3, w: 1, h: 2 }, Rect { x: 2, y: 5, w: 2, h: 1 }, Rect { x: 4, y: 6, w: 2, h: 1 }, Rect { x: 6, y: 7, w: 1, h: 2 }, Rect { x: 6, y: 3, w: 1, h: 1 }, Rect { x: 1, y: 8, w: 1, h: 1 }] }, // U+0053 'S'
-        Glyph { rects: &[Rect { x: 3, y: 2, w: 1, h: 8 }, Rect { x: 0, y: 2, w: 3, h: 1 }, Rect { x: 4, y: 2, w: 3, h: 1 }] }, // U+0054 'T'
+        Glyph { rects: &[Rect { x: 0, y: 2, w: 7, h: 1 }, Rect { x: 3, y: 3, w: 1, h: 7 }] }, // U+0054 'T'
         Glyph { rects: &[Rect { x: 1, y: 2, w: 1, h: 7 }, Rect { x: 6, y: 2, w: 1, h: 7 }, Rect { x: 2, y: 9, w: 4, h: 1 }] }, // U+0055 'U'
         Glyph { rects: &[Rect { x: 0, y: 2, w: 1, h: 2 }, Rect { x: 6, y: 2, w: 1, h: 2 }, Rect { x: 1, y: 4, w: 1, h: 2 }, Rect { x: 5, y: 4, w: 1, h: 2 }, Rect { x: 2, y: 6, w: 1, h: 2 }, Rect { x: 4, y: 6, w: 1, h: 2 }, Rect { x: 3, y: 8, w: 1, h: 2 }] }, // U+0056 'V'
         Glyph { rects: &[Rect { x: 0, y: 2, w: 1, h: 5 }, Rect { x: 6, y: 2, w: 1, h: 5 }, Rect { x: 2, y: 5, w: 1, h: 3 }, Rect { x: 4, y: 5, w: 1, h: 3 }, Rect { x: 1, y: 7, w: 1, h: 3 }, Rect { x: 5, y: 7, w: 1, h: 3 }, Rect { x: 3, y: 3, w: 1, h: 2 }] }, // U+0057 'W'
@@ -87,7 +87,7 @@ pub static MENU: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 1, y: 1, w: 1, h: 9 }, Rect { x: 5, y: 5, w: 1, h: 4 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }] }, // U+0062 'b'
         Glyph { rects: &[Rect { x: 1, y: 5, w: 1, h: 4 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }, Rect { x: 5, y: 5, w: 1, h: 1 }, Rect { x: 5, y: 8, w: 1, h: 1 }] }, // U+0063 'c'
         Glyph { rects: &[Rect { x: 5, y: 1, w: 1, h: 9 }, Rect { x: 1, y: 5, w: 1, h: 4 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }] }, // U+0064 'd'
-        Glyph { rects: &[Rect { x: 1, y: 6, w: 5, h: 1 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }, Rect { x: 1, y: 7, w: 1, h: 2 }, Rect { x: 1, y: 5, w: 1, h: 1 }, Rect { x: 5, y: 5, w: 1, h: 1 }, Rect { x: 5, y: 8, w: 1, h: 1 }] }, // U+0065 'e'
+        Glyph { rects: &[Rect { x: 1, y: 5, w: 1, h: 4 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 6, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }, Rect { x: 5, y: 5, w: 1, h: 2 }, Rect { x: 5, y: 8, w: 1, h: 1 }] }, // U+0065 'e'
         Glyph { rects: &[Rect { x: 2, y: 2, w: 1, h: 8 }, Rect { x: 3, y: 1, w: 3, h: 1 }, Rect { x: 3, y: 4, w: 2, h: 1 }, Rect { x: 1, y: 4, w: 1, h: 1 }] }, // U+0066 'f'
         Glyph { rects: &[Rect { x: 5, y: 4, w: 1, h: 8 }, Rect { x: 1, y: 5, w: 1, h: 4 }, Rect { x: 2, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 9, w: 3, h: 1 }, Rect { x: 2, y: 12, w: 3, h: 1 }] }, // U+0067 'g'
         Glyph { rects: &[Rect { x: 1, y: 1, w: 1, h: 9 }, Rect { x: 5, y: 5, w: 1, h: 5 }, Rect { x: 2, y: 4, w: 3, h: 1 }] }, // U+0068 'h'
@@ -165,7 +165,7 @@ pub static COMPACT: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 7 }, Rect { x: 1, y: 1, w: 4, h: 1 }, Rect { x: 1, y: 4, w: 3, h: 1 }] }, // U+0046 'F'
         Glyph { rects: &[Rect { x: 0, y: 2, w: 1, h: 5 }, Rect { x: 4, y: 4, w: 1, h: 4 }, Rect { x: 1, y: 1, w: 3, h: 1 }, Rect { x: 1, y: 7, w: 3, h: 1 }, Rect { x: 4, y: 2, w: 1, h: 1 }, Rect { x: 3, y: 4, w: 1, h: 1 }] }, // U+0047 'G'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 7 }, Rect { x: 4, y: 1, w: 1, h: 7 }, Rect { x: 1, y: 4, w: 3, h: 1 }] }, // U+0048 'H'
-        Glyph { rects: &[Rect { x: 2, y: 1, w: 1, h: 7 }, Rect { x: 1, y: 1, w: 1, h: 1 }, Rect { x: 3, y: 1, w: 1, h: 1 }, Rect { x: 1, y: 7, w: 1, h: 1 }, Rect { x: 3, y: 7, w: 1, h: 1 }] }, // U+0049 'I'
+        Glyph { rects: &[Rect { x: 1, y: 1, w: 3, h: 1 }, Rect { x: 2, y: 2, w: 1, h: 5 }, Rect { x: 1, y: 7, w: 3, h: 1 }] }, // U+0049 'I'
         Glyph { rects: &[Rect { x: 4, y: 1, w: 1, h: 6 }, Rect { x: 0, y: 7, w: 4, h: 1 }, Rect { x: 2, y: 1, w: 2, h: 1 }] }, // U+004A 'J'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 7 }, Rect { x: 4, y: 1, w: 1, h: 1 }, Rect { x: 3, y: 2, w: 1, h: 1 }, Rect { x: 2, y: 3, w: 1, h: 1 }, Rect { x: 1, y: 4, w: 1, h: 1 }, Rect { x: 2, y: 5, w: 1, h: 1 }, Rect { x: 3, y: 6, w: 1, h: 1 }, Rect { x: 4, y: 7, w: 1, h: 1 }] }, // U+004B 'K'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 7 }, Rect { x: 1, y: 7, w: 4, h: 1 }] }, // U+004C 'L'
@@ -176,12 +176,12 @@ pub static COMPACT: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 4, y: 2, w: 1, h: 6 }, Rect { x: 0, y: 2, w: 1, h: 5 }, Rect { x: 1, y: 1, w: 3, h: 1 }, Rect { x: 1, y: 7, w: 3, h: 1 }, Rect { x: 3, y: 6, w: 1, h: 1 }] }, // U+0051 'Q'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 7 }, Rect { x: 1, y: 1, w: 3, h: 1 }, Rect { x: 1, y: 4, w: 3, h: 1 }, Rect { x: 4, y: 5, w: 1, h: 3 }, Rect { x: 4, y: 2, w: 1, h: 2 }] }, // U+0052 'R'
         Glyph { rects: &[Rect { x: 1, y: 1, w: 3, h: 1 }, Rect { x: 1, y: 4, w: 3, h: 1 }, Rect { x: 1, y: 7, w: 3, h: 1 }, Rect { x: 0, y: 2, w: 1, h: 2 }, Rect { x: 4, y: 5, w: 1, h: 2 }, Rect { x: 4, y: 2, w: 1, h: 1 }, Rect { x: 0, y: 6, w: 1, h: 1 }] }, // U+0053 'S'
-        Glyph { rects: &[Rect { x: 2, y: 1, w: 1, h: 7 }, Rect { x: 0, y: 1, w: 2, h: 1 }, Rect { x: 3, y: 1, w: 2, h: 1 }] }, // U+0054 'T'
+        Glyph { rects: &[Rect { x: 0, y: 1, w: 5, h: 1 }, Rect { x: 2, y: 2, w: 1, h: 6 }] }, // U+0054 'T'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 6 }, Rect { x: 4, y: 1, w: 1, h: 6 }, Rect { x: 1, y: 7, w: 3, h: 1 }] }, // U+0055 'U'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 3 }, Rect { x: 4, y: 1, w: 1, h: 3 }, Rect { x: 1, y: 4, w: 1, h: 2 }, Rect { x: 3, y: 4, w: 1, h: 2 }, Rect { x: 2, y: 6, w: 1, h: 2 }] }, // U+0056 'V'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 4 }, Rect { x: 4, y: 1, w: 1, h: 4 }, Rect { x: 2, y: 2, w: 1, h: 3 }, Rect { x: 1, y: 5, w: 1, h: 3 }, Rect { x: 3, y: 5, w: 1, h: 3 }] }, // U+0057 'W'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 2 }, Rect { x: 4, y: 1, w: 1, h: 2 }, Rect { x: 0, y: 6, w: 1, h: 2 }, Rect { x: 4, y: 6, w: 1, h: 2 }, Rect { x: 1, y: 3, w: 1, h: 1 }, Rect { x: 3, y: 3, w: 1, h: 1 }, Rect { x: 2, y: 4, w: 1, h: 1 }, Rect { x: 1, y: 5, w: 1, h: 1 }, Rect { x: 3, y: 5, w: 1, h: 1 }] }, // U+0058 'X'
-        Glyph { rects: &[Rect { x: 2, y: 4, w: 1, h: 4 }, Rect { x: 0, y: 1, w: 1, h: 3 }, Rect { x: 4, y: 1, w: 1, h: 3 }, Rect { x: 1, y: 4, w: 1, h: 1 }, Rect { x: 3, y: 4, w: 1, h: 1 }] }, // U+0059 'Y'
+        Glyph { rects: &[Rect { x: 0, y: 1, w: 1, h: 3 }, Rect { x: 4, y: 1, w: 1, h: 3 }, Rect { x: 1, y: 4, w: 3, h: 1 }, Rect { x: 2, y: 5, w: 1, h: 3 }] }, // U+0059 'Y'
         Glyph { rects: &[Rect { x: 0, y: 1, w: 5, h: 1 }, Rect { x: 0, y: 7, w: 5, h: 1 }, Rect { x: 4, y: 2, w: 1, h: 1 }, Rect { x: 3, y: 3, w: 1, h: 1 }, Rect { x: 2, y: 4, w: 1, h: 1 }, Rect { x: 1, y: 5, w: 1, h: 1 }, Rect { x: 0, y: 6, w: 1, h: 1 }] }, // U+005A 'Z'
         Glyph { rects: &[Rect { x: 1, y: 0, w: 1, h: 9 }, Rect { x: 2, y: 0, w: 2, h: 1 }, Rect { x: 2, y: 8, w: 2, h: 1 }] }, // U+005B '['
         Glyph { rects: &[Rect { x: 0, y: 0, w: 1, h: 2 }, Rect { x: 1, y: 2, w: 1, h: 2 }, Rect { x: 2, y: 4, w: 1, h: 2 }, Rect { x: 3, y: 6, w: 1, h: 2 }, Rect { x: 4, y: 8, w: 1, h: 1 }] }, // U+005C '\'
@@ -193,7 +193,7 @@ pub static COMPACT: FaceData = FaceData {
         Glyph { rects: &[Rect { x: 0, y: 0, w: 1, h: 8 }, Rect { x: 1, y: 3, w: 3, h: 1 }, Rect { x: 4, y: 4, w: 1, h: 3 }, Rect { x: 1, y: 7, w: 3, h: 1 }] }, // U+0062 'b'
         Glyph { rects: &[Rect { x: 1, y: 3, w: 4, h: 1 }, Rect { x: 1, y: 7, w: 4, h: 1 }, Rect { x: 0, y: 4, w: 1, h: 3 }] }, // U+0063 'c'
         Glyph { rects: &[Rect { x: 4, y: 0, w: 1, h: 8 }, Rect { x: 1, y: 3, w: 3, h: 1 }, Rect { x: 0, y: 4, w: 1, h: 3 }, Rect { x: 1, y: 7, w: 3, h: 1 }] }, // U+0064 'd'
-        Glyph { rects: &[Rect { x: 0, y: 5, w: 5, h: 1 }, Rect { x: 1, y: 7, w: 4, h: 1 }, Rect { x: 1, y: 3, w: 3, h: 1 }, Rect { x: 0, y: 4, w: 1, h: 1 }, Rect { x: 4, y: 4, w: 1, h: 1 }, Rect { x: 0, y: 6, w: 1, h: 1 }] }, // U+0065 'e'
+        Glyph { rects: &[Rect { x: 0, y: 4, w: 1, h: 3 }, Rect { x: 1, y: 3, w: 3, h: 1 }, Rect { x: 1, y: 5, w: 3, h: 1 }, Rect { x: 1, y: 7, w: 4, h: 1 }, Rect { x: 4, y: 4, w: 1, h: 2 }] }, // U+0065 'e'
         Glyph { rects: &[Rect { x: 1, y: 1, w: 1, h: 7 }, Rect { x: 2, y: 0, w: 3, h: 1 }, Rect { x: 2, y: 3, w: 2, h: 1 }, Rect { x: 0, y: 3, w: 1, h: 1 }] }, // U+0066 'f'
         Glyph { rects: &[Rect { x: 4, y: 4, w: 1, h: 5 }, Rect { x: 1, y: 3, w: 3, h: 1 }, Rect { x: 0, y: 4, w: 1, h: 3 }, Rect { x: 1, y: 7, w: 3, h: 1 }, Rect { x: 1, y: 9, w: 3, h: 1 }] }, // U+0067 'g'
         Glyph { rects: &[Rect { x: 0, y: 0, w: 1, h: 8 }, Rect { x: 4, y: 4, w: 1, h: 4 }, Rect { x: 1, y: 3, w: 3, h: 1 }] }, // U+0068 'h'

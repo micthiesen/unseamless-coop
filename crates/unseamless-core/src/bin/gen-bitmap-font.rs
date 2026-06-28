@@ -42,8 +42,8 @@ fn main() {
          //!     --features gen-bitmap-font --target x86_64-unknown-linux-gnu\n\
          //!\n\
          //! Source: vendored Proggy BDF bitmaps under `assets/fonts/` (MIT, Tristan Grimmer).\n\
-         //! Each glyph's lit pixels are merged into maximal rectangles so the native renderer draws\n\
-         //! the fewest filled quads per glyph.\n\
+         //! Each glyph's lit pixels are merged into a few non-overlapping rectangles so the native\n\
+         //! renderer draws the fewest filled quads per glyph.\n\
          #![allow(clippy::all)]\n\
          use super::{{FaceData, Glyph, Rect}};\n"
     )
