@@ -8,6 +8,17 @@ license.workspace = true
 [lib]
 name = "unseamless_core"
 
+# Host-only codegen for the bitmap_font tables. Behind a feature + required-features so the binary is
+# NOT cross-compiled to a useless windows-gnu exe on every `cargo build` (it rasterises the bitmap_font
+# tables on the host and must run there). Regenerate with:
+#   cargo run -p unseamless-core --bin gen-bitmap-font --features gen-bitmap-font --target x86_64-unknown-linux-gnu
+[[bin]]
+name = "gen-bitmap-font"
+required-features = ["gen-bitmap-font"]
+
+[features]
+gen-bitmap-font = []
+
 [dependencies]
 log = { workspace = true }
 num_enum = "0.7"
