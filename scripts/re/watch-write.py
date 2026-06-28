@@ -15,10 +15,10 @@ no instrumentation in the process. Debug registers are *per task*, so this attac
 to *every* thread of the pid and arms DR0 on each — the FSM store can land on any
 game thread.
 
-ptrace caveat: Yama `ptrace_scope=1` (this box) forbids same-uid attach to a
-non-descendant, so run this as **root**:
-    ~/.confirm-sudo.sh python3 scripts/re/watch-write.py --watch-lobby
-(or `echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope` first, then run as you).
+ptrace note: runs as your **normal user, no sudo** — this box sets Yama
+`kernel.yama.ptrace_scope = 0` (persisted in /etc/sysctl.d/10-ptrace.conf), which allows
+same-uid attach to a non-descendant like the Steam-launched game. If a future box has
+scope=1 again, either restore that sysctl or run this under `~/.confirm-sudo.sh`.
 
 RIP nuance: a data (write) breakpoint is a *trap*, so the reported RIP is the
 instruction **after** the store — the writer is the instruction immediately before
