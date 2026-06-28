@@ -125,17 +125,20 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   > **State (2026-06-28) — PICK UP HERE in a new session; full detail in
   > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md):** the
   > create/join initiation is **charted** and direct-drive is **rig-PROVEN** — calling the create
-  > wrapper `0x140cad4c0` on `[G]` (no item, no peer) moves `lobby_state` off `None`. The blocker is
-  > **one Arxan-encrypted availability gate** `0x140cb4b50(this)` (shared by create+join,
-  > EAC/entitlement-shaped) that synchronously rejects offline → `FailedToCreateSession`. Rig-confirmed
-  > the cheap levers are **exhausted**: `enable_offline_multiplayer` (forces `is_offline()` false) and
-  > `bypass_session_create_gate` (flips the gate's `jne→jmp`) both applied, still rejected
-  > (`[G]+0x24=0`). **NEXT: runtime RE of the gate** — it's encrypted in `.text` but decrypted in
-  > memory, so dump `0x140cb4b50`'s live body (Frida/ptrace) to read what it checks; then satisfy it,
-  > ilhook-stub its call, or route around via the network-create leg. Tooling ready: the cdylib
-  > drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free peek/watch),
-  > and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real two-player in-world test
-  > still need a friend; **create** is solo-confirmable on the rig.
+  > wrapper `0x140cad4c0` on `[G]` (no item, no peer) moves `lobby_state` off `None`. **Corrected blocker
+  > (write-watch run):** the Arxan gate `0x140cb4b50` is **NOT** the wall — with
+  > `bypass_session_create_gate` (flips its `jne→jmp`) + `enable_offline_multiplayer` applied, a hardware
+  > write-watch on `[G]+0x24` **HIT at `RIP=0x140cb2086`** (the leg-B store `mov [this+0x24],eax` @
+  > `0x140cb2083`), so control **reaches the network-create vmethod (leg B)** — which returns `eax=0`
+  > offline → `FailedToCreateSession`. (The earlier "gate still rejects, `[G]+0x24=0`" note was a
+  > *peek* artifact: peek can't tell never-written from leg-B-wrote-`0`; the write-watch can, and shows
+  > leg B ran.) **NEXT: RE leg B — the network-session create vmethod `[netsession_vtable+8]`** (create
+  > dispatch `0x140cb207f`): hook the call site to capture the resolved vmethod address, then trace it to
+  > see what it needs offline (live `NetworkSession`/Steam-session object, EAC/entitlement, transport)
+  > and satisfy/stub it. Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
+  > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
+  > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real
+  > two-player in-world test still need a friend; **create** is solo-confirmable on the rig.
 
   It unblocks:
   - **The in-world session itself.** Open/Join/Leave already drive the connection layer (lobby + the

@@ -242,10 +242,40 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 
 ## Why a direct create fails offline (static, 2026-06-27, worker `create-gate`)
 
-> **RIG RESULT (orchestrator, 2026-06-28): the GATE rejected, and flipping its branch is NOT enough.**
+> **RIG RESULT — CORRECTION (orchestrator, 2026-06-28, write-watch run): the gate bypass WORKS; the
+> real reject is leg B (the network-create vmethod).** A hardware **write-watch** on `[G]+0x24`
+> (`scripts/re/watch-write.py --addr <G+0x24> --access write`, armed across the `drive_create` fire)
+> re-ran with **both** `enable_offline_multiplayer` and `bypass_session_create_gate` applied (boot log:
+> `patched 'bypass_session_create_gate': [75] -> [EB]`) and **HIT at `RIP=0x140cb2086`** — exactly 3
+> bytes past the leg-B store `mov [this+0x24], eax` at `0x140cb2083`. That store is reached *only if the
+> gate branch was passed*, so with the `jne→jmp` flip applied **control DID reach leg B (the
+> network-session create vmethod)**; the value stored was `eax=0` (a follow-up peek of `[G]+0x24` read
+> `00 00 00 00`), so the inner returns false → wrapper sets `lobby_state=2`. **The bypass gets us past
+> the gate; leg B itself rejects offline.** This *supersedes* the peek-only finding below: `[G]+0x24 == 0`
+> after the fact is **ambiguous** (never-written vs. leg-B-wrote-`0`) — only the write-watch disambiguates,
+> and it shows leg B ran. So **option (1) below (dump the encrypted gate) is moot for the immediate
+> unblock** — the gate isn't the blocker. For the record a passive dump of the gate `0x140cb4b50` can't
+> read it anyway: it's encrypted *in memory* (live ciphertext `af 34 c0…` ≠ on-disk `2a 8b 84…`) and
+> re-encrypts after execution (post-drive peek == pre-drive peek), so only an in-execution capture could
+> read its body.
+>
+> **NEXT (corrected): RE leg B — the network-session create vmethod `[netsession_vtable+8]`** (create
+> dispatch `0x140cb207f`). It's a *dynamic* target (vtable resolved at runtime via accessor
+> `0x1423f1930([this+0x60])` → `+0x710` = `NetworkSession*`; hand-walking the `[this+0x60]` global chain
+> dead-ends in in-image accessor logic, so don't peek-walk it). The move: **hook the leg-B call site
+> `0x140cb207f` to capture the resolved vmethod address** (extend `session_probe`), then trace/decompile
+> *that* function to see what it needs offline (a live `NetworkSession`/Steam-session object, an
+> EAC/entitlement signal, a non-null transport, …) and satisfy or stub it. Keep
+> `bypass_session_create_gate` ON as a confirmed prerequisite. ERSC's known behavior (re-enable what
+> offline disables, then run the game's own P2P session) fits a leg-B neutralization, not a gate-only fix.
+>
+> ---
+>
+> **RIG RESULT (orchestrator, 2026-06-28) — SUPERSEDED by the write-watch run above (its peek was ambiguous): the GATE rejected, and flipping its branch is NOT enough.**
 > Re-drove `drive_create` with **both** `enable_offline_multiplayer` and `bypass_session_create_gate`
 > applied (boot log: `patched 'bypass_session_create_gate': [75] -> [EB]`). Result: still
-> `FailedToCreateSession`, and a live peek of **`[G]+0x24 = 00 00 00 00`** (never written) with
+> `FailedToCreateSession`, and a live peek of **`[G]+0x24 = 00 00 00 00`** (read as never-written, but
+> see the correction: leg B writing `eax=0` is indistinguishable by peek) with
 > `[G]+0xc = 2`. Per the recipe below, `[G]+0x24` un-written ⇒ the **gate rejected** — i.e. control
 > never reached the network-create (leg B). So even with the gate's success-edge `jne→jmp` flipped, the
 > create still fails at the gate: the encrypted gate's `false` verdict is **load-bearing deeper than the
