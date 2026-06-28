@@ -120,8 +120,24 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   joined), exactly as designed. See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
 - **Rung 3: drive the session FSM (the headline-next).** RE the create/join functions that move
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
-  so players see each other in-world. This is the apply layer the rest of the UI is already waiting on,
-  and it unblocks:
+  so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
+
+  > **State (2026-06-28) — PICK UP HERE in a new session; full detail in
+  > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md):** the
+  > create/join initiation is **charted** and direct-drive is **rig-PROVEN** — calling the create
+  > wrapper `0x140cad4c0` on `[G]` (no item, no peer) moves `lobby_state` off `None`. The blocker is
+  > **one Arxan-encrypted availability gate** `0x140cb4b50(this)` (shared by create+join,
+  > EAC/entitlement-shaped) that synchronously rejects offline → `FailedToCreateSession`. Rig-confirmed
+  > the cheap levers are **exhausted**: `enable_offline_multiplayer` (forces `is_offline()` false) and
+  > `bypass_session_create_gate` (flips the gate's `jne→jmp`) both applied, still rejected
+  > (`[G]+0x24=0`). **NEXT: runtime RE of the gate** — it's encrypted in `.text` but decrypted in
+  > memory, so dump `0x140cb4b50`'s live body (Frida/ptrace) to read what it checks; then satisfy it,
+  > ilhook-stub its call, or route around via the network-create leg. Tooling ready: the cdylib
+  > drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free peek/watch),
+  > and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real two-player in-world test
+  > still need a friend; **create** is solo-confirmable on the rig.
+
+  It unblocks:
   - **The in-world session itself.** Open/Join/Leave already drive the connection layer (lobby + the
     rung-2 side-channel), but they don't yet put players in one another's *world*; rung 3 is what makes
     them place a peer in your session.
