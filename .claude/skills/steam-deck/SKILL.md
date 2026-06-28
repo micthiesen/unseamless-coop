@@ -119,8 +119,10 @@ unlocked root:
 
 1. Put a **statically-linked `ydotool` + `ydotoold`** in `~/.local/share/unseamless-deck/bin/` on the
    Deck (build static on this PC, or grab a static release; musl static binaries run on SteamOS).
-2. Run `ydotoold` (needs `/dev/uinput` access — `sudo` once, or a udev rule granting the `deck` user;
-   document whichever the Deck ends up using).
+2. Run `ydotoold` — **no sudo needed.** SteamOS's `60-cecd-uinput.rules` grants the active-session user
+   an ACL on `/dev/uinput` (confirmed: `test -w /dev/uinput` is YES for `deck` while Game Mode is up), so
+   ydotoold opens it unprivileged. (That access is tied to an active session — which a launch needs
+   anyway — so it's a non-issue. passwordless sudo is off on this Deck regardless.)
 3. Point `dismiss` at it: `DECK_YDOTOOL_SOCKET=<socket>` and ensure the `bin/` dir is on `PATH` for the SSH
    command (or extend `deck-remote.sh` to prefer `$DECK_HELPER_DIR/bin`).
 
