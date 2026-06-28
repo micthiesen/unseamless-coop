@@ -28,8 +28,10 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
 
 - **Layer 1 (buildable blind):** event flags, summons toggle, world time — all CHARTED params/flags.
   Write against the SDK; verify on the rig. Scaling's *config + math* are host-built and host-tested
-  (`unseamless-core/scaling.rs`), but its concrete in-game lever (which `SpEffectParam` rows to edit)
-  is rig-gated — see the resolved-mechanism bullet below.
+  (`unseamless-core/scaling.rs`), and its concrete in-game lever is now **resolved and rig-verified**:
+  `coop/features/scaling.rs` overwrites the referenced `SpEffectParam` rate rows for all 38 classified
+  correction rows, live on the rig (`scaling applied to … SpEffect row(s)`) — see the resolved-mechanism
+  bullet below.
 - **Splash/intro skip is NOT a param** (despite the name): the SDK charts no movie-player type or
   skip function (only the `MovieStep` task phase and a `pre_opening_movie_wait_sec` param, neither a
   lever). It's an AOB-scan + NOP of the boot-flow logo gate — see [SKIP-INTROS.md](SKIP-INTROS.md).
@@ -37,9 +39,16 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
   [CODE-PATCHING.md](CODE-PATCHING.md) (reuses pelite's scanner + `Program::current`, already in the
   tree via the SDK).
 - **Layer 2 (RE-gated, the hard part):** the co-op core rides the **CHARTED** networking — drive
-  `CSSessionManager`'s FSM + `NetworkSessionVmt` rather than building transport. What's left to
-  *observe* on the rig is the FSM's behavior (which count is "players in my world", how sessions
-  persist across map transitions) and where ERSC relaxes the limits — see [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
+  `CSSessionManager`'s FSM + `NetworkSessionVmt` rather than building transport. The **out-of-band
+  connection stack (rungs 1/2/4) is shipped and confirmed across two machines** (2026-06-27 friend test);
+  what's left is **rung 3** — the create/join initiation the SDK doesn't chart. That gap is now narrowed
+  to **leg B**, the charted network-create dispatch: the encrypted availability gate is bypassed and
+  reject #1 (`*(NetworkSession+0x10) == 0`) is isolated (#2/#3 eliminated statically), but forcing it is
+  rig-proven **insufficient** — the offline blocker is deeper in leg B's session registry/init chain
+  (likely needs a real peer) — see
+  [COOP-CONNECTION.md](COOP-CONNECTION.md) and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted". What still needs
+  *observing* on the rig is the FSM's post-`Host`/`Client` behavior (which count is "players in my
+  world", how sessions persist across map transitions) — see [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
 - **Needs internal-function RVAs (not just struct layout):** creating/accepting summon signs,
   showing native on-screen messages. (SpEffect apply/remove is now charted — see
   [DEATH-DEBUFFS.md](DEATH-DEBUFFS.md). FMG text override is **won't-do**, so its RVA isn't needed —
@@ -51,8 +60,10 @@ Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / 
   (`max_hp_rate`, `*_attack_power_rate`, posture rate). So the lever is **editing those `SpEffectParam`
   rate rows once at load** — idempotent, and neither the correction param nor a per-frame `NpcParam.hp`
   write. Enemy vs. boss split comes from `NpcParam.multi_play_correction_param_id` (there's no boss
-  flag); `MultiSoulBonusRateParam` is runes-only. The concrete row/SpEffect-ID map is the rig-gated
-  part — the SDK charts the param types, but which IDs map to which player count is RE'd on the rig.
+  flag); `MultiSoulBonusRateParam` is runes-only. The concrete row/SpEffect-ID map is now **resolved and
+  rig-verified** (no longer rig-gated): `coop/features/scaling.rs` classifies all 38 correction rows
+  (`CORRECTION_ROW_CLASSES`) from the rig param dump and overwrites the referenced rate rows live — the
+  SDK charts the param types and the rig dump supplied which IDs map to which player count.
 
 > This table reflects the pinned commit. If the `fromsoftware-rs` rev is bumped, re-verify the
 > field/method names — struct layouts are read against a specific revision.

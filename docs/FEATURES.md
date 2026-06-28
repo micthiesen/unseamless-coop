@@ -16,13 +16,13 @@ Difficulty legend (rough, from our side of the rewrite):
 
 | Feature | What it does | Diff | Notes |
 |---|---|---|---|
-| Session / networking layer | Replaces vanilla matchmaking so partners share one persistent world. Confirmed deps: `steam_api64` (Steam P2P), `ws2_32` (Winsock), `crypt32`/`wldap32`/`normaliz` (TLS/crypto). | **H** | The 80%. **Legally most sensitive** (wire protocol) — reimplement from observed behavior, and only pursue ERSC-session interop deliberately. |
-| Load mechanism | `ersc.dll` exports `modengine_ext_init` → it's a **ModEngine2 extension**; also ships `ersc_launcher.exe` (exe-swap). | **built, rig-gated** | We diverge: we own it. The cdylib ships as the game's `dinput8.dll` proxy (auto-loaded; also loads `mods/`), and our `start_protected_game.exe` launcher starts the game outside EAC with a marker the DLL requires. No ModEngine2/EML. Export-table verified statically; live load unproven on the rig. |
+| Session / networking layer | Replaces vanilla matchmaking so partners share one persistent world. Confirmed deps: `steam_api64` (Steam P2P), `ws2_32` (Winsock), `crypt32`/`wldap32`/`normaliz` (TLS/crypto). | **H; out-of-band stack shipped** | The 80%. **Legally most sensitive** (wire protocol) — reimplement from observed behavior, and only pursue ERSC-session interop deliberately. The **out-of-band connection stack (rungs 1/2/4)** is shipped and **confirmed live across two machines** (2026-06-27 friend test: side-channel linked, versions matched). What remains is **rung 3** — driving the game's own `CSSessionManager` FSM so players see each other in-world — now narrowed to **leg B** (the charted network-create dispatch): the encrypted gate is bypassed and reject #1 is isolated, but rig-proven **insufficient** — the offline blocker is deeper in leg B's session registry/init chain (likely needs a real peer). See [COOP-CONNECTION.md](COOP-CONNECTION.md) and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted". |
+| Load mechanism | `ersc.dll` exports `modengine_ext_init` → it's a **ModEngine2 extension**; also ships `ersc_launcher.exe` (exe-swap). | **built; rig-confirmed** | We diverge: we own it. The cdylib ships as the game's `dinput8.dll` proxy (auto-loaded; also loads `mods/`), and our `start_protected_game.exe` launcher starts the game outside EAC with a marker the DLL requires. No ModEngine2/EML. Export-table verified statically; **live load confirmed on the rig** — the DLL loads and its features fire in-game across many cycles (scaling applies, nameplates project, the friend test linked). |
 | Player state sync | Positions, animation/HP/SP, equipment, events across the session. | **H** | Implied by co-op; the second-hardest piece after transport. |
 | Session player limit | Raise the vanilla cap (4 open world / 6 arena) so more friends fit one session. | **built; write rig-confirmed** | `coop/features/session_limit.rs` writes `CSSessionManager.session_player_limit_override` from `[session] max_players` (host-tested clamp 2..=6, default 6). Solo rig run confirms the write lands (observer logs `override=6`); the **>4-player effect** still needs a real party. |
 | Seamless roaming | Explore the whole map together instead of being tethered to the host's multiplay area (the defining "seamless" behavior). | **built; write not yet rig-confirmed** | `coop/features/seamless.rs` holds `CSStayInMultiplayAreaWarpData.disable_multiplay_restriction` to host-enforced `gameplay.roam_anywhere` (default on). The roam effect needs a live session; the held write is observable solo via the session observer once a session manager is live. |
 | Separate co-op saves ([COOP-SAVES.md](COOP-SAVES.md)) | Distinct save extension (`save.file_extension = co2`) so co-op never touches vanilla `.sl2`. | **built; rig-confirmed** | `coop/saves.rs` jmp-back-hooks `kernel32!CreateFileW` and rewrites `.sl2`/`.sl2.bak` → `.<ext>`/`.<ext>.bak` via the host-tested `core::saves`. Installed early in `app::install` (before the title-screen save read), not a `Feature` task; not an SDK field. Install failure is **fatal** (refuse to risk the vanilla save). Solo rig run confirmed read/backup/write all redirect and `.sl2` stays untouched. |
-| Offline / non-EAC launch | Runs outside EasyAntiCheat (why it's co-op-safe). | **built, rig-gated** | Our `start_protected_game.exe` launcher starts the game directly (no EAC); the DLL aborts if it wasn't launched that way (`coop/guard.rs`). Logic written; the EAC bypass + abort behavior are **not yet validated on the rig**. |
+| Offline / non-EAC launch | Runs outside EasyAntiCheat (why it's co-op-safe). | **built; launch path rig-confirmed** | Our `start_protected_game.exe` launcher starts the game directly (no EAC); the DLL aborts if it wasn't launched that way (`coop/guard.rs`). The launch-outside-EAC + marker path is **rig-proven** — the mod runs through our launcher every cycle (and linked two machines outside EAC in the friend test), so the marker is set and the guard does *not* abort. Only the narrow negative case (the guard's abort when the marker is **absent**) is still unexercised on the rig. |
 
 ## Session management (menu/hotkey actions — M)
 
@@ -34,9 +34,10 @@ Difficulty legend (rough, from our side of the rewrite):
 > `menu::action_rows(ctx)` (paired verbs collapsed into one stateful row, inapplicable rows hidden; see
 > [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)). **Open World / Join world / Leave world are wired** to
 > the on-demand lobby-discovery connection (rungs 1/2/4; see [COOP-CONNECTION.md](COOP-CONNECTION.md)),
-> with a Steam-readiness gate. **Lock / Unlock / PvP / PvP teams / Friendly fire are surfaced but still
-> inert** ("not wired up yet"): rung 3 is the apply layer that connects them to real game calls and
-> sources their on/off state from the session FSM.
+> with a Steam-readiness gate, and **confirmed across two machines** (2026-06-27 friend test linked the
+> side-channel). **Lock / Unlock / PvP / PvP teams / Friendly fire are surfaced but still
+> inert** ("not wired up yet"; `coop/features/session_actions.rs` toasts a placeholder): rung 3 is the
+> apply layer that connects them to real game calls and sources their on/off state from the session FSM.
 
 From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
@@ -50,28 +51,33 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 - Crit co-op (`crit_coop`): co-op partners can damage enemies during crits (riposte/backstab/guard
   counter), instead of the enemy being invulnerable to all but the player who landed it. On by default.
 
-## Per-player scaling ([SCALING.md](SCALING.md))
+## Per-player scaling ([SCALING.md](SCALING.md)) — **built; live, rig-verified**
 
 `[SCALING]`, applied per connected player:
 
 - Enemy health / damage / posture · Boss health / damage / posture
 
-Mechanism (resolved): edit the `SpEffectParam` rate rows referenced by `MultiPlayCorrectionParam`,
-once at load (idempotent — set absolute rates, never per-frame `NpcParam.hp`). Enemy/boss split is
-free via `NpcParam.multi_play_correction_param_id` (no boss flag). Player count from
-`CSSessionManager.players`. The concrete row/SpEffect-ID map is rig-gated. See [SCALING.md](SCALING.md).
+Mechanism (resolved + shipped in `coop/features/scaling.rs`): overwrite the `SpEffectParam` rate rows
+referenced by `MultiPlayCorrectionParam`, once at load (idempotent — set absolute rates, never per-frame
+`NpcParam.hp`). Enemy/boss split is free via `NpcParam.multi_play_correction_param_id` (no boss flag);
+the boss-vs-normal classification falls out of which SpEffect *family* a row references. Player count
+from `CSSessionManager.players`. The concrete row/SpEffect-ID map is **resolved** — `CORRECTION_ROW_CLASSES`
+holds all 38 correction rows (classified from the rig param dump), and the rate fields are **rig-verified**
+(`max_hp_rate`/`*_attack_power_rate` direct; posture inverted into `sa_receive_damage_rate`; `1.0` == vanilla;
+boss +1 → `max_hp` 2.0). A live rig run logs `scaling applied to 24 SpEffect row(s)`; an in-world HP/posture
+confirmation is the one remaining rig-TODO. See [SCALING.md](SCALING.md).
 
 ## Gameplay modifiers (E–M)
 
 | Feature | Config | Diff |
 |---|---|---|
-| Death debuffs (Rot Essence SpEffects, cured at grace) ([DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) | `death_debuffs` | E–M |
+| Death debuffs (Rot Essence SpEffects, cured at grace) ([DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) | `death_debuffs` | **built** — `coop/features/death_debuffs.rs` advances the host-tested stacking model on the debounced death edge and applies each tier's `SpEffectParam` row; the grace-rest flag (9000, rig-confirmed) clears the stack. Tier rows `7210..7250`, both rig blanks resolved. Remaining: one rig pass to confirm the debuff lands on death / clears at grace. |
 | Spirit summons allowed in MP | `allow_summons` | E |
 | Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
 | Spectate-on-death system | `always_spectate_on_death` | M |
 | Boot master volume | `boot_master_volume_enabled` + `boot_master_volume` | **built** — `coop/features/boot_volume.rs` writes `GameDataMan::game_settings.master_volume` (0..=10, charted) once when the singleton is live, then leaves the in-game slider free. Opt-in via `boot_master_volume_enabled` (off by default). Rig-TODO: confirm the audio engine picks up the live write. |
 | Lock time of day (permanent day/night) | `world_time.{lock,hour,minute}` | **built** — `coop/features/world_time.rs` re-asserts `WorldAreaTime::request_time` each frame (charted). Menu-adjustable. Local config; host-enforced sync is a follow-up. |
-| Overhead player display (ping / soul level / death count / Steam ID) | `overhead_player_display`, `append_steam_id_to_players` | M |
+| Overhead player display (ping / soul level / death count / Steam ID) ([NAMEPLATES.md](NAMEPLATES.md)) | `overhead_player_display`, `append_steam_id_to_players` | **built; pending real peer feed (rung 3)** — the **label-content model** (`unseamless-core/nameplate.rs`: `PeerLabelData` + `nameplate_lines`/`nameplate_text`) is host-tested, and `coop/features/nameplates.rs` projects each peer's head to screen and draws via that one seam (projection/LOD/edge/stable-color **rig-confirmed solo 2026-06-26**). Stats are all `None` today (labels degrade to name-only); the *only* gap is filling the real per-peer name/ping/SL/death-count at that seam once the session core maps a phantom to an identity. |
 
 ## Custom content & modes (M)
 
@@ -111,11 +117,14 @@ Full parity is large. A sane path that front-loads the genuinely hard part:
 
 1. **M0 — harness (done):** DLL loads, frame task fires, logs. ✅
 2. **M1 — easy wins, no networking:** the **E** items (scaling params, summons, splash skip,
-   volume). Proves the SDK-write loop end-to-end and is independently useful/testable.
+   volume). Proves the SDK-write loop end-to-end and is independently useful/testable. ✅ scaling is
+   live + rig-verified; the SDK-write loop is proven end-to-end.
 3. **M2 — transport spike:** two instances exchange a heartbeat over Steam P2P. The make-or-break
-   feasibility test for the whole project; do this before over-investing elsewhere.
+   feasibility test for the whole project; do this before over-investing elsewhere. ✅ the rung-2
+   side-channel runs the full handshake/config-sync/liveness over Steam P2P and **linked two machines
+   in the 2026-06-27 friend test**.
 4. **M3 — minimal shared session:** two players, position + basic state sync, one shared world.
-   "First playable."
+   "First playable." ← current frontier (rung 3; the in-world session FSM, blocked in leg B's session registry/init chain — likely needs a real peer).
 5. **M4+ — layer on:** session actions, PvP toggles, debuffs, then modes (boss/enemy rush) and
    custom goods.
 
