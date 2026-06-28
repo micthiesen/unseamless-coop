@@ -263,10 +263,12 @@ pub struct Gameplay {
     /// lets an item-use drive a session (the rung-3 unblock). The mod applies a boot-time code patch
     /// that neutralizes the game's central "is offline" predicate (see `coop/app::apply_boot_patches`
     /// and `docs/OFFLINE-ITEMS-FINDINGS.md`). Default **on**: we only ever load outside EAC, so this
-    /// is core to the mod's purpose. The patch is AOB-scanned and fails safe (items stay greyed,
-    /// logged) if the signature ever drifts. Boot path rig-confirmed (patch applies, game boots
-    /// clean, no network-error popup); the in-game item-ungrey + FSM-trigger check folds into a
-    /// 2-player/host-trigger session — see `docs/OFFLINE-ITEMS-FINDINGS.md`.
+    /// is core to the mod's purpose. The patch is AOB-scanned and fails safe (no-op, logged) if the
+    /// signature ever drifts. **Rig result (2026-06-28): BENIGN but INSUFFICIENT** — the patch applies
+    /// cleanly and is harmless, but it does **not** ungrey the items: forcing `is_offline()` false at
+    /// the root left them greyed, proving the item-grey gate isn't `is_offline()`. Left on (forcing
+    /// `is_offline()` false is plausibly still needed for the session FSM), but the real item gate is
+    /// pending a follow-up RE pass — see `docs/OFFLINE-ITEMS-FINDINGS.md`.
     pub enable_offline_multiplayer: bool,
     pub append_steam_id: bool,
     pub always_spectate_on_death: bool,

@@ -92,16 +92,26 @@ Gated behind a new `[gameplay] enable_offline_multiplayer` config flag.
 
 ## Rig verification recipe (hand-off to the orchestrator)
 
-> **Result (2026-06-28, orchestrator rig): boot path CONFIRMED (steps 1–2); steps 3–4 pending a
-> batched session.** On a real boot the patch resolved and applied with the `expect` guard matching
-> on the live binary (`patched 'enable_offline_multiplayer': [0F, 94, C0] -> [31, C0, 90]`), so the
-> AOB hit the right `is_offline()` site. The game **booted to title cleanly and stayed stable** — no
-> `network error / return to title` popup, no hang, no panic, overlay rendered, FSM probe healthy at
-> `lobby=None`. So the **broad-patch risk did not fire at boot/title.** Still unverified (needs a
-> loaded save + in-game input, so it folds into a batched run with Michael): whether the multiplayer
-> items actually ungrey in the inventory, whether *using* Tarnished's Furled Finger moves
-> `lobby_state` off `None` (the rung-3 unblock + write-watch capture), and whether the network-error
-> risk surfaces deeper in (on world-load / item-use) rather than at title.
+> **Result (2026-06-28, orchestrator rig): the patch is BENIGN but INSUFFICIENT — `is_offline()` is
+> NOT the item-grey gate.** Boot path confirmed: the patch resolved with the `expect` guard matching
+> live (`patched 'enable_offline_multiplayer': [0F, 94, C0] -> [31, C0, 90]`), the game booted to
+> title cleanly and stayed stable, no `network error / return to title` popup, no hang. Then in a
+> loaded save (2026-06-28, Michael at the controls): **the multiplayer items were STILL greyed —
+> Tarnished's Furled Finger could not be selected.**
+>
+> **The disproof (load-bearing):** we patched `is_offline()` at its *root* (`0x140e55180`), so **all
+> 45 of its consumers** — including the menu-availability leaf `0x140764fe0` — see `is_offline() ==
+> false`. The items did not move. Therefore **the multiplayer-item greying does not depend on
+> `is_offline()` at all.** The static inference ("`is_offline()` false ⇒ items available") is wrong;
+> the real gate is a *different* signal. Candidates for the next pass: (a) `IsEnableOnlineMode()`
+> (`0x140e56310`) actually returns **false** outside EAC (the doc's "defaults true in retail" doesn't
+> hold for our no-EAC launch), so the leaf `IsEnableOnlineMode() && !is_offline()` stays false on the
+> `IsEnableOnlineMode` half — read its live value to confirm; (b) a direct EAC / matchmaking-session
+> -availability check the item-usability path consults, unrelated to `is_offline()`. Best found at
+> runtime against a loaded-save repro (the inventory rendering a greyed item). The `enable_offline_
+> multiplayer` patch is left in place (benign, and forcing `is_offline()` false is plausibly still a
+> prerequisite for the *session FSM*, which the doc notes `is_offline()` also gates) — but it is **not
+> sufficient** for the items on its own.
 
 1. Set `[gameplay] enable_offline_multiplayer = true` (default), `scripts/rig.sh apply` + launch.
 2. Confirm boot log shows `patched 'enable_offline_multiplayer': [0F, 94, C0] -> [31, C0, 90]`.
