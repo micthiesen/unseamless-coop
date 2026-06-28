@@ -11,7 +11,7 @@
 //! # How it works
 //!
 //! The glyph→rectangles data is **precomputed**, not rasterised at runtime. The `gen-bitmap-font`
-//! generator binary parses the vendored Spleen [`bdf`] bitmaps, merges each glyph's lit pixels into
+//! generator binary parses the vendored Proggy [`bdf`] bitmaps, merges each glyph's lit pixels into
 //! the fewest possible rectangles ([`merge`] — fewer rectangles, fewer draw calls), and emits the
 //! static tables in `generated.rs`. At runtime [`shape`] just *positions* those cached rectangles by
 //! advancing a pen across the text. Output is in glyph-cell-local **integer pixel** coordinates with
@@ -20,15 +20,13 @@
 //!
 //! # The two faces
 //!
-//! [`Face::Menu`] and [`Face::Compact`] reproduce the two faces the shipping imgui overlay actually
-//! uses (`crates/unseamless-coop/src/overlay.rs`): the "crisp menu font" (Spleen 8x16, the same face
-//! as the committed `menu-font.otf`) for the utility window, and the smaller "compact default" used
-//! for the dense toast/debug surfaces. We name them by **role**, not size — `Menu` is the interactive
-//! menu face, `Compact` is the glanceable-info face — matching the overlay's own vocabulary. For the
-//! compact face we use a real native Spleen size (**6x12**) rather than the overlay's bundled imgui
-//! default (ProggyClean, which we can't cleanly reproduce as a 1-bit pixel font and isn't part of the
-//! Spleen family): unifying on one BSD-2 pixel family at two native bitmap sizes keeps both faces
-//! crisp and mergeable. Pixel fonts only look right at a native size, so we source two real sizes
+//! [`Face::Menu`] and [`Face::Compact`] are the two roles the overlay draws (toasts, the utility
+//! window, debug panes). Both come from the classic **Proggy** bitmap family by Tristan Grimmer — the
+//! same lineage as imgui's bundled default font (ProggyClean) — sourced from its native X11 PCF
+//! bitmaps, so the glyphs are the hand-designed pixels, not a thresholded outline render. We name the
+//! faces by **role**, not size: `Menu` is the interactive-menu face (**ProggyClean, 7x13** — the
+//! imgui default size), `Compact` is the glanceable-info face (**ProggyTiny, 6x10** — a smaller,
+//! tighter Proggy). Pixel fonts only look right at a native size, so we source two real native sizes
 //! rather than downscaling one.
 
 pub mod bdf;
@@ -46,7 +44,7 @@ pub struct Glyph {
 }
 
 /// Precomputed data for one font face: cell metrics plus the per-glyph rectangle sets, indexed by
-/// `codepoint - first`. Spleen is monospaced, so a single `advance` covers every glyph.
+/// `codepoint - first`. Proggy is monospaced, so a single `advance` covers every glyph.
 #[derive(Clone, Copy, Debug)]
 pub struct FaceData {
     /// Cell width in pixels (the font bounding box width).
@@ -68,9 +66,9 @@ pub struct FaceData {
 /// The two font faces the overlay uses, named by role (see the module docs for the naming rationale).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Face {
-    /// The crisp interactive-menu face: Spleen 8x16, matching the overlay's `menu-font.otf`.
+    /// The interactive-menu face: ProggyClean, 7x13 (the classic imgui-default size).
     Menu,
-    /// The compact glanceable-info face (toasts, debug panes): Spleen 6x12.
+    /// The compact glanceable-info face (toasts, debug panes): ProggyTiny, 6x10.
     Compact,
 }
 
@@ -198,8 +196,8 @@ mod tests {
     use crate::bitmap_font::merge::Bitmap;
 
     /// Vendored BDF sources, included only for tests (the runtime draws from `generated.rs`).
-    const SPLEEN_8X16_BDF: &str = include_str!("../../assets/fonts/spleen-8x16-ascii.bdf");
-    const SPLEEN_6X12_BDF: &str = include_str!("../../assets/fonts/spleen-6x12-ascii.bdf");
+    const PROGGY_CLEAN_BDF: &str = include_str!("../../assets/fonts/proggy-clean-ascii.bdf");
+    const PROGGY_TINY_BDF: &str = include_str!("../../assets/fonts/proggy-tiny-ascii.bdf");
 
     /// Rasterise positioned rectangles onto a `w`×`h` char grid for human-readable assertions:
     /// `#` = filled, `.` = empty. Out-of-grid rectangles are an error (caught by the bounds we pass).
@@ -224,26 +222,23 @@ mod tests {
         let rects = shape("A", Face::Menu);
         let m = Face::Menu.metrics();
         let pic = render(&rects, m.cell_w, m.cell_h);
-        // The exact Spleen 8x16 'A', drawn from the merged rectangles.
+        // The exact ProggyClean 7x13 'A', drawn from the merged rectangles.
         assert_eq!(
             pic,
             "\
-........
-........
-.#####..
-##...##.
-##...##.
-##...##.
-#######.
-##...##.
-##...##.
-##...##.
-##...##.
-##...##.
-........
-........
-........
-........"
+.......
+.......
+...##..
+...##..
+..#..#.
+..#..#.
+..####.
+.#....#
+.#....#
+.#....#
+.......
+.......
+......."
         );
     }
 
@@ -256,22 +251,19 @@ mod tests {
         assert_eq!(
             pic,
             "\
-................
-................
-##...##....##...
-##...##....##...
-##...##.........
-##...##...###...
-#######....##...
-##...##....##...
-##...##....##...
-##...##....##...
-##...##....##...
-##...##....###..
-................
-................
-................
-................"
+..............
+..........#...
+.#....#.......
+.#....#.......
+.#....#..##...
+.######...#...
+.#....#...#...
+.#....#...#...
+.#....#...#...
+.#....#...#...
+..............
+..............
+.............."
         );
     }
 
@@ -284,30 +276,27 @@ mod tests {
         let m = Face::Menu.metrics();
         let pic = render(&rects, m.cell_w, m.line_height * 2);
         let one_a = "\
-........
-........
-.#####..
-##...##.
-##...##.
-##...##.
-#######.
-##...##.
-##...##.
-##...##.
-##...##.
-##...##.
-........
-........
-........
-........";
+.......
+.......
+...##..
+...##..
+..#..#.
+..#..#.
+..####.
+.#....#
+.#....#
+.#....#
+.......
+.......
+.......";
         assert_eq!(pic, format!("{one_a}\n{one_a}"));
     }
 
     #[test]
     fn measure_matches_layout() {
-        assert_eq!(measure("Hi", Face::Menu), (16, 16)); // 2 cells * 8 advance, 1 line * 16
-        assert_eq!(measure("A\nBB", Face::Menu), (16, 32)); // widest line 2 cells, 2 lines
-        assert_eq!(measure("", Face::Compact), (0, 12)); // empty: no width, one line high
+        assert_eq!(measure("Hi", Face::Menu), (14, 13)); // 2 cells * 7 advance, 1 line * 13
+        assert_eq!(measure("A\nBB", Face::Menu), (14, 26)); // widest line 2 cells, 2 lines
+        assert_eq!(measure("", Face::Compact), (0, 10)); // empty: no width, one line high
     }
 
     #[test]
@@ -322,7 +311,7 @@ mod tests {
     #[test]
     fn compact_face_uses_the_smaller_cell() {
         let m = Face::Compact.metrics();
-        assert_eq!((m.cell_w, m.cell_h, m.advance), (6, 12, 6));
+        assert_eq!((m.cell_w, m.cell_h, m.advance), (6, 10, 6));
         // And it actually produces glyph rectangles.
         assert!(!shape("x", Face::Compact).is_empty());
     }
@@ -378,12 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn menu_face_matches_spleen_8x16_bdf() {
-        assert_generated_matches_bdf(Face::Menu, SPLEEN_8X16_BDF);
+    fn menu_face_matches_proggy_clean_bdf() {
+        assert_generated_matches_bdf(Face::Menu, PROGGY_CLEAN_BDF);
     }
 
     #[test]
-    fn compact_face_matches_spleen_6x12_bdf() {
-        assert_generated_matches_bdf(Face::Compact, SPLEEN_6X12_BDF);
+    fn compact_face_matches_proggy_tiny_bdf() {
+        assert_generated_matches_bdf(Face::Compact, PROGGY_TINY_BDF);
     }
 }

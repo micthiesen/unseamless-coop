@@ -46,10 +46,10 @@ What the spike established (all rig-confirmed):
       `draw_text_screen`) in `native_draw.rs` — a near-plane camera-locked billboard with aspect-correct
       bitmap text. Wired by native toasts (below); the menu will build on it too.
 - [x] **Bitmap font -> draw-shapes** (`unseamless_core::bitmap_font`): `shape(text, Face) -> rects` from
-      precomputed static glyph->merged-rects (Spleen Menu 8x16 / Compact 6x12), with ASCII-art unit
+      precomputed static glyph->merged-rects (Proggy: Menu = ProggyClean 7x13, Compact = ProggyTiny 6x10), with ASCII-art unit
       tests. The enabler for native text.
 - [x] **Native toasts** (`coop/features/native_toasts.rs`, behind `native_spike`): the live
-      notification toasts drawn screen-space via [`native_draw::draw_text_screen`] (real Spleen glyphs ->
+      notification toasts drawn screen-space via [`native_draw::draw_text_screen`] (real Proggy glyphs ->
       `CSEzDraw` quads), right-aligned + stacked + severity-colored + lifetime-faded, with a contrast
       shadow. Rig-confirmed. Banners are the same pattern (TODO).
 - [ ] **Native menu** — the perf-sensitive surface; needs the bitmap font + a layout pass + native input;

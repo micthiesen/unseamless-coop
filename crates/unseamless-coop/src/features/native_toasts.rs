@@ -1,7 +1,7 @@
 //! Native **toasts** — the notification toasts ([`crate::notify`] / `unseamless_core::notifications`)
 //! drawn by the game's own `CSEzDraw` renderer ([`crate::native_draw`]) in screen space, instead of the
-//! imgui overlay. Real Spleen glyphs (`unseamless_core::bitmap_font`) are rasterized to solid quads on a
-//! near-plane billboard — no overlay, no present-hook.
+//! imgui overlay. Real bitmap-font glyphs (`unseamless_core::bitmap_font`, ProggyTiny via `Face::Compact`)
+//! are rasterized to solid quads on a near-plane billboard — no overlay, no present-hook.
 //!
 //! This is the first screen-space surface to move off imgui (the path to dropping it entirely; see
 //! `docs/NAMEPLATES.md` > native rendering). Gated by `[nameplates] native_spike` (the native-rendering
@@ -19,7 +19,7 @@ use crate::native_draw::{CamFrame, ScreenSpace};
 /// Distance (m) of the screen-space plane in front of the camera (just clears the near plane; apparent
 /// size is distance-independent).
 const PLANE_DIST_M: f32 = 0.5;
-/// NDC units per font-pixel — sets the on-screen text size (Spleen Compact is 12px tall).
+/// NDC units per font-pixel — sets the on-screen text size (the Compact face, ProggyTiny, is 10px tall).
 const SCALE: f32 = 0.0035;
 /// Right edge / top edge anchors in NDC, and the gap between stacked toasts.
 const RIGHT_NDC: f32 = 0.96;

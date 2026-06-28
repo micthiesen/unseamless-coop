@@ -8,7 +8,7 @@
 //!  - [`ScreenSpace`] / [`draw_screen_rect`] / [`draw_filled_quad`] — the screen-space 2D layer (a
 //!    near-plane billboard), the substrate for native toasts/menus. `CSEzDraw` geometry is world-space,
 //!    so 2D UI is drawn on a plane locked just in front of the camera.
-//!  - [`draw_text_screen`] / [`text_width_ndc`] — screen-space bitmap text: real Spleen glyphs
+//!  - [`draw_text_screen`] / [`text_width_ndc`] — screen-space bitmap text: real bitmap-font glyphs
 //!    ([`unseamless_core::bitmap_font`]) rasterized to filled quads. This is the working native text path.
 //!  - [`draw_text_world`] — a wrapper over the game's `CSEzDraw::draw_text` that we RE'd. **It does not
 //!    work in retail** (kept only as the RE record); see its docs.
@@ -154,7 +154,7 @@ pub fn draw_screen_rect(ez: &mut CSEzDraw, ss: &ScreenSpace, cx: f32, cy: f32, h
 /// by the screen aspect so glyphs stay square on screen rather than stretching with the viewport (NDC
 /// is non-uniform: a unit covers more screen px in x than y). Font pixels are top-left-origin, y-down
 /// ([`bitmap_font::shape`]) and map to y-up NDC. The native text primitive that replaces imgui text:
-/// real Spleen glyphs rasterized to `CSEzDraw` solid quads. Use [`text_width_ndc`] to right-align.
+/// real bitmap-font (Proggy) glyphs rasterized to `CSEzDraw` solid quads. Use [`text_width_ndc`] to right-align.
 pub fn draw_text_screen(ez: &mut CSEzDraw, ss: &ScreenSpace, text: &str, face: Face, anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
     let rects = bitmap_font::shape(text, face);
     let sx = scale / ss.aspect(); // aspect-correct horizontal scale

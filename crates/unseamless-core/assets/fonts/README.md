@@ -8,30 +8,28 @@ the merge-correctness tests. Nothing here ships in the DLL.
 
 ## Files
 
-| File | Spleen size | Role / `Face` |
+| File | Proggy size | Role / `Face` |
 |------|-------------|---------------|
-| `spleen-8x16-ascii.bdf` | 8x16 | `Face::Menu` — the crisp interactive-menu face (same face as the overlay's `menu-font.otf`) |
-| `spleen-6x12-ascii.bdf` | 6x12 | `Face::Compact` — the smaller glanceable-info face (toasts, debug panes) |
-| `Spleen-LICENSE.txt` | — | BSD-2 license (Frederic Cambus) |
+| `proggy-clean-ascii.bdf` | ProggyClean, 7x13 | `Face::Menu` — the interactive-menu face (the classic imgui-default Proggy) |
+| `proggy-tiny-ascii.bdf` | ProggyTiny, 6x10 | `Face::Compact` — the smaller glanceable-info face (toasts, debug panes) |
+| `Proggy-LICENSE.txt` | — | MIT license (Tristan Grimmer) |
 
 Both are trimmed to **printable ASCII** (`U+0020`..=`U+007E`, 95 glyphs) — the only charset the overlay
-renders (see `docs/OVERLAY-RENDERING.md` > "Rendered strings are ASCII-only"). The full Spleen BDFs
-carry thousands of glyphs we don't use; trimming keeps the vendored sources small.
+renders (see `docs/OVERLAY-RENDERING.md` > "Rendered strings are ASCII-only").
 
 ## Provenance
 
-[Spleen](https://github.com/fcambus/spleen) **2.1.0**, by Frederic Cambus, **BSD-2-Clause**. A
-monospaced bitmap font shipped in several *native* pixel sizes. We use two real native sizes rather
-than downscaling one, because a bitmap font is only crisp at a size it was hand-designed for.
+The classic **[Proggy](https://github.com/bluescan/proggyfonts)** programming bitmap fonts by Tristan
+Grimmer, **MIT**. `Face::Menu` is **ProggyClean** (the font imgui ships as its default); `Face::Compact`
+is **ProggyTiny**, a smaller, tighter member of the same family. We source both from Proggy's native
+X11 **PCF** bitmaps and convert them to BDF (the glyphs are the hand-designed pixels — no rasteriser,
+no antialiasing, no thresholding). A bitmap font is only crisp at a size it was hand-designed for, so
+we use two real native sizes rather than downscaling one.
 
-We pin **2.1.0** to match the exact Spleen release the overlay's `menu-font.otf` was subset from
-(`crates/unseamless-coop/assets/README.md`), so the `Menu` face is genuinely the same face the imgui
-overlay renders. (The printable-ASCII 8x16 and 6x12 glyph bitmaps are in fact byte-identical between
-Spleen 2.1.0 and 2.2.0, but pinning the same release keeps the "same face as `menu-font.otf`" claim
-literally true.) The 8x16 face is that same font; parsing the BDF gives the exact 1-bit pixels with no
-rasteriser/antialiasing guesswork. The 6x12 face replaces the imgui overlay's bundled default (ProggyClean) for the compact
-role: ProggyClean isn't part of the Spleen family and can't be cleanly reproduced as a 1-bit pixel
-font, so we unify on one BSD-2 pixel family at two native sizes.
+The conversion normalises each glyph to a full font-bounding-box cell (matching the BDF shape this
+repo's `bitmap_font::bdf` parser expects). To re-derive after a font update: fetch
+`ProggyClean.pcf.gz` / `ProggyTiny.pcf.gz` from the upstream repo and run a PCF→BDF conversion
+(e.g. `pcf2bdf`, or any tool that preserves the native 1-bit bitmap), trimmed to printable ASCII.
 
 ## Regenerating
 

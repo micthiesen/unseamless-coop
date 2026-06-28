@@ -1,6 +1,6 @@
 //! Code generator for [`unseamless_core::bitmap_font`]'s static glyph tables.
 //!
-//! Parses the vendored Spleen BDF bitmaps (`assets/fonts/`), merges each glyph's lit pixels into the
+//! Parses the vendored Proggy BDF bitmaps (`assets/fonts/`), merges each glyph's lit pixels into the
 //! fewest rectangles ([`merge`]), and rewrites `src/bitmap_font/generated.rs` with the result. The
 //! output is committed; this only runs when regenerating (e.g. after changing the vendored fonts or
 //! the covered charset).
@@ -25,8 +25,8 @@ use unseamless_core::bitmap_font::merge;
 fn main() {
     // Resolve paths relative to this crate, so it runs from anywhere.
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let menu_bdf = crate_dir.join("assets/fonts/spleen-8x16-ascii.bdf");
-    let compact_bdf = crate_dir.join("assets/fonts/spleen-6x12-ascii.bdf");
+    let menu_bdf = crate_dir.join("assets/fonts/proggy-clean-ascii.bdf");
+    let compact_bdf = crate_dir.join("assets/fonts/proggy-tiny-ascii.bdf");
     let out = crate_dir.join("src/bitmap_font/generated.rs");
 
     let menu = load(&menu_bdf);
@@ -41,7 +41,7 @@ fn main() {
          //!   cargo run -p unseamless-core --bin gen-bitmap-font \\\n\
          //!     --features gen-bitmap-font --target x86_64-unknown-linux-gnu\n\
          //!\n\
-         //! Source: vendored Spleen BDF bitmaps under `assets/fonts/` (BSD-2, Frederic Cambus).\n\
+         //! Source: vendored Proggy BDF bitmaps under `assets/fonts/` (MIT, Tristan Grimmer).\n\
          //! Each glyph's lit pixels are merged into maximal rectangles so the native renderer draws\n\
          //! the fewest filled quads per glyph.\n\
          #![allow(clippy::all)]\n\
@@ -68,7 +68,7 @@ fn load(path: &Path) -> BdfFont {
 }
 
 /// Emit one `pub static <NAME>: FaceData = …` block. Verifies the glyphs form the expected contiguous
-/// printable-ASCII range with a constant advance (Spleen is monospaced); a gap or stray advance is a
+/// printable-ASCII range with a constant advance (Proggy is monospaced); a gap or stray advance is a
 /// generator-time panic rather than silently wrong tables.
 fn emit_face(src: &mut String, name: &str, font: &BdfFont) {
     let first = 0x20u32;

@@ -1,12 +1,11 @@
 //! A minimal parser for the **BDF** (Glyph Bitmap Distribution Format) bitmap fonts we vendor under
 //! `assets/fonts/`. BDF stores glyphs as literal 1-bit bitmaps, so it is the cleanest possible source
 //! for a pixel font: no rasteriser, no antialiasing, no thresholding — the bytes in the file *are* the
-//! pixels we draw. (The shipping overlay's `menu-font.otf` is the same Spleen 8x16 face; we parse the
-//! BDF rather than rasterise the OTF precisely to avoid the grid-alignment guesswork a rasteriser
-//! introduces.)
+//! pixels we draw. (Our Proggy sources start life as native X11 PCF bitmaps and are converted to BDF,
+//! so the glyphs stay the hand-designed pixels rather than a thresholded outline render.)
 //!
-//! This parser only handles the subset of BDF that Spleen uses — enough to turn each glyph into a
-//! cell-local [`merge::Bitmap`]. It is used by the `gen-bitmap-font` generator binary and by
+//! This parser only handles the subset of BDF that the Proggy sources use — enough to turn each glyph
+//! into a cell-local [`merge::Bitmap`]. It is used by the `gen-bitmap-font` generator binary and by
 //! [`crate::bitmap_font`]'s tests; it has no runtime role (the cdylib draws from the precomputed
 //! tables in `generated.rs`). It is intentionally strict: a malformed line is a hard error, since the
 //! only inputs are files we vendor and control.
@@ -16,7 +15,7 @@ use super::merge::Bitmap;
 /// A parsed BDF font: face-level metrics plus one decoded glyph per encoded codepoint.
 #[derive(Debug)]
 pub struct BdfFont {
-    /// Cell width in pixels (the font bounding box width). Spleen is monospaced, so every glyph's
+    /// Cell width in pixels (the font bounding box width). Proggy is monospaced, so every glyph's
     /// advance equals this.
     pub cell_w: usize,
     /// Cell height in pixels (the font bounding box height = ascent + descent).
@@ -257,7 +256,7 @@ ENDFONT
     }
 
     // A glyph whose bounding box is *smaller* than the cell and offset from the origin, to exercise
-    // the placement math at non-identity offsets. Every vendored Spleen glyph is full-cell
+    // the placement math at non-identity offsets. Every vendored Proggy glyph is full-cell
     // (BBX == FONTBOUNDINGBOX), so without this the `cx`/`cy` formulas are only ever tested at
     // bxoff=0 / byoff=-descent. Here a 2x3 solid block sits at BBX `2 3 3 5` in an 8x16 cell.
     const OFFSET: &str = "\
