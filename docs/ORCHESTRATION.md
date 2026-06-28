@@ -39,6 +39,17 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   fleet dir, outside every workspace, so it never COW-diverges) — `worker-open` reads it to revive
   with the right overlay; `worker-rm`/`worker-prune` clean it.
 
+**Workers vs. `Agent`/`Task` subagents.** Fanning out a *chunk of buildable work* (a feature lane, a
+substantial RE pass, a migration — anything whose result is a branch to integrate) is **always** a fleet
+worker, never an `Agent`-tool subagent, even for a single lane. A worker is visible (`worker-ls`),
+watchable by the human, branch-isolated, and integrated through the normal review path; a subagent is an
+invisible black box that produces no integrable branch and can't be watched or reviewed. Subagents stay
+valid only for **supporting** tasks that feed the orchestrator's own work and return *findings, not a
+deliverable*: running tests, locating code (`Explore`), grep-and-summarize research, review swarms
+(`/ultracheck`, `check`). Litmus: *would the result be a branch merged to `main`?* → worker; *just
+informing your own work?* → subagent. This is the orchestrator-specific override of the global "spawn
+subagents aggressively" guidance.
+
 The overlay files (`docs/roles/worker.md`, `docs/roles/worker-solo.md`, and any orchestrator-specific
 notes) are **tracked and read-only at runtime** (consumed via `--append-system-prompt-file`), so they
 COW into a workspace without ever being mutated there.

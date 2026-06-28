@@ -22,6 +22,17 @@ in-game validation, integration, and the only commits to `main`). Spawning worke
 required: do small or rig-coupled work yourself; reach for a worker when a feature is independent
 enough to run on its own for a while.
 
+**When you DO fan out a chunk of work, it goes to a fleet worker — never an `Agent`/`Task` subagent.**
+A chunk of buildable work (a feature lane, a substantial RE pass, a migration — anything whose result is
+a branch you'd integrate) is always a `worker-new`, even if it's a single lane. Workers are visible in
+`worker-ls`, watchable by Michael, and integrate cleanly; a subagent is an invisible black box that
+can't be reviewed, watched, or merged. **Subagents remain valid only for *supporting* tasks that feed
+your own work and return findings, not a deliverable:** running tests, locating code (`Explore`),
+grep-and-summarize research, review swarms (`/ultracheck`, `check`). Litmus test: *would the result be a
+branch you merge to `main`?* → worker; *just informing your own work?* → subagent is fine. (This is the
+orchestrator-specific override of the global "be aggressive about spawning subagents" guidance — here
+the aggression goes to workers for chunks, subagents only for support.)
+
 All tooling is in `scripts/fleet/`. tmux sessions are `usc-orch` (you) and `usc-worker-<name>`.
 
 ## Spawn A Worker

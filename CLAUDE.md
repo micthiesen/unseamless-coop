@@ -126,6 +126,19 @@ worker, which overrides this). The full design and the `scripts/fleet/` tooling 
   Never drives the rig and never commits to `main`; anything serial it asks the orchestrator for by
   message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`).
 
+**Fan out chunks of work as fleet workers, never as `Agent`/`Task` subagents.** When you parallelize a
+*chunk of buildable work* — a feature lane, a substantial RE pass, a migration, anything whose result is
+a branch you'd integrate — spawn a fleet worker (`scripts/fleet/worker-new`), **not** an `Agent`-tool
+subagent. Workers are visible (`worker-ls`), watchable/controllable by Michael, commit to
+`worker/<name>`, and you integrate them; a subagent is an invisible black box that can't be any of those.
+This holds even for one lane — a single chunk still goes to a worker, not a subagent. **Subagents stay
+valid for *supporting* tasks that feed your own work and return findings, not a deliverable:** running
+tests, locating code (`Explore`), grep-and-summarize research, review swarms (`/ultracheck`'s reviewers,
+`check`). The litmus test: *would the result be a branch you merge to `main`?* → fleet worker. *Is it
+just informing your own work?* → a subagent is fine. (This is the orchestrator-specific override of the
+global CLAUDE.md's "be aggressive about spawning subagents": here that aggression goes to **workers** for
+chunks, subagents only for support.)
+
 The rig is single (one game install, one `unseamless-coop/` config+log dir, one Steam), so all
 rig/RE/validation serializes through the orchestrator. This is the structured form of the
 concurrent-sessions guidance above.
