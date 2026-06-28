@@ -39,4 +39,5 @@ pub mod saves;
 pub mod scaling;
 pub mod settings;
 pub mod transport;
+pub mod ui;
 pub mod util;
