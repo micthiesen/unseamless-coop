@@ -388,8 +388,9 @@ fn spawn_overlay(module: usize) {
 
 /// Apply one-shot boot-flow code patches, each gated by its own config flag: **skip-intros** (NOP
 /// the conditional branch that gates the logo/splash video sequence so the game falls straight
-/// through to the title) and **enable-offline-multiplayer** (neutralize the game's "is offline"
-/// predicate so the online multiplayer items are selectable offline). See `coop/patch.rs` and
+/// through to the title), **enable-offline-multiplayer** (neutralize the game's "is offline"
+/// predicate), and **force-online-menu-mode** (force `IsEnableOnlineMode()` true) — the latter two
+/// both candidates for un-greying the online multiplayer items offline. See `coop/patch.rs` and
 /// `docs/{SKIP-INTROS,CODE-PATCHING,OFFLINE-ITEMS-FINDINGS}.md`.
 fn apply_boot_patches(config: &unseamless_core::config::Config) {
     if config.gameplay.skip_splash_screens {
@@ -433,6 +434,43 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
             12,
             0x0F,
             &[0x31, 0xC0, 0x90],
+        );
+    }
+
+    if config.gameplay.force_online_menu_mode {
+        // EXPERIMENTAL / UNVERIFIED follow-up to enable_offline_multiplayer (which rig-proved that
+        // forcing `is_offline()` false does NOT ungrey the multiplayer items — the item gate reads a
+        // *different* signal). This patch tries the next candidate: force the game's
+        // `IsEnableOnlineMode()` getter (reads the `Menu.IsEnableOnlineMode` config bool) to always
+        // return true. The getter lazily initializes a cached bool and all its code paths converge on
+        //   movzx eax, byte [<cached bool 0x144588afc>]   (0F B6 05 B1 26 73 03)
+        // as the single return site, so overwriting that with `mov eax,1 ; nop ; nop` forces every
+        // call to report online-mode enabled regardless of the cached value. This is the cheapest
+        // end-to-end test of whether `IsEnableOnlineMode` is (part of) the real item gate — flip the
+        // flag on the rig and watch whether the items ungrey. A miss/ambiguous/drifted scan fails safe
+        // (no-op, logged), like the patches above. Full write-up + the rig recipe and the live address
+        // to read (0x144588afc) instead of patching: docs/OFFLINE-ITEMS-FINDINGS.md.
+        //
+        // Site note: unlike skip-intros (whose safety rests on patching *before* its boot-logo path
+        // first runs), this getter is lazily initialized and may already be live when install runs.
+        // The single 7-byte overwrite is not atomic, so a concurrent execution during the write is a
+        // theoretical torn read — in practice install runs very early (init thread, pre-title) and the
+        // getter only inits once a menu touches online state, so the risk matches the is_offline patch
+        // above. See patch.rs's "reason per-site" caveat.
+        //
+        // Re-derive after a game update: find the getter referenced by the UTF-16 string
+        // "Menu.IsEnableOnlineMode" (the unique `lea rdx, [string]`); the function's return path ends
+        // in a unique `movzx eax, byte [<cached bool>]`. Take that 7-byte movzx as the landmark
+        // (offset 0, expect 0x0F) and overwrite it with `mov eax,1` padded with NOPs (B8 01 00 00 00
+        // 90 90). The cached-bool disp is what makes the movzx unique.
+        const IS_ENABLE_ONLINE_MODE_RET: &[pelite::pattern::Atom] =
+            pelite::pattern!("0F B6 05 B1 26 73 03");
+        crate::patch::overwrite_landmark(
+            "force_online_menu_mode",
+            IS_ENABLE_ONLINE_MODE_RET,
+            0,
+            0x0F,
+            &[0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90],
         );
     }
 }

@@ -270,6 +270,17 @@ pub struct Gameplay {
     /// `is_offline()` false is plausibly still needed for the session FSM), but the real item gate is
     /// pending a follow-up RE pass — see `docs/OFFLINE-ITEMS-FINDINGS.md`.
     pub enable_offline_multiplayer: bool,
+    /// **EXPERIMENTAL / UNVERIFIED** candidate for the offline multiplayer-item gate (rung-3
+    /// follow-up). [`enable_offline_multiplayer`] forcing `is_offline()` false was rig-proven
+    /// *insufficient* — the item-grey gate doesn't read the offline mode enum at all. This flag tries
+    /// the next candidate: force the game's `Menu.IsEnableOnlineMode` getter to always report **true**
+    /// (a boot-time code patch over its return path; see `coop/app::apply_boot_patches` and
+    /// `docs/OFFLINE-ITEMS-FINDINGS.md` > "2026-06-28 item-gate pass"). Static analysis can't tell
+    /// whether this getter is part of the real item gate, so this ships **off by default** purely as a
+    /// rig-testable lever: flip it on, relaunch, and see if the multiplayer items ungrey. Fail-safe
+    /// (no-op + logged) if the AOB drifts, exactly like the patches above. Remove or promote once the
+    /// rig settles which signal is the gate.
+    pub force_online_menu_mode: bool,
     pub append_steam_id: bool,
     pub always_spectate_on_death: bool,
     /// Opt-in for [`boot_master_volume`]: when off (the default) the mod never touches the
@@ -394,6 +405,7 @@ impl Default for Gameplay {
             overhead_display: OverheadDisplay::Normal,
             skip_splash_screens: true,
             enable_offline_multiplayer: true,
+            force_online_menu_mode: false,
             append_steam_id: false,
             always_spectate_on_death: false,
             boot_master_volume_enabled: false,

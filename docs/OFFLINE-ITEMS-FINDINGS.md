@@ -140,3 +140,156 @@ The addresses shift on a patch; re-find them in minutes:
 Tools used: `scripts/re/` capstone helpers (PE section map, `.pdata` function bounds, rip-relative
 disp xref finder, `E8/E9` call-site finder) — the techniques, not the scratch scripts, are the
 reusable part (cf. [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) > "Re-usable method notes").
+
+---
+
+# Item-gate follow-up pass (static, 2026-06-28, worker `item-gate`)
+
+Picks up after the disproof above. Static-only on the same pinned `eldenring.exe` (image base
+`0x140000000`). Behavioral notes in my own words; addresses are facts. **Nothing here is rig-verified
+yet** — static inference already failed once on this exact problem (the disproof), so every claim
+below is tagged with honest confidence and paired with a runtime check the orchestrator runs before
+we trust it.
+
+## TL;DR
+
+- **The offline mode enum is now fully ruled out as the item gate.** `is_offline()` (`0x140e55180`)
+  is the *sole* consumer of the mode enum (`0x143d87220`): the enum's only reader is its getter
+  `0x140e0e960`, and that getter's only caller is `is_offline()`. So the disproof (patching
+  `is_offline()` to false) already neutralized *every* path that the mode enum can influence. The
+  item gate reads a **different** signal — confirmed, high confidence.
+- **The prior doc's "polarity nail" was a red herring.** The leaf `0x140764fe0`
+  (`IsEnableOnlineMode() && !is_offline()`) has **zero callers** — no `call`, no `jmp`, no
+  rip-relative ref, and the one absolute-pointer ref to it is a slot in a **dev/CVAR type-dispatch
+  table** in `.data` (`0x143b350e0`, reached only via `jmp [table + type_byte*8]` at `0x140765037`).
+  It never gated the inventory. This is *why* `is_offline()` looked like the gate but wasn't.
+- **Two concrete next candidates, neither confirmable statically:** (a) `IsEnableOnlineMode()` may
+  return **false** at our no-EAC launch — I charted the exact live byte to read; (b) a **sibling
+  network-status getter** (same module as `is_offline`, different signal) — charted the getter family.
+- **Landed a default-off, fail-safe candidate patch** (`[gameplay] force_online_menu_mode`) that
+  forces `IsEnableOnlineMode()` true, as a one-flip rig lever to test candidate (a) end to end.
+
+## Candidate (a): `IsEnableOnlineMode()` — charted for a live read
+
+`IsEnableOnlineMode()` getter = **`0x140e56310`**. It is **not** the "static dev CVAR that defaults
+true" the prior doc assumed — it is a lazily-initialized cached bool (MSVC magic-static guard):
+
+- On first call it reads the config value keyed by the UTF-16 string **`"Menu.IsEnableOnlineMode"`**
+  (`0x142beac58`) and stores the result byte.
+- **Cached return byte: `0x144588afc`** (a writable `.data` byte). Every call's return path converges
+  on `movzx eax, byte [0x144588afc]` at `0x140e56444`.
+- **Magic-static init-guard dword: `0x144588b00`** (`-1` once initialized).
+
+**Why this is the live test that splits the problem:** the disproof forced `is_offline()` false, so
+any item path of the shape `IsEnableOnlineMode() && !is_offline()` now reduces to
+`IsEnableOnlineMode()`. The items stayed greyed, so **either** `IsEnableOnlineMode()` is false at
+runtime **or** the item path doesn't use this predicate at all. Reading `0x144588afc` settles which:
+
+> **Rig read (orchestrator), after reaching the title screen (the getter inits lazily, so read it
+> *after* the menu is up):**
+> `python3 -c "import sys; f=open(f'/proc/{sys.argv[1]}/mem','rb'); f.seek(0x144588afc); print(f.read(1).hex())" <pid>`
+> (the exe loads at its preferred base `0x140000000`, confirmed in SESSION-RE-FINDINGS.md, so the
+> static VA is the live VA). Also read the guard at `0x144588b00` (4 bytes) — if it's not `-1`/non-zero
+> the getter hasn't initialized yet, so open any menu that touches online state first, then re-read.
+> - **byte == 0 → `IsEnableOnlineMode()` is FALSE outside EAC.** Strong candidate: it's (half of)
+>   the gate. Test the landed patch (below) — flip `force_online_menu_mode = true` and see if items
+>   ungrey.
+> - **byte == 1 → ruled out.** The item path doesn't gate on this predicate; move to candidate (b).
+
+**Confidence this getter is correctly charted: high.** **Confidence it's the actual item gate:
+low–medium** — "Menu.IsEnableOnlineMode" reads like a dev/menu CVAR that plausibly defaults true even
+without EAC, in which case forcing it true is a no-op. The live read is one cheap command; do it first.
+
+### The landed candidate patch (`[gameplay] force_online_menu_mode`, default OFF)
+
+Wired in `coop/app.rs::apply_boot_patches`, behind a **new, default-off** flag so it can't affect
+normal play and the orchestrator can A/B it independently of `enable_offline_multiplayer`:
+
+```
+0x140e56444: 0F B6 05 B1 26 73 03   movzx eax, byte [0x144588afc]   ; the getter's sole return site
+          -> B8 01 00 00 00 90 90   mov eax, 1 ; nop ; nop          ; force "online mode enabled"
+```
+
+- **landmark (unique, 7 bytes):** `0F B6 05 B1 26 73 03` — exactly one match in the image (the
+  cached-bool disp `B1 26 73 03` is what makes it unique). offset `0`, expect `0x0F`.
+- All of the getter's code paths (the two fast-path `jle`/`jne` exits and the post-init fall-through)
+  converge on this `movzx`, so patching it forces the return on **every** call.
+- Fail-safe exactly like the other boot patches: a missed/ambiguous/drifted scan no-ops + logs.
+
+## Candidate (b): a sibling network-status getter (same module, different signal)
+
+The offline/online state is computed once at boot by **`0x140e0ea60`** (the only writer of the mode
+enum; called from the boot network-flow step). It does **not** compute a single offline bool — it
+writes a whole block of related state from a series of platform/EAC/login sub-queries:
+
+- mode enum → `0x143d87220` (via `0x140e5b530`) — the `is_offline()` source, **ruled out**.
+- a sibling status dword → **`0x143b400bc`** (13 readers) and friends `0x143b400b0` (6),
+  `0x143b400b8`, `0x143b400c0`, plus `0x143d87224` and a **byte at `0x143d87228`**.
+
+Those sibling globals are read **only** inside the same network-status module
+(`~0x140e0dfc0..0x140e0ec77`), which exposes them through a family of small **getter functions** — the
+public "what's my online status" API the rest of the game calls. The ones with external callers:
+
+| getter | reads | external callers (sample) |
+|---|---|---|
+| `0x140e0dfc0` | `0x143b400bc` | `0x1408c6bcf`, `0x1408cde5d` |
+| `0x140e0dfe0` | `0x143b400bc` | `0x140909b1c`, `0x140933909`, `0x140997301/451` |
+| `0x140e0e000` | `0x143b400bc` | `0x140b04224` |
+| `0x140e0e0c0` | (built object) | `0x140d77290/2ce/60c` |
+| `0x140e0e1d0` | (built object) | `0x140d76e90`, `0x140d77b0c` |
+| `0x140e0e2e0` | `0x143b400bc` | `0x140b042a7` |
+| `0x140e0e3a0` | `0x143b400bc` | `0x140cbbb48` |
+| `0x140e0e550` | (built object) | `0x140d76fa0`, `0x140d77bec` |
+| `0x140e0e960` | mode enum | `is_offline()` only |
+
+The `0x140d76xxx`/`0x140d77xxx` caller cluster queries three of these getters and is the most
+multiplayer-menu-shaped, but I could **not** statically tie any one getter to the *inventory item
+greyed* decision without param/menu symbols — and guessing here is exactly what failed last time.
+
+**Confidence: low** as to which (if any) is the gate; **high** that this getter family is the right
+*neighborhood* of "online availability" signals distinct from the mode enum.
+
+## The decisive runtime recipe (hand-off — do this if the cheap read in (a) says "ruled out")
+
+Static can narrow but not pin the gate; one runtime observation pins it directly. Repro: load a save
+where a multiplayer item (Tarnished's Furled Finger) is visible and **greyed** in the pouch.
+
+1. **First, the cheap split:** do the `0x144588afc` live read in candidate (a). If `0`, test
+   `force_online_menu_mode` and you may be done. If `1`, continue.
+2. **Pin the gate by watching the greyed item's availability read.** With the inventory open on the
+   greyed item, the menu code that decides "greyed" reads some online-status signal. Use Frida (rig
+   action — RUNTIME-RE.md option B) to hook the **getter family above** (`0x140e0dfc0`, `…dfe0`,
+   `…e000`, `…e0c0`, `…e1d0`, `…e2e0`, `…e3a0`, `…e550`) plus `is_offline()` (`0x140e55180`) and
+   `IsEnableOnlineMode()` (`0x140e56310`); log entry + return value, then scroll onto / try-to-use the
+   greyed item. **The getter that fires from menu/item code on that interaction, returning the
+   "offline/unavailable" value, is the gate.** (A hardware *read*-watchpoint on `0x143b400bc` works
+   too but it has 13 readers and will be noisy; the getter hooks are cleaner.)
+3. **Confirm by forcing it.** Patch the identified getter to return its "online" value (or force the
+   global it reads) and verify the item ungreys with no "network error / return to title" popup. Then
+   we wire that as the real patch (replacing or augmenting `force_online_menu_mode`).
+
+If even the getter hooks don't fire on the item interaction, the gate is **outside** this network
+module — most likely a live matchmaking/login-session availability check (EAC handshake never
+completes for us), reachable by Frida-stalking the item-availability function itself from the
+EquipParamGoods/use-condition side. That's the deeper fallback.
+
+## Re-derivation after a game update (this pass)
+
+- **`IsEnableOnlineMode()` + its cached byte:** scan UTF-16 for `"Menu.IsEnableOnlineMode"`, find the
+  unique `lea rdx,[string]` (`0x140e563dc`); its enclosing function is the getter. Its return path
+  ends in a unique `movzx eax, byte [<cached bool>]` — that disp names the live byte
+  (`0x144588afc` here) and the guard dword sits 4 bytes after it (`0x144588b00`). The `movzx` is the
+  `force_online_menu_mode` landmark.
+- **The network-status getter family:** find the only writer of the mode enum (`0x140e0ea60`, the
+  function whose `mov [enum], eax` you reach from `is_offline`'s getter), list the other globals it
+  writes (`0x143b400bc` & neighbours), and take their readers — all clustered in one module; each
+  small reader function is a status getter. Filter to those with callers *outside* the module.
+
+## Reusable method note
+
+New scan shapes used this pass, beyond the prior `scripts/re/` capstone helpers: **(1) absolute
+8-byte pointer search** (find vtable / fn-pointer-table slots that hold a function VA — rip-relative
+xref scans miss these because table entries are absolute, which is why the leaf looked "uncalled");
+**(2) `.pdata` enclosing-function lookup** to turn any xref site into its owning function bounds. Both
+are the reusable part; the throwaway scripts are not committed (kept in `/tmp`), per the
+SESSION-RE-FINDINGS convention.

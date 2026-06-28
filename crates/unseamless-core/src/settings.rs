@@ -44,6 +44,7 @@ pub enum SettingId {
     Nameplates = 21,
     NameplateDistance = 22,
     EnableOfflineMultiplayer = 23,
+    ForceOnlineMenuMode = 24,
 }
 
 impl SettingId {
@@ -224,6 +225,14 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
+            id: ForceOnlineMenuMode,
+            label: "Force online menu mode (experimental)",
+            kind: Toggle {
+                get: |c| c.gameplay.force_online_menu_mode,
+                set: |c, v| c.gameplay.force_online_menu_mode = v,
+            },
+        },
+        Setting {
             id: AppendSteamId,
             label: "Append Steam ID to names",
             kind: Toggle {
@@ -379,7 +388,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 23, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 24, "registry size changed — update this if you added a setting");
     }
 
     #[test]

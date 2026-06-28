@@ -21,6 +21,11 @@ skip_splash_screens = true
 # run is the only way to verify the boot-time "is offline" code patch — confirm the items ungrey and no
 # network-error popup fires. See docs/OFFLINE-ITEMS-FINDINGS.md > "Rig verification recipe".
 enable_offline_multiplayer = true
+# EXPERIMENTAL / UNVERIFIED item-gate candidate (forces the game's IsEnableOnlineMode() getter true via
+# a boot patch). Listed here so the lever is discoverable, but left OFF: the recipe says do the cheap
+# live read of 0x144588afc FIRST — only flip this true to test if that read shows the getter is false
+# outside EAC. See docs/OFFLINE-ITEMS-FINDINGS.md > "Item-gate follow-up pass".
+force_online_menu_mode = false
 append_steam_id = false
 always_spectate_on_death = false
 # On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's
