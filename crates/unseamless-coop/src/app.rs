@@ -19,6 +19,7 @@ use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
 use crate::features::nameplates::Nameplates;
 use crate::features::native_nameplates::NativeNameplates;
+use crate::features::native_toasts::NativeToasts;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
 use crate::features::playstate::PlayStateProbe;
@@ -256,9 +257,12 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
         // camera + positions only). Reads live config; no-op (publishes nothing) when off.
         Box::new(Nameplates::new()),
-        // Spike: overhead nameplates drawn by the game's own world-space text renderer (CSEzDraw),
-        // no overlay/present-hook. Config-file-only (`[nameplates] native_spike`); no-op when off.
+        // Spike: overhead nameplate markers drawn natively via CSEzDraw (no overlay/present-hook).
+        // Config-file-only (`[nameplates] native_spike`); no-op when off.
         Box::new(NativeNameplates::new()),
+        // Spike: notification toasts drawn natively via CSEzDraw + the bitmap font (no overlay).
+        // Same `native_spike` gate; no-op when off or when no toasts are active.
+        Box::new(NativeToasts::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
         // Writes the per-player enemy/boss scaling curve into the multiplayer SpEffect rate rows

@@ -44,10 +44,13 @@ What the spike established (all rig-confirmed):
       player reads as its palette color; floats above the head; depth-tested; present-hook-free.
 - [x] **Screen-space 2D substrate** (`ScreenSpace` / `draw_screen_rect` / `draw_filled_quad`) — proven by
       the probe, in `native_draw.rs` (not yet wired to a real surface).
-- [ ] **Bitmap font -> draw-shapes** (in progress, `unseamless-core`): convert our font(s) to precomputed
-      static glyph->merged-rects, `shape(text) -> rects`, with rect-merging + ASCII-art unit tests. This
-      is the enabler for native text.
-- [ ] **Native toasts/banners** on the screen-space substrate + bitmap font (next, once the font lands).
+- [x] **Bitmap font -> draw-shapes** (`unseamless_core::bitmap_font`): `shape(text, Face) -> rects` from
+      precomputed static glyph->merged-rects (Spleen Menu 8x16 / Compact 6x12), with ASCII-art unit
+      tests. The enabler for native text.
+- [x] **Native toasts** (`coop/features/native_toasts.rs`, behind `native_spike`): the live
+      notification toasts drawn screen-space via [`native_draw::draw_text_screen`] (real Spleen glyphs ->
+      `CSEzDraw` quads), right-aligned + stacked + severity-colored + lifetime-faded, with a contrast
+      shadow. Rig-confirmed. Banners are the same pattern (TODO).
 - [ ] **Native menu** — the perf-sensitive surface; needs the bitmap font + a layout pass + native input;
       accept a small fps dip while open. This is the gating step for fully dropping imgui.
 

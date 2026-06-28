@@ -24,6 +24,7 @@ use eldenring::position::HavokPosition;
 use fromsoftware_shared::program::Program;
 use fromsoftware_shared::{F32Vector4, Triangle};
 use pelite::pe64::Pe; // brings `rva_to_va` into scope on `Program`
+use unseamless_core::bitmap_font::{self, Face, PositionedRect};
 
 fn rgba_to_vec4(rgba: [u8; 4]) -> F32Vector4 {
     F32Vector4(
@@ -60,8 +61,6 @@ fn set_fill(ez: &mut CSEzDraw, rgba: [u8; 4]) {
 }
 
 /// Draw a solid quad (two filled triangles) with corners `a,b,c,d` in winding order (e.g. TL,TR,BR,BL).
-/// Part of the screen-space 2D substrate; not wired until native toasts/menu land (see module docs).
-#[allow(dead_code)]
 pub fn draw_filled_quad(ez: &mut CSEzDraw, a: &HavokPosition, b: &HavokPosition, c: &HavokPosition, d: &HavokPosition, rgba: [u8; 4]) {
     set_fill(ez, rgba);
     let Some(draw) = draw_triangle_fn() else { return };
@@ -97,12 +96,21 @@ pub fn draw_billboard_disc(ez: &mut CSEzDraw, center: &HavokPosition, right: [f3
     }
 }
 
+/// The render camera's frame: position + orthonormal basis (right/up/forward) + vertical fov (radians)
+/// and aspect. The caller reads this from `cs/camera.rs`; [`ScreenSpace`] turns it into a screen plane.
+pub struct CamFrame {
+    pub pos: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub fwd: [f32; 3],
+    pub fov_y: f32,
+    pub aspect: f32,
+}
+
 /// A camera-locked screen plane: maps normalized screen coords (`nx,ny` in -1..1, origin center, +x
 /// right, +y up) to world points on a plane `dist` in front of the camera. Apparent on-screen size is
 /// `dist`-independent (the fov term cancels), so `dist` only needs to clear the near clip plane. This is
 /// how we draw screen-space 2D UI (toasts/menus) with world-space `CSEzDraw` geometry.
-/// Part of the screen-space 2D substrate; not wired until native toasts/menu land (see module docs).
-#[allow(dead_code)]
 pub struct ScreenSpace {
     pos: [f32; 3],
     right: [f32; 3],
@@ -113,12 +121,11 @@ pub struct ScreenSpace {
     dist: f32,
 }
 
-#[allow(dead_code)]
 impl ScreenSpace {
-    pub fn new(pos: [f32; 3], right: [f32; 3], up: [f32; 3], fwd: [f32; 3], fov_y: f32, aspect: f32, dist: f32) -> Self {
-        let half_h = dist * (fov_y * 0.5).tan();
-        let half_w = half_h * aspect;
-        Self { pos, right, up, fwd, half_w, half_h, dist }
+    pub fn new(cam: &CamFrame, dist: f32) -> Self {
+        let half_h = dist * (cam.fov_y * 0.5).tan();
+        let half_w = half_h * cam.aspect;
+        Self { pos: cam.pos, right: cam.right, up: cam.up, fwd: cam.fwd, half_w, half_h, dist }
     }
 
     /// World point for screen NDC (`nx,ny` in -1..1).
@@ -135,14 +142,32 @@ impl ScreenSpace {
 }
 
 /// Draw an axis-aligned screen-space rect (NDC center `cx,cy`, half-extents `hw,hh`) as a filled quad.
-/// Part of the screen-space 2D substrate; not wired until native toasts/menu land (see module docs).
-#[allow(dead_code)]
 pub fn draw_screen_rect(ez: &mut CSEzDraw, ss: &ScreenSpace, cx: f32, cy: f32, hw: f32, hh: f32, rgba: [u8; 4]) {
     let tl = ss.point(cx - hw, cy + hh);
     let tr = ss.point(cx + hw, cy + hh);
     let br = ss.point(cx + hw, cy - hh);
     let bl = ss.point(cx - hw, cy - hh);
     draw_filled_quad(ez, &tl, &tr, &br, &bl, rgba);
+}
+
+/// Draw `text` (bitmap `face`) as filled quads at screen-NDC top-left `(tlx, tly)`, `scale` NDC per
+/// font-pixel, with a 1-pixel dark shadow for contrast on any background. The font's top-left-origin,
+/// y-down pixel rects ([`bitmap_font::shape`]) map to y-up NDC. This is the native text primitive that
+/// replaces imgui text: real Spleen glyphs rasterized to `CSEzDraw` solid quads.
+pub fn draw_text_screen(ez: &mut CSEzDraw, ss: &ScreenSpace, text: &str, face: Face, anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
+    let rects = bitmap_font::shape(text, face);
+    let shadow = [0, 0, 0, (rgba[3] as u16 * 4 / 5) as u8];
+    blit_rects(ez, ss, &rects, [anchor[0] + scale, anchor[1] - scale], scale, shadow);
+    blit_rects(ez, ss, &rects, anchor, scale, rgba);
+}
+
+/// Fill each shaped glyph rect at NDC top-left `anchor` scaled by `scale` (NDC per font-pixel).
+fn blit_rects(ez: &mut CSEzDraw, ss: &ScreenSpace, rects: &[PositionedRect], anchor: [f32; 2], scale: f32, rgba: [u8; 4]) {
+    for r in rects {
+        let cx = anchor[0] + (r.x as f32 + r.w as f32 * 0.5) * scale;
+        let cy = anchor[1] - (r.y as f32 + r.h as f32 * 0.5) * scale; // y-down px -> y-up NDC
+        draw_screen_rect(ez, ss, cx, cy, r.w as f32 * 0.5 * scale, r.h as f32 * 0.5 * scale, rgba);
+    }
 }
 
 // --- CSEzDraw::draw_text (RE record; non-functional in retail) -------------------------------------

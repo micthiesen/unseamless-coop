@@ -9,6 +9,7 @@ pub mod crit_coop;
 pub mod death_debuffs;
 pub mod nameplates;
 pub mod native_nameplates;
+pub mod native_toasts;
 pub mod notifications;
 pub mod observer;
 pub mod playstate;
