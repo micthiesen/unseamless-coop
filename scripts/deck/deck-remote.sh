@@ -91,7 +91,7 @@ cmd_paths() {
 }
 
 cmd_check() {
-  say "deck-remote check on $(hostname) ($(uname -s))"
+  say "deck-remote check on $(uname -n) ($(uname -s))"
   local have_steam have_ydotool have_game
   have_steam="$(command -v steam || echo MISSING)"
   have_ydotool="$(command -v ydotool || echo MISSING)"
@@ -107,7 +107,7 @@ cmd_check() {
   return 0   # the trailing `[[ ]] && warn` above must not become this function's (failing) exit status
 }
 
-cmd_mark_throwaway() { mkdir -p "$HELPER_DIR"; : > "$THROWAWAY_SENTINEL"; ok "marked $(hostname) as a throwaway rig ($THROWAWAY_SENTINEL)"; }
+cmd_mark_throwaway() { mkdir -p "$HELPER_DIR"; : > "$THROWAWAY_SENTINEL"; ok "marked $(uname -n) as a throwaway rig ($THROWAWAY_SENTINEL)"; }
 
 # Move staged artifacts into place. The local driver rsyncs unseamless_coop.dll / start_protected_game.exe
 # / unseamless_coop.toml into $STAGING first; we place them like rig.sh's apply (dll -> dinput8.dll, our
@@ -139,7 +139,7 @@ cmd_apply_staged() {
     warn "no staged config — left $CONFIG_DST as-is"
   fi
 
-  { echo "applied: $(date -Is)"; echo "host: $(hostname)"; cat "$STAGING/BUILD_INFO" 2>/dev/null || true; } > "$MARKER"
+  { echo "applied: $(date -Is)"; echo "host: $(uname -n)"; cat "$STAGING/BUILD_INFO" 2>/dev/null || true; } > "$MARKER"
   ok "wrote marker ($MARKER)"
 }
 
