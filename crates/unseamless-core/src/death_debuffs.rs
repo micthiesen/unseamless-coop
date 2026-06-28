@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn dont_sync_is_per_player() {
         // Death debuffs are local, never networked — pin the per-player decision (DEATH-DEBUFFS.md §A).
-        assert!(APPLY_DONT_SYNC);
+        const { assert!(APPLY_DONT_SYNC) };
     }
 
     #[test]

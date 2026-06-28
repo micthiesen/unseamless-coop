@@ -70,9 +70,9 @@ mod tests {
 
     #[test]
     fn all_palette_entries_are_distinct() {
-        for i in 0..PALETTE.len() {
-            for j in (i + 1)..PALETTE.len() {
-                assert_ne!(PALETTE[i], PALETTE[j], "palette {i} and {j} are identical");
+        for (i, a) in PALETTE.iter().enumerate() {
+            for (j, b) in PALETTE.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "palette {i} and {j} are identical");
             }
         }
     }

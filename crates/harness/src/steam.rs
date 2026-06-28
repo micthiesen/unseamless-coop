@@ -401,6 +401,10 @@ pub fn password_or_default(arg: Option<String>) -> String {
 fn _assert_steamid_is_u64(_: SteamId) {} // doc: SteamId::raw() is the u64 PeerId the side-channel uses
 
 #[cfg(test)]
+/// Pinned reference value for `token("swordfish")`. Filled in from the first green run (see test).
+const KNOWN_VECTOR_SWORDFISH: &str = "e1ae25ea4eab35799470c31622b014b8";
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -427,7 +431,3 @@ mod tests {
         assert_eq!(token("swordfish"), KNOWN_VECTOR_SWORDFISH);
     }
 }
-
-#[cfg(test)]
-/// Pinned reference value for `token("swordfish")`. Filled in from the first green run (see test).
-const KNOWN_VECTOR_SWORDFISH: &str = "e1ae25ea4eab35799470c31622b014b8";
