@@ -42,6 +42,8 @@ use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
 use pelite::pattern::Atom;
 use unseamless_core::config::Config;
 use unseamless_core::util::{FrameThrottle, Latch};
+use windows::Win32::System::LibraryLoader::GetModuleHandleA;
+use windows::core::PCSTR;
 
 use crate::feature::{Feature, Tick};
 
@@ -256,14 +258,138 @@ impl Feature for SessionFsmProbe {
     }
 }
 
+// --- Rung-3 DIRECT-DRIVE probe (experimental) ---------------------------------------------------
+//
+// Where the FSM logger + entry hooks OBSERVE the create/join initiation, this DRIVES it: a one-shot
+// that CALLS the charted create-session wrapper on `[G]` to confirm we can move
+// `lobby_state None -> TryToCreateSession` with no in-game item and no peer (the pivot to driving
+// `CSSessionManager` directly — docs/SESSION-DRIVE.md + the create chart in docs/SESSION-RE-FINDINGS.md).
+//
+// Target: the create WRAPPER `bool 0x140cad4c0(this, u8 flag, u32 mode, void* settings)` — chosen over
+// the inner because it owns the failure path (sets `lobby_state = 2` + cleanup) so a rejected call
+// degrades cleanly instead of leaving half-state. Args are the near-constants the sign/host template
+// passes: `mode = 4`, `settings = {u16@0 = 0, u32@4 = 2}`; `flag` comes from sign data in the natural
+// path, so we try `0` (tweak [`DRIVE_FLAG`] if a run rejects). The request builder (`0x140cb20d0`)
+// calls `is_offline()` twice, so this is meant to run WITH `gameplay.enable_offline_multiplayer = true`.
+//
+// Re-derive after a game update: the wrapper offset is from the exe's preferred base `0x140000000`; if
+// the create chart in docs/SESSION-RE-FINDINGS.md shifts, update [`CREATE_WRAPPER_OFFSET`].
+
+/// Offset of the create wrapper (`0x140cad4c0`) from the exe preferred base (`0x140000000`). Resolved
+/// against the live `GetModuleHandle(NULL)` base so it survives a rebase, rather than a hardcoded VA.
+const CREATE_WRAPPER_OFFSET: usize = 0x140c_ad4c0 - 0x1_4000_0000;
+/// `flag` arg (`dl`). Sign data supplies this in the natural path; `0` is the first guess for a driven
+/// create — change here and rebuild if a run lands on `FailedToCreate`.
+const DRIVE_FLAG: u8 = 0;
+/// `mode` arg (`r8d`) — the constant the sign/host create path passes.
+const DRIVE_MODE: u32 = 4;
+
+/// The 8-byte `settings` blob the create path points `r9` at: `{ u16@+0 = 0; u32@+4 = 2 }`. `repr(C)`
+/// gives `u16` at 0 (pad 2..4) and `u32` at 4, matching the charted layout. Consumed synchronously by
+/// the param builder, so a stack local outlives the call.
+// Fields are read by the game through the `r9` pointer (FFI), never by Rust — so they read as dead.
+#[allow(dead_code)]
+#[repr(C)]
+struct CreateSettings {
+    a: u16,
+    b: u32,
+}
+
+/// The create wrapper's win64 signature: `this`(rcx), `flag`(dl), `mode`(r8d), `settings`(r9).
+type CreateFn =
+    unsafe extern "system" fn(*mut CSSessionManager, u8, u32, *const CreateSettings) -> bool;
+
+/// One-shot driver: when in-game and `lobby_state == None`, call the create wrapper once and log the
+/// before/return/after under the `session-probe:` prefix (the FSM logger then traces the transition).
+pub struct SessionCreateDriver {
+    fired: bool,
+}
+
+impl SessionCreateDriver {
+    fn new() -> Self {
+        Self { fired: false }
+    }
+}
+
+impl Feature for SessionCreateDriver {
+    fn name(&self) -> &'static str {
+        "session-create-driver"
+    }
+
+    fn phase(&self) -> CSTaskGroupIndex {
+        // Main thread, same context the natural host path runs in — the create issues async work via a
+        // vtable call, so it must be driven from the game thread, not our init thread.
+        CSTaskGroupIndex::FrameBegin
+    }
+
+    fn on_frame(&mut self, tick: Tick) {
+        if self.fired {
+            return;
+        }
+        // Need a loaded world (the create touches player/world context) — don't fire at the title.
+        if !crate::playstate::current().in_game() {
+            return;
+        }
+        // Need the live manager AND lobby_state == None (the inner guards on None; we also want a clean
+        // baseline for the FSM logger's transition line).
+        let Some((base, lobby)) =
+            crate::sdk::with_instance::<CSSessionManager, _>(|s| {
+                (s as *const CSSessionManager as usize, crate::session::read(s).lobby_state)
+            })
+        else {
+            return;
+        };
+        if lobby != LobbyState::None {
+            log::info!(
+                "session-probe: drive-create skipped — lobby_state is {:?}, need None (already in/at a session)",
+                lobby,
+            );
+            self.fired = true;
+            return;
+        }
+
+        self.fired = true; // one-shot: set BEFORE the call so a crash/hang can't re-fire it
+
+        let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+            Ok(h) => h.0 as usize,
+            Err(e) => {
+                log::error!("session-probe: drive-create — GetModuleHandle(NULL) failed: {e}");
+                return;
+            }
+        };
+        let fn_addr = exe_base + CREATE_WRAPPER_OFFSET;
+        // SAFETY: `fn_addr` is the create wrapper resolved from the live exe base + its charted offset;
+        // we call it with this=[G] (the live, non-null singleton just read) and the constant args the
+        // natural host path uses, on the main thread, with lobby_state == None (its precondition).
+        let create: CreateFn = unsafe { std::mem::transmute::<usize, CreateFn>(fn_addr) };
+        let settings = CreateSettings { a: 0, b: 2 };
+        log::info!(
+            "session-probe: drive-create @frame {} — calling create wrapper {:#x}(this={:#x}, flag={}, mode={}, settings={{0,2}}); lobby was None",
+            tick.frame, fn_addr, base, DRIVE_FLAG, DRIVE_MODE,
+        );
+        let ret = unsafe { create(base as *mut CSSessionManager, DRIVE_FLAG, DRIVE_MODE, &settings) };
+        let after = crate::sdk::with_instance::<CSSessionManager, _>(|s| {
+            crate::session::read(s).lobby_state
+        });
+        log::info!(
+            "session-probe: drive-create returned {} — lobby_state now {:?} (TryToCreateSession=driven OK; FailedToCreateSession=internal gate rejected)",
+            ret,
+            after,
+        );
+    }
+}
+
 /// The session probe's gated frame features, for [`crate::app::build_features`] to `extend` with —
 /// mirroring [`crate::diag::probe_features`] so every `[debug.probes]`-gated feature is appended the
-/// same way (one assembly style, gating kept inside this module). Empty unless `[debug.probes]
-/// session_probe` is on; currently just the FSM-transition logger.
+/// same way (one assembly style, gating kept inside this module). The FSM-transition logger when
+/// `session_probe` is on; the experimental [`SessionCreateDriver`] when `drive_create` is on.
 pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
+    let mut features: Vec<Box<dyn Feature>> = Vec::new();
     if config.debug.probes.session_probe {
-        vec![Box::new(SessionFsmProbe::new())]
-    } else {
-        Vec::new()
+        features.push(Box::new(SessionFsmProbe::new()));
     }
+    if config.debug.probes.drive_create {
+        features.push(Box::new(SessionCreateDriver::new()));
+    }
+    features
 }

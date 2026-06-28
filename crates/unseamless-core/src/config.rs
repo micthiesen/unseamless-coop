@@ -235,6 +235,15 @@ pub struct DebugProbes {
     /// ER uses `RunCallbacks`, lobby discovery is viable; never fires → likely `ManualDispatch`, rung 4
     /// blocked. Solo, single-player. Off by default. (Kept as the fast re-derive after a game update.)
     pub lobby_callback_probe: bool,
+    /// **EXPERIMENTAL rung-3 direct-drive probe** (`coop/session_probe::SessionCreateDriver`): once
+    /// in-game with `lobby_state == None`, CALL the charted create-session initiation on `[G]` to
+    /// confirm we can drive `None -> TryToCreateSession` without an in-game item or a peer (the pivot
+    /// to driving `CSSessionManager` directly — see `docs/SESSION-DRIVE.md`). One-shot, main thread.
+    /// Off by default; a rig experiment, not shipped behavior. The create request builder calls
+    /// `is_offline()` twice, so pair this with `gameplay.enable_offline_multiplayer = true`. A driven
+    /// `lobby_state -> 1` confirms direct-drive; `-> 2` (FailedToCreate) means an internal gate
+    /// rejected it. Solo-confirmable (create needs no peer); join stays 2-player.
+    pub drive_create: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

@@ -101,6 +101,10 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
                            # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
+drive_create = false       # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
+                           # charted create-session fn on [G] (no item, no peer) and log whether lobby_state
+                           # moves to TryToCreateSession. Pair with gameplay.enable_offline_multiplayer = true
+                           # (the create builder calls is_offline twice). See docs/SESSION-DRIVE.md.
 
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
