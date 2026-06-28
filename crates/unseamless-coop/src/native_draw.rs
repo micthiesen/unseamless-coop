@@ -28,6 +28,7 @@ use fromsoftware_shared::program::Program;
 use fromsoftware_shared::{F32Vector4, Triangle};
 use pelite::pe64::Pe; // brings `rva_to_va` into scope on `Program`
 use unseamless_core::bitmap_font::{self, Face, PositionedRect};
+use unseamless_core::ui::render::{DrawCmd, DrawList};
 
 fn rgba_to_vec4(rgba: [u8; 4]) -> F32Vector4 {
     F32Vector4(
@@ -138,6 +139,47 @@ impl ScreenSpace {
             1.0,
         )
     }
+}
+
+/// Compute the UI layout viewport (px) for a `design_height` that keeps glyphs square: width =
+/// `design_height * aspect`. A `ui::render` surface lays out in this viewport and hands the resulting
+/// `DrawList` (+ this viewport) to [`draw_list`], so pixels map uniformly to screen (no x/y distortion).
+#[allow(dead_code)]
+pub fn ui_viewport(ss: &ScreenSpace, design_height: f32) -> [f32; 2] {
+    [design_height * ss.aspect(), design_height]
+}
+
+/// Rasterize a `ui::render` [`DrawList`] into screen space via CSEzDraw. `viewport` is the pixel size the
+/// list was laid out in (top-left origin, y-down); use [`ui_viewport`] so `viewport.0/viewport.1 ==
+/// ss.aspect()` and pixels map uniformly (glyphs stay square). Each `Rect` cmd becomes a filled screen
+/// rect; each `Text` cmd is shaped via `bitmap_font` and its glyph rects filled the same way. Painter's
+/// order is preserved. This is the one bridge every native UI surface (toasts/banners/menu) draws through.
+#[allow(dead_code)]
+pub fn draw_list(ez: &mut CSEzDraw, ss: &ScreenSpace, viewport: [f32; 2], dl: &DrawList) {
+    for cmd in dl.cmds() {
+        match cmd {
+            DrawCmd::Rect { rect, color } => {
+                fill_px_rect(ez, ss, viewport, [rect.x, rect.y, rect.w, rect.h], *color);
+            }
+            DrawCmd::Text { pos, text, face, color } => {
+                for g in bitmap_font::shape(text, *face) {
+                    fill_px_rect(ez, ss, viewport, [pos[0] + g.x, pos[1] + g.y, g.w, g.h], *color);
+                }
+            }
+        }
+    }
+}
+
+/// Fill a pixel-space rect `[x, y, w, h]` (top-left origin) mapped uniformly into screen NDC via `vp`.
+fn fill_px_rect(ez: &mut CSEzDraw, ss: &ScreenSpace, vp: [f32; 2], rect: [i32; 4], rgba: [u8; 4]) {
+    let [x, y, w, h] = rect;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let (vw, vh) = (vp[0], vp[1]);
+    let cx = 2.0 * (x as f32 + w as f32 * 0.5) / vw - 1.0;
+    let cy = 1.0 - 2.0 * (y as f32 + h as f32 * 0.5) / vh; // px y-down -> NDC y-up
+    draw_screen_rect(ez, ss, cx, cy, w as f32 / vw, h as f32 / vh, rgba);
 }
 
 /// Draw an axis-aligned screen-space rect (NDC center `cx,cy`, half-extents `hw,hh`) as a filled quad.

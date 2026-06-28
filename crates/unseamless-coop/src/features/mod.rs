@@ -8,6 +8,7 @@ pub mod boot_volume;
 pub mod crit_coop;
 pub mod death_debuffs;
 pub mod nameplates;
+pub mod native_menu;
 pub mod native_nameplates;
 pub mod native_toasts;
 pub mod notifications;
