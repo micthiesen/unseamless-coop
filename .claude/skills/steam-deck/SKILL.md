@@ -27,8 +27,11 @@ away from ready.
 ## Prerequisites
 
 - **SSH key auth** to the Deck (set up out of band — `deck.sh` uses `BatchMode`, no passwords).
-- **`DECK_HOST=user@host`** exported. Required by every verb. **This network's Deck is at a static
-  `10.10.1.57`**, so `DECK_HOST=deck@10.10.1.57` (the SteamOS default user is `deck`; adjust if changed).
+- **`DECK_HOST=user@host`** exported. Required by every verb. **This network's Deck is `deck@10.10.1.57`
+  on SSH port `2222`** — so `DECK_HOST=deck@10.10.1.57 DECK_PORT=2222`. (`DECK_PORT` defaults to 22; it
+  flows to both ssh and rsync. The SteamOS default user is `deck`.) Confirmed reachable; recon showed
+  Steam present + running, `/dev/uinput` writable by `deck`, rsync/setsid/pgrep present, ELDEN RING at the
+  internal default path — only ydotool needs seeding (see below).
 - The game **installed** on the Deck (we don't install ELDEN RING, just our mod over it).
 - For `launch`: the Deck **logged into Game Mode** (a running Steam). For `dismiss`/click-into-gameplay:
   **ydotool** available on the Deck (see "ydotool on SteamOS" below).
@@ -56,15 +59,17 @@ Player 1 is the local rig, player 2 is the Deck. The seed config (`scripts/rig/s
 pairing key) and settings by default. Typical run:
 
 ```bash
+export DECK_HOST=deck@10.10.1.57 DECK_PORT=2222     # this network's Deck
+
 # Player 2 (Deck) — once:
-DECK_HOST=deck@10.10.1.57 scripts/deck.sh setup
-DECK_HOST=deck@10.10.1.57 scripts/deck.sh seed-save        # same character as the rig (skip intros)
+scripts/deck.sh setup
+scripts/deck.sh seed-save        # same character as the rig (skip intros)
 
 # Each test, both machines on the same build:
-scripts/rig.sh apply                                            # player 1 (this PC)
-DECK_HOST=deck@10.10.1.57 scripts/deck.sh apply            # player 2 (Deck)
-scripts/rig.sh cycle                                            # P1 into gameplay
-DECK_HOST=deck@10.10.1.57 scripts/deck.sh cycle            # P2 into gameplay
+scripts/rig.sh apply             # player 1 (this PC)
+scripts/deck.sh apply            # player 2 (Deck)
+scripts/rig.sh cycle             # P1 into gameplay
+scripts/deck.sh cycle            # P2 into gameplay
 # In-game: one Opens a world, the other Joins (rung-4 lobby + rung-2 side-channel link).
 # Read both logs:  scripts/rig.sh log -f   |   scripts/deck.sh pull-logs && less .deck-logs/*
 ```

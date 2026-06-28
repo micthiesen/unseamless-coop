@@ -20,6 +20,7 @@ set -euo pipefail
 # ---- config (env-overridable) -------------------------------------------------------------------
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DECK_HOST="${DECK_HOST:-}"                 # user@host (key auth). REQUIRED.
+DECK_PORT="${DECK_PORT:-22}"               # SSH port (the Deck on this network listens on 2222).
 DECK_APPID="${DECK_APPID:-1245620}"
 TRIPLE="x86_64-pc-windows-gnu"
 SEED_CONFIG="${SEED_CONFIG:-$ROOT/scripts/rig/seed-config.toml}"
@@ -37,7 +38,7 @@ DECK_SAVE_SRC="${DECK_SAVE_SRC:-}"
 # Extra ssh flags. NOTE: individual option VALUES must not contain spaces — they're also passed to
 # rsync's `-e`, which word-splits them (the flattened `${SSH_OPTS[*]}` form below).
 # shellcheck disable=SC2206  # DECK_SSH_OPTS is meant to word-split into extra ssh flags
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 ${DECK_SSH_OPTS:-})
+SSH_OPTS=(-p "$DECK_PORT" -o BatchMode=yes -o ConnectTimeout=10 ${DECK_SSH_OPTS:-})
 
 # ---- output helpers -----------------------------------------------------------------------------
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
