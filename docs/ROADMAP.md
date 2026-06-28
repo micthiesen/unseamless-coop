@@ -138,13 +138,14 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   > or `vtable[0x108](…)==null` (@`0x1423f5c87`); see [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
   > **Reject #1 confirmed but insufficient (2026-06-28 `force_netsession_ready` run):** `NetworkSession+0x10`
   > *is* 0 offline (as predicted), but forcing it nonzero did **not** unblock — create still
-  > `FailedToCreateSession`. Leg B's real return is the finalize `0x1423fab40 → 0x1423fa1b0`, which reads the
-  > **online-service singleton `0x144842d28` — the SAME `0x144842d40` service the parked item-grey hunt
-  > flagged** ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)). **The two hunts have merged: the
-  > create/join gate and the item-grey gate are one online-availability service.** **NEXT: runtime-RE that
-  > service's offline predicate and neutralize it** (unblocks items + create + join at once), and/or **drive
-  > create with a live rung-4 lobby + a real peer** (2-player; the finalize may need a real session context).
-  > Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
+  > `FailedToCreateSession`. Leg B's real return is the finalize `0x1423fab40 → 0x1423fa1b0`, a **session-object
+  > registry/init lookup** (several clean vmethods deep) that yields nothing offline in a *solo* drive. (An
+  > earlier note wrongly called `0x1423fa1b0`'s `0x144842d28` read the item-grey service — it's a numeric hash
+  > modulus, not that service; **no proven link** to the item-grey hunt. Corrected in SESSION-DRIVE.md.)
+  > **NEXT (highest-EV): drive create with a live rung-4 lobby + a real peer** (2-player; the registry lookup
+  > likely needs an actual peer/match context a solo drive can't provide) — set `drive_create` +
+  > `bypass_session_create_gate` + `force_netsession_ready` on both machines. Or keep tracing the registry
+  > chain solo. Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
   > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
   > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real
   > two-player in-world test still need a friend; **create** is solo-confirmable on the rig.

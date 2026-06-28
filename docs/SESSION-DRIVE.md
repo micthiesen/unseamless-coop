@@ -494,29 +494,37 @@ blocker is deeper, and it converges with the item-grey hunt.** Drove create with
 - **Forcing it to 1 (write persisted — a post-run peek read `1`) did NOT unblock:** create still returned
   `false → FailedToCreateSession`, `[G]+0x24 = 0`.
 - **Deeper trace.** Leg B's *return value* is the finalize call `0x1423fab40`, which returns 0 iff
-  `0x1423fa1b0(new_session_obj, &descriptor@0x1423fc6a0, mode)` returns null. And `0x1423fa1b0` reads the
-  global service pointer at **`0x144842d28`** — i.e. the **same service-manager singleton region
-  (`0x144842d40`)** that [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) identifies as "where the
-  offline/no-EAC state actually enters" (its body is control-flow-obfuscated, best read at runtime). **So
-  the session-create offline gate and the parked item-grey gate are the SAME underlying online-availability
-  signal — the two hunts have merged.**
+  `0x1423fa1b0(new_session_obj, cmp_fn@0x1423fc6a0, mode)` returns null. `0x1423fa1b0` is a **registry /
+  hashmap lookup-or-insert** on the freshly-created session object: it takes its bucket count from a
+  *numeric* global at `0x144842d28` (used as a `div` modulus, **not** a pointer), a comparator **callback**
+  `0x1423fc6a0`, and resolves an entry by calling vmethods on the new session object
+  (`[new_session_vtable+0xd8]`, then a secondary lookup `0x1423fa100`). It returns null when those vmethods
+  yield nothing — i.e. the session entry can't be established offline. So past the gate and reject #1, the
+  create dies in this **session-object registry/init chain**, several clean vmethods deep.
+- **CORRECTION (don't repeat my earlier mistake):** an earlier pass of this note claimed `0x144842d28` was
+  the **same** online-availability service as the item-grey hunt's `0x144842d40`, "merging the two hunts."
+  **That was wrong.** `0x144842d28` is a numeric hash-modulus, not a service pointer; it's merely a `.data`
+  neighbor of `0x144842d40`. There is **no proven link** between the create blocker and the item-grey
+  service — drop that claim.
 - **Caveat (P drift):** `P = *([G]+0x60)` varies across runs/states (`…3f0` / `…450` / `…470`, all in
   `.data`), so a pre-write to `NetworkSession+0x10` may not land on the exact object leg B reads at call
-  time; a rigorous reject-#1 force should write from *inside* a leg-B-entry hook. But the finalize→service
-  dependency above means satisfying reject #1 alone can't clear create regardless.
+  time; a rigorous reject-#1 force should write from *inside* a leg-B-entry hook. But the finalize chain
+  above means satisfying reject #1 alone can't clear create regardless.
 
-**NEXT — the simple per-reject levers are exhausted; this is now the online-availability service itself
-(`0x144842d40`), shared by items + create + join.** Options, in rough order:
-1. **Runtime-RE the service singleton's offline predicate and neutralize it.** It's the convergence point —
-   neutralizing it would unblock the multiplayer items AND session create/join at once. Its leaf is
-   control-flow-obfuscated, so read it at runtime (hook `0x140e43610`/`0x144d985fd` from OFFLINE-ITEMS, or
-   the `0x1423fa1b0` read of `0x144842d28`) to see what status it compares and force that.
-2. **Drive create with a live rung-4 lobby + a real peer (2-player).** The finalize looks up a session
-   entry in the service; that may only be populated with an actual lobby/match context — which we *have*
-   (rung 4) but didn't exercise in the solo drive. This needs a friend (batched with the other 2-player
-   verifications).
-3. **ERSC-style session-layer neutralization** — replace/stub the session encryption + establishment so it
-   doesn't consult the service at all. Heaviest; the fallback if (1)/(2) don't land.
+**NEXT — the simple per-reject levers are exhausted; the offline failure is now down in the session-object
+registry/init chain (`0x1423fa1b0` and the vmethods it calls), several levels deep.** Options, in rough
+order of expected value:
+1. **Drive create with a live rung-4 lobby + a real peer (2-player).** Highest-EV. The finalize is a
+   lookup/insert that yields nothing in a *solo* drive; a real session likely needs an actual peer/lobby
+   match context to populate it. We already build a rung-4 lobby on launch (the seed sets a password), but
+   the solo drive had no peer. This needs a friend — batch it with the other 2-player verifications, and
+   set `[debug.probes] drive_create` + `bypass_session_create_gate` + `force_netsession_ready` on both
+   machines so the create fires with a real peer present.
+2. **Keep tracing the registry/init chain** (`0x1423fa1b0` → `[new_session_vtable+0xd8]` → `0x1423fa100` →
+   …) to the root offline dependency, then satisfy/stub it. Deep but solo-doable; lower EV than (1) since
+   the root may simply *be* "no peer".
+3. **ERSC-style session-layer neutralization** — replace/stub the session establishment wholesale.
+   Heaviest; the fallback.
 
 The reject-#1 lever (`[debug.probes] force_netsession_ready`) stays in the tree as a charted, default-off
 probe — it proved reject #1 is real and not the whole story.

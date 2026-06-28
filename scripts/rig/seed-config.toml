@@ -114,8 +114,9 @@ drive_create = false       # EXPERIMENTAL rung-3 direct-drive: once in-game with
                            # (the create builder calls is_offline twice). See docs/SESSION-DRIVE.md.
 force_netsession_ready = false # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
-                           # INSUFFICIENT (the blocker is deeper — the 0x144842d40 online service); kept as a
-                           # charted probe. Logs the flag's pre-call value either way. See docs/SESSION-DRIVE.md.
+                           # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which
+                           # likely needs a real peer); kept as a charted probe. Logs the flag's pre-call value
+                           # either way. See docs/SESSION-DRIVE.md > "Leg B charted".
 
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
