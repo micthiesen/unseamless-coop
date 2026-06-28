@@ -149,24 +149,47 @@ pub fn ui_viewport(ss: &ScreenSpace, design_height: f32) -> [f32; 2] {
     [design_height * ss.aspect(), design_height]
 }
 
+/// Hard ceiling on filled quads per [`draw_list`] call. Each quad is a CSEzDraw command; the game's
+/// debug-draw command buffer has a finite capacity, and flooding it (a dense text surface = thousands of
+/// glyph quads) overruns it → hard crash. We cap + warn rather than crash: a surface that hits this is
+/// drawing far too much and should window/shrink its content. Tuned below the observed crash threshold.
+const MAX_QUADS_PER_LIST: usize = 6000;
+
 /// Rasterize a `ui::render` [`DrawList`] into screen space via CSEzDraw. `viewport` is the pixel size the
 /// list was laid out in (top-left origin, y-down); use [`ui_viewport`] so `viewport.0/viewport.1 ==
 /// ss.aspect()` and pixels map uniformly (glyphs stay square). Each `Rect` cmd becomes a filled screen
 /// rect; each `Text` cmd is shaped via `bitmap_font` and its glyph rects filled the same way. Painter's
-/// order is preserved. This is the one bridge every native UI surface (toasts/banners/menu) draws through.
-pub fn draw_list(ez: &mut CSEzDraw, ss: &ScreenSpace, viewport: [f32; 2], dl: &DrawList) {
-    for cmd in dl.cmds() {
+/// order is preserved. Returns the number of quads drawn (for profiling). Capped at
+/// [`MAX_QUADS_PER_LIST`] to never overrun the command buffer. The one bridge every native UI surface draws through.
+pub fn draw_list(ez: &mut CSEzDraw, ss: &ScreenSpace, viewport: [f32; 2], dl: &DrawList) -> usize {
+    let mut quads = 0usize;
+    'cmds: for cmd in dl.cmds() {
         match cmd {
             DrawCmd::Rect { rect, color } => {
+                if quads >= MAX_QUADS_PER_LIST {
+                    break;
+                }
                 fill_px_rect(ez, ss, viewport, [rect.x, rect.y, rect.w, rect.h], *color);
+                quads += 1;
             }
             DrawCmd::Text { pos, text, face, color } => {
                 for g in bitmap_font::shape(text, *face) {
+                    if quads >= MAX_QUADS_PER_LIST {
+                        break 'cmds;
+                    }
                     fill_px_rect(ez, ss, viewport, [pos[0] + g.x, pos[1] + g.y, g.w, g.h], *color);
+                    quads += 1;
                 }
             }
         }
     }
+    if quads >= MAX_QUADS_PER_LIST {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("native_draw: draw_list hit the {MAX_QUADS_PER_LIST}-quad cap; a surface is drawing too much (content truncated to avoid a command-buffer overrun)");
+        }
+    }
+    quads
 }
 
 /// Fill a pixel-space rect `[x, y, w, h]` (top-left origin) mapped uniformly into screen NDC via `vp`.

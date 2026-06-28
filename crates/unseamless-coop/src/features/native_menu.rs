@@ -52,7 +52,7 @@ const PLANE_DIST_M: f32 = 0.5;
 /// aspect so glyphs stay square, and [`draw_list`] maps this whole canvas across the screen — so the
 /// number is a *size* knob (bigger ⇒ smaller on-screen chrome), not a resolution. Text is rasterized
 /// to filled quads, so this never blurs glyphs (it's vector scaling, not bitmap sampling).
-const DESIGN_HEIGHT_PX: f32 = 1080.0;
+const DESIGN_HEIGHT_PX: f32 = 600.0;
 /// How many rows the scrolling tabs (Settings / Log) show at once. Drives both the [`Tab::scrolling`]
 /// viewport the [`Navigator`] clamps scroll against and the row window we actually rasterize (we draw
 /// only the visible slice — keeps the per-primitive `CSEzDraw` cost bounded; see native_draw).

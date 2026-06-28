@@ -30,7 +30,7 @@ const PLANE_DIST_M: f32 = 0.5;
 /// `native_draw` scales that uniformly to the real viewport. 1080 is the standard 1080p virtual canvas
 /// (`docs/UI-LIBRARY.md`); a smaller value would enlarge the on-screen UI (the orchestrator can tune
 /// it on the rig if the text reads too small).
-const DESIGN_HEIGHT: f32 = 1080.0;
+const DESIGN_HEIGHT: f32 = 600.0;
 
 /// Draws notifications (toasts + banners) with the native renderer. No-op unless
 /// `[nameplates] native_spike`.
