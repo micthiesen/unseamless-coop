@@ -200,6 +200,16 @@ runtime **or** the item path doesn't use this predicate at all. Reading `0x14458
 low–medium** — "Menu.IsEnableOnlineMode" reads like a dev/menu CVAR that plausibly defaults true even
 without EAC, in which case forcing it true is a no-op. The live read is one cheap command; do it first.
 
+> **RIG RESULT (orchestrator, 2026-06-28): candidate (a) RULED OUT.** Read `0x144588afc` live at the
+> title screen (`watch-write.py --peek 0x144588afc --peek-len 8`): `01 00 00 00 05 05 00 80` — **byte0
+> = 1**, so `IsEnableOnlineMode()` is **TRUE** outside EAC. Forcing it true (`force_online_menu_mode`)
+> is therefore a **no-op** and cannot be the item gate. Combined with the earlier disproof
+> (`is_offline()` ruled out) and the leaf `0x140764fe0` being callerless, the whole
+> `IsEnableOnlineMode() && !is_offline()` family is eliminated. **The item-grey gate is candidate (b):
+> a different signal the item-usability path consults (a direct EAC / matchmaking-session-availability
+> check), found via the runtime recipe below.** `force_online_menu_mode` is left in (inert, default
+> OFF, now known no-op) pending removal; the next move is the Frida pass.
+
 ### The landed candidate patch (`[gameplay] force_online_menu_mode`, default OFF)
 
 Wired in `coop/app.rs::apply_boot_patches`, behind a **new, default-off** flag so it can't affect

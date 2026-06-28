@@ -207,10 +207,20 @@ def main():
                     help="watch base+0xc (lobby_state); reads base from G")
     ap.add_argument("--addr", type=lambda s: int(s, 0), default=None,
                     help="explicit absolute address to watch (4-byte write)")
+    ap.add_argument("--peek", type=lambda s: int(s, 0), default=None,
+                    help="read --peek-len bytes at this absolute address and exit (no watch)")
+    ap.add_argument("--peek-len", type=int, default=1)
     ap.add_argument("--max-hits", type=int, default=20)
     args = ap.parse_args()
 
     pid = args.pid or find_pid()
+
+    if args.peek is not None:
+        data = read_mem(pid, args.peek, args.peek_len)
+        hexs = " ".join(f"{b:02x}" for b in data)
+        print(f"[{args.peek:#x}] = {hexs}"
+              + (f"   (byte0 = {data[0]})" if data else ""))
+        return
 
     if args.read_base:
         base = read_base(pid)
