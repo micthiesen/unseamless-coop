@@ -242,6 +242,24 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 
 ## Why a direct create fails offline (static, 2026-06-27, worker `create-gate`)
 
+> **RIG RESULT (orchestrator, 2026-06-28): the GATE rejected, and flipping its branch is NOT enough.**
+> Re-drove `drive_create` with **both** `enable_offline_multiplayer` and `bypass_session_create_gate`
+> applied (boot log: `patched 'bypass_session_create_gate': [75] -> [EB]`). Result: still
+> `FailedToCreateSession`, and a live peek of **`[G]+0x24 = 00 00 00 00`** (never written) with
+> `[G]+0xc = 2`. Per the recipe below, `[G]+0x24` un-written ⇒ the **gate rejected** — i.e. control
+> never reached the network-create (leg B). So even with the gate's success-edge `jne→jmp` flipped, the
+> create still fails at the gate: the encrypted gate's `false` verdict is **load-bearing deeper than the
+> single branch** — it almost certainly sets failure state (or a second check) the create path consults
+> downstream, before leg B. **Bypassing the one branch is insufficient.** Next options, in rough order:
+> (1) **runtime-RE the gate** — it's Arxan-encrypted in `.text` but decrypted in memory at runtime, so
+> a Frida/ptrace dump of `0x140cb4b50`'s live body reveals what it actually checks (likely an EAC /
+> entitlement / online-session-available signal — possibly the same 4th signal the item-grey hunt
+> chased); (2) **ilhook-redirect the gate *call*** to a stub that returns `true` AND skips the real
+> gate entirely (no encrypted-`.text` patch, avoids its failure side-effects — but may also skip setup
+> the create needs); (3) **route around it** — call the network-create leg B vmethod directly, past the
+> wrapper/inner that hold the gate. The simple boot-patch lever is exhausted; this needs runtime RE.
+
+
 The rung-3 direct-drive is **proven to fire but be rejected**: calling the create wrapper
 `0x140cad4c0` on `[G]` (`this`=live `CSSessionManager`, `flag=0`, `mode=4`, `settings={u16:0,u32:2}`,
 no item, no peer) moved `lobby_state None → FailedToCreateSession` **synchronously** — one transition,
