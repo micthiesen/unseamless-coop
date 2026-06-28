@@ -136,9 +136,15 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   > via `this→*(this+0x60)→+0x710→VT=*()→VT[1]`; CLEAN, not Arxan), and it returns 0 on any of **three
   > early rejects** — `*(NetworkSession+0x10)==0` (@`0x1423f5c4f`), `vtable[0xe8](…)==false` (@`0x1423f5c69`),
   > or `vtable[0x108](…)==null` (@`0x1423f5c87`); see [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
-  > **NEXT (narrow): hook `0x1423f5c00` on a `bypass`+`drive_create` run and see which of those three
-  > branches is taken offline** — that names the exact offline-reject to satisfy/stub. Keep
-  > `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
+  > **Reject #1 confirmed but insufficient (2026-06-28 `force_netsession_ready` run):** `NetworkSession+0x10`
+  > *is* 0 offline (as predicted), but forcing it nonzero did **not** unblock — create still
+  > `FailedToCreateSession`. Leg B's real return is the finalize `0x1423fab40 → 0x1423fa1b0`, which reads the
+  > **online-service singleton `0x144842d28` — the SAME `0x144842d40` service the parked item-grey hunt
+  > flagged** ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)). **The two hunts have merged: the
+  > create/join gate and the item-grey gate are one online-availability service.** **NEXT: runtime-RE that
+  > service's offline predicate and neutralize it** (unblocks items + create + join at once), and/or **drive
+  > create with a live rung-4 lobby + a real peer** (2-player; the finalize may need a real session context).
+  > Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
   > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
   > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real
   > two-player in-world test still need a friend; **create** is solo-confirmable on the rig.

@@ -244,6 +244,14 @@ pub struct DebugProbes {
     /// `lobby_state -> 1` confirms direct-drive; `-> 2` (FailedToCreate) means an internal gate
     /// rejected it. Solo-confirmable (create needs no peer); join stays 2-player.
     pub drive_create: bool,
+    /// **EXPERIMENTAL rung-3 reject-#1 lever** (pairs with [`drive_create`]): just before the driven
+    /// create call, force the network-create vmethod's first synchronous reject to pass by writing a
+    /// nonzero to the readiness flag at `*([G]+0x60)+0x710 + 0x10` (`NetworkSession+0x10`, the dword the
+    /// charted leg-B vmethod `0x1423f5c00` tests first; its other two rejects can't fire offline — see
+    /// `docs/SESSION-DRIVE.md` > "Leg B charted"). The driver logs the flag's pre-call value regardless;
+    /// this only *writes* it. A rig experiment to see whether satisfying reject #1 lets create walk
+    /// `None -> TryToCreateSession -> Host` offline. Off by default.
+    pub force_netsession_ready: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

@@ -303,12 +303,31 @@ type CreateFn =
 /// before/return/after under the `session-probe:` prefix (the FSM logger then traces the transition).
 pub struct SessionCreateDriver {
     fired: bool,
+    /// When true, satisfy leg B's reject #1 by writing `NetworkSession+0x10` nonzero just before the
+    /// create call (`force_netsession_ready` probe). The flag's pre-call value is logged either way.
+    force_ready: bool,
 }
 
 impl SessionCreateDriver {
-    fn new() -> Self {
-        Self { fired: false }
+    fn new(force_ready: bool) -> Self {
+        Self { fired: false, force_ready }
     }
+}
+
+/// Resolve the embedded `NetworkSession`'s readiness flag `&*([G]+0x60)+0x710 + 0x10` from the live
+/// `CSSessionManager*` — the dword the charted leg-B vmethod (`0x1423f5c00`) tests first (reject #1).
+/// Returns `None` if the `*(this+0x60)` pointer is null (manager not fully wired). The chain was
+/// charted live (`this->*(this+0x60)->+0x710 = NetworkSession`, vtable slot 1 = leg B) — see
+/// `docs/SESSION-DRIVE.md` > "Leg B charted".
+fn netsession_ready_flag(base: usize) -> Option<*mut u32> {
+    // SAFETY: `base` is the live `CSSessionManager*` (just read from the SDK singleton); `+0x60` holds a
+    // pointer `P` into a `.data` singleton. Read it as a pointer, and if non-null, `P+0x710+0x10` is the
+    // `NetworkSession` readiness dword. Read-only deref of `base+0x60` here; the caller does any write.
+    let p = unsafe { *((base + 0x60) as *const usize) };
+    if p == 0 {
+        return None;
+    }
+    Some((p + 0x710 + 0x10) as *mut u32)
 }
 
 impl Feature for SessionCreateDriver {
@@ -363,6 +382,25 @@ impl Feature for SessionCreateDriver {
         // natural host path uses, on the main thread, with lobby_state == None (its precondition).
         let create: CreateFn = unsafe { std::mem::transmute::<usize, CreateFn>(fn_addr) };
         let settings = CreateSettings { a: 0, b: 2 };
+
+        // Reject #1 (rung-3): leg B (the network-create vmethod 0x1423f5c00) fails offline iff the dword
+        // at NetworkSession+0x10 is 0. Log its pre-call value for confirmation, and — when the
+        // force_netsession_ready probe is on — write it nonzero to see if create then proceeds past leg B.
+        if let Some(flag) = netsession_ready_flag(base) {
+            let before = unsafe { flag.read_volatile() };
+            log::info!(
+                "session-probe: drive-create — NetworkSession+0x10 (reject#1 flag) = {before} before create",
+            );
+            if self.force_ready {
+                unsafe { flag.write_volatile(1) };
+                log::info!(
+                    "session-probe: drive-create — forced NetworkSession+0x10 = 1 (satisfy reject #1)",
+                );
+            }
+        } else {
+            log::info!("session-probe: drive-create — NetworkSession ptr (*(this+0x60)) null; skipping reject#1 probe");
+        }
+
         log::info!(
             "session-probe: drive-create @frame {} — calling create wrapper {:#x}(this={:#x}, flag={}, mode={}, settings={{0,2}}); lobby was None",
             tick.frame, fn_addr, base, DRIVE_FLAG, DRIVE_MODE,
@@ -389,7 +427,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
         features.push(Box::new(SessionFsmProbe::new()));
     }
     if config.debug.probes.drive_create {
-        features.push(Box::new(SessionCreateDriver::new()));
+        features.push(Box::new(SessionCreateDriver::new(config.debug.probes.force_netsession_ready)));
     }
     features
 }

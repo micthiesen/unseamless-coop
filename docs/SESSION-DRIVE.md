@@ -484,14 +484,42 @@ dword at `*([G]+0x60)+0x710 + 0x10`, read by the trivial getter `0x141eba210` (`
 readiness/enabled flag the game leaves 0 outside an online session. **This is the whole rung-3 create
 wall, narrowed to one 4-byte flag.**
 
-**NEXT (build + solo-test, no friend needed):** satisfy reject #1 — resolve `NetworkSession =
-*([G]+0x60)+0x710` and **set `[NetworkSession+0x10]` nonzero just before the `bypass`+`drive_create`
-call**, then check whether create now walks `None → TryToCreateSession → Host` instead of
-`FailedToCreateSession`. Caveats to watch on the rig: the flag may need to be a *meaningful* value (a real
-handle/count) rather than a bare `1`, and even if create reaches `Host`, the session may fault deeper when
-it tries to actually network without a real Steam session — that's the next layer if this flag clears.
-This is the same shape as ERSC "re-enable what offline disables," now localized to a clean readable
-function instead of the encrypted gate.
+**RIG RESULT (2026-06-28, `force_netsession_ready` probe): reject #1 confirmed but NOT sufficient — the
+blocker is deeper, and it converges with the item-grey hunt.** Drove create with `bypass` +
+`enable_offline_multiplayer` + a new probe that resolves `NetworkSession = *([G]+0x60)+0x710` and writes
+`[NetworkSession+0x10]` nonzero just before the call:
+
+- **`NetworkSession+0x10 = 0` offline (confirmed),** exactly as the reject-#1 hypothesis predicted — the
+  static read was right.
+- **Forcing it to 1 (write persisted — a post-run peek read `1`) did NOT unblock:** create still returned
+  `false → FailedToCreateSession`, `[G]+0x24 = 0`.
+- **Deeper trace.** Leg B's *return value* is the finalize call `0x1423fab40`, which returns 0 iff
+  `0x1423fa1b0(new_session_obj, &descriptor@0x1423fc6a0, mode)` returns null. And `0x1423fa1b0` reads the
+  global service pointer at **`0x144842d28`** — i.e. the **same service-manager singleton region
+  (`0x144842d40`)** that [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) identifies as "where the
+  offline/no-EAC state actually enters" (its body is control-flow-obfuscated, best read at runtime). **So
+  the session-create offline gate and the parked item-grey gate are the SAME underlying online-availability
+  signal — the two hunts have merged.**
+- **Caveat (P drift):** `P = *([G]+0x60)` varies across runs/states (`…3f0` / `…450` / `…470`, all in
+  `.data`), so a pre-write to `NetworkSession+0x10` may not land on the exact object leg B reads at call
+  time; a rigorous reject-#1 force should write from *inside* a leg-B-entry hook. But the finalize→service
+  dependency above means satisfying reject #1 alone can't clear create regardless.
+
+**NEXT — the simple per-reject levers are exhausted; this is now the online-availability service itself
+(`0x144842d40`), shared by items + create + join.** Options, in rough order:
+1. **Runtime-RE the service singleton's offline predicate and neutralize it.** It's the convergence point —
+   neutralizing it would unblock the multiplayer items AND session create/join at once. Its leaf is
+   control-flow-obfuscated, so read it at runtime (hook `0x140e43610`/`0x144d985fd` from OFFLINE-ITEMS, or
+   the `0x1423fa1b0` read of `0x144842d28`) to see what status it compares and force that.
+2. **Drive create with a live rung-4 lobby + a real peer (2-player).** The finalize looks up a session
+   entry in the service; that may only be populated with an actual lobby/match context — which we *have*
+   (rung 4) but didn't exercise in the solo drive. This needs a friend (batched with the other 2-player
+   verifications).
+3. **ERSC-style session-layer neutralization** — replace/stub the session encryption + establishment so it
+   doesn't consult the service at all. Heaviest; the fallback if (1)/(2) don't land.
+
+The reject-#1 lever (`[debug.probes] force_netsession_ready`) stays in the tree as a charted, default-off
+probe — it proved reject #1 is real and not the whole story.
 
 ### Tooling / re-derivation
 
