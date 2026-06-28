@@ -49,6 +49,10 @@ fn rung3_create_chart() -> Guide {
             ("Yes — selectable", Advance::Next),
             ("No — still greyed", Advance::To("patch-failed")),
         ])
+        // Look-first: the answer needs the tester to OPEN their inventory and look, so render as a
+        // non-blocking banner first and only open the blocking modal on the done chord — otherwise the
+        // modal grabs input the instant it's active and the tester can't go check.
+        .look_first()
         .default_branch(Advance::To("patch-failed"))
         .step(
             "host",
@@ -316,12 +320,19 @@ mod tests {
         let hints = ControlHints { done: "D", skip: "S" };
         let mut r = GuideRunner::start(rung3_create_chart(), Role::Solo, hints);
 
-        // boot auto-finishes on InGame -> the items-enabled choice step (a choice renders as a modal:
-        // banner is None, the prompt rides on the choice view).
+        // boot auto-finishes on InGame -> the items-enabled choice step. It's `.look_first()`, so it
+        // renders FIRST as a non-blocking banner (the tester opens their inventory to check) — NOT the
+        // modal yet — and the banner hints "answer" for the done chord.
         let in_game = RigState { game_state: GameState::InGame, ..Default::default() };
         let boot = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: ChoiceInput::default() };
-        let view = r.tick(&boot).choice.expect("boot -> items-enabled choice modal");
-        assert!(view.prompt.contains("greyed"), "items-enabled prompt, got: {}", view.prompt);
+        let banner = r.tick(&boot).banner.expect("look_first: items-enabled shows a banner first, not a modal");
+        assert!(banner.contains("greyed"), "items-enabled banner prompt, got: {banner}");
+        assert!(banner.contains("= answer"), "look-first banner hints 'answer' for the done chord, got: {banner}");
+
+        // The done chord OPENS the modal (a single long-held frame crosses the hold threshold).
+        let open = GuideInput { delta: 1.0, state: &in_game, new_log_lines: &[], done_held: true, skip_held: false, choice: ChoiceInput::default() };
+        let view = r.tick(&open).choice.expect("done chord opens the items-enabled modal");
+        assert!(view.prompt.contains("greyed"), "opened modal carries the prompt, got: {}", view.prompt);
 
         // items-enabled: confirm the first option ("Yes — selectable") -> Advance::Next -> the host step.
         let yes = GuideInput { delta: 0.1, state: &in_game, new_log_lines: &[], done_held: false, skip_held: false, choice: ChoiceInput { up: false, down: false, confirm: true, note: "" } };

@@ -56,6 +56,7 @@ a modifier to opt out of a default. The modifiers chain after the `.step(...)` t
 | `.stub("reason")` | Mark a not-yet-executable step (renders as `[PENDING: reason]`; advances on done/skip, never auto). |
 | `.choice(&[(label, advance)])` | Make this a **choice step**: a focused modal of preset options; selecting one logs the answer and advances per its `Advance`. The **last resort after logging** (see below). Supersedes `done_when`/`branch`. |
 | `.note()` | On a choice step, also offer an optional **keyboard** free-form note field; whatever's typed is logged with the answer. |
+| `.look_first()` | On a choice step, render it FIRST as a non-blocking banner (so the tester can inspect the game), and only open the blocking modal on the done chord. For a choice whose answer needs in-game inspection. See below. |
 
 The `id` is a short stable string, unique within the guide; `.branch(...)`/`Advance::To` address steps
 by it.
@@ -182,6 +183,29 @@ normal manual step. A choice throws nothing away: even a skip is logged (`-> 'sk
 - `.choice(...)` supersedes `done_when`/`branch` (the option's own `Advance` is the branch). Give it a
   `.default_branch(...)` so skip is sensible, exactly like a branching step.
 
+### Look-first choices (inspect the game, then answer)
+
+A plain choice step opens its blocking modal the **instant** it becomes active and grabs input focus, so
+the tester can't go look at the game before answering. When the answer needs **in-game inspection** — open
+the inventory to see if an item is greyed, look at a nameplate's placement, check a menu state — add
+`.look_first()`. The step then renders FIRST as a normal, non-blocking top banner (prompt + a `hold L3 +
+Up = answer` hint); the tester interacts with the game freely, and only when they press the **done chord**
+does the blocking modal open to commit an answer. Skip still escapes from the banner (logged `skipped`,
+taking the `default_branch`), so the never-trap rule holds before the modal is ever opened.
+
+```rust
+.step("items-enabled", "Open your inventory and look at the multiplayer items. Are they selectable?")
+    .choice(&[("Yes", Advance::Next), ("No", Advance::To("patch-failed"))])
+    .look_first()                                 // banner first; done chord opens the modal
+    .default_branch(Advance::To("patch-failed"))  // where SKIP goes (from the banner OR the modal)
+```
+
+**When to use it:** the answer is irreducibly perceptual AND requires the tester to *go interact with the
+game* (move the camera, open a menu) before they can judge. **When NOT to:** a choice answerable on sight
+— "does this modal render clearly?" (an overlay self-check), "is the banner legible?" — keeps the default
+immediate modal; `.look_first()` would just add a needless extra press. Chain it directly after
+`.choice(...)`.
+
 ## Controls & rendering (you don't write these)
 
 - The tester advances with **hold `L3 + D-pad Up`** (done) and skips with **press `L3 + D-pad Down`**
@@ -202,6 +226,9 @@ normal manual step. A choice throws nothing away: even a skip is logged (`-> 'sk
 - [ ] A `.choice(...)` only for an irreducibly human-perceptual signal whose answer matters (the last
       resort after logging) — never as a manual "press to continue". Give it a `.default_branch(...)`;
       add `.note()` only if free-form detail is worth capturing. The answer is logged either way.
+- [ ] Add `.look_first()` to a choice whose answer needs in-game inspection (open a menu, look at the
+      world) — banner first, modal on the done chord. Leave an on-sight choice (a render self-check) as
+      the default immediate modal.
 - [ ] Role-tag steps for two-player guides; leave shared steps untagged.
 - [ ] Stub anything not yet executable rather than leaving it out.
 - [ ] `scripts/test-core.sh` green (the registry test builds every named guide).

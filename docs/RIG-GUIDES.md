@@ -140,6 +140,19 @@ controls. The skip chord still escapes. The optional free-form **note** is **key
 has a keyboard; there's no controller text entry / virtual keyboard) — a controller-only tester uses
 the presets + skip, free-form needs a keyboard.
 
+**Look-first (`.look_first()`).** When the answer needs the tester to *go interact with the game* (open
+the inventory to see if an item is greyed, look at a nameplate) before judging, the default
+opens-immediately modal is wrong — it grabs input focus the instant the step is active, so the tester
+can't go look. `.look_first()` splits it in two: the step first renders as a normal, **non-blocking**
+banner (the engine returns a `TickResult` with `banner = Some(prompt + a "hold … = answer" hint)` and
+`choice = None`, which the binding publishes as a `RigView::Banner`, so the overlay takes **no** input
+focus), and only when the tester presses the **done chord** does the engine flip a per-step
+`choice_opened` flag and start returning the `ChoiceView` modal. From then on
+it's an ordinary modal (nav + confirm resolves). Skip escapes from the banner too (logged `skipped`,
+default branch), so never-trap holds before the modal is ever opened; `choice_opened` resets on every
+advance, so a look-first choice that loops back re-arms as a banner. All host-tested in `guide.rs`; the
+overlay binding needs no special case (it already switches on banner-vs-`ChoiceView`).
+
 ### Controls (the one TBD — picked, documented, swappable)
 
 Two deliberately-awkward, **standard-bit** chords (no Guide/Home button, so they survive Steam

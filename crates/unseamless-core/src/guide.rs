@@ -345,6 +345,15 @@ pub struct Step {
     /// Whether a choice step also offers an optional free-form **note** field (keyboard-entered in the
     /// overlay). The captured note rides on the logged [`ChoiceMade`]. Only meaningful with `choice`.
     choice_note: bool,
+    /// `true` makes a choice step **look-first**: instead of opening its blocking modal the instant it
+    /// becomes active, it renders FIRST as a normal, non-blocking pinned banner (prompt + a "hold … =
+    /// answer" hint), so the tester can go inspect the game (open the inventory, look at a nameplate)
+    /// before committing an answer. The done chord then **opens** the modal (rather than answering),
+    /// after which it's an ordinary choice modal (nav + confirm resolves). Skip still escapes from the
+    /// unopened banner via the default branch (never-trap holds). Opt-in via [`Guide::look_first`]; a
+    /// choice answerable on sight (e.g. "does this modal render clearly?") keeps the default
+    /// immediate-modal behaviour. Only meaningful with `choice`.
+    look_first: bool,
     /// `true` marks the standard **connect step** (appended by [`Guide::connect_step`]): shown to every
     /// machine, it derives the runner's [`Role`] from the tester's Open/Join action
     /// ([`RigState::lobby_intent`]) and auto-finishes once that intent resolves. Open World ⇒
@@ -367,6 +376,7 @@ impl Step {
             stub: None,
             choice: None,
             choice_note: false,
+            look_first: false,
             connect: false,
         }
     }
@@ -518,6 +528,26 @@ impl Guide {
     /// styling on a non-choice step (the modal is what renders the field).
     pub fn note(mut self) -> Self {
         self.last_mut().choice_note = true;
+        self
+    }
+
+    /// Make a [`choice`](Self::choice) step **look-first**: it renders FIRST as a normal, non-blocking
+    /// banner (so the tester can inspect the game), and only **opens** the blocking modal when the done
+    /// chord is pressed. Use it for a choice whose answer needs in-game inspection — the bug it fixes is
+    /// that a plain choice grabs input focus the instant it's active, so the tester can't go look (open
+    /// the inventory, check a nameplate) before answering. While the banner is up, the done chord opens
+    /// the modal (the banner hints "answer", not "done"); skip still escapes via the default branch
+    /// (never-trap). Once opened it's an ordinary modal. A choice answerable on sight (e.g. a render
+    /// self-check) should NOT use this — keep the default immediate modal. Only valid on a choice step.
+    pub fn look_first(mut self) -> Self {
+        let step = self.last_mut();
+        debug_assert!(
+            step.choice.is_some(),
+            "step '{}' uses .look_first() without .choice() — look_first only applies to a choice step \
+             (chain it after .choice())",
+            step.id,
+        );
+        step.look_first = true;
         self
     }
 
@@ -676,6 +706,11 @@ pub struct GuideRunner {
     /// Selection index within the current **choice step** (reset to 0 on every advance). Engine-held so
     /// the nav/clamp/wrap logic stays host-tested; the overlay only renders [`ChoiceView::selected`].
     choice_sel: usize,
+    /// Whether the current step's **look-first** choice modal has been opened yet (reset to `false` on
+    /// every advance). Only meaningful on a `look_first` choice step: while `false` the step renders as a
+    /// non-blocking banner and the done chord opens it; once `true` it's the ordinary modal. A
+    /// non-look-first choice ignores this (it's always "opened").
+    choice_opened: bool,
     /// Set on the tick a choice resolves, surfaced once via [`TickResult::choice_made`] (recomputed
     /// each tick like [`just_finished`](Self::just_finished)).
     just_made_choice: Option<ChoiceMade>,
@@ -701,6 +736,7 @@ impl GuideRunner {
             step_log: VecDeque::new(),
             just_finished: false,
             choice_sel: 0,
+            choice_opened: false,
             just_made_choice: None,
             just_derived_role: None,
         };
@@ -744,6 +780,29 @@ impl GuideRunner {
         // Skip: rising edge of the skip chord (a press, not a hold).
         let skip_fired = input.skip_held && !self.prev_skip;
         self.prev_skip = input.skip_held;
+
+        // Look-first choice, not yet opened: the step shows as a NON-BLOCKING banner so the tester can
+        // go inspect the game before answering (the bug this fixes — a plain choice grabs input focus the
+        // instant it's active). The done chord OPENS the modal (it doesn't answer); skip still escapes
+        // via the default branch (never-trap holds); modal nav/confirm are inert until opened. Once
+        // opened, control falls through to the ordinary modal path below.
+        if self.guide.steps[idx].choice.is_some()
+            && self.guide.steps[idx].look_first
+            && !self.choice_opened
+        {
+            let step_id = self.guide.steps[idx].id;
+            let skip_to = self.guide.steps[idx].skip_to.clone();
+            // Same precedence as a normal step (done > skip): a done hold opens; otherwise a skip edge
+            // escapes. Skip is logged as `skipped` and captured like any answer (never thrown away).
+            if done_fired {
+                self.choice_opened = true;
+            } else if skip_fired {
+                let made = ChoiceMade { step_id, label: "skipped", note: String::new() };
+                self.just_made_choice = Some(made);
+                self.advance(skip_to.unwrap_or(Advance::Next), idx);
+            }
+            return self.render();
+        }
 
         // Choice step: driven by the modal nav/confirm (overlay menu layer) + the skip chord, not the
         // done/auto path. Handled here and returned, so a choice never consults `done_when`/`branch`.
@@ -872,6 +931,21 @@ impl GuideRunner {
         match self.current {
             Some(idx) => {
                 let step = &self.guide.steps[idx];
+                // A look-first choice that hasn't been opened yet renders as a normal, non-blocking
+                // pinned banner (NOT the modal): `banner` is `Some`, `choice` is `None`, so the overlay
+                // doesn't take input focus and the tester can inspect the game. The done chord opens it
+                // (handled in `tick`), after which the modal branch below takes over.
+                if step.choice.is_some() && step.look_first && !self.choice_opened {
+                    return TickResult {
+                        banner: Some(self.banner_for(step, true)),
+                        color: step_color(step.id),
+                        finished_now: false,
+                        stub: false,
+                        choice: None,
+                        choice_made,
+                        role_derived,
+                    };
+                }
                 // A choice step renders as a modal, not a pinned banner: `banner` is `None`, `choice`
                 // carries the model. The colour is a normal per-step hue (a choice is never a stub).
                 if let Some(options) = step.choice.as_ref() {
@@ -898,7 +972,7 @@ impl GuideRunner {
                 let stub = step.stub.is_some();
                 let color = if stub { PENDING_BANNER_COLOR } else { step_color(step.id) };
                 TickResult {
-                    banner: Some(self.banner_for(step)),
+                    banner: Some(self.banner_for(step, false)),
                     color,
                     finished_now: false,
                     stub,
@@ -921,8 +995,14 @@ impl GuideRunner {
 
     /// Render a step's pinned banner: a `[PENDING: reason]` prefix for a stub, the instruction text,
     /// then the auto-appended control hints (authors never write these). Plain/diagnostic voice.
-    fn banner_for(&self, step: &Step) -> String {
-        let hints = format!("(hold {} = done, {} = skip)", self.hints.done, self.hints.skip);
+    /// `answer_hint` switches the done-chord label from "done" to
+    /// "answer" — set only for the unopened **look-first** choice banner, where the done chord OPENS the
+    /// modal to commit an answer (rather than finishing the step). Passed explicitly by the caller (which
+    /// knows the render state) rather than re-inferred here, so the two banner states stay decoupled.
+    fn banner_for(&self, step: &Step, answer_hint: bool) -> String {
+        let done_label = if answer_hint { "answer" } else { "done" };
+        let hints =
+            format!("(hold {} = {done_label}, {} = skip)", self.hints.done, self.hints.skip);
         // ASCII only: the overlay's pinned banner uses the Spleen ASCII-subset font, so a non-ASCII
         // glyph (em dash, etc.) would render blank — keep markers/separators plain.
         match step.stub {
@@ -946,6 +1026,7 @@ impl GuideRunner {
         self.step_elapsed = 0.0;
         self.done_hold = 0.0;
         self.choice_sel = 0; // a fresh step's modal (if any) starts on its first option
+        self.choice_opened = false; // a fresh look-first choice starts as a banner, unopened
         // Keep `done_consumed` true if the done chord is still held (set by the caller on a manual
         // finish): the tester must release and re-hold to advance the next step. `prev_skip` likewise
         // stays so a still-held skip doesn't re-fire on the next step.
@@ -1654,6 +1735,132 @@ mod tests {
         done.done_held = true;
         done.delta = HOLD_FRAME;
         assert!(r.tick(&done).choice.is_some(), "a completed done hold does not resolve a choice step");
+    }
+
+    // --- Look-first choice (banner first, modal on the done chord) -----------------------------------
+
+    fn look_first_guide() -> Guide {
+        // A look-first choice branching two ways, then the landing steps.
+        Guide::new("g")
+            .step("inspect", "Go look, then answer")
+            .choice(&[("Yes", Advance::To("yes")), ("No", Advance::To("no"))])
+            .look_first()
+            .default_branch(Advance::To("no"))
+            .step("yes", "landed yes")
+            .step("no", "landed no")
+    }
+
+    #[test]
+    fn look_first_renders_a_banner_not_a_modal_until_opened() {
+        let mut r = GuideRunner::start(look_first_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        // Unopened: a non-blocking banner (so the overlay takes no input focus), not the modal.
+        let out = idle_tick(&mut r, &state);
+        let banner = out.banner.expect("a look-first choice shows a banner before it's opened");
+        assert!(out.choice.is_none(), "no modal while unopened — the banner replaces it");
+        assert!(banner.contains("Go look, then answer"), "banner carries the prompt");
+        // The done chord reads "answer" (it opens the modal), not "done".
+        assert!(banner.contains("hold DONE = answer"), "look-first banner hints 'answer', got: {banner}");
+    }
+
+    #[test]
+    fn look_first_done_opens_the_modal_then_confirm_resolves() {
+        let mut r = GuideRunner::start(look_first_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        idle_tick(&mut r, &state); // show the banner
+        // The done chord opens the modal (banner clears, the ChoiceView appears, still on this step).
+        let opened = done_tick(&mut r, &state);
+        assert!(opened.banner.is_none(), "opening clears the banner");
+        let view = opened.choice.expect("the done chord opens the modal");
+        assert_eq!(view.step_id, "inspect");
+        assert_eq!(view.selected, 0, "the opened modal starts on the first option");
+        assert!(opened.choice_made.is_none(), "opening is not answering — nothing resolved yet");
+        // Now it's an ordinary modal: nav to "No" (index 1) and confirm -> its To("no").
+        r.tick(&choice_input(&state, false, true, false, ""));
+        let out = r.tick(&choice_input(&state, false, false, true, ""));
+        let made = out.choice_made.expect("confirm resolves the opened modal");
+        assert_eq!(made.label, "No");
+        assert!(out.banner.unwrap().contains("landed no"), "confirm takes the option's branch");
+    }
+
+    #[test]
+    fn look_first_skip_escapes_while_unopened_via_the_default_branch() {
+        // never-trap: a look-first choice must be escapable from its banner state without ever opening
+        // the modal. Skip logs `skipped` and takes the default branch.
+        let mut r = GuideRunner::start(look_first_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        idle_tick(&mut r, &state); // show the banner (unopened)
+        let out = skip_tick(&mut r, &state);
+        let made = out.choice_made.expect("skip still captures the answer, even unopened");
+        assert_eq!(made.label, "skipped", "an unopened look-first skip logs 'skipped'");
+        assert!(out.banner.unwrap().contains("landed no"), "skip takes default_branch To('no')");
+    }
+
+    #[test]
+    fn look_first_modal_nav_is_inert_until_opened() {
+        // While the banner is up, the modal nav/confirm channel does nothing (there's no modal to drive):
+        // a confirm can't resolve the step and nav can't move a hidden selection.
+        let mut r = GuideRunner::start(look_first_guide(), Role::Solo, HINTS);
+        let state = RigState::default();
+        idle_tick(&mut r, &state);
+        // A confirm while unopened is ignored — still on the banner, nothing resolved.
+        let out = r.tick(&choice_input(&state, false, true, true, ""));
+        assert!(out.banner.is_some() && out.choice.is_none(), "nav/confirm inert until the modal opens");
+        assert!(out.choice_made.is_none(), "a confirm can't resolve an unopened look-first choice");
+    }
+
+    #[test]
+    fn look_first_resets_to_unopened_on_re_entry() {
+        // A look-first choice that loops back to itself must re-arm as a banner (unopened) each time, so
+        // the tester can re-inspect — the per-step `choice_opened` flag resets on advance.
+        let guide = Guide::new("g")
+            .step("loop", "look again")
+            .choice(&[("Again", Advance::To("loop")), ("Out", Advance::To("out"))])
+            .look_first()
+            .default_branch(Advance::To("out"))
+            .step("out", "escaped");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        idle_tick(&mut r, &state); // banner
+        done_tick(&mut r, &state); // open the modal
+        // Confirm "Again" (index 0) -> To("loop"): back on the step, and it's a BANNER again (re-armed).
+        let looped = r.tick(&choice_input(&state, false, false, true, ""));
+        assert!(looped.banner.is_some() && looped.choice.is_none(), "re-entry re-arms the banner (unopened)");
+        assert!(looped.banner.unwrap().contains("look again"));
+    }
+
+    #[test]
+    fn entering_a_look_first_step_with_done_still_held_does_not_auto_open() {
+        // The load-bearing invariant: a tester who finishes the *previous* step with the done chord and
+        // is still holding it as the look-first step becomes active must NOT have the modal pop open under
+        // them — the inspect window has to survive a held chord. (`done_consumed` stays set across the
+        // advance until release, so `done_fired` can't re-fire without a release+re-hold.)
+        let guide = Guide::new("g")
+            .step("prev", "previous step")
+            .step("inspect", "go look")
+            .choice(&[("Yes", Advance::Next)])
+            .look_first()
+            .step("end", "end");
+        let mut r = GuideRunner::start(guide, Role::Solo, HINTS);
+        let state = RigState::default();
+        idle_tick(&mut r, &state); // show "prev"
+        // Finish "prev" with the done chord, landing on the look-first step.
+        assert!(done_tick(&mut r, &state).banner.unwrap().contains("go look"));
+        // Keep holding done across the next frames: the step must stay a banner (not auto-open).
+        let mut still = input(&state, &[], HOLD_FRAME);
+        still.done_held = true;
+        let out = r.tick(&still);
+        assert!(out.choice.is_none(), "a still-held done must not auto-open the look-first modal");
+        assert!(out.banner.unwrap().contains("go look"), "still on the inspect banner");
+        // Release, then a fresh hold opens it.
+        idle_tick(&mut r, &state); // release
+        assert!(done_tick(&mut r, &state).choice.is_some(), "release + re-hold opens the modal");
+    }
+
+    #[test]
+    #[should_panic(expected = "look_first only applies to a choice step")]
+    fn look_first_without_choice_panics() {
+        let _ = Guide::new("g").step("s", "x").look_first();
     }
 
     // --- Connect step / derived role ---------------------------------------------------------------
