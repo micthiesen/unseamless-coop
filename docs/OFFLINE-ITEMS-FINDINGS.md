@@ -303,3 +303,142 @@ xref scans miss these because table entries are absolute, which is why the leaf 
 **(2) `.pdata` enclosing-function lookup** to turn any xref site into its owning function bounds. Both
 are the reusable part; the throwaway scripts are not committed (kept in `/tmp`), per the
 SESSION-RE-FINDINGS convention.
+
+---
+
+# Item-gate STATIC narrowing pass (2026-06-28, worker `item-gate-static`)
+
+Picks up after candidates (a)/(b) above: the mode enum (`0x143d87220`) and `IsEnableOnlineMode`
+(`0x144588afc`) are both **rig-eliminated** — do not re-pursue. My lane is the **static legwork to
+make the orchestrator's runtime Frida pass short and targeted**: find the *other* online/EAC signal
+the inventory-item-usability path consults. Static-only on the same pinned `eldenring.exe`
+(image base `0x140000000`); behavioral notes in my own words; addresses are facts. Nothing here is
+rig-verified — static inference has failed twice on this exact problem, so each claim is tagged with
+honest confidence and paired with the runtime check that settles it.
+
+## TL;DR — the narrowed Frida target
+
+Found a **lazily-cached "online-play-available" boolean chain that is genuinely distinct from both
+eliminated signals** (it does not read the mode enum nor the `IsEnableOnlineMode` byte), and that is
+**reached from the multiplayer-menu code** that the prior pass had only loosely flagged. The chain
+also survives the `is_offline()` disproof untouched — the disproof patched only the mode-enum getter,
+and nothing in this chain depends on it. That makes it the strongest "different signal" candidate to
+date. The whole thing is **four functions + two cached bytes**, so the Frida pass is tiny.
+
+```
+multiplayer-menu cluster            network-status getter           cached online-available bool chain
+0x140d76fa0 / 0x140d77bec  ───────▶  0x140e0e550  ──(7 call sites)──▶  0x14073cd40 ──▶ 0x140e0ec90 ──▶ 0x140e43610
+(the two ONLY callers of                (consults the bool             (caches byte      (caches byte    (leaf body at
+ getter 0x140e0e550)                     chain; independent of          0x143d6a840,      0x143d87228,    0x144d985fd;
+                                         is_offline/mode getter)        guard 0x143d6a844) guard 0x143d8722c) reads a service
+                                                                                                           singleton, derives
+                                                                                                           the bool)
+```
+
+## The candidate chain (each function: what it reads, why it's a plausible item-grey gate)
+
+All four are **magic-static lazy getters / their leaf**, MSVC pattern (TLS guard at `gs:[0x58]`,
+init-guard dword == `-1` once computed, cached result byte). Confidence the chain is correctly
+*charted*: **high** (exact `E8`-call finder + tight in-module rip-reader scans, the same techniques
+the prior passes used). Confidence it's the *actual* item gate: **medium** — higher than (a)/(b)
+because it's menu-reachable and disproof-independent, but only the rig can pin it.
+
+| addr | role | reads / caches | external callers | why a candidate |
+|---|---|---|---|---|
+| **`0x140e0e550`** | network-status getter | builds a status object; consults the bool chain below (7 call sites to `0x14073cd40` in its body region `0x140e0e664..0x140e0e944`) | **only** `0x140d76fa0`, `0x140d77bec` (the multiplayer-menu cluster) | the *one* getter in the prior "getter family" that the menu cluster actually calls — the bridge from menu code to the online signal |
+| **`0x14073cd40`** | outer cached-bool getter | caches **bool `0x143d6a840`** (guard `0x143d6a844`); value comes from `0x140e0ec90` | two calling functions: the menu getter `0x140e0e550` (7 call instructions inside it) + `0x140dfc9d8` | the boolean the menu getter consults; a single byte the rig can peek/force |
+| **`0x140e0ec90`** | inner cached-bool getter | caches **bool `0x143d87228`** (guard `0x143d8722c`); value computed by `0x140e43610(1)` | sole caller `0x14073cd85` (which is `0x14073cd40`) | the inner cache; distinct byte, distinct guard from `IsEnableOnlineMode` (`0x144588afc`) |
+| **`0x140e43610`** | leaf compute (real body `0x144d985fd`) | reads a **service-manager singleton (ptr at `0x144842d40`)** and derives the bool from a status compare | `0x140e0ecd7` (= `0x140e0ec90`) | the raw read — *this* is where the offline/no-EAC state actually enters. Body is control-flow-obfuscated (movabs+push return trampolines, stack-pivot `lea rsp`), so its exact predicate is best read at runtime, not decoded |
+
+Supporting facts (exact, reliable — `E8`/`E9` finder and `.pdata` bounds):
+
+- **Menu cluster** (the consumers nearest the inventory decision): functions `0x140d76d20..0x140d770cf`,
+  `0x140d771d0..0x140d773f4`, `0x140d77550..0x140d7782e`, `0x140d77ae0..0x140d77bba`,
+  `0x140d77bc0..0x140d77c9a`. They query the network-status getter family (`0x140e0e0c0/e1d0/e550`).
+  `0x140d76d20` and `0x140d77bc0` have **no direct callers** (reached via vtable / obfuscated dispatch
+  — consistent with menu virtual methods); the others are dispatched from `0x140d6aXXX`.
+- **Independence from the ruled-out path (load-bearing):** getter `0x140e0e550`'s body calls
+  `0x14073cd40` (the bool) and **not** `0x140e0e960` (the mode-enum getter) nor `0x140e55180`
+  (`is_offline()`). So forcing `is_offline()` false (the disproof) cannot have moved this signal — which
+  is exactly why the items stayed greyed and why this is the next thing to look at.
+- The boot writer `0x140e0ea60` separately computes a **sibling status block** —
+  `0x143b400b0/b4/b8/bc/c0` and `0x143d87224` — from a family of platform/EAC/login sub-queries (it
+  calls `0x140e5b410/530/650/770/890/9b0`, each fetching a service object and calling a virtual on
+  it). These siblings are read **only inside** the status module (`0x140e0dfc0..0x140e0ec80`) and
+  surfaced through the getter family. They are **not** cleared by the `is_offline()` patch either, so
+  they remain at their offline-computed values — secondary candidates.
+  - **Correction to the prior pass:** that pass (above) listed the byte `0x143d87228` under this
+    boot-writer block. It is **not** boot-written — the *only* writer of `0x143d87228` in the whole
+    image is `0x140e0ecdc`, inside the magic-static getter `0x140e0ec90` (verified by an exact write
+    xref). `0x143d87228` just happens to sit in `.data` immediately after the boot block
+    (`…87220` enum, `…87224` dword, `…87228` byte, `…8722c` guard) — **adjacency, not a shared
+    initializer.** So it has exactly one initializer (the chain's lazy compute), consistent with the
+    MSVC magic-static pattern, and `0x143d8722c` is confirmed its init-guard by the thread-safe-init
+    acquire/release calls (`0x1424fad58` / `0x1424facf8`) and the `cmp [guard], -1` it wraps — not a
+    sibling status field.
+
+## The cheap pre-read (orchestrator, no Frida — do this first)
+
+The two cached bytes initialize lazily, and they init **at the moment the menu queries them** — i.e.
+when you open the inventory on the greyed item. That makes the read both cheap and perfectly timed:
+
+1. Boot to title. Read the two init-guards (4 bytes each): `0x143d6a844` and `0x143d8722c`. If a guard
+   is **not** `-1`/non-zero, that bool hasn't been computed yet.
+2. **Open the inventory/equip menu on the greyed Tarnished's Furled Finger** (this drives the menu
+   cluster → getter `0x140e0e550` → the bool chain, forcing init). Re-read.
+3. Read the chain's cached bools (1 byte each): **`0x143d6a840`** and **`0x143d87228`**. Separately,
+   dump the boot sibling block `0x143b400b0..0x143b400c0` (20 bytes) + `0x143d87224` (4). (`0x143d87228`
+   belongs to the chain, not the boot block — read it once, under the chain.)
+   - The exe loads at its preferred base `0x140000000` (SESSION-RE-FINDINGS confirmed), so static VA ==
+     live VA. Read via `watch-write.py --peek <VA> --peek-len <n>` or `/proc/<pid>/mem`.
+   - Whichever of these bytes reads "unavailable/offline" while the item is greyed is the live gate
+     candidate. **Polarity is unknown** — read it off directly here (i.e. determine whether `1` means
+     "available" or "offline" from the value seen while the item is greyed).
+
+## The decisive Frida pass (hand-off — short, because the chain is four functions)
+
+Repro: loaded save where Tarnished's Furled Finger is **visible and greyed** in the pouch.
+Hook (RUNTIME-RE.md option B), log `entry + return value + return-address (caller)`:
+
+- the chain: **`0x14073cd40`**, **`0x140e0ec90`**, **`0x140e43610`**
+- the menu-facing getter: **`0x140e0e550`** (and, if you want the full family, the prior list
+  `0x140e0dfc0/dfe0/e000/e0c0/e1d0/e2e0/e3a0`)
+- the controls: `is_offline()` `0x140e55180` and `IsEnableOnlineMode()` `0x140e56310` (expect these to
+  fire returning their known values — they're the eliminated baseline)
+
+Then scroll onto / try-to-use the greyed item. **The function in the chain that fires from menu/item
+code, returning the "unavailable" value on that interaction, is the gate.** Confirm by forcing it
+(patch its cached-byte return, or force the byte in memory) and checking the item ungreys with **no
+"network error / return to title" popup** (cf. `CSEventNetworkErrorReturnTitleStep`). If even these
+hooks don't fire on the item interaction, the gate is *below* this module — a live
+matchmaking/login-session availability read inside the service singleton (`0x144842d40`) reached only
+through the obfuscated leaf body `0x144d985fd`; stalk it from the EquipParamGoods/use-condition side
+(the deeper fallback the prior pass named).
+
+## Clean patch candidate (note only — runtime confirm comes first)
+
+If the rig pins the bool chain as the gate, the fail-safe patch mirrors the existing ones: force the
+cached-bool return to "available." Cleanest single landmark is `0x14073cd40`'s sole return site
+`movzx eax, byte [0x143d6a840]` at **`0x14073cd9c`** (`0F B6 05 9D DA 62 03`) → `mov eax,1; nop; nop`
+(`B8 01 00 00 00 90 90`), exactly the shape of `force_online_menu_mode`. **Do not land this until the
+Frida pass confirms polarity and that forcing it ungreys the item without a network-error popup** —
+static has guessed wrong twice here.
+
+## Re-derivation after a game update (this pass)
+
+- **The bool chain:** from getter `0x140e0e550` (the network-status getter whose *only* two callers are
+  the menu cluster), find the `E8` to `0x14073cd40` in its body; that getter's return site
+  `movzx eax, byte [cached]` names the outer cached byte + its guard (guard = byte+4). Its sole inner
+  `call` (`0x140e0ec90`) and that one's `call` (`0x140e43610` → jmp-thunk to the real body in the patch
+  `.text`) walk the chain down to the service-singleton read.
+- **The menu cluster:** the two callers of `0x140e0e550`; their enclosing `.pdata` functions are the
+  menu-facing query bridge.
+
+## Reusable method note
+
+Added to the `/tmp` scratch helpers this pass (techniques, not committed): an **exact `E8`/`E9`
+call-site finder** (decode-free; `target == site+5+rel32`) — reliable where the broad rip-relative
+xref back-scan throws false positives on heavily-aligned globals — and **incremental-link
+jump-thunk following** (ER routes many `.text` functions through a `jmp` into the second `.text`
+section at `0x144c0e000`; the real, often control-flow-obfuscated body lives there). Both belong in
+`scripts/re/` if this kind of pass recurs.
