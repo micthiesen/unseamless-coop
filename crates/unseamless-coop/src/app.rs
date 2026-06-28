@@ -386,9 +386,11 @@ fn spawn_overlay(module: usize) {
     });
 }
 
-/// Apply one-shot boot-flow code patches gated by config. Currently just skip-intros: NOP the
-/// conditional branch that gates the logo/splash video sequence so the game falls straight through
-/// to the title screen. See `coop/patch.rs` and `docs/{SKIP-INTROS,CODE-PATCHING}.md`.
+/// Apply one-shot boot-flow code patches, each gated by its own config flag: **skip-intros** (NOP
+/// the conditional branch that gates the logo/splash video sequence so the game falls straight
+/// through to the title) and **enable-offline-multiplayer** (neutralize the game's "is offline"
+/// predicate so the online multiplayer items are selectable offline). See `coop/patch.rs` and
+/// `docs/{SKIP-INTROS,CODE-PATCHING,OFFLINE-ITEMS-FINDINGS}.md`.
 fn apply_boot_patches(config: &unseamless_core::config::Config) {
     if config.gameplay.skip_splash_screens {
         // Scan a distinctive sequence in the boot/title flow; the logo gate is a `74` (JZ rel8) a
@@ -405,6 +407,33 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
         const BOOT_LOGO_LANDMARK: &[pelite::pattern::Atom] =
             pelite::pattern!("C6 ? ? ? ? ? 01 ? 03 00 00 00 ? 8B ? E8 ? ? ? ? E9 ? ? ? ? ? 8D");
         crate::patch::nop_landmark("skip_splash_screens", BOOT_LOGO_LANDMARK, -60, 0x74, 2);
+    }
+
+    if config.gameplay.enable_offline_multiplayer {
+        // Re-enable the online multiplayer items offline by neutralizing the game's central
+        // "is offline" predicate so it always reports *not* offline. That tiny leaf function is
+        //   sub rsp,0x28 ; call <get_network_mode> ; cmp eax,2 ; sete al ; add rsp,0x28 ; ret
+        // i.e. `return network_mode == 2` where the network-mode enum global is 2 when launched
+        // offline / outside EAC (1 = online, 0 = initializing). ~45 sites gate online features on
+        // this predicate — including multiplayer-item availability — so forcing it false ungreys the
+        // items (and lets an item-use drive the session FSM). We overwrite `sete al` (0F 94 C0) with
+        // `xor eax,eax ; nop` (31 C0 90) so the predicate returns 0; the dead `cmp eax,2` is left
+        // in place. A miss/ambiguous/drifted scan fails safe (items stay greyed, logged), like
+        // skip-intros above. Full RE write-up + risks + rig recipe: docs/OFFLINE-ITEMS-FINDINGS.md.
+        //
+        // Re-derive after a game update: find the unique tiny function whose body is
+        // `cmp eax,2 ; sete al` bracketed by `sub rsp,0x28 ; call …` and `add rsp,0x28 ; ret`
+        // (that's `is_offline()`); the bare tail alone is NOT unique, so the landmark spans the
+        // whole 20-byte function (the 4 `?` are the call rel32). offset +12 is the `sete al`.
+        const IS_OFFLINE_LANDMARK: &[pelite::pattern::Atom] =
+            pelite::pattern!("48 83 EC 28 E8 ? ? ? ? 83 F8 02 0F 94 C0 48 83 C4 28 C3");
+        crate::patch::overwrite_landmark(
+            "enable_offline_multiplayer",
+            IS_OFFLINE_LANDMARK,
+            12,
+            0x0F,
+            &[0x31, 0xC0, 0x90],
+        );
     }
 }
 

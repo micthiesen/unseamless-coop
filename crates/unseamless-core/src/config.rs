@@ -256,6 +256,18 @@ pub struct Gameplay {
     pub roam_anywhere: bool,
     pub overhead_display: OverheadDisplay,
     pub skip_splash_screens: bool,
+    /// Re-enable Elden Ring's online **multiplayer items** (Tarnished's Furled Finger, Furlcalling
+    /// Finger Remedy, Small Golden Effigy, the duelist/invader fingers, Taunter's Tongue, …) when the
+    /// game is launched offline / outside EAC. Vanilla greys these out because FromSoft matchmaking is
+    /// unreachable, which also blocks the game's own co-op session FSM — so re-enabling them is what
+    /// lets an item-use drive a session (the rung-3 unblock). The mod applies a boot-time code patch
+    /// that neutralizes the game's central "is offline" predicate (see `coop/app::apply_boot_patches`
+    /// and `docs/OFFLINE-ITEMS-FINDINGS.md`). Default **on**: we only ever load outside EAC, so this
+    /// is core to the mod's purpose. The patch is AOB-scanned and fails safe (items stay greyed,
+    /// logged) if the signature ever drifts. Boot path rig-confirmed (patch applies, game boots
+    /// clean, no network-error popup); the in-game item-ungrey + FSM-trigger check folds into a
+    /// 2-player/host-trigger session — see `docs/OFFLINE-ITEMS-FINDINGS.md`.
+    pub enable_offline_multiplayer: bool,
     pub append_steam_id: bool,
     pub always_spectate_on_death: bool,
     /// Opt-in for [`boot_master_volume`]: when off (the default) the mod never touches the
@@ -379,6 +391,7 @@ impl Default for Gameplay {
             roam_anywhere: true,
             overhead_display: OverheadDisplay::Normal,
             skip_splash_screens: true,
+            enable_offline_multiplayer: true,
             append_steam_id: false,
             always_spectate_on_death: false,
             boot_master_volume_enabled: false,

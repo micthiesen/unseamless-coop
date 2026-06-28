@@ -43,6 +43,7 @@ pub enum SettingId {
     BootMasterVolumeEnabled = 20,
     Nameplates = 21,
     NameplateDistance = 22,
+    EnableOfflineMultiplayer = 23,
 }
 
 impl SettingId {
@@ -215,6 +216,14 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
+            id: EnableOfflineMultiplayer,
+            label: "Enable offline multiplayer items",
+            kind: Toggle {
+                get: |c| c.gameplay.enable_offline_multiplayer,
+                set: |c, v| c.gameplay.enable_offline_multiplayer = v,
+            },
+        },
+        Setting {
             id: AppendSteamId,
             label: "Append Steam ID to names",
             kind: Toggle {
@@ -370,7 +379,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 22, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 23, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -443,6 +452,23 @@ mod tests {
         s.adjust(&mut cfg, true);
         assert!(!cfg.gameplay.roam_anywhere, "must write gameplay.roam_anywhere");
         assert!(!cfg.gameplay.allow_summons, "must not touch a neighbouring field");
+        assert_eq!(s.display_value(&cfg), "Off");
+    }
+
+    #[test]
+    fn enable_offline_multiplayer_toggle_binds_to_its_own_config_field() {
+        // Guards the EnableOfflineMultiplayer get/set against a copy-paste pointing at a sibling
+        // (especially the skip_splash_screens / append_steam_id neighbours it sits between).
+        let reg = registry();
+        let s = reg.iter().find(|s| s.id == SettingId::EnableOfflineMultiplayer).unwrap();
+        let mut cfg = Config::default();
+        assert!(cfg.gameplay.enable_offline_multiplayer, "must default on");
+        cfg.gameplay.skip_splash_screens = true; // neighbour sentinel
+        cfg.gameplay.append_steam_id = true; // neighbour sentinel
+        s.adjust(&mut cfg, true);
+        assert!(!cfg.gameplay.enable_offline_multiplayer, "must write gameplay.enable_offline_multiplayer");
+        assert!(cfg.gameplay.skip_splash_screens, "must not touch a neighbouring field");
+        assert!(cfg.gameplay.append_steam_id, "must not touch a neighbouring field");
         assert_eq!(s.display_value(&cfg), "Off");
     }
 

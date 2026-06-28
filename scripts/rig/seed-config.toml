@@ -17,6 +17,10 @@ allow_summons = true
 roam_anywhere = true
 overhead_display = "normal"
 skip_splash_screens = true
+# Re-enable the online multiplayer items offline (the rung-3 unblock). Listed explicitly because a rig
+# run is the only way to verify the boot-time "is offline" code patch — confirm the items ungrey and no
+# network-error popup fires. See docs/OFFLINE-ITEMS-FINDINGS.md > "Rig verification recipe".
+enable_offline_multiplayer = true
 append_steam_id = false
 always_spectate_on_death = false
 # On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's
