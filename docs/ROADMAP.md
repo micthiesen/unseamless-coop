@@ -59,8 +59,12 @@ rung-2 side-channel link both work (`coop: linked … versions match`; the `coop
 messages bidirectionally). So rungs 1, 2, 4 are done *and verified peer-to-peer*. **Rung 3, driving the
 game's own session so players see each other in-world, is the headline-next** (see below). Two findings
 from that session: the in-game multiplayer items are **greyed out offline** (outside EAC), so the rung-3
-FSM can't be triggered the normal way — the likely unlock is re-enabling them (an RE/patch, like ERSC);
-and the **overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. Investigated blind
+FSM can't be triggered the normal way. We first hunted the item-grey gate to re-enable them, but **three
+static candidate families were rig-eliminated** (`is_offline()`, `IsEnableOnlineMode()`, the cached
+online-available chain — see [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), so that hunt is
+**parked**. The approach pivoted (2026-06-28) to **driving `CSSessionManager` directly** — chart and call
+the create/join initiation function, no item needed (the multiplayer items become removable harness). The
+**overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. Investigated blind
 (no Windows box): the anatomy is charted and the healthy **vkd3d trace baseline is now captured**
 (2026-06-28) as the reference to diff a native trace against (see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
 > "Native-Windows Crash" > Validation plan). What's left needs a Windows box (one friend trace run on
