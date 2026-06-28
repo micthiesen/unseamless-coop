@@ -1232,4 +1232,148 @@ mod tests {
         assert_eq!(client.peer().config().scaling.enemy_health, 80);
         assert!(!client.peer().config().gameplay.allow_summons);
     }
+
+    // --- systematic, deterministic fault-model sweep ---------------------------------------------
+    //
+    // The two tests above pin a couple of hand-picked fault points. These sweep the *cartesian
+    // product* of drop / duplicate / reorder (the whole `FaultModel`) across several fixed seeds, so
+    // a regression in the self-heal shows up as a specific reproducible `drop/dup/reorder/seed` case
+    // rather than a lucky-or-unlucky single configuration. Determinism comes from the transport's
+    // seeded PRNG; no proptest or other dep (CLAUDE.md: hand-rolled deterministic cases preferred).
+
+    /// A shared-settings profile that differs from `Config::default()` in **every** host-enforced
+    /// field (all six scaling percents off their defaults, all four shared bools flipped off their
+    /// `true` default, a non-default player cap). All values sit inside their clamp ranges, so the
+    /// decoder leaves them untouched and convergence is exact equality — meaning a single dropped or
+    /// mis-mapped field would fail the sweep, not just the one field the older tests check.
+    fn distinct_shared_profile(c: &mut Config) {
+        c.scaling.enemy_health = 80;
+        c.scaling.enemy_damage = 25;
+        c.scaling.enemy_posture = 40;
+        c.scaling.boss_health = 250;
+        c.scaling.boss_damage = 30;
+        c.scaling.boss_posture = 45;
+        c.gameplay.crit_coop = false;
+        c.gameplay.death_debuffs = false;
+        c.gameplay.allow_summons = false;
+        c.gameplay.roam_anywhere = false;
+        c.session.max_players = 4;
+    }
+
+    /// Drive a fresh host+client pair over a faulty channel until the client's shared subset equals
+    /// the host's, or the `budget` of maintenance rounds is spent. Returns the round it converged on
+    /// (`None` if it never did). Deliberately **no `connect()`**: convergence is driven solely by
+    /// `maintain()`'s periodic Hello + ConfigSync re-assert, so a lucky surviving handshake reply
+    /// can't mask a broken re-assert. Exercises the full handshake → link → config-apply path under
+    /// loss, since the host only links (and thus syncs) the client after its Auth proof survives.
+    fn rounds_to_converge(faults: FaultModel, seed: u64, budget: usize) -> Option<usize> {
+        let v = Version::new(0, 1, 0);
+        let ends = Loopback::mesh_with_faults(&[HOST, CLIENT], faults, seed);
+        let (mut host, mut client) = pair_over(ends, v, v);
+        distinct_shared_profile(host.peer_mut().config_mut());
+        host.peer_mut().mark_config_changed(); // bump generation; maintain() re-asserts it
+        let target = SharedSettings::from(host.peer().config());
+        for round in 1..=budget {
+            host.maintain();
+            client.maintain();
+            host.pump();
+            client.pump();
+            if SharedSettings::from(client.peer().config()) == target {
+                return Some(round);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn config_converges_across_the_fault_grid() {
+        // Every (drop, duplicate, reorder, seed) combination must converge. Round budgets scale with
+        // the drop rate: at a given loss the convergence chain is a Bernoulli pipeline (handshake link
+        // ~drop^2 per round, then the config delivery ~drop per round), so heavier loss needs a larger
+        // bound. The budgets are generous multiples of the observed convergence so the test asserts
+        // "converges", not a brittle exact count, while still being a real gate.
+        let dups = [0.0, 0.6];
+        let reorders = [false, true];
+        let seeds = [0x1111_1111u64, 0x2222_2222, 0xDEAD_BEEF];
+        for (drop, budget) in [(0.0, 30usize), (0.5, 800), (0.85, 8000)] {
+            for &dup in &dups {
+                for &reorder in &reorders {
+                    for &seed in &seeds {
+                        let faults = FaultModel { drop_rate: drop, duplicate_rate: dup, reorder };
+                        assert!(
+                            rounds_to_converge(faults, seed, budget).is_some(),
+                            "no convergence within {budget} rounds: \
+                             drop={drop} dup={dup} reorder={reorder} seed={seed:#x}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Build a host+client pair that is **already linked** (handshake done off-transport), then wrap
+    /// each linked [`Peer`] in a [`Session`] over `ends`. The link set is never pruned, so this lets a
+    /// test isolate the periodic ConfigSync re-assert from the handshake's own multi-delivery
+    /// probability — which is what dominates the round count at extreme loss.
+    fn linked_session_pair(ends: Vec<Loopback>, v: Version) -> (Session<Loopback>, Session<Loopback>) {
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        // Exchange Hellos (records each other's nonce) then Auth proofs (links), with no transport in
+        // the loop — the same direct-handle pattern as `linked_host`/`linked_client`.
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        client.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
+        let client_proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: client_proof });
+        let host_proof = crate::crypto::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &HOST_NONCE, PW);
+        client.handle(HOST, ModMessage::Auth { to: CLIENT, proof: host_proof });
+        assert!(host.is_linked(CLIENT) && client.is_linked(HOST), "test setup: pair must be linked");
+        let mut it = ends.into_iter();
+        (Session::new(host, it.next().unwrap()), Session::new(client, it.next().unwrap()))
+    }
+
+    #[test]
+    fn config_reassert_self_heals_under_extreme_loss() {
+        // With the handshake already established (the link is permanent), the host's periodic
+        // ConfigSync re-assert is the *sole* convergence path — exactly the maintenance-tick mechanism
+        // the live stack relies on. Isolating it lets us push loss to the extreme (95–99%), where the
+        // handshake's own ~drop^2-per-round link probability would otherwise dominate, and still assert
+        // the host's settings reach the client: one surviving delivery per round suffices, so even at
+        // 99% loss convergence is a bounded geometric wait (~1/0.01 ≈ 100 rounds expected). Duplication
+        // is on throughout, so the generation guard is also exercised under the same loss.
+        let v = Version::new(0, 1, 0);
+        let seeds = [0xABCD_1234u64, 0x5555_AAAA];
+        for drop in [0.95, 0.99] {
+            for reorder in [false, true] {
+                for &seed in &seeds {
+                    let faults = FaultModel { drop_rate: drop, duplicate_rate: 0.5, reorder };
+                    let ends = Loopback::mesh_with_faults(&[HOST, CLIENT], faults, seed);
+                    let (mut host, mut client) = linked_session_pair(ends, v);
+                    distinct_shared_profile(host.peer_mut().config_mut());
+                    host.peer_mut().mark_config_changed();
+                    let target = SharedSettings::from(host.peer().config());
+
+                    const BUDGET: usize = 5000; // ~50x the expected wait at 99% loss
+                    let mut converged = None;
+                    for round in 1..=BUDGET {
+                        host.maintain();
+                        client.maintain();
+                        host.pump();
+                        client.pump();
+                        if SharedSettings::from(client.peer().config()) == target {
+                            converged = Some(round);
+                            break;
+                        }
+                    }
+                    assert!(
+                        converged.is_some(),
+                        "config re-assert never healed within {BUDGET} rounds: \
+                         drop={drop} reorder={reorder} seed={seed:#x}",
+                    );
+                    // The link survived the whole lossy run (it is never pruned), which is *why* the
+                    // re-assert can apply — pin that so a future "evict on silence" change is caught.
+                    assert!(client.peer().is_linked(HOST), "link must persist through the loss");
+                }
+            }
+        }
+    }
 }

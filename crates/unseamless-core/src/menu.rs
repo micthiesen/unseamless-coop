@@ -683,6 +683,33 @@ mod tests {
     }
 
     #[test]
+    fn action_rows_out_of_session_ignores_stale_host_and_toggle_state() {
+        use SessionAction::*;
+        // A context that "shouldn't happen": is_host plus every host-toggle state bit set, but NOT in
+        // a session (the shape of a stale context left over after a session ended). The HIDE-by-session
+        // -state rule means `in_session` alone selects the surface, so this must still be exactly the
+        // two connect verbs — never a `Leave world` or a host toggle row leaking through from the
+        // stale flags. Pins that the out-of-session branch is gated purely on `in_session`.
+        let stale = SessionContext {
+            in_session: false,
+            is_host: true,
+            steam_ready: true,
+            in_game: true,
+            world_locked: true,
+            pvp_on: true,
+            pvp_teams_on: true,
+            friendly_fire_on: true,
+        };
+        assert_eq!(
+            triples(&stale),
+            vec![
+                ("Open world".into(), OpenWorld, true),
+                ("Join world".into(), JoinWorld, true),
+            ],
+        );
+    }
+
+    #[test]
     fn action_rows_toggle_rows_flip_label_and_action_with_state() {
         use SessionAction::*;
         // world_locked flips the Lock/Unlock row's label *and* its emitted action.

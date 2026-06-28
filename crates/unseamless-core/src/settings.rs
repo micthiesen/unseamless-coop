@@ -572,6 +572,46 @@ mod tests {
     }
 
     #[test]
+    fn every_setting_survives_a_mutate_save_reload_round_trip() {
+        // Drive a non-default value through EVERY registered setting (via the registry's own get/set
+        // glue), persist to TOML, reload, and assert the whole Config round-trips. This ties the
+        // registry to serde for the entire surface at once: a setting whose set() writes a field that
+        // is `#[serde(skip)]`'d, mis-renamed, or simply absent from the serialized form is caught here
+        // — without a hand-written per-field test. Complements the per-field binding tests (which
+        // guard get/set wiring) by guarding *persistence* of every mutated value.
+        let reg = registry();
+        let mut cfg = Config::default();
+
+        for s in &reg {
+            let before = s.display_value(&cfg);
+            match &s.kind {
+                SettingKind::Toggle { get, set } => {
+                    let v = get(&cfg);
+                    set(&mut cfg, !v); // flip off its default
+                }
+                SettingKind::Choice { .. } => s.adjust(&mut cfg, true), // advance one choice
+                SettingKind::Range { min, max, step, get, set } => {
+                    // Land on an in-range, non-default value: step one up (saturating, like the
+                    // production `adjust`), or down if already at max.
+                    let cur = get(&cfg);
+                    let up = cur.saturating_add(*step).min(*max);
+                    let target = if up != cur { up } else { cur.saturating_sub(*step).max(*min) };
+                    set(&mut cfg, target);
+                }
+            }
+            // The mutation must be observable through the same accessor — for *every* kind. This also
+            // keeps the test honest as settings are added: a zero-width Range or a single-variant Choice
+            // (whose adjust is a no-op) trips here instead of silently testing nothing.
+            assert_ne!(s.display_value(&cfg), before, "{:?}: mutation must change the value", s.id);
+        }
+
+        let (reloaded, warnings) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
+        assert!(warnings.is_empty(), "mutated-but-in-range config should not warn: {warnings:?}");
+        // Total `Config: PartialEq` makes this one assert cover every mutated field at once.
+        assert_eq!(reloaded, cfg, "every mutated setting must survive save -> reload unchanged");
+    }
+
+    #[test]
     fn choice_cycles_both_ways_and_wraps() {
         let reg = registry();
         let s = reg.iter().find(|s| s.id == SettingId::OverheadDisplay).unwrap();
