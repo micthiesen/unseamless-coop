@@ -20,6 +20,12 @@ commit you forked from, shared with `main`.
   it.** WIP commits while you work are fine and wanted. Never `amend`, `reset`, or `rebase` *into or
   past* `git merge-base main HEAD`. Rewriting that base makes integration conflict and trips the
   teardown safety check.
+- **Commit finished work automatically — don't wait to be asked.** Whenever you complete a coherent
+  chunk (a fix wired up, a doc updated, a question answered with an edit), commit it to your branch
+  right then, without prompting. Uncommitted work is invisible to the orchestrator, which can only
+  integrate what's committed, so leaving finished work in the working tree quietly blocks handoff.
+  The default is: did something, verified it, → commit it. (You still **never commit to `main`** and
+  **never push** — those stay the orchestrator's.)
 - **Stage only the files your task changed.** Your workspace is a copy of the orchestrator's working
   tree, so it may already carry its unrelated in-flight edits. Avoid `git add -A` / `git add .`; add
   the specific paths you touched, so you don't commit someone else's work onto your branch.

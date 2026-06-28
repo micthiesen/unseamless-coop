@@ -23,9 +23,13 @@
 //                      messagesRef / commands / onAgentSubmit (the prompt input's
 //                      own props; these English names are stable).
 //   * input fiber   = a fiber with value:string + onChange:function (the controlled
-//                      text input). Its `value` IS the user's current draft.
-// onSubmit clears the box as part of its job, so to avoid clobbering a draft we
-// save `value` first and re-assert it via `onChange(draft)` after the clear settles.
+//                      text input). Its `value` IS the user's current draft, and a
+//                      sibling pair on the same fiber -- cursorOffset:number +
+//                      onChangeCursorOffset:function -- IS the caret position.
+// onSubmit clears the box (text AND caret) as part of its job, so to avoid clobbering
+// a draft we save `value`+`cursorOffset` first and re-assert both after the clear
+// settles -- value via `onChange(draft)`, caret via `onChangeCursorOffset(offset)` --
+// so the draft comes back exactly where the user left it, not collapsed to the start.
 // React double-buffers fibers, so we also traverse `.alternate`; a brief retry
 // absorbs the window where the tree is mid-commit.
 //
@@ -145,14 +149,28 @@ function pageRoutine() {
       if(p && typeof p==="object" && typeof p.onChange==="function" && typeof p.value==="string") { input=f; return; }
       v(f.child); v(f.sibling); v(f.alternate);
     })(prompt.child);
-    if(probeOnly) return JSON.stringify({ok:true, foundPrompt:true, foundInput: !!input});
-    const draft = input ? (input.memoizedProps.value || "") : "";
-    const onChange = input ? input.memoizedProps.onChange : null;
+    if(probeOnly){ const pip = input ? input.memoizedProps : null; return JSON.stringify({ok:true, foundPrompt:true, foundInput: !!input, foundCaret: !!(pip && typeof pip.cursorOffset==="number" && typeof pip.onChangeCursorOffset==="function")}); }
+    const ip = input ? input.memoizedProps : null;
+    const draft = ip ? (ip.value || "") : "";
+    const onChange = ip ? ip.onChange : null;
+    // Caret position rides on the same fiber as a sibling prop pair; capture it so the
+    // restored draft lands where the user left it instead of collapsing to offset 0.
+    const cursor = ip && typeof ip.cursorOffset === "number" ? ip.cursorOffset : null;
+    const onChangeCursor = ip && typeof ip.onChangeCursorOffset === "function" ? ip.onChangeCursorOffset : null;
     const noop = new Proxy(function(){}, { get:()=>(()=>{}), apply:()=>{} });
     try { prompt.memoizedProps.onSubmit(msg, noop, false, {}); }
     catch(e){ return JSON.stringify({ok:false, err:"onSubmit threw: "+String(e&&e.message||e)}); }
-    if (draft && onChange) { setTimeout(()=>{try{onChange(draft);}catch(e){}},50); setTimeout(()=>{try{onChange(draft);}catch(e){}},160); }
-    return JSON.stringify({ok:true, submitted:true, draftLen:draft.length});
+    // Restore value then caret (twice, to ride out the post-submit clear). The caret is
+    // set AFTER value in the same callback so its write wins, and clamped to the draft
+    // length so it survives even if a value-change effect re-clamps it -- those two, not
+    // update batching, are what keep the caret off 0 (Ink's renderer doesn't batch a
+    // setTimeout the way react-dom would, so don't reorder these expecting it to).
+    function restore(){
+      try{ onChange(draft); }catch(e){}
+      if (onChangeCursor && cursor!=null) { try{ onChangeCursor(Math.min(cursor, draft.length)); }catch(e){} }
+    }
+    if (draft && onChange) { setTimeout(restore,50); setTimeout(restore,160); }
+    return JSON.stringify({ok:true, submitted:true, draftLen:draft.length, cursor:cursor});
   }`;
 }
 
@@ -205,7 +223,9 @@ async function run() {
   clearTimeout(timeout);
 
   if (probeOnly) {
-    if (out.ok) { console.log(`_inject selftest OK (prompt found, input ${out.foundInput ? "found" : "MISSING"})`); process.exit(out.foundInput ? 0 : 5); }
+    // Caret props are reported but NON-fatal: if a Claude Code update drops them the
+    // send still works, it just restores the draft without the caret (the old behavior).
+    if (out.ok) { console.log(`_inject selftest OK (prompt found, input ${out.foundInput ? "found" : "MISSING"}, caret ${out.foundCaret ? "found" : "absent (draft-only restore)"})`); process.exit(out.foundInput ? 0 : 5); }
     console.error("_inject selftest FAILED:", out.err); process.exit(5);
   }
   if (out.ok) { process.exit(0); }
