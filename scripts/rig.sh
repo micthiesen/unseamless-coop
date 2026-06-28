@@ -75,11 +75,16 @@ RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.yd
 # the per-press desktop toasts (RIG_DISMISS_NOTIFY=1): watch when each press fires vs. when a popup
 # actually shows, then raise PRESSES/INTERVAL if popup #3 still slips through, or drop them to go
 # shorter. Set RIG_DISMISS_NOTIFY=0 to silence the toasts once dialed in.
-RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-22}"
+RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-30}"
 RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-0.4}"
 RIG_DISMISS_REFOCUS_EVERY="${RIG_DISMISS_REFOCUS_EVERY:-4}"   # re-focus the game window every Nth press (1 = every press, old behavior)
 RIG_DISMISS_FOCUS_SETTLE="${RIG_DISMISS_FOCUS_SETTLE:-0.25}"  # pause after activating the window before injecting (was a hardcoded 0.5)
 RIG_DISMISS_NOTIFY="${RIG_DISMISS_NOTIFY:-1}"                 # per-press desktop toast for visually dialing in the timing
+# Seconds to wait after the framework comes up before the FIRST dismiss press (cycle/friend-test). The
+# offline/connection popups don't appear until ~10-18s after the title renders, so a too-short settle
+# presses into an empty title and the popups slip through after the run ends (the cycle-whiffs-but-manual-
+# dismiss-works failure mode). Wait long enough that the popups are reliably up before we start pressing.
+RIG_DISMISS_PRESETTLE="${RIG_DISMISS_PRESETTLE:-10}"
 
 # ---- friend-bundle packaging (rig.sh package / share) ------------------------------------------
 # `package` builds the mod and assembles a self-contained zip a friend installs on Windows
@@ -402,6 +407,11 @@ cmd_launch() {
   # here at the end so the timer starts after the window is up (--wait) and well clear of cycle's
   # post-launch popup-dismiss key injection, which would otherwise re-wake the panel.
   [[ $was_blanked -eq 1 ]] && schedule_reblank
+  # Always succeed once we've handed off to Steam. Without this, the `&& schedule_reblank` above is the
+  # function's last statement, so when the screen ISN'T blanked (the normal interactive case) it
+  # short-circuits to exit 1 — which made `launch_and_dismiss`'s `if cmd_launch --wait` skip the popup
+  # auto-dismiss entirely (cycle whiffed, manual `dismiss` worked). The launch itself can't "fail" here.
+  return 0
 }
 
 latest_log() { ls -1t "$LOG_DIR"/unseamless_coop-*.log 2>/dev/null | head -1; }
@@ -669,7 +679,11 @@ launch_and_dismiss() {
   local dismiss="${1:-1}"
   if cmd_launch --wait; then
     if [[ $dismiss -eq 1 ]]; then
-      sleep 2          # give the offline/connection popups a moment to appear after the title
+      # Wait for the offline/connection popups to actually appear before pressing — they show ~10-18s
+      # after the title, and pressing into the bare title (the old `sleep 2`) lets them slip through
+      # after the dismiss window closes. RIG_DISMISS_PRESETTLE + the wider press span span that window.
+      say "Settling ${RIG_DISMISS_PRESETTLE}s for the startup popups to appear before dismissing…"
+      sleep "$RIG_DISMISS_PRESETTLE"
       cmd_dismiss || warn "auto-dismiss failed; clear the popups manually or: scripts/rig.sh dismiss"
     fi
     say "Game is running. Drive your test, then: scripts/rig.sh log -f  /  scripts/rig.sh kill"
