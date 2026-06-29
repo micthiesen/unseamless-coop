@@ -642,9 +642,13 @@ mod tests {
 
     const HOST: PeerId = 1;
     const CLIENT: PeerId = 2;
+    /// A second client, for multi-peer interleave tests (per-sender gate independence, multi-peer
+    /// liveness). Distinct id + nonce so its frames don't alias `CLIENT`'s.
+    const CLIENT2: PeerId = 4;
     /// Distinct per-session nonces so the two peers' proofs differ on the wire.
     const HOST_NONCE: AuthNonce = [0x11; AUTH_NONCE_LEN];
     const CLIENT_NONCE: AuthNonce = [0x22; AUTH_NONCE_LEN];
+    const CLIENT2_NONCE: AuthNonce = [0x44; AUTH_NONCE_LEN];
     /// Default matching co-op password for a pair, so the handshake links by default.
     const PW: &str = "co-op-password";
 
@@ -709,6 +713,17 @@ mod tests {
         client.handle(HOST, ModMessage::Auth { to: CLIENT, proof });
         assert!(client.is_linked(HOST), "test setup: HOST should be linked");
         client
+    }
+
+    /// Link an arbitrary client (`cid`/`nonce`) into an existing host [`Peer`] by feeding its
+    /// `Hello` + a valid `Auth` proof — the multi-client analogue of [`linked_host`], so a test can
+    /// stand up a host with several authenticated clients to exercise per-sender behavior.
+    fn link_client_into(host: &mut Peer, cid: PeerId, nonce: AuthNonce, v: Version) {
+        host.handle(cid, ModMessage::Hello { mod_version: v.to_u32(), nonce });
+        // `cid` is the prover, HOST the verifier — same ordering as `linked_host`.
+        let proof = crate::crypto::auth_proof(HOST, cid, &HOST_NONCE, &nonce, PW);
+        host.handle(cid, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(cid), "test setup: client {cid} should be linked");
     }
 
     /// Drive both sessions to convergence on a perfect channel (no frames left in flight).
@@ -1375,5 +1390,454 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- SeqGate: pathological orderings, duplicates, multi-peer interleave ----------------------
+
+    #[test]
+    fn action_gate_keeps_only_advancing_seqs_under_extreme_reorder() {
+        // The gate accepts a frame only when its seq advances past the per-sender high-water mark, so
+        // a pathologically reordered + duplicated stream collapses to the monotonic subset. (This is
+        // the deliberate exactly-once-and-ordered semantics: a reordered-OLD action is treated as
+        // stale and dropped, never replayed — see `SeqGate`.)
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        let stream = [
+            (5u32, SessionAction::JoinWorld), // first real seq -> applied (passes the 0 floor)
+            (3, SessionAction::OpenWorld),    // reordered-old  -> dropped
+            (5, SessionAction::OpenWorld),    // duplicate      -> dropped
+            (8, SessionAction::OpenWorld),    // advances       -> applied
+            (1, SessionAction::JoinWorld),    // ancient        -> dropped
+            (8, SessionAction::JoinWorld),    // duplicate      -> dropped
+            (2, SessionAction::JoinWorld),    // ancient        -> dropped
+        ];
+        for (seq, action) in stream {
+            host.handle(CLIENT, ModMessage::SessionAction { seq, action });
+        }
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT, SessionAction::OpenWorld)),
+            "the high-water seq (8, OpenWorld) is the last accepted action"
+        );
+        // A genuinely newer seq after all the churn still applies.
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 9, action: SessionAction::JoinWorld });
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::JoinWorld)), "seq 9 advances");
+    }
+
+    #[test]
+    fn action_gate_collapses_a_large_duplicate_burst_to_one_apply() {
+        // A flood of the exact same frame (a duplicating channel gone wild) applies once; a later
+        // stale-seq frame is still rejected after the burst.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        let frame = ModMessage::SessionAction { seq: 7, action: SessionAction::OpenWorld };
+        for _ in 0..1000 {
+            host.handle(CLIENT, frame.clone());
+        }
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::OpenWorld)), "1000 dups -> one apply");
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 6, action: SessionAction::JoinWorld });
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT, SessionAction::OpenWorld)),
+            "a post-burst stale seq (6 < 7) is rejected"
+        );
+    }
+
+    #[test]
+    fn action_gate_dedups_each_sender_independently() {
+        // Two linked clients with OVERLAPPING seq numbers: the gate is keyed per sender, so CLIENT's
+        // seq-1 and CLIENT2's seq-1 are independent — neither shadows the other.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        link_client_into(&mut host, CLIENT2, CLIENT2_NONCE, v);
+
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        // CLIENT2's seq-1 must still apply even though CLIENT already used seq-1.
+        host.handle(CLIENT2, ModMessage::SessionAction { seq: 1, action: SessionAction::OpenWorld });
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT2, SessionAction::OpenWorld)),
+            "CLIENT2's seq-1 is not shadowed by CLIENT's seq-1"
+        );
+        // CLIENT's seq-1 duplicate is dropped; its seq-2 advances.
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::LeaveWorld });
+        assert_eq!(host.last_action(), Some((CLIENT2, SessionAction::OpenWorld)), "CLIENT dup dropped");
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 2, action: SessionAction::LeaveWorld });
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::LeaveWorld)), "CLIENT advances on its own");
+        // CLIENT2's stale seq-1 redelivery is dropped.
+        host.handle(CLIENT2, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::LeaveWorld)), "CLIENT2 stale dup dropped");
+    }
+
+    #[test]
+    fn log_gate_dedups_each_sender_independently_on_the_host() {
+        // The host aggregates forwarded logs through a per-sender gate too: overlapping seqs from two
+        // clients are independent, and a per-sender duplicate collapses.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        link_client_into(&mut host, CLIENT2, CLIENT2_NONCE, v);
+
+        host.handle(CLIENT, ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: "a1".into() }));
+        host.handle(CLIENT2, ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: "b1".into() }));
+        // CLIENT's seq-1 duplicate (different payload, as a stale dup looks) is dropped.
+        host.handle(CLIENT, ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: "a1-dup".into() }));
+        host.handle(CLIENT2, ModMessage::Log(LogRecord { seq: 2, level: LogLevel::Info, message: "b2".into() }));
+        assert_eq!(host.log_bundle().len(), 3, "a1 + b1 + b2 aggregated; the duplicate a1 collapsed");
+    }
+
+    // --- handshake flows ------------------------------------------------------------------------
+
+    #[test]
+    fn version_banner_is_withheld_until_a_peer_authenticates() {
+        // A peer with BOTH a wrong password and an incompatible major version: only the auth-failure
+        // banner fires. The version banner is deferred to link time, so an unauthenticated stranger
+        // can't plant a version banner on a real player's overlay.
+        let v_us = Version::new(1, 0, 0);
+        let v_them = Version::new(2, 0, 0);
+        let mut host = Peer::new(HOST, HOST, v_us, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v_them.to_u32(), nonce: CLIENT_NONCE });
+        let bad = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "wrong-password");
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: bad });
+
+        let banners = host.notifications().banners();
+        assert!(banners.iter().any(|b| b.message.contains("Authentication failed")), "auth banner fires");
+        assert!(
+            !banners.iter().any(|b| b.message.contains("version mismatch")),
+            "version banner is withheld for an unauthenticated peer"
+        );
+        assert!(!host.is_linked(CLIENT));
+    }
+
+    #[test]
+    fn version_mismatch_banners_a_linked_peer_on_both_sides() {
+        // The happy-auth-but-incompatible-version case end to end: a matching password links the pair,
+        // and each side raises the version-mismatch banner about the other (it's symmetric).
+        let (mut host, mut client) = pair(Version::new(1, 0, 0), Version::new(2, 5, 0));
+        host.connect();
+        client.connect();
+        run(&mut [&mut host, &mut client]);
+        assert!(host.peer().is_linked(CLIENT) && client.peer().is_linked(HOST), "still links across a major gap");
+        assert!(host.peer().notifications().banners().iter().any(|b| b.message.contains("version mismatch")));
+        assert!(client.peer().notifications().banners().iter().any(|b| b.message.contains("version mismatch")));
+    }
+
+    #[test]
+    fn re_verifying_an_already_linked_peer_does_not_re_toast_or_re_broadcast() {
+        // A re-asserted Auth (which `maintain`'s periodic Hello reply produces over a lossy channel)
+        // for an already-linked peer is a no-op: it must not re-broadcast config nor surface a new
+        // toast/banner. Pin all three (emitted frames, toast count, banner count stay put).
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        let toasts_before = host.notifications().toasts().len();
+        let banners_before = host.notifications().banners().len();
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        let out = host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(out.is_empty(), "re-verifying an already-linked peer emits no frames (no config re-broadcast)");
+        assert_eq!(host.notifications().toasts().len(), toasts_before, "no new toast on re-verify");
+        assert_eq!(host.notifications().banners().len(), banners_before, "no new banner on re-verify");
+    }
+
+    #[test]
+    fn simultaneous_handshake_heals_when_auth_races_ahead_of_hello_both_ways() {
+        // The simultaneous-exchange race over a reordering channel: each side's `Auth` can arrive
+        // before the peer's `Hello` (so the nonce isn't known yet). `verify_auth` must drop those
+        // quietly (no link, no banner), then link once each `Hello` + a re-asserted `Auth` land — the
+        // self-heal `maintain` drives. Exercise it directly on both peers.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        let client_proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        let host_proof = crate::crypto::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &HOST_NONCE, PW);
+
+        // Both Auths arrive first (nonces unknown) — dropped quietly on each side.
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: client_proof });
+        client.handle(HOST, ModMessage::Auth { to: CLIENT, proof: host_proof });
+        assert!(!host.is_linked(CLIENT) && !client.is_linked(HOST), "no link before the nonce is known");
+        assert!(host.notifications().banners().is_empty(), "no premature auth banner on the host");
+        assert!(client.notifications().banners().is_empty(), "no premature auth banner on the client");
+
+        // Then the Hellos, then the re-asserted Auths — the handshake heals on both sides.
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        client.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: HOST_NONCE });
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: client_proof });
+        client.handle(HOST, ModMessage::Auth { to: CLIENT, proof: host_proof });
+        assert!(host.is_linked(CLIENT), "host links once Hello + re-asserted Auth arrive");
+        assert!(client.is_linked(HOST), "client links symmetrically");
+    }
+
+    // --- liveness: false-positives under loss, multi-peer ----------------------------------------
+
+    #[test]
+    fn liveness_tolerates_heavy_loss_without_false_flagging_a_live_peer() {
+        // A live peer keeps maintaining; under heavy (but not total) loss enough heartbeats survive
+        // within LIVENESS_TIMEOUT_TICKS that neither side ever flags the other as lost. At 60% drop,
+        // each direction lands ≥1 of its per-tick frames with high probability, so a 30-tick silence
+        // window is astronomically unlikely — this pins that the timeout is conservative enough not to
+        // flap, the core liveness-false-positive guarantee on the live two-machine path.
+        let v = Version::new(0, 1, 0);
+        for &seed in &[0x1u64, 0xFEED, 0xBEEF, 0x1234_5678, 0xABCD_EF01] {
+            let faults = FaultModel { drop_rate: 0.6, duplicate_rate: 0.2, reorder: true };
+            let ends = Loopback::mesh_with_faults(&[HOST, CLIENT], faults, seed);
+            let (mut host, mut client) = linked_session_pair(ends, v);
+            for round in 1..=300 {
+                host.maintain();
+                client.maintain();
+                host.pump();
+                client.pump();
+                assert!(
+                    !host.peer().is_stale(CLIENT),
+                    "host falsely flagged a live client at round {round} (seed {seed:#x})"
+                );
+                assert!(
+                    !client.peer().is_stale(HOST),
+                    "client falsely flagged a live host at round {round} (seed {seed:#x})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn liveness_still_flags_a_peer_under_total_loss() {
+        // The true-positive companion: with the channel fully dark, a still-maintaining peer correctly
+        // goes stale once past the timeout (the heartbeat genuinely isn't getting through).
+        let v = Version::new(0, 1, 0);
+        let faults = FaultModel { drop_rate: 1.0, ..Default::default() };
+        let ends = Loopback::mesh_with_faults(&[HOST, CLIENT], faults, 1);
+        let (mut host, mut client) = linked_session_pair(ends, v);
+        for _ in 0..=LIVENESS_TIMEOUT_TICKS {
+            host.maintain();
+            client.maintain();
+            host.pump();
+            client.pump();
+        }
+        assert!(host.peer().is_stale(CLIENT), "total loss: the silent client is flagged");
+        assert!(client.peer().is_stale(HOST), "and the silent host is flagged");
+    }
+
+    #[test]
+    fn liveness_flags_only_the_silent_peer_among_several() {
+        // Two linked clients: one keeps pinging, the other falls silent. Only the silent one is
+        // flagged, and exactly one "Lost contact" banner is raised.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        link_client_into(&mut host, CLIENT2, CLIENT2_NONCE, v);
+        for _ in 0..(LIVENESS_TIMEOUT_TICKS + 5) {
+            host.handle(CLIENT, ModMessage::Ping { frame: 1 }); // CLIENT stays chatty
+            host.maintain(); // CLIENT2 says nothing
+        }
+        assert!(!host.is_stale(CLIENT), "the chatty peer stays live");
+        assert!(host.is_stale(CLIENT2), "the silent peer is flagged");
+        let lost = host.notifications().banners().iter().filter(|b| b.message.contains("Lost contact")).count();
+        assert_eq!(lost, 1, "exactly one lost-contact banner — for the silent peer only");
+    }
+
+    #[test]
+    fn handshake_banners_are_torn_down_when_a_linked_peer_goes_silent() {
+        // A linked but version-incompatible peer carries a version banner; if it then falls silent the
+        // liveness sweep tears that now-unactionable banner down and replaces it with the lost-contact
+        // banner (the peer WAS authenticated).
+        let v_us = Version::new(1, 0, 0);
+        let v_them = Version::new(2, 0, 0);
+        let mut host = Peer::new(HOST, HOST, v_us, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v_them.to_u32(), nonce: CLIENT_NONCE });
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(CLIENT));
+        assert!(host.notifications().banners().iter().any(|b| b.message.contains("version mismatch")));
+
+        for _ in 0..(LIVENESS_TIMEOUT_TICKS + 1) {
+            host.maintain();
+        }
+        let banners = host.notifications().banners();
+        assert!(!banners.iter().any(|b| b.message.contains("version mismatch")), "version banner torn down");
+        assert!(banners.iter().any(|b| b.message.contains("Lost contact")), "linked peer's departure is bannered");
+    }
+
+    #[test]
+    fn auth_failure_banner_clears_when_an_unlinked_stranger_departs() {
+        // A wrong-password stranger gets an auth banner but no lost-contact banner (it never linked).
+        // When it goes silent, the sweep clears the stale auth banner and still raises no lost-contact.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        let bad = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "wrong-password");
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: bad });
+        assert!(host.notifications().banners().iter().any(|b| b.message.contains("Authentication failed")));
+
+        for _ in 0..(LIVENESS_TIMEOUT_TICKS + 1) {
+            host.maintain();
+        }
+        let banners = host.notifications().banners();
+        assert!(!banners.iter().any(|b| b.message.contains("Authentication failed")), "stale auth banner cleared");
+        assert!(!banners.iter().any(|b| b.message.contains("Lost contact")), "no lost-contact for an unlinked stranger");
+    }
+
+    #[test]
+    fn a_bare_ping_refreshes_liveness_but_not_the_roster_or_link() {
+        // A Ping is liveness-only: it registers the sender for the liveness sweep but does NOT add a
+        // version to the roster or link it. An unlinked stranger that pings once then vanishes goes
+        // stale but is not bannered.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Ping { frame: 1 });
+        assert!(host.known_peers().get(&CLIENT).is_none(), "a Ping alone adds no roster entry");
+        assert!(!host.is_linked(CLIENT), "and does not link");
+        for _ in 0..(LIVENESS_TIMEOUT_TICKS + 1) {
+            host.maintain();
+        }
+        assert!(host.is_stale(CLIENT), "tracked for liveness once heard...");
+        assert!(host.notifications().banners().is_empty(), "...but an unlinked stranger's silence isn't bannered");
+    }
+
+    // --- config-sync generation edge cases ------------------------------------------------------
+
+    #[test]
+    fn config_sync_applies_each_monotonic_increment_then_ignores_redelivery() {
+        // Rapid re-asserts at increasing generations each apply in order; a later redelivery of an
+        // older generation (with a different payload) is ignored.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        for (generation, hp) in [(2u32, 120u32), (3, 175), (4, 250)] {
+            let mut s = SharedSettings::from(&Config::default());
+            s.scaling.boss_health = hp;
+            client.handle(HOST, ModMessage::ConfigSync { generation, settings: s });
+            assert_eq!(client.config().scaling.boss_health, hp, "generation {generation} applied");
+        }
+        let mut stale = SharedSettings::from(&Config::default());
+        stale.scaling.boss_health = 999;
+        client.handle(HOST, ModMessage::ConfigSync { generation: 3, settings: stale });
+        assert_eq!(client.config().scaling.boss_health, 250, "a redelivered older generation is ignored");
+    }
+
+    #[test]
+    fn config_sync_from_a_linked_non_host_is_ignored_with_a_warning() {
+        // The host receives a ConfigSync from a linked CLIENT (a non-host). Only the host is
+        // authoritative, so it's ignored — and because the sender IS linked, a diagnostic warn fires
+        // (distinct from the silent drop for an *un*linked sender, covered separately).
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        let before = host.config().scaling.boss_health;
+        let mut s = SharedSettings::from(&Config::default());
+        s.scaling.boss_health = before.wrapping_add(50);
+        host.handle(CLIENT, ModMessage::ConfigSync { generation: 9, settings: s });
+        assert_eq!(host.config().scaling.boss_health, before, "a non-host ConfigSync never mutates config");
+        assert!(
+            host.notifications().toasts().iter().any(|t| t.message.contains("non-host")),
+            "a linked non-host ConfigSync raises a diagnostic warn"
+        );
+    }
+
+    #[test]
+    fn config_generation_wrap_is_a_known_unhandled_boundary() {
+        // Generation comparison is a plain `>`, which assumes a monotonic source within a session. If
+        // the host's u32 generation ever WRAPPED (2^32 changes) — or a host restart reset the counter —
+        // a post-wrap gen 0 compares below the applied high-water mark and stalls. This is the same
+        // deferred host-epoch concern documented on `applied_config_gen`; pinned here so the boundary
+        // is explicit. A future host-instance epoch is what fixes it, not a change to this comparison.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        let mut hi = SharedSettings::from(&Config::default());
+        hi.scaling.boss_health = 250;
+        client.handle(HOST, ModMessage::ConfigSync { generation: u32::MAX, settings: hi });
+        assert_eq!(client.config().scaling.boss_health, 250, "the high-water generation applies");
+        let mut wrapped = SharedSettings::from(&Config::default());
+        wrapped.scaling.boss_health = 120;
+        client.handle(HOST, ModMessage::ConfigSync { generation: 0, settings: wrapped });
+        assert_eq!(
+            client.config().scaling.boss_health,
+            250,
+            "a wrapped gen-0 sync is currently ignored — known limitation, not a silent rollback"
+        );
+    }
+
+    #[test]
+    fn non_host_has_nothing_authoritative_to_assert() {
+        // A client owns no generation: marking config changed and broadcasting config are both no-ops.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        assert!(client.mark_config_changed().is_empty(), "a client has nothing authoritative to assert");
+        assert!(client.broadcast_config().is_empty(), "and broadcasts no config");
+    }
+
+    // --- log-forward rate limiter: burst / refill / token counting ------------------------------
+
+    #[test]
+    fn forward_log_refill_saturates_at_capacity_across_many_idle_ticks() {
+        // Idle ticks refill tokens but must SATURATE at the burst capacity, not accumulate unbounded —
+        // otherwise a long-quiet client could later dump an arbitrarily large flood in one frame.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default(), CLIENT_NONCE);
+        client.config_mut().debug.forward_to_host = true;
+        let mut emitted = 0;
+        while !client.forward_log(LogLevel::Trace, "x").is_empty() {
+            emitted += 1;
+        }
+        assert_eq!(emitted, LOG_FORWARD_BURST, "drained exactly the initial burst");
+        for _ in 0..100 {
+            client.maintain();
+        }
+        let mut after = 0;
+        while !client.forward_log(LogLevel::Trace, "x").is_empty() {
+            after += 1;
+        }
+        assert_eq!(after, LOG_FORWARD_BURST, "100 ticks of refill cap at the burst capacity, not 100*refill");
+    }
+
+    #[test]
+    fn forward_log_grants_exactly_refill_tokens_per_tick() {
+        // Token counting across frame deltas: N maintenance ticks grant exactly N*refill takes (while
+        // still under capacity), pinning the per-tick accrual amount.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default(), CLIENT_NONCE);
+        client.config_mut().debug.forward_to_host = true;
+        while !client.forward_log(LogLevel::Trace, "x").is_empty() {} // drain to empty
+        client.maintain();
+        client.maintain();
+        let mut granted = 0;
+        while !client.forward_log(LogLevel::Trace, "x").is_empty() {
+            granted += 1;
+        }
+        assert_eq!(
+            granted,
+            (2.0 * LOG_FORWARD_REFILL_PER_TICK) as u32,
+            "two ticks grant exactly two refills' worth of forwards"
+        );
+    }
+
+    #[test]
+    fn forward_log_is_a_noop_without_counting_drops_when_disabled_or_on_host() {
+        // A "drop" means *throttled* — disabled forwarding and the host's own logs are silent no-ops,
+        // not drops, so they must not inflate the dropped-logs diagnostic.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default(), CLIENT_NONCE);
+        assert!(!client.config().debug.forward_to_host, "default is off");
+        for _ in 0..10 {
+            assert!(client.forward_log(LogLevel::Warn, "x").is_empty(), "disabled forwarding emits nothing");
+        }
+        assert_eq!(client.dropped_logs(), 0, "disabled forwarding is a no-op, not a drop");
+
+        let mut host = Peer::new(HOST, HOST, v, Config::default(), HOST_NONCE);
+        host.config_mut().debug.forward_to_host = true;
+        assert!(host.forward_log(LogLevel::Warn, "x").is_empty(), "the host doesn't forward its own logs");
+        assert_eq!(host.dropped_logs(), 0, "and that's not counted as a drop");
+    }
+
+    #[test]
+    fn forward_log_drop_count_accumulates_across_separate_overflows() {
+        // Over two separate bursts (each past the available tokens) the dropped-logs counter keeps
+        // climbing — it's a session total, not reset per burst.
+        let v = Version::new(0, 1, 0);
+        let mut client = Peer::new(CLIENT, HOST, v, Config::default(), CLIENT_NONCE);
+        client.config_mut().debug.forward_to_host = true;
+        for _ in 0..(LOG_FORWARD_BURST + 5) {
+            client.forward_log(LogLevel::Trace, "x");
+        }
+        assert_eq!(client.dropped_logs(), 5, "first overflow dropped 5");
+        client.maintain(); // refill LOG_FORWARD_REFILL_PER_TICK tokens
+        let refill = LOG_FORWARD_REFILL_PER_TICK as u64;
+        for _ in 0..(refill + 3) {
+            client.forward_log(LogLevel::Trace, "x");
+        }
+        assert_eq!(client.dropped_logs(), 5 + 3, "second overflow adds 3 to the running total");
     }
 }

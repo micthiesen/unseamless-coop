@@ -217,6 +217,62 @@ mod tests {
     }
 
     #[test]
+    fn partial_drop_is_independent_per_recipient() {
+        // A broadcast's drop roll is made per recipient, so two receivers see DIFFERENT subsets of the
+        // same sends — the realism the side-channel's self-heal is built against (a frame can reach one
+        // peer and miss another in the same broadcast).
+        let faults = FaultModel { drop_rate: 0.5, ..Default::default() };
+        let mut ends = Loopback::mesh_with_faults(&[1, 2, 3], faults, 0xD1FF);
+        for i in 0u8..200 {
+            ends[0].send(&[i]);
+        }
+        let got2: Vec<u8> = ends[1].poll().into_iter().map(|(_, b)| b[0]).collect();
+        let got3: Vec<u8> = ends[2].poll().into_iter().map(|(_, b)| b[0]).collect();
+        assert!(!got2.is_empty() && !got3.is_empty(), "both recipients received some frames");
+        assert!(got2.len() < 200 && got3.len() < 200, "both recipients lost some frames");
+        assert_ne!(got2, got3, "the two recipients saw different subsets (per-recipient drop rolls)");
+    }
+
+    #[test]
+    fn drop_and_duplicate_compose_on_the_same_channel() {
+        // Both faults at once: each delivered frame may also be duplicated while others vanish. The
+        // received multiset is a subset of the sends, each surviving frame present once or twice.
+        let faults = FaultModel { drop_rate: 0.3, duplicate_rate: 0.5, reorder: false };
+        let mut ends = Loopback::mesh_with_faults(&[1, 2], faults, 0xC0DE);
+        for i in 0u8..100 {
+            ends[0].send(&[i]);
+        }
+        let got: Vec<u8> = ends[1].poll().into_iter().map(|(_, b)| b[0]).collect();
+        let mut counts: BTreeMap<u8, usize> = BTreeMap::new();
+        for b in &got {
+            *counts.entry(*b).or_default() += 1;
+        }
+        assert!(counts.values().all(|&c| c == 1 || c == 2), "each surviving frame appears once or twice");
+        assert!(counts.values().any(|&c| c == 2), "some frames were duplicated");
+        assert!(counts.len() < 100, "some frames were dropped entirely");
+    }
+
+    #[test]
+    fn reorder_only_shuffles_within_a_poll_not_across_them() {
+        // Reordering permutes the frames drained in a single poll; frames sent after an intervening
+        // poll land in a later batch and can't jump ahead of the earlier batch.
+        let faults = FaultModel { reorder: true, ..Default::default() };
+        let mut ends = Loopback::mesh_with_faults(&[1, 2], faults, 0x5151);
+        for i in 0u8..8 {
+            ends[0].send(&[i]);
+        }
+        let first: Vec<u8> = ends[1].poll().into_iter().map(|(_, b)| b[0]).collect();
+        for i in 8u8..16 {
+            ends[0].send(&[i]);
+        }
+        let second: Vec<u8> = ends[1].poll().into_iter().map(|(_, b)| b[0]).collect();
+        assert_eq!(first.len(), 8, "first batch fully drained");
+        assert_eq!(second.len(), 8, "second batch fully drained");
+        assert!(first.iter().all(|&b| b < 8), "the first batch holds only the first 8 sends");
+        assert!(second.iter().all(|&b| (8..16).contains(&b)), "later sends stay in the later batch");
+    }
+
+    #[test]
     fn same_seed_replays_identically() {
         let faults = FaultModel { drop_rate: 0.5, duplicate_rate: 0.3, reorder: true };
         let run = || {
