@@ -258,7 +258,10 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 >    so the game allocates the slot array (cap>0), then leg B's tail store succeeds. Set `[debug.probes]
 >    drive_create` + `[gameplay] bypass_session_create_gate` + `[debug.probes] force_netsession_ready`
 >    on both machines. Open question: *what* allocates the slot array (normal match setup vs. whether our
->    rung-4 lobby alone triggers it) — answerable only with a real peer.
+>    rung-4 lobby alone triggers it) — answerable only with a real peer. **Protocol reference for what the
+>    peer-join exchanges (what likely sizes the array):** vswarte's `waygate-server`, cloned locally at
+>    `../waygate-server` (`message/src/eldenring/{session,sign,matchingticket}.rs` + `wire/`); see the
+>    "Protocol reference — `waygate-server`" note in [COOP-CONNECTION.md](COOP-CONNECTION.md) > Rung 3.
 > 2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
 >    = base and `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
 >    produces a malformed session the game can't run; only if (1) is impossible.

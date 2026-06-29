@@ -165,6 +165,20 @@ the one genuinely hard step — driving the game's own session so players see ea
 > `[NetworkSession+0x18]`) or the heavier ERSC-style session neutralization. **`create` is solo-confirmable
 > up to this point; past it needs the peer.**
 
+> **Protocol reference — `waygate-server` (cloned locally at `../waygate-server`).** vswarte's
+> [Elden Ring matchmaking-server reimplementation](https://github.com/vswarte/waygate-server) (Rust, MIT —
+> same author as our `fromsoftware-rs` SDK, so **clean-room-safe public RE**, not ERSC's closed bytes). It is
+> the deepest open RE of ER's online/session **wire protocol**. It is **server-side** (it replaces FromSoft's
+> matchmaking server), so it does **not** chart the client `CSSessionManager`/`NetworkSession` engine code or
+> the slot-array allocation — our actual blocker is client-side and waygate won't hand us a driver. What it
+> *does* give us is the **message exchange of the summon/join handshake** — i.e. what a real peer-join sends,
+> which is precisely the flow that "sizes the slot array" in the capacity-0 finding above. Use it when running
+> the 2-player create test to predict + interpret what the peer-join exchange does. Files of interest:
+> `message/src/eldenring/session.rs` + `message/src/session.rs` (session messages), `…/sign.rs` +
+> `server/src/handler/eldenring/sign.rs` (summon-sign → pulled-into-world, the in-world join we want to
+> drive), `…/matchingticket.rs` + `…/quickmatch.rs` (match/session formation), and the `wire/` crate (the
+> on-wire format + crypto).
+
 > **What it takes to *call* the session is specified in [SESSION-DRIVE.md](SESSION-DRIVE.md)** — the
 > minimal create/host + join calls, the args/state/keys each needs, and the loud SDK-survey result
 > (the SDK charts the session object + FSM + transport but exposes **no** callable create/host/join, so
@@ -409,6 +423,10 @@ give the linked coordination channel ("both go now") and the two instances to dr
   "offline" but Steam-connected.
 - [RUNTIME-RE.md](RUNTIME-RE.md) — Frida/Steam-API/packet tooling for the optional ERSC-observation
   accelerator and the rung-3 RE.
+- **External reference — `../waygate-server`** (cloned locally): vswarte's ER matchmaking-server
+  reimplementation (Rust, MIT, clean-room-safe). The deepest open RE of ER's online/session **wire
+  protocol** (server-side); a reference for the summon/join message exchange when working rung-3. See the
+  "Protocol reference — `waygate-server`" note under [Rung 3](#rung-3--drive-the-games-session-the-hard-re-on-our-terms).
 - Side-channel code: [`peer.rs`](../crates/unseamless-core/src/peer.rs),
   [`protocol.rs`](../crates/unseamless-core/src/protocol.rs),
   [`transport.rs`](../crates/unseamless-core/src/transport.rs),
