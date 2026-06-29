@@ -139,11 +139,11 @@ that is rig work for the orchestrator** — I did static analysis only.
 
 ## Needs live validation by the orchestrator
 
-- Nothing here was run against the live game; it is static disassembly. The verdict (no
-  screen-space geometry mode) is high-confidence from the code, but the negative is worth a
-  one-line sanity check if ever doubted.
-- The "matrix swap" lever above (the `[[ctx+0x10]+0xd0]` VP matrix and the `+0x210` override
-  branch) is entirely unverified at runtime and would need the rig.
+Nothing here was run against the live game; it is static disassembly. The verdict (no
+screen-space geometry mode) is high-confidence from the code, but the negative is worth a
+one-line sanity check if ever doubted. The "matrix swap" lever (the `[[ctx+0x10]+0xd0]` VP matrix
+and the `+0x210` override branch) is entirely unverified at runtime and would need the rig (probe
+described above).
 
 ## Re-derivation notes (after a game update)
 

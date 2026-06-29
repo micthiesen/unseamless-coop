@@ -33,7 +33,7 @@ filled quad) at a screen position? If yes it fixes both problems at once (swim-f
 **Recommendation:** keep the bitmap-font→quads substrate for fully-custom surfaces (the tabbed
 menu), but **retarget nameplates and system-style notifications onto the game's own tag-HUD /
 message channels** for pixel-perfect, free, swim-free output. This is a model-write, not a draw
-hook. Several behavioral assumptions need a quick rig confirpass (flagged at the end).
+hook. Several behavioral assumptions need a quick rig confirm pass (flagged at the end).
 
 ---
 
@@ -102,9 +102,9 @@ Confirmed by the prior spike and not revisited: `CSEzDraw::draw_text` (RVA `0x26
 
 ## The pragmatic win: write the game's own HUD model, let Scaleform render it
 
-The original lane framing assumed we'd need to *call a draw function*. The better lever is that the
-game's Scaleform HUD is **model-driven**, and the model lives on the **`CSFeMan` singleton, already
-charted by the SDK** (`#[shared::singleton("CSFeMan")]` on `CSFeManImp` in `cs/fe_man.rs`). We can
+The lever the original "call a draw function" framing missed: the game's Scaleform HUD is
+**model-driven**, and the model lives on the **`CSFeMan` singleton, already charted by the SDK**
+(`#[shared::singleton("CSFeMan")]` on `CSFeManImp` in `cs/fe_man.rs`). We can
 get that singleton from a frame task and write its text channels; the game's existing update task
 copies them into the FrontEndView and hands them to Scaleform. Result: **pixel-perfect, GPU-textured,
 font-loaded, swim-free, batched text — with no RE and no render hook.** The tradeoff is we inherit

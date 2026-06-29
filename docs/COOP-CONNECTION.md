@@ -94,7 +94,7 @@ the one genuinely hard step — driving the game's own session so players see ea
   `dinput8` load). The Copy button uses imgui's built-in Win32 clipboard. **Still to eyeball on the
   rig:** that the Copy button actually populates the OS clipboard (needs opening the overlay in-game).
 
-### Rung 2 — Private Steam P2P side-channel (the real unblock) — **SHIPPED (pending two-player rig run)**
+### Rung 2 — Private Steam P2P side-channel (the real unblock) — **SHIPPED + CONFIRMED (2026-06-27 friend test)**
 - `SteamP2PTransport` ([`coop/coop.rs`](../crates/unseamless-coop/src/coop.rs)) satisfies the existing
   [`Transport`](../crates/unseamless-core/src/transport.rs) trait (`PeerId = u64` is already "a Steam
   ID in production"), over poll-based `ISteamNetworkingMessages`. The peer SteamID and host/client role
@@ -129,39 +129,41 @@ the one genuinely hard step — driving the game's own session so players see ea
   manual relay. (These stay in each machine's own log — `forward.rs` drops `unseamless_coop::coop`-target
   records as side-channel noise, so they don't reach the host's forwarded bundle; that's fine, each
   machine's guide reads its own log.)
-- **Implementation grounded; the open piece is the two-player rig run** — confirm the NAT/auth open
-  question (peers may need to be Steam friends), that both sides establish without us pumping the
-  SessionRequest callback (we proactively `AcceptSessionWithUser`), and that the `coop_connect` report
-  goes `linking → linked`. This now happens as part of the **lobby-discovery friend test** (see
-  [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)), since discovery is what seeds the peer.
+- **Confirmed in the 2026-06-27 lobby-discovery friend test** (see
+  [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md), the run that seeds the peer): both sides established
+  without us pumping the `SessionRequest` callback (we proactively `AcceptSessionWithUser`) and the
+  `coop_connect` report went `linking → linked`. **Still open:** those peers were Steam friends, so
+  whether the NAT/auth path works for *non-friends* is unverified.
 - Slots into the same `Transport` seam as `BridgeTransport`; the bridge (loopback) was the host-side
   rehearsal for exactly this.
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
 
-> **STATE (2026-06-28) — the create/join initiation is CHARTED; the blocker moved deep, and the next
-> real move needs two players.** Progress since this section was written: the create wrapper
-> (`0x140cad4c0`) is charted and **direct-drive is rig-proven to fire** (drives `lobby_state` off
-> `None`); the Arxan availability gate (`0x140cb4b50`) is **bypassed** (`bypass_session_create_gate`,
-> branch flip — rig-confirmed via a hardware write-watch to reach leg B); and **leg B (the network-create
-> vmethod `0x1423f5c00`) is charted** — three early rejects, two eliminated statically, leaving reject #1
-> (`*(NetworkSession+0x10)==0`). Reject #1 is **real but insufficient**: forcing it (`force_netsession_ready`
-> probe) did **not** unblock — create still `FailedToCreateSession`. The offline failure is deeper, in leg
-> B's **session registry/init chain** (`0x1423fab40 → 0x1423fa1b0`, a lookup/insert several vmethods deep on
-> the freshly-created session object), which yields nothing in a *solo* drive. Full trace +
-> re-derivation: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
+> **STATE — the create/join initiation is CHARTED; the offline blocker is leg B's tail (session-slot
+> array capacity 0), and the next real move needs two players.** The create wrapper (`0x140cad4c0`) is
+> charted and **direct-drive is rig-proven to fire** (drives `lobby_state` off `None`); the Arxan
+> availability gate (`0x140cb4b50`) is **bypassed** (`bypass_session_create_gate`, branch flip —
+> rig-confirmed via a hardware write-watch to reach leg B); and **leg B (the network-create vmethod
+> `0x1423f5c00`) is charted** — three early rejects (two eliminated statically), a 4th session-config gate
+> (`0x1423fd7a0`), then a finalize/registry tail. In-world (main player present) create sails through
+> reject #1, the 4th gate (fields populated), and the registry chain — and dies in leg B's **tail capacity
+> check**: the session-slot array is **capacity 0** offline (`[NetworkSession+0x20]cap=0`), so the tail
+> store has nowhere to land. A real **rung-4 lobby + peer** is what sizes the slot array. Rig-disproven
+> tombstones: reject #1 (`*(NetworkSession+0x10)==0`) is real but **insufficient** (forcing it via
+> `force_netsession_ready` didn't unblock); the registry/init chain (`0x1423fab40 → 0x1423fa1b0`) was
+> suspected as the deeper blocker but is **OOM-only, not an offline gate**. Full trace + re-derivation:
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
 >
-> **NEXT REAL MOVE — a 2-player create test (needs a friend / second machine):** the registry lookup most
-> likely needs a real **peer/match context** a solo drive can't provide. On **both** machines set
-> `[debug.probes] drive_create = true` + `[debug.probes] force_netsession_ready = true` +
-> `[gameplay] bypass_session_create_gate = true` (+ `enable_offline_multiplayer = true`), open a rung-4
-> lobby + join (one Open World, one Join world), then let `drive_create` fire with the peer present and
-> read the `session-probe: drive-create returned …` / FSM lines — does `lobby_state` now reach
-> `TryToCreateSession`/`Host` instead of `FailedToCreateSession`? Procedure in
-> [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real peer still
-> doesn't satisfy the registry lookup, the fallback is to keep tracing the chain
-> (`0x1423fa1b0 → [new_session_vtable+0xd8] → 0x1423fa100`) to its root, or the heavier ERSC-style session
-> neutralization. **`create` is solo-confirmable up to this point; past it needs the peer.**
+> **NEXT REAL MOVE — a 2-player create test (needs a friend / second machine):** a live peer/match is what
+> populates the capacity-0 slot array. On **both** machines set `[debug.probes] drive_create = true` +
+> `[debug.probes] force_netsession_ready = true` + `[gameplay] bypass_session_create_gate = true` (+
+> `enable_offline_multiplayer = true`), open a rung-4 lobby + join (one Open World, one Join world), then
+> let `drive_create` fire with the peer present and read the `session-probe: drive-create returned …` / FSM
+> lines — does `lobby_state` now reach `TryToCreateSession`/`Host` instead of `FailedToCreateSession`?
+> Procedure in [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real
+> peer still doesn't size the slot array, the fallback is to fabricate the backing array (write
+> `[NetworkSession+0x18]`) or the heavier ERSC-style session neutralization. **`create` is solo-confirmable
+> up to this point; past it needs the peer.**
 
 > **What it takes to *call* the session is specified in [SESSION-DRIVE.md](SESSION-DRIVE.md)** — the
 > minimal create/host + join calls, the args/state/keys each needs, and the loud SDK-survey result
@@ -268,7 +270,7 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
   truncated to the first 16 bytes as 32 lowercase hex chars — KAT-pinned so the DLL and the harness agree byte for
   byte.
 
-**Build order (the awkward part is resolved; what's left is the friend test).**
+**Build order (all three steps shipped and verified in the 2026-06-27 friend test).**
 1. ✅ **Rig probe** — answered: ER pumps via `RunCallbacks`, `CreateLobby` succeeds, the path is
    poll-based (not register-based). Done 2026-06-26.
 2. ✅ **Harness prototype** — the [`harness`](../crates/harness) crate is a normal exe and *can* link
@@ -276,8 +278,7 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
 3. ✅ **DLL hand-bind (shipped)** — the poll-based `ISteamUtils`/`ISteamMatchmaking` path is bound in
    `coop/steam.rs` (the register-based `CCallbackBase` machinery is gone), driven on demand by the
    Open World / Join world actions and feeding the resolved host SteamID + chosen role into the
-   side-channel. Solo `CreateLobby` is rig-proven, and the **joiner-finds-host leg is CONFIRMED** (the
-   2026-06-27 friend test linked two machines) — rung 4 is verified end-to-end.
+   side-channel. Verified end-to-end (rig-confirmed note above).
 
 ## Steam integration: hand-bind the flat C API at runtime (do NOT take the crate)
 
@@ -305,9 +306,8 @@ Why hand-binding is small for our needs:
   poll on our own frame task; sending to a user auto-opens the session. The rung-4 lobby calls are
   async (`SteamAPICall_t`), but we poll those too via `ISteamUtils` `IsAPICallCompleted` +
   `GetAPICallResult` rather than registering a call-result handler — so the whole mod stays poll-only
-  and never touches the game's dispatch. (Rig lesson: registering a `CCallbackBase` call-result *and*
-  polling the same handle conflicts — ER's `RunCallbacks` consumes it first and the poll sees
-  `InvalidHandle`; poll, don't register. See rung 4 above.)
+  and never touches the game's dispatch. (Rig lesson: don't *also* register a `CCallbackBase`
+  call-result; it conflicts with the game's pump. Poll, don't register. See rung 4 above.)
 - **Don't manage Steam lifecycle.** The game already called `SteamAPI_Init`; we **never** call
   `SteamAPI_Init`/`Shutdown`. We just call the interface accessor + a handful of functions.
 - Net surface for rungs 1-3 is ~10-15 flat functions, e.g. (accessor names are versioned — resolve by
@@ -322,7 +322,7 @@ Why hand-binding is small for our needs:
   - async-call polling (rung 4, the poll-not-pump path): `SteamAPI_SteamUtils_v010` accessor +
     `SteamAPI_ISteamUtils_IsAPICallCompleted` / `_GetAPICallResult` (and `_GetAPICallFailureReason` for
     diagnostics). This is how we read a `SteamAPICall_t` result without registering a call-result.
-  - lobby discovery (rung 4, **`CreateLobby` rig-proven; joiner leg pending the friend test**):
+  - lobby discovery (rung 4, **`CreateLobby` rig-proven; joiner leg CONFIRMED in the 2026-06-27 friend test**):
     the `SteamAPI_SteamMatchmaking_v0NN` accessor (resolve the exact `_v0NN` from the rig dump) +
     `SteamAPI_ISteamMatchmaking_CreateLobby` /
     `_SetLobbyData` / `_AddRequestLobbyListStringFilter` / `_RequestLobbyList` / `_GetLobbyByIndex` /
@@ -358,44 +358,36 @@ path now exists and lights up the moment two modded games link.
 
 ## Open questions / risks (confirm on the rig)
 
-- **Steam P2P auth/NAT (gates rung 2).** Messaging two arbitrary SteamIDs via `ISteamNetworkingMessages`
+- **Steam P2P auth/NAT (rung 2).** Messaging two arbitrary SteamIDs via `ISteamNetworkingMessages`
   may require the accounts to be Steam **friends** (or share a Steam networking session) for
-  NAT-punch/auth. For friends this usually suffices; verify early. This is a *Steam* connection detail,
-  not the game's matchmaking lobby, so it doesn't violate "defer the lobby."
-- **`SteamNetworkingMessagesSessionRequest_t`.** Incoming sessions normally surface via this callback;
-  since we avoid the callback queue, rely on **proactive `AcceptSessionWithUser`** (we know the peer)
-  and/or the implicit-open-on-send behavior. Confirm both sides establish without us pumping callbacks.
+  NAT-punch/auth. **Confirmed working for friends** (2026-06-27 test); whether *non-friends* can link is
+  still open. This is a *Steam* connection detail, not the game's matchmaking lobby, so it doesn't violate
+  "defer the lobby."
+- **`SteamNetworkingMessagesSessionRequest_t`.** ✅ Incoming sessions normally surface via this callback;
+  since we avoid the callback queue, we rely on **proactive `AcceptSessionWithUser`** (we know the peer)
+  and the implicit-open-on-send behavior. The friend test confirmed both sides establish without us
+  pumping callbacks.
 - **Flat-API symbol versions.** Accessor names carry a version (`…_v002`, etc.) that must match the
   rig's `steam_api64.dll`. Resolve by name; re-derive after a Steam client update (document the names
   next to the binding per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results").
 - **Rung 3 is the real gate.** In-world co-op blocks on the create/join RE. Rungs 1-2 work *around* it
   but don't eliminate it.
-- **Lobby async results (rung 4).** ✅ **Resolved on the rig (2026-06-26).** ER pumps Steam via legacy
-  `RunCallbacks` (imports confirm it; no `ManualDispatch`), and `CreateLobby` succeeds in-process. We do
-  **not** register call-results — that conflicts with the game's pump (`InvalidHandle` on poll); instead
-  we **poll** each `SteamAPICall_t` via `ISteamUtils` `IsAPICallCompleted` + `GetAPICallResult`. Only the
-  **joiner-finds-host** leg (filter/list/join/resolve) remains to confirm, in the two-player friend test.
+- **Lobby async results (rung 4).** ✅ **Resolved on the rig (2026-06-26):** ER pumps Steam via legacy
+  `RunCallbacks` (no `ManualDispatch`), `CreateLobby` succeeds in-process, and we **poll** each
+  `SteamAPICall_t` (`ISteamUtils` `IsAPICallCompleted` + `GetAPICallResult`) rather than register
+  call-results (which conflict → `InvalidHandle` on poll). Joiner-finds-host leg since CONFIRMED in the
+  friend test. Full detail in rung 4 above.
 
 ## Concrete next step
 
-Rungs 1, 2, and 4 are shipped and **CONFIRMED live across two machines** (2026-06-27 friend test): a
-single lobby-discovery run linked the side-channel (`coop: linked … versions match`; `coop_connect`
-showed lobby created, host-id resolved, handshake reached, sent 2674 / received 2011). The peers were
-Steam friends here; whether non-friends can link is still open but didn't block. So the
-out-of-band connection stack is done and verified.
+Rungs 1, 2, and 4 are shipped and **CONFIRMED live across two machines** (2026-06-27 friend test, numbers
+in the status header above). The out-of-band connection stack is done and verified.
 
-**Rung 3 create-drive is charted and solo-proven to fire; the blocker is now deep and needs a peer.**
-Since the friend test we stopped relying on the greyed multiplayer items entirely and **drove
-`CSSessionManager` directly**: the create wrapper (`0x140cad4c0`) fires, the Arxan availability gate
-(`0x140cb4b50`) is bypassed, and leg B (the network-create vmethod `0x1423f5c00`) is charted down to a
-single residual reject (#1) that proved **insufficient** — the offline failure lives deeper, in leg B's
-session registry/init lookup (`0x1423fa1b0`), which yields nothing in a *solo* drive. Full state +
-re-derivation: the **Rung 3 STATE callout above** and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
-
-**The concrete next step is now a 2-player create-drive test** (needs a friend / second machine): with
+The next move is **rung 3's 2-player create-drive test** (needs a friend / second machine): with
 `drive_create` + `force_netsession_ready` + `bypass_session_create_gate` set on both peers, open+join a
-rung-4 lobby and let create fire **with a real peer present** — the registry lookup most likely needs that
-peer/match context. Does `lobby_state` reach `TryToCreateSession`/`Host`? Step-by-step in
+rung-4 lobby and let create fire **with a real peer present** (the leg-B session registry/init lookup at
+`0x1423fa1b0` most likely needs the peer/match context a solo drive can't give). Does `lobby_state` reach
+`TryToCreateSession`/`Host`? Full state in the **Rung 3 STATE callout above**; step-by-step in
 [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real peer still doesn't
 satisfy it, keep tracing the registry chain or fall back to ERSC-style session neutralization. Rungs 2+4
 give the linked coordination channel ("both go now") and the two instances to drive against.

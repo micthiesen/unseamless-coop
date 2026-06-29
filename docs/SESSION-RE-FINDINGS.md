@@ -1,10 +1,21 @@
-# Session-FSM RE findings (rung 3) — static pass, 2026-06-27
+# Session-FSM RE findings (rung 3) — static, 2026-06-27
 
-A solo static analysis of `eldenring.exe` (no game running, no rig driving) to chart the
-create/join initiation for [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md). It did **not** land the
-two initiation function entries (those need a runtime write-watch — see "Why static stops here"),
-but it produced the anchors that turn that runtime step from an open hunt into a one-shot confirm,
-and it corrected a wrong assumption baked into the runbook's strategy B.
+Three static passes over `eldenring.exe` (no game running) charting the create/join session
+initiation for [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md):
+
+1. **The keystone** (below) — found the live `CSSessionManager` singleton global `G`, the ctor, the
+   field offsets, and the vtable (the singleton + offsets are also **runtime-confirmed**).
+2. **[Create/join initiation chart](#session-createjoin-initiation--static-chart-landed-2026-06-27-workersession-init-re)** —
+   landed both initiation functions (CREATE/JOIN) statically, bottom-up from the `lobby_state` write.
+3. **[Summon-sign trace](#summon-sign--session-start-trace-top-down-static-2026-06-27-worker-summon-sign-trace)** —
+   came top-down from multiplayer-item use; shows item-use drives a job/request state machine (not a
+   synchronous create call) and charts the direct-drive arg recipe.
+
+**Current state:** create/join entry functions, signatures, and (for create) the full arg set are
+known by *address*; the singleton/offsets/vtable are runtime-verified. What remains is the one-shot
+rig confirm of the store sites + active-drive, and join's exact peer payload (two-player test). An
+earlier read that an immediate-store scan *couldn't* tie the write to an initiation entry was wrong
+(pass 2 corrected it — strategy B works); the wrong turn is tombstoned inline.
 
 All addresses are for the **2026-06-02 `eldenring.exe`** (size 86,998,096; image base
 `0x140000000`; two `.text` sections at VMA `0x140001000` and `0x144c0e000`; `.pdata` exception
@@ -74,51 +85,31 @@ The reflection name string `"CSSessionManager"` is at `0x142b994e0` (ASCII) / `0
 (UTF-16); its DLRF descriptor getter is `0x1400ab920`. Not needed for the write-watch, but handy if
 a future bump needs to re-anchor by name.
 
-## Why static stops here (and the strategy-B correction)
+## The vtable, and a superseded dead end
 
-> **⚠️ SUPERSEDED (2026-06-27 follow-on) — this section's central claim is WRONG.** The
-> [follow-on static pass below](#session-createjoin-initiation--static-chart-landed-2026-06-27-workersession-init-re)
-> *did* find the initiation by immediate store: strategy B works. `lobby_state` on the singleton **is**
-> written by plain immediate stores (`mov [rbx+0xc], 1` at `0x140cb208e` = create, `mov [rbx+0xc], 4`
-> at `0x140cb25f0` = join, both on the real `CSSessionManager`). The reasoning below missed them
-> because (a) it only checked values `1`/`4` against a noisy whole-image scan instead of restricting to
-> the method block, and (b) it mis-read the float-blend function at `0x141b8a470` as a session
-> "assignment/clone family." Read the bullets below only as a record of the wrong turn. The scaffold's
-> RIG TODO comment in `crates/unseamless-coop/src/session_probe.rs` repeats this stale claim and should
-> be corrected when its consts are filled.
+**Tombstone (superseded by pass 2):** an earlier read here concluded that an immediate-store scan for
+`mov dword [reg+0xc], <enum>` (`C7 4? 0C 01 …`) *couldn't* tie the `lobby_state` write to an
+initiation entry — so the runbook's "strategy B" was dead and only a runtime write-watch (strategy A)
+would do. **That was wrong:** the `None→TryToCreateSession`/`None→TryToJoinSession` transitions *are*
+plain immediate stores on the real singleton (`mov [rbx+0xc],1` at `0x140cb208e` = create,
+`mov [rbx+0xc],4` at `0x140cb25f0` = join), and pass 2 below found them statically. The scan missed
+them because it checked `1`/`4` against a noisy whole-image scan (mostly DLRF reflection-descriptor
+ctors embedding `"CSSessionManager"`, and a `"FACE"`-tagged (`0x45434146`) message struct, all with
+an unrelated `+0xc`) instead of restricting to the `CSSessionManager` method block, and because it
+mis-read the float-blend function `0x141b8a470` as a session "assignment/clone family" (it is not —
+see the pass-2 tombstone). Both strategies are now viable; the keystone makes the rig confirm cheap.
+(The stale "register store, not immediate" RIG TODO in `crates/unseamless-coop/src/session_probe.rs`
+should be corrected when its consts are filled.)
 
-The runbook's **strategy B** says to scan for an immediate store of the enum constant,
-`mov dword ptr [reg+0xc], 1` (`C7 4? 0C 01 …`). **On this build that does not find the initiation**,
-for two reasons established by the pass:
+The `CSSessionManager` **vtable is `0x142b9a0c8`** (the ctor's `[this+0]` store, runtime-confirmed as
+`[base+0]` above). It is a short vtable (~2 slots); one slot observes a *different* singleton's state,
+which is why a quick read of it looked off — but the live object genuinely carries this vtable.
+Create/join are **non-virtual** (not reachable by walking a vtable).
 
-- **`lobby_state` on the singleton is written by a *register* store, never an immediate.** Every
-  decode-verified `mov [reg+0xc], 1|4` immediate in the image lands on an *unrelated* object — DLRF
-  reflection-descriptor constructors that embed `"CSSessionManager"` (len-16) with a `+0xc` kind
-  field, and a `"FACE"`-tagged (`0x45434146`) message struct whose `+0xc`/`+0x10` are its own type
-  and size. `+0xc` is a ubiquitous struct offset, so the immediate-store scan is almost all false
-  positives, and none touch the real session manager.
-- **The real `lobby_state` writes are register stores in `this`-param callees.** The writes that
-  *are* on `CSSessionManager`-shaped objects are register copies (`mov [rbx+0xc], eax` where
-  `eax = [rsi+0xc]`) inside a session-state assignment/clone family near `0x141b8a470` — i.e. the
-  field is moved around, and the value of the *initiating* transition flows from a parameter/memory,
-  not a literal. No function that loads `G` performs the `None→TryToCreateSession` store directly,
-  and no immediate `+0xc` writer is called with `rcx = G` from its immediate caller — so the
-  transition happens a call-level or two below an entry that takes `this` as an argument.
+## The cheap runtime confirm (mechanics; expected results in pass 2)
 
-Net: the value-store can't be statically tied to the *initiation entry* on this build. This matches
-why the runbook already calls **strategy A (runtime write-watch) "most direct"** — now it's the
-*only* reliable route, and the keystone makes it cheap.
-
-The `CSSessionManager` vtable is **`0x142b9a0c8`** (the ctor's `[this+0]` store, runtime-confirmed
-as `[base+0]` above). It is a short vtable (~2 slots); one slot observes a *different* singleton's
-state, which is why a quick read of it looked off — but the live object genuinely carries this
-vtable. Create/join are **non-virtual** anyway (not reachable by walking a vtable), so the write-watch
-remains the route.
-
-## The cheap runtime confirm (hand-off for the next rig/driven session)
-
-This replaces the open-ended "find these two functions". **Frida is not required** — the runtime
-confirmation showed the exe loads at its preferred base, so a Linux-native hardware watchpoint works:
+The runtime confirmation showed the exe loads at its preferred base, so a Linux-native hardware
+watchpoint works and **Frida is not required**:
 
 1. Boot with `[debug.probes] session_probe = true`. The FSM probe prints
    `session-probe: FSM live … CSSessionManager @0x<base>` once the manager is live (at the title
@@ -130,16 +121,13 @@ confirmation showed the exe loads at its preferred base, so a Linux-native hardw
      `DR7` to enable a 4-byte write watch (len=11b, rw=01b, L0=1), `PTRACE_CONT`; on the trap read
      `RIP` from `GETREGSET`. A ~40-line Python `ctypes` script does it. Yama allows same-uid attach.
    - or Frida-gadget (RUNTIME-RE.md, Option B) if you'd rather script in JS.
-3. **Host once**: the watch fires at the exact instruction writing `1` on the first `None →
-   TryToCreateSession` edge (the probe's transition line timestamps it for correlation — ignore
-   later copies in the assignment family). Subtract the `0x140000000` load base from `RIP` to get the
-   static VA; its `.pdata`-enclosing function is the **create** initiation. **Join once** for the
-   `… → 4` write → the **join** initiation.
-4. Walk each writer to its function prologue, take ~16 unique bytes as the pelite landmark, and fill
-   `SESSION_CREATE_SITE` / `SESSION_JOIN_SITE` in `coop/session_probe.rs` (the scaffold is otherwise
-   ready). Because the write is in a `this`-param callee, also note from the captured call stack the
-   outermost entry you actually want to hook (the one the host/join UI calls), if it differs from
-   the leaf writer.
+3. On the trap, subtract the `0x140000000` load base from `RIP` to get the static VA and its
+   `.pdata`-enclosing function. The **first `→1` write = create, first `→4` = join** (the watch fires
+   multiple times per connect for completion/failure/leave, so take the first edge; the probe's
+   transition line timestamps it for correlation). The exact expected `RIP→static-VA` map and the
+   consts to fill in `coop/session_probe.rs` are in
+   [pass 2's runtime-verify recipe](#runtime-verify-recipe-orchestrator--the-cheap-one-shot-confirm)
+   and [landmark hints](#landmark-hints-for-session_probers-do-not-fill-until-runtime-confirmed).
 
 The one thing still needed is the **in-game host/join *trigger***: our overlay "Open World" drives
 only the rung-4 lobby, not the game session FSM, so the transition must be kicked by a native
@@ -151,11 +139,12 @@ peer), so a solo driven session can chart **create**; **join** waits for the two
 ## Re-usable method notes
 
 The scan scripts written for this pass (capstone + numpy over the raw PE, `.pdata` for exact
-function bounds, a fast rip-relative xref finder, and a port of `from_singleton`'s getter pattern)
-are scratch, but the *techniques* are the reusable part and are described inline above. The two that
-earn their keep next time: (a) **unique-field-fingerprint → constructor → instance global** (the
-`+0x25c=1` route here), and (b) **rip-relative xref via `disp32 == target − (field_va + 4)`** for
-fast, desync-free xref finding without a full linear disassembly.
+function bounds, a fast rip-relative xref finder, a port of `from_singleton`'s getter pattern) were
+scratch; they are now committed as **`scripts/re/static.py`** (see [pass 3's tooling note](#re-derivation-after-a-game-update)).
+The two *techniques* that earn their keep next time: (a) **unique-field-fingerprint → constructor →
+instance global** (the `+0x25c=1` route here), and (b) **rip-relative xref via
+`disp32 == target − (field_va + 4)`** for fast, desync-free xref finding without a full linear
+disassembly.
 
 ---
 
@@ -170,13 +159,12 @@ now skip the open hunt and go straight to a one-shot **call-the-function + write
 All addresses are for the same **2026-06-02 `eldenring.exe`** (image base `0x140000000`), facts
 about the binary; behavior is described in our own words (CLAUDE.md > Clean-room).
 
-## Correction: the `0x141b8a470` "assignment/clone family" was a red herring
+## Tombstone: `0x141b8a470` was a red herring
 
-The prior pass pointed at register `+0xc` copies near `0x141b8a470` as the lobby-state writers. That
-function is **not** `CSSessionManager` code: it's a **float-interpolated struct blend** (a `comiss`
-lerp factor in `xmm`, copying `+0xc/+0x10/+0x14` plus `0x18`-stride sub-objects at `+0xc8/+0x178` and
-SIMD blocks at `+0x228..+0x268`) — a pose/transform interpolation whose `+0xc` happens to collide
-with the offset of interest. Ignore it for session RE.
+`0x141b8a470` is a **float-interpolated struct/pose blend** (a `comiss` lerp factor in `xmm`), whose
+`+0xc` field merely *collides* with `lobby_state`'s offset — it is **not** `CSSessionManager` code.
+The prior pass mis-took its register `+0xc` copies for the lobby-state writers. Ignore it for session
+RE.
 
 ## The lobby_state setter family — one dedicated function per `LobbyState`
 
@@ -480,16 +468,13 @@ access-asserts — a state-logging method, not the worker).
 So, consistent with the `disable_session_creation` semantics, the `None→TryTo*` write lives in the
 net update task's "process a `signs` entry" step — the cluster of multiplayer step virtuals in
 `~0x1401cXXXX…0x1401dXXXX` and `~0x140a3XXXX` that load `G` (`0x143d7a4d0`) and are dispatched
-(caller-count 0). This top-down narrowing **converged with `session-init-re`'s bottom-up pass**: its
-CREATE **driver is `0x140a23010`**, which was already in my sign/net `G`-referencing candidate list
-(I had it flagged as `0x140a23010`, 2 `G`-refs, 1 caller). Top-down and bottom-up met at the same
-function. The confirmed initiation functions (from `session-init-re`, now also in this doc/main):
-
-- **CREATE:** wrapper **`0x140cad4c0`**`(this, u8, u32, void*)` → inner **`0x140cb1f70`** → store
-  `[G+0xc]=1` (`TryToCreateSession`) at `0x140cb208e`. Solo "no-peer" driver: **`0x140a23010`**.
-- **JOIN:** wrapper **`0x140cae640`**`(this, u8, void*, u32, void*)` → inner **`0x140cb2470`** →
-  store `[G+0xc]=4` (`TryToJoinSession`) at `0x140cb25f0` (the wrapper's own `=5` write is the
-  `FailedToJoinSesion` failure path).
+(caller-count 0). This top-down narrowing **converged with the bottom-up pass**: its CREATE driver
+`0x140a23010` was already in my sign/net `G`-referencing candidate list (flagged with 2 `G`-refs, 1
+caller) — top-down and bottom-up met at the same function. The confirmed CREATE/JOIN initiation
+functions, signatures, and store sites are charted once in the
+[pass-2 chart above](#session-createjoin-initiation--static-chart-landed-2026-06-27-workersession-init-re)
+(CREATE wrapper `0x140cad4c0` → inner `0x140cb1f70`; JOIN wrapper `0x140cae640` → inner
+`0x140cb2470`).
 
 ## Arg construction for driving create/join directly (the direct-drive recipe)
 
@@ -539,14 +524,13 @@ two-player friend test, feeding the rung-4-resolved peer in.
 ## Net for the rewrite
 
 To drive co-op without the items we replicate the **summon path's effect**, skipping the FromNet
-server leg: stand up the peer over our own side-channel (rungs 2+4, done), then **call the create
-wrapper `0x140cad4c0` directly** for the host — `this=[G]`, `flag`, `mode=4`, an 8-byte
-`settings={u16:0,u32:2}` (the arg recipe above) — and the join wrapper `0x140cae640` for the guest
-once its peer payload is charted on the two-player test. The items are harness for exactly this
-job/request machine; the create/join entry and (for create) its full arg set are now known, so the
-co-op core can drive the FSM rather than only observe it. Open items for the rig: (1) does the
-`is_offline()` check inside `0x140cb20d0` block a direct create offline (the `enable_offline_multiplayer`
-patch likely clears it); (2) join's exact peer payload (`a`/`b`/stack5), charted with a real peer.
+server leg: stand up the peer over our own side-channel (rungs 2+4, done), then call the create/join
+wrappers directly (the arg recipe above) — create is solo-drivable now; join's wrapper waits on the
+peer payload from the two-player test. The items are harness for exactly this job/request machine;
+the create/join entry and (for create) its full arg set are known, so the co-op core can drive the
+FSM rather than only observe it. Open items for the rig: (1) does the `is_offline()` check inside the
+params builder `0x140cb20d0` block a direct create offline (the `enable_offline_multiplayer` patch
+likely clears it); (2) join's exact peer payload (`a`/`b`/stack5), charted with a real peer.
 
 ## Re-derivation after a game update
 

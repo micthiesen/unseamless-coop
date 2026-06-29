@@ -240,55 +240,45 @@ argument mapping, **(2)** the join-session function entry + which register is th
 **(3)** the password→AES-session-key derivation (+ confirmation of any function-internal online gate).
 The peer identity and the call ordering are already solved by rungs 4 and 2.
 
-## Why a direct create fails offline (static, 2026-06-27, worker `create-gate`)
+## Why a direct create fails offline (the rung-3 create wall)
 
-> **RIG RESULT — CORRECTION (orchestrator, 2026-06-28, write-watch run): the gate bypass WORKS; the
-> real reject is leg B (the network-create vmethod).** A hardware **write-watch** on `[G]+0x24`
-> (`scripts/re/watch-write.py --addr <G+0x24> --access write`, armed across the `drive_create` fire)
-> re-ran with **both** `enable_offline_multiplayer` and `bypass_session_create_gate` applied (boot log:
-> `patched 'bypass_session_create_gate': [75] -> [EB]`) and **HIT at `RIP=0x140cb2086`** — exactly 3
-> bytes past the leg-B store `mov [this+0x24], eax` at `0x140cb2083`. That store is reached *only if the
-> gate branch was passed*, so with the `jne→jmp` flip applied **control DID reach leg B (the
-> network-session create vmethod)**; the value stored was `eax=0` (a follow-up peek of `[G]+0x24` read
-> `00 00 00 00`), so the inner returns false → wrapper sets `lobby_state=2`. **The bypass gets us past
-> the gate; leg B itself rejects offline.** This *supersedes* the peek-only finding below: `[G]+0x24 == 0`
-> after the fact is **ambiguous** (never-written vs. leg-B-wrote-`0`) — only the write-watch disambiguates,
-> and it shows leg B ran. So **option (1) below (dump the encrypted gate) is moot for the immediate
-> unblock** — the gate isn't the blocker. For the record a passive dump of the gate `0x140cb4b50` can't
-> read it anyway: it's encrypted *in memory* (live ciphertext `af 34 c0…` ≠ on-disk `2a 8b 84…`) and
-> re-encrypts after execution (post-drive peek == pre-drive peek), so only an in-execution capture could
-> read its body.
+> **Current truth — root cause CONFIRMED (2026-06-29, in-world rig).** A **solo** direct-drive create
+> cannot succeed. The create wrapper fires and is rejected **synchronously** (`lobby_state None →
+> FailedToCreateSession`, returns `false` the same frame). With the leg-A gate bypassed and reject #1
+> forced, create passes every static gate charted below — leg A, rejects #1/#2/#3, and the 4th gate —
+> then dies in **leg B's tail capacity check**: the session-slot array has **capacity 0** offline
+> (`cmp count,[rbx+0x20]; jae fail` with `rbx=[[NetworkSession+8]+0x48]` and `[rbx+0x20]==0` → `0>=0` →
+> fail), because no real match/lobby ever allocated it, so the finished session object has nowhere to be
+> stored. It is **not** OOM, the gate, the 4th gate, or the finalize registry. **The unblock is the
+> 2-player drive** (a live rung-4 lobby + a real peer is what sizes the slot array). The static anatomy
+> and how each candidate was ruled out follow; superseded conclusions are kept as one-line tombstones.
 >
-> **NEXT (corrected): RE leg B — the network-session create vmethod `[netsession_vtable+8]`** (create
-> dispatch `0x140cb207f`). It's a *dynamic* target (vtable resolved at runtime via accessor
-> `0x1423f1930([this+0x60])` → `+0x710` = `NetworkSession*`; hand-walking the `[this+0x60]` global chain
-> dead-ends in in-image accessor logic, so don't peek-walk it). The move: **hook the leg-B call site
-> `0x140cb207f` to capture the resolved vmethod address** (extend `session_probe`), then trace/decompile
-> *that* function to see what it needs offline (a live `NetworkSession`/Steam-session object, an
-> EAC/entitlement signal, a non-null transport, …) and satisfy or stub it. Keep
-> `bypass_session_create_gate` ON as a confirmed prerequisite. ERSC's known behavior (re-enable what
-> offline disables, then run the game's own P2P session) fits a leg-B neutralization, not a gate-only fix.
+> **Paths forward:**
+> 1. **2-player drive (highest-EV, the real fix):** drive create with a live rung-4 lobby + a real peer
+>    so the game allocates the slot array (cap>0), then leg B's tail store succeeds. Set `[debug.probes]
+>    drive_create` + `[gameplay] bypass_session_create_gate` + `[debug.probes] force_netsession_ready`
+>    on both machines. Open question: *what* allocates the slot array (normal match setup vs. whether our
+>    rung-4 lobby alone triggers it) — answerable only with a real peer.
+> 2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
+>    = base and `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
+>    produces a malformed session the game can't run; only if (1) is impossible.
 >
-> ---
->
-> **RIG RESULT (orchestrator, 2026-06-28) — SUPERSEDED by the write-watch run above (its peek was ambiguous): the GATE rejected, and flipping its branch is NOT enough.**
-> Re-drove `drive_create` with **both** `enable_offline_multiplayer` and `bypass_session_create_gate`
-> applied (boot log: `patched 'bypass_session_create_gate': [75] -> [EB]`). Result: still
-> `FailedToCreateSession`, and a live peek of **`[G]+0x24 = 00 00 00 00`** (read as never-written, but
-> see the correction: leg B writing `eax=0` is indistinguishable by peek) with
-> `[G]+0xc = 2`. Per the recipe below, `[G]+0x24` un-written ⇒ the **gate rejected** — i.e. control
-> never reached the network-create (leg B). So even with the gate's success-edge `jne→jmp` flipped, the
-> create still fails at the gate: the encrypted gate's `false` verdict is **load-bearing deeper than the
-> single branch** — it almost certainly sets failure state (or a second check) the create path consults
-> downstream, before leg B. **Bypassing the one branch is insufficient.** Next options, in rough order:
-> (1) **runtime-RE the gate** — it's Arxan-encrypted in `.text` but decrypted in memory at runtime, so
-> a Frida/ptrace dump of `0x140cb4b50`'s live body reveals what it actually checks (likely an EAC /
-> entitlement / online-session-available signal — possibly the same 4th signal the item-grey hunt
-> chased); (2) **ilhook-redirect the gate *call*** to a stub that returns `true` AND skips the real
-> gate entirely (no encrypted-`.text` patch, avoids its failure side-effects — but may also skip setup
-> the create needs); (3) **route around it** — call the network-create leg B vmethod directly, past the
-> wrapper/inner that hold the gate. The simple boot-patch lever is exhausted; this needs runtime RE.
-
+> **Superseded hypotheses (tombstones — do not revisit):**
+> - *"The leg-A gate `0x140cb4b50` is the blocker."* Wrong. A hardware write-watch on `[G]+0x24`
+>   (`scripts/re/watch-write.py --addr <G+0x24> --access write`, with `enable_offline_multiplayer` +
+>   `bypass_session_create_gate` applied) **HIT at `RIP=0x140cb2086`** — 3 bytes past the leg-B store
+>   `mov [this+0x24], eax` at `0x140cb2083`, which is reached **only if the gate branch passed**. So the
+>   bypass gets control to leg B; the gate is not the blocker. (A passive peek of `[G]+0x24 == 0` is
+>   *ambiguous* — never-written vs. leg-B-wrote-`eax=0`; only the write-watch disambiguates, and it shows
+>   leg B ran. The earlier peek-only read of `[G]+0x24=0` / `[G]+0xc=2` wrongly concluded "gate rejected.")
+> - *"Reject #1 (`NetworkSession+0x10==0`) is the blocker."* Real (it is 0 offline) but **not sufficient**
+>   — forcing it nonzero did not unblock.
+> - *"Create dies in the session-object registry/init chain (`0x1423fa1b0`)."* Wrong — that chain is
+>   OOM-only.
+> - *"The 4th gate `0x1423fd7a0` is the blocker."* Wrong — in-world its fields are populated and it
+>   returns true.
+> - *"The create blocker shares the item-grey service `0x144842d40`."* Wrong — the finalize uses numeric
+>   global `0x144842d28` (a hash modulus, merely a `.data` neighbor), no proven link.
 
 The rung-3 direct-drive is **proven to fire but be rejected**: calling the create wrapper
 `0x140cad4c0` on `[G]` (`this`=live `CSSessionManager`, `flag=0`, `mode=4`, `settings={u16:0,u32:2}`,
@@ -331,38 +321,38 @@ exactly why `enable_offline_multiplayer` was insufficient.** The two real reject
   `0x140cb207f`). Returns a `u32` stored to `[this+0x24]`; `0` → fail. Dynamic target (resolved at
   runtime), not statically decodable.
 
-### The leading suspect: gate `0x140cb4b50` — hypothesis (a), an availability gate distinct from `is_offline`
+### Leg A — the availability gate `0x140cb4b50` (was the lead suspect; rig: bypass works, not the blocker)
 
-Four facts make `0x140cb4b50` the prime synchronous reject and put it squarely in **hypothesis (a)**:
+The gate `0x140cb4b50` was the leading *static* suspect for the synchronous reject. The rig later proved
+the bypass clears it and the real reject is leg B (see the write-watch tombstone above), but the static
+charting stands and is load-bearing for re-derivation:
 
-1. **It's `is_offline()`-independent.** It runs first, before the builder; `is_offline()` only sets
-   param fields downstream and never rejects. This directly explains why `enable_offline_multiplayer`
-   didn't help — the gate is on a different signal entirely.
+1. **It's `is_offline()`-independent.** It runs first, before the builder; `is_offline()` only sets param
+   fields downstream and never rejects. This is why `enable_offline_multiplayer` didn't help — the gate is
+   on a different signal.
 2. **It takes only `this`** (`mov rcx, rbx` is the sole arg setup before the call; `rdx/r8/r9` are
-   leftovers). So our `flag`/`mode`/`settings` **cannot** influence its verdict. ⇒ if Leg A is the
-   reject, **hypothesis (b) (arg validation) is ruled out** — the args never reach a check that could
-   change the outcome.
-3. **It's Arxan-encrypted in place.** Its body (`.pdata` `0x140cb4b50..0x140cb4c6d`, 285 bytes) reads
-   as high-entropy garbage on disk (Shannon entropy **7.27** vs **5.59** for its clean neighbors) — it
-   is the **only** encrypted function in the whole `0x140cb4000..0x140cb6000` block; every sibling
-   decodes cleanly or is an `e9` jump-thunk. Selective virtualization/encryption of one function is the
-   signature of an **EAC / anti-tamper / online-entitlement** check — precisely the kind of gate that
-   would reject session creation outside EAC.
+   leftovers), so our `flag`/`mode`/`settings` cannot influence its verdict — for leg A, **hypothesis (b)
+   (arg validation) is ruled out.**
+3. **It's Arxan-encrypted in place.** Its body (`.pdata` `0x140cb4b50..0x140cb4c6d`, 285 bytes) reads as
+   high-entropy garbage on disk (Shannon entropy **7.27** vs **5.59** for its clean neighbors) — the
+   **only** encrypted function in the whole `0x140cb4000..0x140cb6000` block; every sibling decodes
+   cleanly or is an `e9` jump-thunk. Selective encryption of one function is the signature of an **EAC /
+   anti-tamper / online-entitlement** check. It also **can't be passively dumped**: it's encrypted *in
+   memory* too (live ciphertext `af 34 c0…` ≠ on-disk `2a 8b 84…`) and re-encrypts after execution
+   (post-drive peek == pre-drive peek), so only an in-execution capture could read its body — its exact
+   predicate (which global/service it reads) **cannot be decoded statically.**
 4. **It's shared by create AND join.** `0x140cb4b50` has exactly two callers — the create inner and the
-   join inner — each calling it (`call [0x143b3acd8]()` then `call 0x140cb4b50(this)`, identical
-   sequence) right after the `lobby_state` guards and bailing to `FailedToCreate`/`FailedToJoin` on
-   false. That is the shape of a generic "is multiplayer permitted right now?" availability gate, not a
-   create-specific argument check.
+   join inner — each calling it (`call [0x143b3acd8]()` then `call 0x140cb4b50(this)`, identical sequence)
+   right after the `lobby_state` guards and bailing to `FailedToCreate`/`FailedToJoin` on false. That is a
+   generic "is multiplayer permitted right now?" availability gate, not a create-specific argument check.
 
-Because the gate body is encrypted, **its exact predicate (which global/service it reads) cannot be
-decoded statically** — that needs a runtime hook (below). It is plausibly *related to* the elusive
-item-grey signal (both are "is online play available" gates), but it is **likely a distinct 4th
-signal**: the item-grey hunt already rig-eliminated the mode enum / `is_offline()`, `IsEnableOnlineMode`,
-and the cached online-available chain (see [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), and
-this gate is separately Arxan-protected and consulted by the **session FSM** rather than the menu. If
-the runtime hook shows it reading the same service singleton (`0x144842d40`) the item leaf reached,
-they converge; otherwise it's a new signal. Either way the *fix surface* is the same (force the gate to
-pass), so the convergence question is informational, not blocking.
+It is plausibly *related to* the elusive item-grey signal (both are "is online play available" gates) but
+**likely a distinct 4th signal**: the item-grey hunt already rig-eliminated the mode enum / `is_offline()`,
+`IsEnableOnlineMode`, and the cached online-available chain (see
+[OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), and this gate is separately Arxan-protected and
+consulted by the **session FSM** rather than the menu. If a runtime hook ever shows it reading the same
+service singleton (`0x144842d40`) the item leaf reached, they converge; otherwise it's a new signal.
+Either way it's moot for the create unblock — the bypass already passes it.
 
 ### Hypothesis (b) (arg validation) is unlikely — and we charted what the args actually do
 
@@ -385,30 +375,18 @@ arg. For the record, what our drive's args become:
 So if the rig shows Leg A passes and create *still* fails, the next move is to vary these args against
 Leg B — but the static read says they're well-formed and (b) is the weaker hypothesis.
 
-### Runtime-verify recipe (orchestrator) — disambiguate Leg A vs Leg B
+### Re-derivation: disambiguating leg A vs leg B (write-watch on `[G]+0x24`)
 
-Both legs end the same way (inner returns false → wrapper sets `lobby_state=2`), so timing doesn't
-disambiguate; one observation does. The exe loads at its preferred base `0x140000000` (confirmed), so
-static VA == live VA. Read `[G]` (`[0x143d7a4d0]`) for the live `this`.
-
-1. **Cheapest passive probe — write-watch `[G]+0x24`.** `[this+0x24]` is written **only** at
-   `0x140cb2083`, which is reached **only if Leg A passed** (the gate returned true). Arm a 4-byte
-   write-watch on `<G_instance>+0x24` (`scripts/re/watch-write.py --addr <base+0x24>`), then re-drive
-   create (`[debug.probes] drive_create`):
-   - **`[G]+0x24` is written** (watch fires) right before `lobby_state→2` ⇒ **Leg A passed, Leg B
-     (network create) rejected** — the gate is *not* the (sole) blocker; investigate the network
-     create / hypothesis (b).
-   - **`[G]+0x24` is never written** before `lobby_state→2` ⇒ **Leg A (the gate `0x140cb4b50`)
-     rejected** — hypothesis (a) confirmed; the gate is the synchronous reject.
-2. **Direct confirm — hook the gate.** Hook `0x140cb4b50` read-only and capture its return (`al`) on the
-   drive: `al==0` ⇒ Leg A rejected (the gate is the gate). `al==1` ⇒ gate passed, failure is Leg B.
-3. **Active confirm — flip the bypass.** Set `[gameplay] bypass_session_create_gate = true` (landed,
-   default-off — see below) and re-drive:
-   - create now reaches **`TryToCreateSession`** ⇒ the gate *was* the reject (hypothesis (a) confirmed,
-     and the bypass is a working unblock).
-   - create still **`FailedToCreateSession`** but `[G]+0x24` now *is* written ⇒ the gate was
-     load-bearing and the failure moved to Leg B (the network create needs whatever the gate was
-     gating) — deeper RE on the network-session create path.
+Both legs end identically (inner returns false → wrapper sets `lobby_state=2`), so timing can't
+disambiguate; one observation can. The exe loads at preferred base `0x140000000` (confirmed), so static
+VA == live VA; read `[G]` (`[0x143d7a4d0]`) for the live `this`. `[this+0x24]` is written **only** at
+`0x140cb2083`, reached **only if leg A passed**, so a 4-byte write-watch on `<G_instance>+0x24`
+(`scripts/re/watch-write.py --addr <base+0x24>`) across a `[debug.probes] drive_create` fire tells the
+legs apart: **fires** ⇒ leg A passed, leg B rejected; **never fires** ⇒ leg A rejected. (Run: it fired —
+see the leg-A tombstone above; a *passive peek* of `[G]+0x24` can't substitute since `0` is ambiguous
+between never-written and leg-B-wrote-`0`.) To actively confirm, set `[gameplay]
+bypass_session_create_gate = true` (landed, default-off — below) and re-drive: the bypass flips leg A's
+verdict so any remaining failure is leg B's.
 
 ### Patch candidate (landed, default-off): `gameplay.bypass_session_create_gate`
 
@@ -436,158 +414,99 @@ gate still *runs* but its `false` verdict no longer fails the create:
   encrypted gate entirely — is riskier (drops side effects) and is the fallback only if running the gate
   is itself the problem.
 - **Caveat:** if the gate is load-bearing for the network create, this bypass just moves the failure to
-  Leg B (still `FailedToCreateSession`). That's the informative outcome the re-drive + `[G]+0x24`
-  write-watch reveals (recipe step 3).
+  Leg B (still `FailedToCreateSession`). The write-watch confirmed this is exactly what happens — the
+  bypass passes leg A and the failure moves to leg B (charted below).
 - **Join:** the join inner has the identical gate site (`0x140cb2570` → `jne` at `0x140cb257d`); a
   parallel bypass would flip that `jne`, but join is the two-player leg and not solo-confirmable, so
   this lane wires create only.
 
-### Leg B charted (2026-06-28): the network-create dispatch + its three synchronous rejects
+### Leg B charted — the network-session create vmethod
 
-With leg B confirmed as the real blocker, I resolved and read it. **Resolving the vmethod (live, sudo-free
-pointer walk):** leg B is `[ *( *(this+0x60) + 0x710 ) + 8 ]` — the create inner does
-`lea rcx,[this+0x60]; call 0x1423f1930` (a 3-instruction getter: `rax=[rcx]; rax+=0x710; ret`), then
-`r9 = *(rax)` (a vtable ptr), and `call [r9+8]` with `this' = *(this+0x60)+0x710`. So: `this`=`[G]` →
-`P = *(this+0x60)` → the embedded `NetworkSession` sub-object sits at `P+0x710` → its vtable `VT = *(P+0x710)`
-→ leg B = `VT[1] = *(VT+8)`. **Walked on the live game:** `P = 0x143dcd470` (stable across a run; a
-`.data` singleton), `VT = 0x1431f9140` (`.rdata`), **leg-B vmethod = `0x1423f5c00`** (`.text`). (A
-post-failure transient can leave `this+0x60` pointing at `0x143dcd450`, whose `+0x710` resolves into
-`.data` garbage — ignore it; the valid `.text` chain is the `0x143dcd470` one. The walk is
-`scripts/re/watch-write.py --peek`-able; `/tmp/walk-legb.py` did it.)
+Leg B is the real synchronous blocker. **Resolving the vmethod (live, sudo-free pointer walk):**
+`[ *( *(this+0x60) + 0x710 ) + 8 ]` — the create inner does `lea rcx,[this+0x60]; call 0x1423f1930` (a
+3-instruction getter: `rax=[rcx]; rax+=0x710; ret`), then `r9 = *(rax)` (a vtable ptr), and `call [r9+8]`
+with `this' = *(this+0x60)+0x710`. So `this`=`[G]` → `P = *(this+0x60)` → the embedded `NetworkSession`
+sub-object at `P+0x710` → its vtable `VT = *(P+0x710)` → leg B = `VT[1] = *(VT+8)`. **Walked live:**
+`P = 0x143dcd470` (a stable `.data` singleton), `VT = 0x1431f9140` (`.rdata`), **leg-B vmethod =
+`0x1423f5c00`** (`.text`); create dispatch is at `0x140cb207f`. (`P` drifts across runs/states —
+`…3f0`/`…450`/`…470`, all `.data`; a post-failure transient at `0x143dcd450` resolves `+0x710` into
+`.data` garbage — ignore it, the valid `.text` chain is the `0x143dcd470` one. Don't hand-peek-walk the
+chain blindly; it's `scripts/re/watch-write.py --peek`-able, `/tmp/walk-legb.py` did it.)
 
-**Leg B is CLEAN, not Arxan-encrypted** (entropy 5.30; disassembles to real x86), so unlike the gate it
-can be read statically. Its return value is `esi`: the success path sets `esi` = the result of the
-session-register call `0x1423fab40` (nonzero), and **every early reject jumps to `0x1423f5cf9: xor esi,esi`**
-→ returns 0 → the inner returns false → wrapper sets `FailedToCreateSession`. There are **three early
-synchronous rejects**, in order, any of which is the likely offline culprit:
+**Leg B is CLEAN, not Arxan-encrypted** (entropy 5.30; disassembles to real x86), so it reads statically.
+Its return is `esi`: the success path sets `esi` = the result of the session-register/finalize call
+`0x1423fab40` (nonzero); **every early reject jumps to `0x1423f5cf9: xor esi,esi`** → returns 0 → inner
+returns false → wrapper sets `FailedToCreateSession`. The synchronous rejects, in order:
 
-1. **`*(NetworkSession+0x10) == 0`** — `lea rcx,[this+0x10]; call 0x141eba210` where `0x141eba210` is just
-   `mov eax,[rcx]; ret` (a getter for the dword at `+0x10`); `test eax,eax; je fail` at `0x1423f5c4f`. A
-   simple readiness/enabled flag on the NetworkSession.
-2. **`this->vtable[0xe8](this, params, true) == false`** — virtual at `0x1423f5c61`; `je fail` at
-   `0x1423f5c69`.
-3. **`this->vtable[0x108](this, params, true) == null`** — virtual at `0x1423f5c7b` returning a pointer;
-   `je fail` at `0x1423f5c87`. (On success this pointer `rdi` is the new session object, then registered.)
+1. **Reject #1 — `*(NetworkSession+0x10) == 0`** (`lea rcx,[this+0x10]; call 0x141eba210` where
+   `0x141eba210` is `mov eax,[rcx]; ret`, a getter for the dword at `+0x10`; `test eax,eax; je fail` at
+   `0x1423f5c4f`). A readiness/enabled flag on the NetworkSession, **0 offline** — the dword at
+   `*([G]+0x60)+0x710 + 0x10`.
+2. **Reject #2 — `this->vtable[0xe8](this, params, true) == false`** (virtual at `0x1423f5c61`; `je fail`
+   at `0x1423f5c69`). Vmethod `[0xe8]→0x1423f6fb0` (from `VT=0x1431f9140`) is `mov al,1; ret` — **always
+   true, can never reject.**
+3. **Reject #3 — `this->vtable[0x108](this, params, true) == null`** (virtual at `0x1423f5c7b` returning a
+   pointer; `je fail` at `0x1423f5c87`; on success `rdi` = the new session object). Vmethod
+   `[0x108]→0x1423f7070` allocates a `0x5f8`-byte session object (`call 0x141eb9ed0(ecx=0x5f8, edx=8)`),
+   returns null **only on alloc failure (OOM)**, else bumps a counter `[this+0xa8]`, constructs the object
+   (`0x1423fd300`), returns it. Not an offline gate.
+4. **4th gate — `[new_obj_vtable+8](new_obj) == false`** (call at `0x1423f5c8f`; `test al,al; jne
+   0x1423f5cab` at `0x1423f5c92`; false → cleanup → `esi=0`). Charted below; **passes in-world.**
 
-**Reject #2 and #3 eliminated statically → by elimination the offline blocker is reject #1.** Read the two
-vmethods (resolved from the static `.rdata` vtable `VT=0x1431f9140`: `[0xe8]→0x1423f6fb0`,
-`[0x108]→0x1423f7070`):
+So #2/#3 are eliminated statically. Reject #1 was initially the lead offline suspect (the only reject that
+can fire offline) — the rig confirmed it's real but **not sufficient**:
 
-- **Reject #2 vmethod `0x1423f6fb0` is `mov al,1; ret`** — it *always* returns true. It can never reject,
-  online or off.
-- **Reject #3 vmethod `0x1423f7070`** allocates a `0x5f8`-byte session object (`call 0x141eb9ed0(ecx=0x5f8,
-  edx=8)`), and returns null **only if that allocation fails** (OOM), else bumps a counter `[this+0xa8]`,
-  constructs the object (`0x1423fd300`), and returns it. Not an offline gate — it succeeds normally.
+> **Rig (`force_netsession_ready` probe).** Drove create with `bypass` + `enable_offline_multiplayer` + a
+> probe that resolves `NetworkSession = *([G]+0x60)+0x710` and writes `[NetworkSession+0x10]` nonzero just
+> before the call. Confirmed `NetworkSession+0x10 = 0` offline (static read was right); forcing it to 1
+> (persisted — a post-run peek read `1`) **did not unblock** (still `false → FailedToCreateSession`,
+> `[G]+0x24 = 0`). Caveat: `P` drift (`…3f0`/`…450`/`…470`, all `.data`) means a pre-write may not land on
+> the exact object leg B reads at call time, so a rigorous force writes from *inside* a leg-B-entry hook —
+> but the gates below mean reject #1 alone can't clear create regardless. `[debug.probes]
+> force_netsession_ready` stays a charted, default-off probe.
 
-So the only synchronous reject that can fire offline is **reject #1: `*(NetworkSession+0x10) == 0`** — the
-dword at `*([G]+0x60)+0x710 + 0x10`, read by the trivial getter `0x141eba210` (`mov eax,[rcx]; ret`). A
-readiness/enabled flag the game leaves 0 outside an online session. **This is the whole rung-3 create
-wall, narrowed to one 4-byte flag.**
+**The finalize/registry chain is OOM-only — not an offline gate** (this corrects an earlier note that
+blamed it):
 
-**RIG RESULT (2026-06-28, `force_netsession_ready` probe): reject #1 confirmed but NOT sufficient — the
-blocker is deeper, and it converges with the item-grey hunt.** Drove create with `bypass` +
-`enable_offline_multiplayer` + a new probe that resolves `NetworkSession = *([G]+0x60)+0x710` and writes
-`[NetworkSession+0x10]` nonzero just before the call:
+- **`0x1423fab40`** (finalize) → `0x1423fa1b0(new_obj, cmp=0x1423fc6a0, mode)`; returns 0 only if that
+  returns null.
+- **`0x1423fa1b0`** is a registry / hashmap lookup-or-insert on the new session object: bucket count from
+  the **numeric** global `0x144842d28` (used as a `div` modulus, **not** a pointer), comparator callback
+  `0x1423fc6a0`, resolving via `[new_obj_vtable+0xd8]` (`0x1423fdfa0`) then a secondary lookup
+  `0x1423fa100`. Both null-return points **only fail on allocation:** `0x1423fdfa0` allocates `0x60` via
+  `0x141eb9ed0` (null iff alloc fails, else constructs an entry); `0x1423fa100` is the same shape
+  (allocates `0x58`, null only on alloc/`0x1423f7290` failure). So `0x1423fa1b0` (hence finalize) **always
+  succeeds offline barring OOM** — it is not where create dies.
+- **Correction:** an earlier pass claimed `0x144842d28` was the **same** online-availability service as the
+  item-grey hunt's `0x144842d40` ("merging the two hunts"). Wrong — `0x144842d28` is a numeric
+  hash-modulus, merely a `.data` neighbor of `0x144842d40`; there is **no proven link** between the create
+  blocker and the item-grey service.
 
-- **`NetworkSession+0x10 = 0` offline (confirmed),** exactly as the reject-#1 hypothesis predicted — the
-  static read was right.
-- **Forcing it to 1 (write persisted — a post-run peek read `1`) did NOT unblock:** create still returned
-  `false → FailedToCreateSession`, `[G]+0x24 = 0`.
-- **Deeper trace.** Leg B's *return value* is the finalize call `0x1423fab40`, which returns 0 iff
-  `0x1423fa1b0(new_session_obj, cmp_fn@0x1423fc6a0, mode)` returns null. `0x1423fa1b0` is a **registry /
-  hashmap lookup-or-insert** on the freshly-created session object: it takes its bucket count from a
-  *numeric* global at `0x144842d28` (used as a `div` modulus, **not** a pointer), a comparator **callback**
-  `0x1423fc6a0`, and resolves an entry by calling vmethods on the new session object
-  (`[new_session_vtable+0xd8]`, then a secondary lookup `0x1423fa100`). It returns null when those vmethods
-  yield nothing — i.e. the session entry can't be established offline. So past the gate and reject #1, the
-  create dies in this **session-object registry/init chain**, several clean vmethods deep.
-- **CORRECTION (don't repeat my earlier mistake):** an earlier pass of this note claimed `0x144842d28` was
-  the **same** online-availability service as the item-grey hunt's `0x144842d40`, "merging the two hunts."
-  **That was wrong.** `0x144842d28` is a numeric hash-modulus, not a service pointer; it's merely a `.data`
-  neighbor of `0x144842d40`. There is **no proven link** between the create blocker and the item-grey
-  service — drop that claim.
-- **Caveat (P drift):** `P = *([G]+0x60)` varies across runs/states (`…3f0` / `…450` / `…470`, all in
-  `.data`), so a pre-write to `NetworkSession+0x10` may not land on the exact object leg B reads at call
-  time; a rigorous reject-#1 force should write from *inside* a leg-B-entry hook. But the finalize chain
-  above means satisfying reject #1 alone can't clear create regardless.
+### The 4th gate charted (`0x1423fd7a0`) — session-config fields; passes in-world
 
-**NEXT — the simple per-reject levers are exhausted; the offline failure is now down in the session-object
-registry/init chain (`0x1423fa1b0` and the vmethods it calls), several levels deep.** Options, in rough
-order of expected value:
-1. **Drive create with a live rung-4 lobby + a real peer (2-player).** Highest-EV. The finalize is a
-   lookup/insert that yields nothing in a *solo* drive; a real session likely needs an actual peer/lobby
-   match context to populate it. We already build a rung-4 lobby on launch (the seed sets a password), but
-   the solo drive had no peer. This needs a friend — batch it with the other 2-player verifications, and
-   set `[debug.probes] drive_create` + `bypass_session_create_gate` + `force_netsession_ready` on both
-   machines so the create fires with a real peer present.
-2. **Keep tracing the registry/init chain** (`0x1423fa1b0` → `[new_session_vtable+0xd8]` → `0x1423fa100` →
-   …) to the root offline dependency, then satisfy/stub it. Deep but solo-doable; lower EV than (1) since
-   the root may simply *be* "no peer".
-3. **ERSC-style session-layer neutralization** — replace/stub the session establishment wholesale.
-   Heaviest; the fallback.
-
-The reject-#1 lever (`[debug.probes] force_netsession_ready`) stays in the tree as a charted, default-off
-probe — it proved reject #1 is real and not the whole story.
-
-### Leg-B re-charted (2026-06-28, orchestrator, static): a **4th gate** the earlier pass missed; the finalize/registry chain is **NOT** the offline blocker
-
-Following option (2) above, I read the whole leg-B tail statically (clean target, same 2026-06-02 image).
-Two corrections to the note above, both load-bearing:
-
-**(A) There is a 4th synchronous gate between reject #3 and the finalize — the earlier charting stopped at
-three.** After reject #3 returns the new `0x5f8` session object (`rdi`), leg B does **`call
-[new_obj_vtable + 8](new_obj)`** at `0x1423f5c8f` and `jne` to the register path only if it returns
-**true** (`0x1423f5c92: test al,al; jne 0x1423f5cab`). A false return falls through to cleanup → `esi=0` →
-`FailedToCreateSession`, exactly like a reject. So leg B has **four** offline-relevant gates, not three,
-and this 4th one runs **before** the finalize/register call.
+Between reject #3 and the finalize call there is a 4th synchronous gate (read statically on the same
+2026-06-02 image). After reject #3 returns the new `0x5f8` session object (`rdi`), leg B does `call
+[new_obj_vtable + 8](new_obj)` at `0x1423f5c8f` and proceeds to the register path only if it returns true
+(`0x1423f5c92: test al,al; jne 0x1423f5cab`); false falls through to cleanup → `esi=0` →
+`FailedToCreateSession`.
 
 - The new object's vtable is **`0x1431fa248`** (installed by the constructor `0x1423fd300`: `mov [obj],
-  0x1431fa248`). Its slot `+0x8` = **`0x1423fd7a0`** (the 4th gate), slot `+0xd8` = **`0x1423fdfa0`** (the
-  registry-key vmethod the earlier note fingered).
+  0x1431fa248`); slot `+0x8` = **`0x1423fd7a0`** (the 4th gate), slot `+0xd8` = **`0x1423fdfa0`** (the
+  registry-key vmethod above).
 - **4th gate `0x1423fd7a0`** returns false if **both** `[new_obj+0x3b0]==0` **and** `[new_obj+0x3b4]==0`;
-  otherwise it calls helper **`0x1423faf60`** and returns false if that does. **`0x1423faf60` bails false
-  if any of five dwords `[new_obj+0x68], +0x6c, +0x70, +0x74, +0x78` is zero**, then runs a vmethod
-  (`[[new_obj+0x58]]+0x8`) and three `0x1423fd110` sub-checks that all must pass. These are clearly
-  **session-configuration fields** (seat counts / peer slots / match params) populated from real session
-  setup — all zero in a freshly-constructed object with no peer/match context.
+  otherwise it calls helper **`0x1423faf60`** and returns its result.
+- **Helper `0x1423faf60`** bails false if any of five dwords `[new_obj+0x68], +0x6c, +0x70, +0x74, +0x78`
+  is zero, then runs a vmethod (`[[new_obj+0x58]]+0x8`) and three `0x1423fd110` sub-checks that all must
+  pass.
 
-**(B) The finalize/registry chain only fails on OOM — it is not an offline gate.** I read the chain the
-earlier note blamed:
+These are **session-configuration fields** (seat counts / peer slots / match params). Statically they
+looked like the offline blocker (all zero in a freshly-constructed object with no peer context), but the
+rig overturned that: in-world they are populated and the gate passes (next).
 
-- **`0x1423fab40`** (finalize) → calls `0x1423fa1b0(this=new_obj, cmp=0x1423fc6a0, mode)`; returns 0 only
-  if that returns null.
-- **`0x1423fa1b0`** has two null-return points: the `[new_obj_vtable+0xd8]` vmethod (`0x1423fdfa0`) and the
-  secondary `0x1423fa100`. **Both only return null on allocation failure:** `0x1423fdfa0` allocates `0x60`
-  bytes via `0x141eb9ed0` and returns null *iff that alloc fails* (else constructs an entry and returns it);
-  `0x1423fa100` is the same shape (allocates `0x58`, returns null only on alloc/`0x1423f7290` failure). So
-  `0x1423fa1b0` (hence finalize) **always succeeds offline barring OOM** — it is not where create dies.
+### Rig: the 4th gate passes — create dies at leg B's tail capacity check (root cause)
 
-**Conclusion / correction to the prior NEXT.** The earlier note's "create dies in the session-object
-registry/init chain" is **wrong** — that chain is OOM-only. The earlier `force_netsession_ready` run forced
-reject #1 and then static-traced *past* the unseen 4th gate straight to finalize. The real synchronous
-offline stop after reject #1 is almost certainly the **4th gate `0x1423fd7a0` / helper `0x1423faf60`**,
-which need a wall of peer/session-config fields (`[new_obj+0x3b0|0x3b4]` and `[new_obj+0x68..0x78]`)
-nonzero. (Static-strong, not yet runtime-confirmed — see the probe below.)
-
-**This sharpens, not changes, the top recommendation.** All of reject #1, the 4th gate, and its helper read
-fields that only a **real peer/match context** populates; a solo drive leaves them zero by construction.
-Forcing them one-by-one is whack-a-mole (we already saw forcing reject #1 just exposes the next gate) and
-risks building a malformed session object that crashes once `Ingame`. So **the 2-player drive (option 1)
-remains highest-EV**, and this pass tells us *what to expect/force there*: the create path needs the new
-session object's config fields filled, which is exactly what a live peer supplies.
-
-**Remaining solo-doable, non-destructive step (precise):** extend `session_probe` with a **leg-B entry
-tracer** — hook the new object's gate vmethods (or `0x1423f5c00` itself) to log, on a real `drive_create`
-fire, the runtime values of `[new_obj+0x3b0]`, `[new_obj+0x3b4]`, `[new_obj+0x68..0x78]`, and the `al` of
-the 4th gate — to **confirm at runtime which gate fails first** and capture the exact zero fields. That's
-the right artifact to have *before* the friend test, so the 2-player run knows precisely what to verify.
-(`[new_obj_vtable+8]=0x1423fd7a0`, `[+0xd8]=0x1423fdfa0`; vtable `0x1431fa248`; constructor `0x1423fd300`.)
-
-### Rig result (2026-06-29, in-world): the 4th gate **PASSES** — create dies in the finalize/register tail
-
-Ran the leg-B gate tracer (`[debug.probes] drive_create` + the two `gate-trace` hooks) **in-world**
-(main player present) with `bypass_session_create_gate` + `force_netsession_ready` +
-`enable_offline_multiplayer`. Both hooks fired:
+Ran the leg-B gate tracer (`[debug.probes] drive_create` + the two `gate-trace` hooks) **in-world** (main
+player present) with `bypass_session_create_gate` + `force_netsession_ready` + `enable_offline_multiplayer`:
 
 ```
 gate-trace legb-entry  REACHED — NetworkSession=0x143dcdb30  reject#1 [+0x10]=1
@@ -596,33 +515,18 @@ gate-trace create-gate4 REACHED — obj=0x7ffe93851cd0
 drive-create returned false — FailedToCreateSession
 ```
 
-**This overturns the static "Leg-B re-charted" note above.** In-world, leg B IS reached, and the 4th
-gate's fields are **populated, not zero**: `[+0x3b0]=35000`, `[+0x3b4]=5000`, and the helper's five
-dwords `[6, 30000, 30000, 30000, 30000]` (the `6` is the session player limit — `max_players=6` from
-the rig config; the `35000/5000/30000` read like network timeouts in ms). So `0x1423fd7a0` returns
-**true** — the 4th gate does **not** veto in-world. My earlier claim that it's the offline blocker was
-an artifact of driving **too early**: when the create is driven during the load transition
-(`GameState::in_game()` flips true before `WorldChrMan` is populated), leg B isn't even reached
-(neither hook fired — first run this day); driven with the **main player actually present**, it sails
-through reject #1–3 *and* the 4th gate.
+In-world the 4th gate's fields are **populated, not zero** (`[+0x3b0]=35000`, `[+0x3b4]=5000`, helper
+dwords `[6, 30000, 30000, 30000, 30000]` — the `6` is `max_players` from the rig config, the rest read
+like network timeouts in ms), so `0x1423fd7a0` returns **true**. The earlier "4th gate is the blocker"
+was an artifact of driving **too early**: when create is driven during the load transition
+(`GameState::in_game()` flips true before `WorldChrMan` is populated) leg B isn't even reached (neither
+hook fires); with the main player actually present it sails through reject #1–3 and the 4th gate. (Fixed
+in code: `SessionCreateDriver` now gates on `sdk::with_active_main_player(...).is_some()`, not just
+`GameState::in_game()`, so the drive fires only once the world is genuinely loaded.)
 
-**So the real offline blocker is leg B's *tail*, after the 4th gate** — the create still returns false
-having passed every gate I charted. Leg B returns `esi=0` (→ `FailedToCreateSession`) from one of two
-tail points not yet instrumented:
-1. the **finalize** `0x1423fab40` returned 0 (its `0x1423fa1b0` lookup-or-insert returned null), or
-2. the **capacity check** in leg B's tail: `mov eax,[rbx+0x24]; cmp eax,[rbx+0x20]; jae fail`, where
-   `rbx = [[NetworkSession+8]+0x48]` — i.e. the session-slot array is full. **Leading hypothesis:**
-   `[rbx+0x20]` (capacity) is **0 offline** because no real match/peer has allocated session slots, so
-   even a successful finalize can't be stored → fail. This again points at the **2-player path** (a
-   real peer/lobby match is what allocates the slots), consistent with the top recommendation.
-
-**Timing lesson (fixed in code):** `SessionCreateDriver` now gates on
-`sdk::with_active_main_player(...).is_some()`, not just `GameState::in_game()`, so the drive fires only
-once the world is genuinely loaded. Without this the drive fires mid-load and bails before leg B.
-
-**CONFIRMED (2026-06-29, second in-world run, extended tracer): capacity-0 is the root blocker.** The
-leg-B entry tracer now also reads the NetworkSession's session-slot array (`rcx` at entry IS the
-NetworkSession, so the array on it at `+0x18`/`+0x20`/`+0x24` is directly readable). In-world, solo:
+So the failure is in leg B's **tail**, past every gate. A second in-world run with the tracer extended to
+read the NetworkSession's session-slot array (`rcx` at entry IS the NetworkSession; the array is at
+`+0x18`/`+0x20`/`+0x24`) pinned it:
 
 ```
 gate-trace legb-entry REACHED — NetworkSession=0x143dcdad0  reject#1 [+0x10]=1
@@ -631,29 +535,19 @@ gate-trace create-gate4 REACHED — fields populated (35000/5000/[6,30000,30000,
 drive-create returned false — FailedToCreateSession
 ```
 
-So the create passes reject #1 (forced), #2, #3, **and** the 4th gate, and the failure is **leg B's
-tail store**: `cmp count,[+0x20]cap; jae fail` with **cap=0** → `0 >= 0` → fail, so the freshly-built
-(and likely finalized) session object **can't be stored** — the slot array was never allocated. This is
-the single root cause of the solo offline create failure, and it is precisely what a **real match/lobby
-allocates** (the slot array on the NetworkSession is sized when a multiplayer session is actually set
-up). It is not OOM, not the gate, not the 4th gate, not the finalize registry.
+**Root cause: the slot-array capacity is 0.** Leg B's tail store is `mov eax,[rbx+0x24]; cmp
+eax,[rbx+0x20]; jae fail` with `rbx = [[NetworkSession+8]+0x48]`; `cap=0` → `0 >= 0` → fail, so the
+freshly-built (and likely finalized) session object **can't be stored** — the slot array was never
+allocated. It is not OOM, not the gate, not the 4th gate, not the finalize registry. It is precisely what
+a **real match/lobby allocates** (the slot array on the NetworkSession is sized when a multiplayer session
+is actually set up), which is why the unblock is the 2-player drive (see "Paths forward" at the top of
+this section). The considered alternative tail point — the finalize `0x1423fab40` returning 0 — is ruled
+out: that chain is OOM-only (above).
 
-**CONCLUSION — the solo create thread is settled; the unblock is the 2-player drive.** A solo drive
-fundamentally can't succeed: with no real match, the session-slot array has capacity 0, so leg B has
-nowhere to put the session. The two paths forward:
-1. **2-player drive (highest-EV, the real fix):** drive create *with a live rung-4 lobby + a real peer*
-   so the game allocates the slot array (cap>0), then leg B's tail store succeeds. Set `drive_create` +
-   `bypass_session_create_gate` + `force_netsession_ready` on both machines. (Needs a 2nd player.)
-2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
-   = base, `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
-   produces a malformed session the game can't actually run; only if (1) is impossible. The open
-   question for (1) is *what* allocates the slot array (the normal match setup vs. whether our rung-4
-   lobby alone triggers it) — answerable only with a real peer.
-
-**Rig tooling note:** autonomous in-world is now solved — `scripts/rig.sh cycle --in-world` (the new
+**Rig tooling:** autonomous in-world is now solved — `scripts/rig.sh cycle --in-world` (the new
 `enter-world` step) selects "Continue", loads the save, and waits for `in_gameplay` (~33s), so the
-one-shot drive fires unattended. The leg-B gate tracer (entry: reject#1 + slot-array cap/count;
-4th-gate: the config fields) stays as a charted default-off probe under `drive_create`.
+one-shot drive fires unattended. The leg-B gate tracer (entry: reject #1 + slot-array cap/count; 4th-gate:
+the config fields) stays a charted default-off probe under `drive_create`.
 
 ### Tooling / re-derivation
 

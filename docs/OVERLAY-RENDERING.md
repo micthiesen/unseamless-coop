@@ -6,16 +6,16 @@ later overhead player nameplates — on top of Elden Ring by hooking the game's 
 path, and getting that to work under **Proton/vkd3d**. This is the single biggest UI dependency: it's
 the renderer those two host-tested models have always assumed but never had.
 
-**Status: the renderer shipped.** `coop/overlay.rs` draws the session-action menu, notification
-toasts/banners, the read-only settings view, and a live log tail through **hudhook (DX12 present-hook)
-+ Dear ImGui** — the decision this note worked through, now built and wired. What remains unverified is
-the **Proton/vkd3d rig behavior**: the game-internal and Proton claims below are either grounded in the
-pinned `fromsoftware-rs` SDK source (cited as such), in open-source overlay code we read and use (cited,
-license noted), or are behavioral inferences to confirm on the rig (hedged) — that rig confirmation
-(does the box render under vkd3d, does input capture feel right) is the open part, not the renderer
-choice. Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene: we reimplement from behavior + public
-SDK/open-source, never from ERSC's bytes (it's closed + Themida-packed — there's nothing to copy here
-anyway; ERSC ships its own DX renderer hook we don't get to see).
+**Status: the renderer shipped and is verified on the rig (vkd3d/Proton).** `coop/overlay.rs` draws
+the session-action menu, notification toasts/banners, the read-only settings view, and a live log tail
+through **hudhook (DX12 present-hook) + Dear ImGui** (the decision this note worked through, now built
+and wired). It renders correctly under vkd3d (rig baseline captured 2026-06-28). The open problem is
+**native Windows**, where the present hook is fatal on NVIDIA hardware (see "Native-Windows Crash"
+below). The game-internal and Proton claims below are grounded in the pinned `fromsoftware-rs` SDK
+source (cited as such), in open-source overlay code we read and use (cited, license noted), or are
+behavioral inferences (hedged). Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene: we reimplement from
+behavior + public SDK/open-source, never from ERSC's bytes (it's closed + Themida-packed, nothing to
+copy here anyway; ERSC ships its own DX renderer hook we don't get to see).
 
 > Why we own this at all: our session actions are an **overlay menu**, not ERSC's in-game items, and
 > our notifications are toasts/banners, not (only) native game messages
@@ -28,9 +28,9 @@ Elden Ring renders with **DirectX 12**. On the rig (Linux + Steam + Proton) that
 to **Vulkan by vkd3d-proton** (D3D12 → Vulkan). So an overlay that hooks the game's *D3D12* objects
 isn't hooking real Direct3D — it's hooking vkd3d-proton's D3D12 *implementation*, which then drives
 Vulkan underneath. That layering is the load-bearing risk: a DX12 present-hook that works natively on
-Windows can still misbehave on vkd3d (timing, swapchain extensions, descriptor-heap paths). The good
-news, detailed below, is that the standard Rust overlay crate explicitly targets Wine/Proton and the
-most prominent ER tool built on it reports working on Steam Deck. The caveats are real but bounded.
+Windows can still misbehave on vkd3d (timing, swapchain extensions, descriptor-heap paths). The
+caveats are real but bounded — the standard Rust overlay crate explicitly targets Wine/Proton and the
+most prominent ER tool built on it runs on Steam Deck (detailed below).
 
 ## hudhook: The Standard Choice
 
@@ -118,8 +118,9 @@ Where the friction lives (all to verify on the rig, where the game actually runs
 - **The command-queue scan over vkd3d's structs.** hudhook finds the command queue by scanning the
   *swapchain object's* memory layout. That layout is **vkd3d-proton's**, not Microsoft's DXGI, so the
   offset differs from Windows — but the scan is offset-agnostic (it searches a range), so this should
-  survive translation. *Inference, confirm on rig:* watch for the "Found command queue pointer…" log
-  line; its absence means the scan failed under vkd3d.
+  survive translation. *Confirmed on rig (2026-06-28):* the scan found the CQ at offset **+0x8** under
+  vkd3d (and at **+0x138** on the WARP VM — the offset-agnostic scan handled both). Its absence in a
+  log means the scan failed.
 - **vkd3d swapchain-extension churn.** Recent vkd3d-proton/Proton combos have produced black-but-
   running DX12 screens fixed by disabling swapchain extensions, e.g.
   `VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_id,VK_KHR_present_wait %command%` or disabling
@@ -227,10 +228,9 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
    closing it returns control. (ER practice tool uses a hold-`RShift` reveal; pick our own.)
 4. **Render `notifications.rs`.** Wire the present-detour render loop to read shared `Notifications` (via
    `try_lock`) and draw `toasts()` as a corner stack + `banners()` as a top strip, colored by
-   `Severity`. Drive `tick(delta)` from a frame task, not the render loop. (Originally this step also
-   planned a `CSMenuManImp::display_status_message` complement for plain messages; that native-banner
-   path is now a **won't-do** — see [ROADMAP.md](ROADMAP.md) > Won't-do — so the overlay is the sole
-   notification surface.)
+   `Severity`. Drive `tick(delta)` from a frame task, not the render loop. (The overlay is the sole
+   notification surface; the once-planned `CSMenuManImp::display_status_message` complement is a
+   **won't-do** — see "Fallbacks" #1 and [ROADMAP.md](ROADMAP.md) > Won't-do.)
 5. **Render `menu.rs`.** Draw `Menu::rows(cfg, ctx)` as a list (selected row highlighted, disabled rows
    dimmed, settings showing `value`), and forward the toggle/nav keys to
    `select_next`/`select_prev`/`activate`/`adjust`. The model already returns `MenuOutcome`; the cdylib
@@ -307,6 +307,12 @@ diagnostic report is already built ASCII-only for the same reason (`crate::diag:
 > instruction and any fix are UNVALIDATED on native Windows.** The overlay works on our rig
 > (vkd3d/Proton) and is fatal on the friend's native machine. This section is the analysis + a
 > validation plan that needs no Windows box for the baseline.
+>
+> **Update: a crash handler now names the culprit directly (shipped, verified on WARP — see "Status &
+> Next Steps").** `crashdump.rs` logs the faulting **module+offset** on a hard fault, mapping straight
+> to a hypothesis, so the next real-NVIDIA run identifies the faulting module outright; the
+> last-trace-line inference threaded through the sections below is now the cross-check, not the only
+> localizer.
 
 ### What happened
 
@@ -429,18 +435,18 @@ events forward straight to the `log` crate — that's how its `error!` lines rea
 | `Couldn't find command queue pointer …` | warn | CQ scan rejected a queue (would already show at info) |
 | `Call IDXGISwapChain::Present trampoline` | trace | **the decisive line** — see below |
 
-A single run at `[debug] enabled = true, level = "trace"` should surface all of these in our shareable
-log: our `simplelog` sinks set no target filter, `CombinedLogger` raises `log::max_level` to `Trace`,
-and `tracing`'s `log` feature honours it (the `error`-level bridge is *verified* — those lines reached
-our file; the trace-level path is *expected*, exercised for the first time by this very run, as
-hudhook sets no static `max_level` feature). **Caveat from "What happened":** the tail is
-buffering-dependent — 3 of 4 runs lost the last lines — so this run is only trustworthy with
-per-record flushing forced (otherwise the decisive line can be dropped exactly as before). **The
-decisive observation:** if `Call IDXGISwapChain::Present trampoline` is the *last* line before death,
-the crash is in the game's original Present (hypothesis #1). If it's *absent* (and flushing is on),
-the crash is just after the Render-error log — in the `trace!` eval or detour glue — *before* the
-trampoline call. (`print_dxgi_debug_messages` runs at `dx12.rs:234`, *before* the Render-error line,
-so its survival is already implied whenever that line is present.) Either way it pinpoints the step.
+A single run at `[debug] enabled = true, level = "trace"` should surface all of these: our `simplelog`
+sinks set no target filter, `CombinedLogger` raises `log::max_level` to `Trace`, and `tracing`'s `log`
+feature honours it (the `error`-level bridge is *verified* — those lines reached our file; the
+trace-level path is *expected*, exercised for the first time by this run, as hudhook sets no static
+`max_level` feature). **Caveat:** the tail is buffering-dependent (3 of 4 first runs lost their last
+lines), so this is only trustworthy with per-record flushing forced. **The decisive observation:** if
+`Call IDXGISwapChain::Present trampoline` is the *last* line before death, the crash is in the game's
+original Present (hypothesis #1); if it's *absent* (flushing on), the crash is just after the
+Render-error log, in the `trace!` eval or detour glue *before* the trampoline call.
+(`print_dxgi_debug_messages` runs at `dx12.rs:234`, before the Render-error line, so its survival is
+implied whenever that line is present.) The crash handler (above) now answers this more directly by
+naming the faulting module, so treat the trace-line tell as a cross-check.
 
 ### Validation plan (baseline needs no Windows box)
 
@@ -524,8 +530,9 @@ run); decide #3/#4 with Michael from that data.
 
 ## Status & Next Steps
 
-- [ ] Rig milestone #1: add hudhook to the cdylib, install the DX12 hook, draw a static text box over
-      the running game. Confirm it renders under the rig's Proton/vkd3d (the make-or-break test).
+- [x] Rig milestone #1: hudhook added to the cdylib, DX12 hook installed, overlay renders over the
+      running game under the rig's Proton/vkd3d (rig baseline captured 2026-06-28 — the make-or-break
+      test passed).
 - [ ] Capture the working Proton + vkd3d + game version in RIG-RUNBOOK.md; record any
       `VKD3D_DISABLE_EXTENSIONS` / swapchain-extension workaround needed.
 - [x] **Input capture solved deterministically** via hudhook's `message_filter`: while the utility
@@ -547,13 +554,13 @@ run); decide #3/#4 with Michael from that data.
 - [x] Overhead nameplates: **shipped as native `CSEzDraw` dots** (`coop/features/native_nameplates.rs`),
       not on this overlay. The imgui world→screen projection path was removed — see [NAMEPLATES.md](NAMEPLATES.md).
 - [ ] ⚠️ **Native-Windows overlay crash** (friend test 2026-06-27, RTX 3080): fatal on the first hooked
-      Present on native NVIDIA DX12; works on our vkd3d rig. **Narrowed 2026-06-28:** the
-      `crates/dx12-harness` + `/windows-test` VM run was CLEAN on WARP (5690 hooked-Present frames, no
-      crash), **ruling out the hardware-independent MinHook mechanism (#1) and the imgui font upload
-      (#3)**. The crash is **NVIDIA-driver-specific** (the present-threading trigger of #1, or the #2
-      interposer) — WARP can't reproduce it and the VM can't validate a fix. **Next:** a friend
-      trace-level run (the super-validated gate) and/or single-GPU VFIO passthrough of the RTX 5080 into
-      the VM for a real-NVIDIA repro. Mitigate meanwhile with `[debug] overlay = false`.
+      Present on native NVIDIA DX12; works on our vkd3d rig. **Narrowed 2026-06-28:** a CLEAN WARP VM
+      run (`crates/dx12-harness` + `/windows-test`) ruled out the hardware-independent MinHook mechanism
+      (#1) and the imgui font upload (#3), pinning the crash as **NVIDIA-driver-specific** (the
+      present-threading trigger of #1, or the #2 interposer); WARP can't reproduce it and the VM can't
+      validate a fix. Full analysis: "Native-Windows Crash" above. **Next:** a friend trace-level run
+      (the super-validated gate) and/or single-GPU VFIO passthrough of the RTX 5080 into the VM for a
+      real-NVIDIA repro. Mitigate meanwhile with `[debug] overlay = false`.
 - [x] **Crash handler staged (2026-06-29):** `unseamless-coop/src/crashdump.rs` (in the cdylib *and* the
       harness) installs an unhandled-exception filter that logs the **faulting module+offset** + AV
       target + registers on a hard fault — so the next real-NVIDIA run names the culprit module

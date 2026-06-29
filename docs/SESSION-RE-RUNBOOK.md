@@ -1,14 +1,14 @@
 # Session create/join RE runbook (rung 3)
 
 > **STATUS (2026-06-28) — the "find the two initiation functions" task below is DONE; don't re-run it.**
-> The create wrapper (`0x140cad4c0`) and the network-create dispatch (leg B, `0x1423f5c00`) are charted,
-> the Arxan availability gate is bypassed, and the blocker has moved **past** initiation into leg B's deep
-> session **registry/init lookup** (`0x1423fa1b0`), which fails in a *solo* drive. The current state, the
-> full trace, and the **next real move (a 2-player create-drive test)** live in
-> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted", [COOP-CONNECTION.md](COOP-CONNECTION.md) > "Rung 3",
-> and [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test". The
-> write-watch recipe below is kept for re-derivation after a game update (addresses shift), not as the
-> current to-do.
+> The create wrapper (`0x140cad4c0`) and the network-create dispatch (leg B, `0x1423f5c00`) are charted and
+> create now drives directly (the Arxan availability gate is bypassed). The remaining blocker is **past**
+> initiation, deep in leg B's tail, where a *solo* drive fundamentally can't succeed (only a real
+> peer/match supplies the session state it needs). Current state, the full trace, and the **next real move
+> (a 2-player create-drive test)** live in [SESSION-DRIVE.md](SESSION-DRIVE.md),
+> [COOP-CONNECTION.md](COOP-CONNECTION.md) > "Rung 3", and
+> [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test". The write-watch
+> recipe below is kept for re-derivation after a game update (addresses shift), not as the current to-do.
 
 The exact recipe for the **one networking gap the SDK doesn't chart**: the internal functions that
 start a co-op session. This is rig-gated RE — it can only be done with the game running, ideally with
@@ -88,8 +88,9 @@ Correlate them by frame/timestamp — together they are the before/after of an i
 > disabled). "Open World / Join world" drive only our side-channel, not the game's `CSSessionManager`, so
 > they leave `lobby_state = None`. So before this recipe can fire, you need to either **re-enable the
 > offline multiplayer items** (find + patch ER's offline-disable check, the way ERSC does) so an item-use
-> moves the FSM, **or** drive the create/join functions directly. Re-enabling the items looks like the
-> cheaper unlock.
+> moves the FSM, **or** drive the create/join functions directly. **The project took the direct-drive
+> route** (call the charted create wrapper on `[G]` — see [SESSION-DRIVE.md](SESSION-DRIVE.md)); re-enabling
+> the items is the parallel offline-items lane ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)).
 
 - Set `[debug.probes] session_probe = true` in the seed config (`scripts/rig/seed-config.toml`), then
   `scripts/rig.sh apply` + launch. (`[debug] enabled = true` is already on in the seed, so the
@@ -119,12 +120,12 @@ de-risks and times the next step).
 The goal is the entry point of the function that performs the `lobby_state` store to
 `TryToCreateSession` (1) / `TryToJoinSession` (4).
 
-> **Read [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) first.** A static pass (2026-06-27) already
+> **Read [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) first.** Static passes (2026-06-27) already
 > charted the live `CSSessionManager` instance global (`G = 0x143d7a4d0`, so `[G]` is the manager;
-> equivalently the `base` the FSM probe prints), the constructor (`0x140cabb60`), and the field
-> offsets — and **proved strategy B below does not work on this build** (the transition is a register
-> store, not an immediate; the immediate `+0xc` stores all land on unrelated reflection/`"FACE"`
-> objects). So go straight to the write-watch; the findings doc hands you `base + 0xc` directly.
+> equivalently the `base` the FSM probe prints), the constructor (`0x140cabb60`), the field offsets, **and
+> the two initiation functions themselves** (create wrapper `0x140cad4c0`, join wrapper `0x140cae640`) with
+> a full re-derivation recipe. So the static chart is done — this step is now the runtime *confirm*
+> (write-watch); the findings doc hands you `base + 0xc` directly.
 
 Strategies, in the order that now actually pays off:
 
@@ -136,12 +137,13 @@ Strategies, in the order that now actually pays off:
   prologue → that entry is the hook site. Solo reaches the **host/create** edge only; **join** needs
   a peer (folds into the two-player friend test).
 
-- **B — store-site AOB (does NOT work on the current build; kept as a record).** Statically scanning
-  for `mov dword ptr [reg+0xc], 1` (`C7 4? 0C 01 00 00 00`, or the `C7 8? …` disp32 form) was the
-  original plan, but on the 2026-06-02 exe every such immediate store is on an unrelated object and
-  the real `lobby_state` writes are register stores in `this`-param callees — see
-  [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md) > "Why static stops here." Don't burn time re-running
-  it unless a future patch changes how the field is written.
+- **B — store-site AOB (the static route; works when scoped correctly).** Scan the `CSSessionManager`
+  method block (`0x140cad000..0x140cb3000`) for immediate stores `mov dword ptr [reg+0xc], imm`
+  (`(41)? C7 4? 0C <imm32>`, or the `C7 8? …` disp32 form) with `imm` in the `LobbyState` range `1..8` —
+  `→1` is the create initiation, `→4` the join. A first pass *wrongly* concluded this couldn't find them
+  (it scanned the whole image, where every immediate `+0xc` store is on an unrelated reflection/`"FACE"`
+  object); restricting to the method block lands all eight setters. The full landed chart + re-derivation
+  recipe is in [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md).
 
 - **C — ERSC accelerator (optional).** If blind RE stalls, restore the real ERSC stack
   (`scripts/rig.sh restore`) and Frida-watch the same `base + 0xc` write while ERSC connects, to see
@@ -150,7 +152,8 @@ Strategies, in the order that now actually pays off:
 
 The win64 prologue at the entry is typically `48 8B C4` (`mov rax, rsp`), `40 53` (`push rbx`), or
 `48 83 EC ..` (`sub rsp, ..`); use ~16 unique bytes from there as the landmark and note the opcode
-byte for the `expect` guard.
+byte for the `expect` guard. (FINDINGS lists the concrete ~18-byte landmarks for the current build's
+four charted entries — start from those; re-derive only after a patch.)
 
 ### 3. Fill the scaffold and rebuild
 
