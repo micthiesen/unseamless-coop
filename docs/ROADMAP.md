@@ -125,7 +125,7 @@ solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay 
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-06-28) — PICK UP HERE in a new session; full detail in
+  > **State (2026-06-29) — PICK UP HERE in a new session; full detail in
   > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md):** the
   > create/join initiation is **charted** and direct-drive is **rig-PROVEN** — calling the create
   > wrapper `0x140cad4c0` on `[G]` (no item, no peer) moves `lobby_state` off `None`. **Corrected blocker
@@ -139,19 +139,21 @@ solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay 
   > via `this→*(this+0x60)→+0x710→VT=*()→VT[1]`; CLEAN, not Arxan), and it returns 0 on any of **three
   > early rejects** — `*(NetworkSession+0x10)==0` (@`0x1423f5c4f`), `vtable[0xe8](…)==false` (@`0x1423f5c69`),
   > or `vtable[0x108](…)==null` (@`0x1423f5c87`); see [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
-  > **Reject #1 confirmed but insufficient (2026-06-28 `force_netsession_ready` run):** `NetworkSession+0x10`
-  > *is* 0 offline (as predicted), but forcing it nonzero did **not** unblock — create still
-  > `FailedToCreateSession`. Leg B's real return is the finalize `0x1423fab40 → 0x1423fa1b0`, a **session-object
-  > registry/init lookup** (several clean vmethods deep) that yields nothing offline in a *solo* drive. (An
-  > earlier note wrongly called `0x1423fa1b0`'s `0x144842d28` read the item-grey service — it's a numeric hash
-  > modulus, not that service; **no proven link** to the item-grey hunt. Corrected in SESSION-DRIVE.md.)
-  > **NEXT (highest-EV): drive create with a live rung-4 lobby + a real peer** (2-player; the registry lookup
-  > likely needs an actual peer/match context a solo drive can't provide) — set `drive_create` +
-  > `bypass_session_create_gate` + `force_netsession_ready` on both machines. Or keep tracing the registry
-  > chain solo. Keep `bypass_session_create_gate` ON (confirmed prerequisite). Tooling ready:
+  > **Reject #1 forced but insufficient → root cause CONFIRMED (2026-06-29 in-world rig):** forcing
+  > `NetworkSession+0x10` nonzero did **not** unblock; create passes every static gate (rejects #1/#2/#3 +
+  > the 4th gate) then dies in **leg B's tail capacity check** — the session-slot array is **capacity 0**
+  > offline (`cmp count,[rbx+0x20]; jae fail`, `rbx=[[NetworkSession+8]+0x48]`, `[rbx+0x20]==0`), because no
+  > real match/lobby allocated it, so the finished session has nowhere to be stored. It is **not** OOM, the
+  > gate, the 4th gate, or the finalize registry (superseded hypotheses, tombstoned in SESSION-DRIVE.md — incl.
+  > the earlier wrong note that `0x1423fa1b0`'s `0x144842d28` read was the item-grey service; it's a hash
+  > modulus, no proven link). **NEXT (the real fix): drive create with a live rung-4 lobby + a real peer**
+  > (2-player — a real peer is what sizes the slot array) — set `drive_create` + `bypass_session_create_gate`
+  > + `force_netsession_ready` on both machines. Keep `bypass_session_create_gate` ON (confirmed prerequisite).
+  > Tooling ready:
   > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
-  > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **join** leg + a real
-  > two-player in-world test still need a friend; **create** is solo-confirmable on the rig.
+  > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **create** success path,
+  > the **join** leg, and the real two-player in-world test all need a friend now (a peer sizes the slot
+  > array); solo, only the capacity-0 **failure** mode is confirmable.
 
   It unblocks:
   - **The in-world session itself.** Open/Join/Leave already drive the connection layer (lobby + the
