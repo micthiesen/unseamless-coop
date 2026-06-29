@@ -19,6 +19,7 @@ pub mod scaling;
 pub mod seamless;
 pub mod session_actions;
 pub mod session_limit;
+pub mod summons;
 pub mod world_time;
 
 /// Announce a config value just applied to a game field, with the shared policy of the

@@ -26,6 +26,7 @@ use crate::features::scaling::ScalingFeature;
 use crate::features::seamless::SeamlessRoam;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
+use crate::features::summons::Summons;
 use crate::features::world_time::WorldTimeLock;
 
 /// How long the init thread keeps trying for the task system before giving up.
@@ -259,6 +260,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         Box::new(DeathDebuffsFeature::new()),
         // Clears crit-invuln so co-op partners can damage during crits (PostPhysics). No-op when off.
         Box::new(CritCoop::new()),
+        // Holds the Spirit Ash summon gate open in co-op (reads live config; no-op when off). SCAFFOLD:
+        // the apply is RE-pending — see features::summons. Inert today; ticks only to latch-log intent.
+        Box::new(Summons::new()),
         // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
         // camera + positions only). Reads live config; no-op (publishes nothing) when off.
         Box::new(Nameplates::new()),
