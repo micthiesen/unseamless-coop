@@ -388,6 +388,61 @@ pub fn registry() -> Vec<Setting> {
 mod tests {
     use super::*;
     use crate::config::OverheadDisplay;
+    use std::collections::HashMap;
+
+    /// Mutate `s` so its displayed value is *guaranteed* to change: flip a toggle, advance a choice,
+    /// or step a range one increment (up, or down if already at max). Mirrors the production `adjust`
+    /// semantics but never no-ops, so the binding audits below can rely on "this moved exactly one
+    /// field". Used by the distinctness / projection sweeps.
+    fn mutate_for_change(s: &Setting, cfg: &mut Config) {
+        match &s.kind {
+            SettingKind::Toggle { get, set } => {
+                let v = get(cfg);
+                set(cfg, !v);
+            }
+            SettingKind::Choice { .. } => s.adjust(cfg, true),
+            SettingKind::Range { min, max, step, get, set } => {
+                let cur = get(cfg);
+                let up = cur.saturating_add(*step).min(*max);
+                let target = if up != cur { up } else { cur.saturating_sub(*step).max(*min) };
+                set(cfg, target);
+            }
+        }
+    }
+
+    /// The set of differing leaf paths (e.g. `"scaling.enemy_health"`) between two configs, found by
+    /// serializing both to TOML and recursively diffing tables. Lets the audit name the *actual*
+    /// config field a setting writes without hand-maintaining a SettingId→field map.
+    fn changed_leaf_keys(a: &Config, b: &Config) -> Vec<String> {
+        let va = toml::Value::try_from(a).expect("config serializes");
+        let vb = toml::Value::try_from(b).expect("config serializes");
+        let mut out = Vec::new();
+        diff_leaves("", &va, &vb, &mut out);
+        out.sort();
+        out
+    }
+
+    fn diff_leaves(prefix: &str, a: &toml::Value, b: &toml::Value, out: &mut Vec<String>) {
+        match (a, b) {
+            (toml::Value::Table(ta), toml::Value::Table(tb)) => {
+                let mut keys: Vec<&String> = ta.keys().chain(tb.keys()).collect();
+                keys.sort();
+                keys.dedup();
+                for k in keys {
+                    let p = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    match (ta.get(k), tb.get(k)) {
+                        (Some(x), Some(y)) => diff_leaves(&p, x, y, out),
+                        _ => out.push(p), // key present on only one side
+                    }
+                }
+            }
+            _ => {
+                if a != b {
+                    out.push(prefix.to_string());
+                }
+            }
+        }
+    }
 
     #[test]
     fn registry_ids_are_unique_and_complete() {
@@ -622,5 +677,146 @@ mod tests {
         assert_eq!(cfg.gameplay.overhead_display, OverheadDisplay::SoulLevelAndPing);
         s.adjust(&mut cfg, true); // forward wraps back to first
         assert_eq!(cfg.gameplay.overhead_display, OverheadDisplay::Normal);
+    }
+
+    // ----- binding-integrity audit (w3-settings-audit) -----
+
+    #[test]
+    fn every_setting_binds_to_a_distinct_config_field() {
+        // Mutating setting `j` must change ONLY setting `j`'s displayed value — never another's. This
+        // is a complete copy-paste guard in one double sweep: a *set* that writes a sibling's field, or
+        // a *get* that reads one, both make some `i != j` move in lockstep with `j` and trip the
+        // `changed == (i == j)` rule. The diagonal (a setting must move its own value) also catches a
+        // get/set wired to different fields. Together: every registry entry reads and writes one
+        // distinct real Config field.
+        let reg = registry();
+        let base = Config::default();
+        let baseline: Vec<String> = reg.iter().map(|s| s.display_value(&base)).collect();
+        for (j, sj) in reg.iter().enumerate() {
+            let mut cfg = base.clone();
+            mutate_for_change(sj, &mut cfg);
+            for (i, si) in reg.iter().enumerate() {
+                let changed = si.display_value(&cfg) != baseline[i];
+                assert_eq!(
+                    changed,
+                    i == j,
+                    "mutating {:?} changed {:?}'s value (each setting must bind to its own field)",
+                    sj.id,
+                    si.id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_setting_writes_exactly_one_distinct_config_leaf() {
+        // The same distinctness, asserted at the serialized-field level so a failure names the exact
+        // colliding key. Each setting's mutation must touch exactly one Config leaf, and no two
+        // settings may share a leaf — a precise, diagnosable copy-paste guard for the `set` closures.
+        let reg = registry();
+        let base = Config::default();
+        // Assumes every bound field is serde-visible: a setting binding a `#[serde(skip)]` field would
+        // surface here as "wrote []" rather than naming the field — true of the whole registry today.
+        let mut owner: HashMap<String, SettingId> = HashMap::new();
+        for s in &reg {
+            let mut cfg = base.clone();
+            mutate_for_change(s, &mut cfg);
+            let keys = changed_leaf_keys(&base, &cfg);
+            assert_eq!(keys.len(), 1, "{:?} must write exactly one config leaf, wrote {keys:?}", s.id);
+            let key = keys.into_iter().next().unwrap();
+            if let Some(prev) = owner.insert(key.clone(), s.id) {
+                panic!("{prev:?} and {:?} both write config leaf `{key}` (copy-paste bug)", s.id);
+            }
+        }
+    }
+
+    #[test]
+    fn range_settings_min_max_default_validate_idempotently() {
+        // Every Range's registry bounds must live *inside* the config's accepted range: driving the
+        // field to the registry min, max, or default and validating must clamp nothing (no warning,
+        // value untouched) — otherwise the menu would let the user pick a value `Config::validate`
+        // immediately rejects. And validate must be idempotent on an in-range value (a second pass is
+        // a no-op), so re-validating a saved config never drifts it.
+        let reg = registry();
+        for s in &reg {
+            let SettingKind::Range { min, max, get, set, .. } = &s.kind else { continue };
+            let default_v = get(&Config::default());
+            for &v in &[*min, *max, default_v] {
+                let mut cfg = Config::default();
+                set(&mut cfg, v);
+                // The registry bound must be representable end to end. Asserting `set` round-trips it
+                // is load-bearing: several `set` closures clamp on write (boot volume, world-time
+                // hour/minute), so without this a registry bound *above* the config-accepted range
+                // would be silently absorbed by `set` before `validate` ever saw it and the
+                // empty-warnings check below would pass anyway.
+                assert_eq!(get(&cfg), v, "{:?}: set did not round-trip registry bound {v}", s.id);
+                let w1 = cfg.validate();
+                assert!(
+                    w1.is_empty(),
+                    "{:?} at {v} warned {w1:?} — registry bound escapes the config-accepted range",
+                    s.id,
+                );
+                assert_eq!(get(&cfg), v, "{:?} validate mutated an in-range value", s.id);
+                let w2 = cfg.validate();
+                assert!(w2.is_empty(), "{:?} validate not idempotent: {w2:?}", s.id);
+                assert_eq!(get(&cfg), v, "{:?} second validate drifted the value", s.id);
+            }
+        }
+    }
+
+    #[test]
+    fn is_shared_matches_the_actual_sharedsettings_projection() {
+        // Tie `SettingId::is_shared` to the *behavior* of `SharedSettings::from`, not to a parallel
+        // list: a setting is shared iff mutating it actually changes the projected wire subset. This
+        // catches a field added to (or dropped from) the projection without updating `is_shared`,
+        // complementing the destructure-based `shared_settings_match_the_wire_subset` above.
+        use crate::protocol::SharedSettings;
+        let reg = registry();
+        let base = Config::default();
+        let base_shared = SharedSettings::from(&base);
+        for s in &reg {
+            let mut cfg = base.clone();
+            mutate_for_change(s, &mut cfg);
+            let affects_projection = SharedSettings::from(&cfg) != base_shared;
+            assert_eq!(
+                affects_projection,
+                s.id.is_shared(),
+                "{:?}: is_shared()={} but mutating it {} the wire projection",
+                s.id,
+                s.id.is_shared(),
+                if affects_projection { "changed" } else { "left unchanged" },
+            );
+        }
+    }
+
+    #[test]
+    fn display_value_is_total_across_all_settings_and_kinds() {
+        // `display_value` must never panic for any reachable value of any setting. Sweep each one with
+        // many adjusts in both directions (covering both toggle states and every choice variant + wrap)
+        // and render at each step. The non-trivial branch is the `Choice` `find(...).unwrap_or`
+        // fallback, which no real registry choice can hit — exercised explicitly by the synthetic
+        // `Setting` below.
+        let reg = registry();
+        for s in &reg {
+            let mut cfg = Config::default();
+            let _ = s.display_value(&cfg);
+            for _ in 0..40 {
+                s.adjust(&mut cfg, true);
+                let _ = s.display_value(&cfg);
+            }
+            for _ in 0..40 {
+                s.adjust(&mut cfg, false);
+                let _ = s.display_value(&cfg);
+            }
+        }
+
+        // The Choice fallback branch: a `get` returning a value absent from `choices` must render the
+        // raw number rather than panic (guards the `find(...).unwrap_or` in `display_value`).
+        let synthetic = Setting {
+            id: SettingId::OverheadDisplay,
+            label: "synthetic",
+            kind: SettingKind::Choice { choices: vec![(0, "zero")], get: |_| 999, set: |_, _| {} },
+        };
+        assert_eq!(synthetic.display_value(&Config::default()), "999");
     }
 }

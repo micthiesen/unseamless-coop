@@ -753,4 +753,48 @@ mod tests {
         assert_eq!(menu.activate(&mut cfg, &SessionContext::default()), MenuOutcome::None);
         assert_eq!(cfg.scaling.enemy_health, 40);
     }
+
+    #[test]
+    fn navigation_never_lands_on_a_disabled_row_under_stale_context() {
+        // A contradictory "stale" context: `is_host` set while NOT in a session — the shape left over
+        // after a session ends without clearing `is_host`. The host-only actions gate on
+        // `in_session && is_host`, so they stay disabled; home()/select_* must never park the cursor on
+        // one. Assert at every landing across more than a full loop in both directions.
+        let cfg = Config::default();
+        let assert_nav_stays_enabled = |ctx: &SessionContext| {
+            let mut menu = Menu::new();
+            menu.home(ctx);
+            let n = menu.rows(&cfg, ctx).len();
+            assert!(
+                menu.rows(&cfg, ctx)[menu.selected()].enabled,
+                "home() landed on a disabled row",
+            );
+            for _ in 0..(n * 2 + 1) {
+                menu.select_next(ctx);
+                let r = &menu.rows(&cfg, ctx)[menu.selected()];
+                assert!(r.enabled, "select_next landed on disabled row `{}`", r.label);
+            }
+            for _ in 0..(n * 2 + 1) {
+                menu.select_prev(ctx);
+                let r = &menu.rows(&cfg, ctx)[menu.selected()];
+                assert!(r.enabled, "select_prev landed on disabled row `{}`", r.label);
+            }
+        };
+
+        // Stale + ready: Open/Join are enabled, host-only actions are not. Cursor must skip the latter.
+        assert_nav_stays_enabled(&SessionContext {
+            is_host: true,
+            in_session: false,
+            steam_ready: true,
+            in_game: true,
+            ..Default::default()
+        });
+        // Stale + cold: every one of the 8 actions is disabled (Open/Join also need Steam + in-game),
+        // so home() must fall through onto the first setting and nav must stay on the settings block.
+        assert_nav_stays_enabled(&SessionContext {
+            is_host: true,
+            in_session: false,
+            ..Default::default()
+        });
+    }
 }
