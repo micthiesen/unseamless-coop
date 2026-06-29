@@ -34,7 +34,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",     # EAC guard: MessageBox
     "Win32_Security_Cryptography",      # CSPRNG for the generated default password
     "Win32_System_Memory",              # patch: VirtualProtect / PAGE_PROTECTION_FLAGS
-    "Win32_System_Diagnostics_Debug",   # patch: FlushInstructionCache
+    "Win32_System_Diagnostics_Debug",   # patch: FlushInstructionCache; crashdump: CONTEXT / EXCEPTION_RECORD
+    "Win32_System_Kernel",              # crashdump: SetUnhandledExceptionFilter + EXCEPTION_POINTERS
 ] }
 # AOB scan over the live game image (skip-intros and other code patches). The SDK already pulls
 # pelite in for its RVA work; name it directly so we can write `pelite::pattern!`. Pin to the same

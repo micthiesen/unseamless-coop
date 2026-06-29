@@ -37,6 +37,11 @@ use hudhook::hooks::dx12::ImguiDx12Hooks;
 use hudhook::imgui::{Context, FontConfig, FontSource, Ui};
 use hudhook::{Hudhook, ImguiRenderLoop, RenderContext};
 
+// Shared verbatim with the cdylib (DRY): the unhandled-exception handler that logs the faulting module
+// on a hard crash. Self-contained (std + windows + log), so a `#[path]` include is sound.
+#[path = "../../unseamless-coop/src/crashdump.rs"]
+mod crashdump;
+
 use windows::core::{w, Interface, Result, HRESULT};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
@@ -419,6 +424,12 @@ fn main() -> Result<()> {
         cfg.hook,
         cfg.hook_thread,
     );
+
+    // Record the faulting module on a hard crash (the native-Windows overlay AV). Installed before the
+    // window/hook so it covers the whole run. DX12_HARNESS_FORCE_CRASH=1 self-tests it on WARP, where
+    // the real crash won't fire.
+    crashdump::install();
+    crashdump::force_test_crash_if("DX12_HARNESS_FORCE_CRASH");
 
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
     let module = hinstance.0 as usize; // Send-safe handle for the off-thread hook install

@@ -72,6 +72,12 @@ pub fn install() {
     let (config, notes) = crate::config::load(&base);
 
     init_subsystems(&base, &config, notes);
+
+    // Install the crash handler right after logging is up and before any hooks: a hard SEH fault (the
+    // native-Windows overlay crash) then logs its faulting module instead of dying silently. Process-
+    // global, so it covers the later overlay present-hook installed on its own thread.
+    crate::crashdump::install();
+
     pre_task_startup(&config, &base);
 
     // No task system means the mod cannot install a single feature — there's no degraded mode to

@@ -27,7 +27,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",               # HBRUSH for the window class
-    "Win32_System_LibraryLoader",       # GetModuleHandleW (hmodule for hudhook)
+    "Win32_System_LibraryLoader",       # GetModuleHandleW (hmodule for hudhook); crashdump module resolution
     "Win32_System_Threading",           # fence event: CreateEventW / WaitForSingleObject
+    "Win32_System_Diagnostics_Debug",   # crashdump: CONTEXT / EXCEPTION_RECORD
+    "Win32_System_Kernel",              # crashdump: SetUnhandledExceptionFilter + EXCEPTION_POINTERS
     "Win32_UI_WindowsAndMessaging",     # window + message pump
 ] }

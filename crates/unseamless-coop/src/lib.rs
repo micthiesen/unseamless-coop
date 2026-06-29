@@ -26,6 +26,7 @@ compile_error!("the `bridge` feature must not be enabled in a release build (use
 mod clipboard;
 mod config;
 mod coop;
+mod crashdump;
 mod debug_panel;
 mod diag;
 mod feature;
