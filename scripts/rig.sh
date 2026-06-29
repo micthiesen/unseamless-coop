@@ -690,18 +690,56 @@ launch_and_dismiss() {
   fi
 }
 
+# Load into the world from the main menu and wait until gameplay is live. `cycle`/`launch` only reach
+# the MENU (popups dismissed); this selects "Continue" (the menu-accept key E, keycode 18) to load the
+# last save, then polls the log until a diag snapshot reports `in_gameplay = true`. Re-presses E every
+# ~18s in case the first didn't land on a settled menu; returns the moment we're in-world. Best-effort:
+# warns + returns 1 on timeout (the one-shot in-world drivers gate on the world themselves, so a miss
+# is safe). This is the piece that was missing for autonomous in-world rig runs (cycle stopped at the menu).
+cmd_enter_world() {
+  local timeout="${1:-150}" log start now elapsed last_press=-100
+  command -v ydotool >/dev/null 2>&1 || { warn "enter-world: ydotool not installed — load the save manually"; return 1; }
+  log="$(latest_log || true)"
+  [[ -n "$log" ]] || { warn "enter-world: no log yet — launch the game first"; return 1; }
+  pgrep -f '[e]ldenring.exe' >/dev/null || { warn "enter-world: game not running"; return 1; }
+  say "Loading into the world (Continue) — waiting up to ${timeout}s for in_gameplay…"
+  start="${EPOCHREALTIME/,/.}"
+  while :; do
+    if grep -qE 'in_gameplay +=.*\btrue\b' "$log"; then
+      now="${EPOCHREALTIME/,/.}"
+      elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN{printf "%.1f", b-a}')"
+      ok "in-world (in_gameplay = true) after ${elapsed}s"
+      return 0
+    fi
+    now="${EPOCHREALTIME/,/.}"
+    elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN{printf "%.0f", b-a}')"
+    (( elapsed >= timeout )) && { warn "enter-world: timed out after ${timeout}s (no in_gameplay=true)"; return 1; }
+    # (Re)assert "Continue" sparsely (every ~18s) so we don't spam the action key once in-world (E is
+    # also the in-game interact key; a stray press during the snapshot-lag window is harmless).
+    if (( elapsed - last_press >= 18 )); then
+      focus_game_window && { ydo key 18:1 18:0 || warn "enter-world: ydotool E failed (is ydotoold up?)"; }
+      last_press=$elapsed
+    fi
+    sleep 4
+  done
+}
+
 cmd_cycle() {
   # Pull our own flags out of the arg list before forwarding the rest to apply (which would `die` on
-  # an unknown option). `--no-dismiss` leaves the startup popups for you to clear manually.
-  local dismiss=1 args=()
+  # an unknown option). `--no-dismiss` leaves the startup popups for you to clear manually; `--in-world`
+  # additionally drives "Continue" and waits until the save is loaded (so a solo in-game test — RE
+  # drive, feature verify — lands in the world unattended, not just at the menu).
+  local dismiss=1 in_world=0 args=()
   for a in "$@"; do
     case "$a" in
       --no-dismiss) dismiss=0 ;;
+      --in-world) in_world=1 ;;
       *) args+=("$a") ;;
     esac
   done
   cmd_apply ${args[@]+"${args[@]}"}
   launch_and_dismiss "$dismiss"
+  (( in_world == 1 )) && cmd_enter_world || true
 }
 
 # ---- friend-bundle packaging ---------------------------------------------------------------------
@@ -995,6 +1033,7 @@ case "$cmd" in
   reposition) reposition_window ;;
   seed-save) cmd_seed_save "$@" ;;
   dismiss) cmd_dismiss "$@" ;;
+  enter-world) cmd_enter_world "$@" ;;
   cycle)   cmd_cycle "$@" ;;
   package) cmd_package "$@" ;;
   share)   cmd_share "$@" ;;

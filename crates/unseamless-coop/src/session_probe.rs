@@ -176,9 +176,18 @@ fn log_legb_entry(_name: &'static str, regs: *mut Registers) {
             log::info!("session-probe: gate-trace legb-entry — NetworkSession (rcx) null");
             return;
         }
-        let reject1 = unsafe { ((ns + 0x10) as *const u32).read_volatile() };
+        let rd = |off: usize| unsafe { ((ns + off) as *const u32).read_volatile() };
+        // [+0x10] = reject #1 readiness flag. [+0x20]/[+0x24] = the session-slot array's capacity/count
+        // on the NetworkSession itself: leg B's *tail* stores the new session object at array[count] only
+        // if count < capacity (`cmp [+0x24],[+0x20]; jae fail`). If capacity (+0x20) is 0 offline, the
+        // store can't happen even after a successful finalize → FailedToCreateSession (the capacity-0
+        // hypothesis). See docs/SESSION-DRIVE.md > "Rig result (2026-06-29 …)".
         log::info!(
-            "session-probe: gate-trace legb-entry REACHED — NetworkSession={ns:#x} reject#1 [+0x10]={reject1} (0 => leg B fails at reject #1)",
+            "session-probe: gate-trace legb-entry REACHED — NetworkSession={ns:#x} reject#1 [+0x10]={} \
+             slot-array [+0x20]cap={} [+0x24]count={} (cap 0 => leg B tail can't store the session)",
+            rd(0x10),
+            rd(0x20),
+            rd(0x24),
         );
     }));
 }

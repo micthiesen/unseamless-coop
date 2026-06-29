@@ -620,13 +620,40 @@ tail points not yet instrumented:
 `sdk::with_active_main_player(...).is_some()`, not just `GameState::in_game()`, so the drive fires only
 once the world is genuinely loaded. Without this the drive fires mid-load and bails before leg B.
 
-**NEXT (solo-doable): instrument leg B's tail** — extend the tracer to capture the finalize
-`0x1423fab40` return value and the capacity pair `[rbx+0x20]`/`[rbx+0x24]` (resolve `rbx` from
-`[[NetworkSession+8]+0x48]`), to settle which of the two tail points fails offline. If it's the
-capacity-0 hypothesis, the fix surface is the slot array, and the real validation is the 2-player
-drive. **Rig note:** the drive needs the world *fully* loaded; the auto-`cycle` popup-dismiss did not
-reliably reach in-world this run (it landed at the menu; a human/secondary step loaded the save), so a
-solo tail-trace still needs someone to get in-world before the one-shot fires.
+**CONFIRMED (2026-06-29, second in-world run, extended tracer): capacity-0 is the root blocker.** The
+leg-B entry tracer now also reads the NetworkSession's session-slot array (`rcx` at entry IS the
+NetworkSession, so the array on it at `+0x18`/`+0x20`/`+0x24` is directly readable). In-world, solo:
+
+```
+gate-trace legb-entry REACHED — NetworkSession=0x143dcdad0  reject#1 [+0x10]=1
+   slot-array [+0x20]cap=0  [+0x24]count=0
+gate-trace create-gate4 REACHED — fields populated (35000/5000/[6,30000,30000,30000,30000])
+drive-create returned false — FailedToCreateSession
+```
+
+So the create passes reject #1 (forced), #2, #3, **and** the 4th gate, and the failure is **leg B's
+tail store**: `cmp count,[+0x20]cap; jae fail` with **cap=0** → `0 >= 0` → fail, so the freshly-built
+(and likely finalized) session object **can't be stored** — the slot array was never allocated. This is
+the single root cause of the solo offline create failure, and it is precisely what a **real match/lobby
+allocates** (the slot array on the NetworkSession is sized when a multiplayer session is actually set
+up). It is not OOM, not the gate, not the 4th gate, not the finalize registry.
+
+**CONCLUSION — the solo create thread is settled; the unblock is the 2-player drive.** A solo drive
+fundamentally can't succeed: with no real match, the session-slot array has capacity 0, so leg B has
+nowhere to put the session. The two paths forward:
+1. **2-player drive (highest-EV, the real fix):** drive create *with a live rung-4 lobby + a real peer*
+   so the game allocates the slot array (cap>0), then leg B's tail store succeeds. Set `drive_create` +
+   `bypass_session_create_gate` + `force_netsession_ready` on both machines. (Needs a 2nd player.)
+2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
+   = base, `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
+   produces a malformed session the game can't actually run; only if (1) is impossible. The open
+   question for (1) is *what* allocates the slot array (the normal match setup vs. whether our rung-4
+   lobby alone triggers it) — answerable only with a real peer.
+
+**Rig tooling note:** autonomous in-world is now solved — `scripts/rig.sh cycle --in-world` (the new
+`enter-world` step) selects "Continue", loads the save, and waits for `in_gameplay` (~33s), so the
+one-shot drive fires unattended. The leg-B gate tracer (entry: reject#1 + slot-array cap/count;
+4th-gate: the config fields) stays as a charted default-off probe under `drive_create`.
 
 ### Tooling / re-derivation
 
