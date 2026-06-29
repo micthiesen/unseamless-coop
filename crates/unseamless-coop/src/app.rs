@@ -26,6 +26,7 @@ use crate::features::scaling::ScalingFeature;
 use crate::features::seamless::SeamlessRoam;
 use crate::features::session_actions::SessionActionsTick;
 use crate::features::session_limit::SessionLimit;
+use crate::features::spectate::SpectateFeature;
 use crate::features::summons::Summons;
 use crate::features::world_time::WorldTimeLock;
 
@@ -263,6 +264,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         // Holds the Spirit Ash summon gate open in co-op (reads live config; no-op when off). SCAFFOLD:
         // the apply is RE-pending — see features::summons. Inert today; ticks only to latch-log intent.
         Box::new(Summons::new()),
+        // On local death, aims the game's death camera at a living co-op partner (PostPhysics). Reads
+        // live config; no-op when off (default). Camera half only — respawn-suppression is rig-gated.
+        Box::new(SpectateFeature::new()),
         // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
         // camera + positions only). Reads live config; no-op (publishes nothing) when off.
         Box::new(Nameplates::new()),

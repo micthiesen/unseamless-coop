@@ -19,6 +19,7 @@ pub mod scaling;
 pub mod seamless;
 pub mod session_actions;
 pub mod session_limit;
+pub mod spectate;
 pub mod summons;
 pub mod world_time;
 
