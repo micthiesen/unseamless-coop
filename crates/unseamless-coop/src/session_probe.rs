@@ -458,6 +458,13 @@ impl Feature for SessionCreateDriver {
         if !crate::playstate::current().in_game() {
             return;
         }
+        // `in_game()` flips true at the load *transition*, before WorldChrMan is populated; driving the
+        // create then bails before leg B is even dispatched (rig-observed 2026-06-29: drive fired with
+        // bypass+force yet neither gate-trace hook fired). Require the active main player present so the
+        // create runs with real world context (matches the create wrapper's own player/world needs).
+        if crate::sdk::with_active_main_player(|_| ()).is_none() {
+            return;
+        }
         // Need the live manager AND lobby_state == None (the inner guards on None; we also want a clean
         // baseline for the FSM logger's transition line).
         let Some((base, lobby)) =

@@ -583,6 +583,51 @@ the 4th gate — to **confirm at runtime which gate fails first** and capture th
 the right artifact to have *before* the friend test, so the 2-player run knows precisely what to verify.
 (`[new_obj_vtable+8]=0x1423fd7a0`, `[+0xd8]=0x1423fdfa0`; vtable `0x1431fa248`; constructor `0x1423fd300`.)
 
+### Rig result (2026-06-29, in-world): the 4th gate **PASSES** — create dies in the finalize/register tail
+
+Ran the leg-B gate tracer (`[debug.probes] drive_create` + the two `gate-trace` hooks) **in-world**
+(main player present) with `bypass_session_create_gate` + `force_netsession_ready` +
+`enable_offline_multiplayer`. Both hooks fired:
+
+```
+gate-trace legb-entry  REACHED — NetworkSession=0x143dcdb30  reject#1 [+0x10]=1
+gate-trace create-gate4 REACHED — obj=0x7ffe93851cd0
+   gate[+0x3b0]=35000  gate[+0x3b4]=5000  helper[+0x68..0x78]=[6,30000,30000,30000,30000]
+drive-create returned false — FailedToCreateSession
+```
+
+**This overturns the static "Leg-B re-charted" note above.** In-world, leg B IS reached, and the 4th
+gate's fields are **populated, not zero**: `[+0x3b0]=35000`, `[+0x3b4]=5000`, and the helper's five
+dwords `[6, 30000, 30000, 30000, 30000]` (the `6` is the session player limit — `max_players=6` from
+the rig config; the `35000/5000/30000` read like network timeouts in ms). So `0x1423fd7a0` returns
+**true** — the 4th gate does **not** veto in-world. My earlier claim that it's the offline blocker was
+an artifact of driving **too early**: when the create is driven during the load transition
+(`GameState::in_game()` flips true before `WorldChrMan` is populated), leg B isn't even reached
+(neither hook fired — first run this day); driven with the **main player actually present**, it sails
+through reject #1–3 *and* the 4th gate.
+
+**So the real offline blocker is leg B's *tail*, after the 4th gate** — the create still returns false
+having passed every gate I charted. Leg B returns `esi=0` (→ `FailedToCreateSession`) from one of two
+tail points not yet instrumented:
+1. the **finalize** `0x1423fab40` returned 0 (its `0x1423fa1b0` lookup-or-insert returned null), or
+2. the **capacity check** in leg B's tail: `mov eax,[rbx+0x24]; cmp eax,[rbx+0x20]; jae fail`, where
+   `rbx = [[NetworkSession+8]+0x48]` — i.e. the session-slot array is full. **Leading hypothesis:**
+   `[rbx+0x20]` (capacity) is **0 offline** because no real match/peer has allocated session slots, so
+   even a successful finalize can't be stored → fail. This again points at the **2-player path** (a
+   real peer/lobby match is what allocates the slots), consistent with the top recommendation.
+
+**Timing lesson (fixed in code):** `SessionCreateDriver` now gates on
+`sdk::with_active_main_player(...).is_some()`, not just `GameState::in_game()`, so the drive fires only
+once the world is genuinely loaded. Without this the drive fires mid-load and bails before leg B.
+
+**NEXT (solo-doable): instrument leg B's tail** — extend the tracer to capture the finalize
+`0x1423fab40` return value and the capacity pair `[rbx+0x20]`/`[rbx+0x24]` (resolve `rbx` from
+`[[NetworkSession+8]+0x48]`), to settle which of the two tail points fails offline. If it's the
+capacity-0 hypothesis, the fix surface is the slot array, and the real validation is the 2-player
+drive. **Rig note:** the drive needs the world *fully* loaded; the auto-`cycle` popup-dismiss did not
+reliably reach in-world this run (it landed at the menu; a human/secondary step loaded the save), so a
+solo tail-trace still needs someone to get in-world before the one-shot fires.
+
 ### Tooling / re-derivation
 
 Found with `scripts/re/static.py` (the committed PE workhorse): `fn` to disassemble the inner/builder,
