@@ -82,6 +82,13 @@ If the menu won't open or you can't find the file, fallback: there's a logs fold
 instead. Each log names the exact build you ran at the top (a "build_id" line), which is how
 I confirm we were all on the same version.
 
+IF THE GAME CRASHES (closes itself) on launch or right when the overlay would appear: that's
+a known bug we're chasing, so it isn't your fault — please still send the logs, that's the
+whole point. The in-game Export button won't be reachable (the overlay is what crashed), so
+use the logs-folder fallback above: zip  <ELDEN RING\Game>\unseamless-coop\logs\  and send it.
+The crash records itself there (look for a line starting "crashdump:") even though the game
+closed.
+
 
 WHAT GOT INSTALLED (for the curious)
 ------------------------------------

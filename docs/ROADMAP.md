@@ -64,12 +64,16 @@ static candidate families were rig-eliminated** (`is_offline()`, `IsEnableOnline
 online-available chain — see [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), so that hunt is
 **parked**. The approach pivoted (2026-06-28) to **driving `CSSessionManager` directly** — chart and call
 the create/join initiation function, no item needed (the multiplayer items become removable harness). The
-**overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. Investigated blind
-(no Windows box): the anatomy is charted and the healthy **vkd3d trace baseline is now captured**
-(2026-06-28) as the reference to diff a native trace against (see [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
-> "Native-Windows Crash" > Validation plan). What's left needs a Windows box (one friend trace run on
-the current breadcrumb+fsync build) — until then the shippable mitigation is `[debug] overlay = false`.
-See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
+**overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. **Narrowed to
+NVIDIA-driver-specific (2026-06-29):** a local Windows-VM harness (`crates/dx12-harness` + the
+[`/windows-test`] skill) ran the same hook + imgui font-bake clean on a real native-Windows D3D12
+loader (WARP), ruling out the hardware-independent MinHook mechanism and the font upload; the crash
+needs real NVIDIA. A `crashdump` handler (`coop/crashdump.rs`, in every build, verified) now logs the
+**faulting module** on the crash, and a crash-trace friend bundle is one command
+(`rig.sh package --trace && rig.sh share`). What's left is one run on any real NVIDIA box (a *light*
+solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay = false`. See
+[OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "Native-Windows Crash" and
+[FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > Part C.
 
 ### Solo / host-doable (no 2nd player needed)
 
@@ -183,3 +187,4 @@ See [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md).
   fallback.
 
 [`/reverse-engineer`]: ../.claude/skills/reverse-engineer
+[`/windows-test`]: ../.claude/skills/windows-test/SKILL.md

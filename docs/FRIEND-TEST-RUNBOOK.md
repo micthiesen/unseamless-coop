@@ -192,6 +192,40 @@ friend hits Export):**
 This stays behavioral RE — read *what the game does*, implement our own driver from that, never paste
 decompiler output into source/commits ([CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
 
+## Part C — Native overlay-crash trace (solo friend, any NVIDIA box)
+
+Independent of Parts A/B (no co-op session needed): the overlay crashes at the first hooked `Present`
+on native NVIDIA but works on our vkd3d rig and on WARP in the VM, so the crash is NVIDIA-driver-specific
+and only a real NVIDIA Windows machine can produce the decisive datum. The `crashdump` handler
+(`coop/crashdump.rs`, in every build) turns that crash into a logged **faulting module+offset**. This
+is a *light* ask — one friend, no co-op, often crashes at launch.
+
+**Build + share the bundle** (diag = symbols + reliable crash tail; `--trace` adds the hudhook
+breadcrumbs alongside the crashdump line):
+
+```
+scripts/rig.sh package --trace      # diag friend bundle with [debug] level = "trace", overlay on
+scripts/rig.sh share                # upload to the rolling GitHub prerelease; copies the link
+```
+
+Do **not** bake a `--guide` for this one — the guide renders *through* the overlay, which is the thing
+crashing, so it can't display. Hand the friend the release link; they Install + just launch the game
+(solo). It either crashes (the case we want) or runs.
+
+**What to read in the returned logs** (they zip `unseamless-coop\logs\`; the Export button is
+unreachable if the overlay crashed — README-FRIENDS tells them this):
+
+- The decisive line: `crashdump: ==== UNHANDLED EXCEPTION ==== code=0xc0000005 (ACCESS_VIOLATION) at <module>+0x…`.
+  `nvwgf2umx.dll`/`nvd3dumx.dll` ⇒ inside the NVIDIA driver (hyp #1 trigger); a Streamline/overlay
+  interposer DLL ⇒ hyp #2; `hudhook`/`unseamless_coop.dll` ⇒ the detour glue.
+- The breadcrumbs before it (`overlay: DX12 present-hook installed` → `initialize() reached` →
+  `Call IDXGISwapChain::Present trampoline`) localize *where* in the flow it died; diff against the rig
+  baseline in [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
+- Symbolicate our own frames: `x86_64-w64-mingw32-addr2line -f -C -e <diag dll/exe> $((ImageBase + offset))`
+  (DLL ImageBase via `objdump -p`). Full recipe + the WARP self-test in the [`/windows-test`] skill.
+
+[`/windows-test`]: ../.claude/skills/windows-test/SKILL.md
+
 ## After the session
 
 - **Collect:** the friend's `unseamless-coop-diagnostics.txt` (Export button) + our own rig log.

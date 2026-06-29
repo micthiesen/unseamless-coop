@@ -774,12 +774,13 @@ resolve_password() {
 }
 
 cmd_package() {
-  local profile=diag do_apply=0 pw_arg="" guide_arg="" probe=0 auto_arg="" no_overlay=0
+  local profile=diag do_apply=0 pw_arg="" guide_arg="" probe=0 auto_arg="" no_overlay=0 trace=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)    profile=release ;;
       --diag)       profile=diag ;;
       --apply)      do_apply=1 ;;
+      --trace)      trace=1 ;;                       # bake [debug] level = "trace" (full hudhook + crashdump breadcrumbs)
       --password)   pw_arg="${2:-}"; shift ;;
       --password=*) pw_arg="${1#*=}" ;;
       --guide)      guide_arg="${2:-}"; shift ;;   # bake a rig-guide name into the bundle config
@@ -836,7 +837,8 @@ EOF
   # Optional: bake a rig-guide name (--guide) so every machine runs the same on-screen test flow, and
   # the rung-3 FSM probe (--session-probe) so create/join transitions land in the log. rig_role is left
   # at the default (solo) — two-player-join derives each machine's role from its Open/Join action.
-  # [debug] keys first (guide / auto_session / overlay), then the [debug.probes] subsection.
+  # [debug] keys first (level / guide / auto_session / overlay), then the [debug.probes] subsection.
+  [[ $trace -eq 1 ]] && printf 'level = "trace"\n' >> "$stage/unseamless_coop.toml"
   [[ -n "$guide_arg" ]] && printf 'guide = "%s"\n' "$guide_arg" >> "$stage/unseamless_coop.toml"
   [[ -n "$auto_arg" ]] && printf 'auto_session = "%s"\n' "$auto_arg" >> "$stage/unseamless_coop.toml"
   [[ $no_overlay -eq 1 ]] && printf 'overlay = false\n' >> "$stage/unseamless_coop.toml"
