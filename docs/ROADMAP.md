@@ -166,17 +166,40 @@ solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay 
   - **In-world presence:** the game's own net sync takes over once `Ingame`.
   - **Peer-map pruning on session-leave:** drop a departed peer from the side-channel's linked set when
     the session roster shrinks.
-- **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password,
-  evil session), PvP/friendly-fire/team toggles, rune-arc sharing, overhead player display
-  (ping/SL/death-count), enemy/boss-rush modes, inbound-action host authorization. See [FEATURES.md](FEATURES.md).
-- **2-player live verifications:** scaling's in-combat HP/posture effect + the off-by-one player count,
-  the `>4`-player limit, session persistence across area boundaries, death-debuffs `dont_sync`
-  (per-player stacks), client→host log forwarding. See [RIG-RUNBOOK.md](RIG-RUNBOOK.md).
-- **Event toasts** — player join/leave and similar (the notifications surface Michael wants expanded);
-  the side-channel already toasts connect/version/liveness, so this slots in with the session layer.
+- **Riding on the session layer:** session-management actions (open/join/lock/unlock/leave, password),
+  PvP/friendly-fire/team toggles, rune-arc sharing, overhead player display (ping/SL/death-count),
+  inbound-action host authorization. See [FEATURES.md](FEATURES.md). (Evil sessions and enemy/boss-rush
+  modes are **dropped** — see Won't-do.)
+- **2-player live verifications:** the off-by-one player count, the `>4`-player limit, session
+  persistence across area boundaries, death-debuffs `dont_sync` (per-player stacks), client→host log
+  forwarding. See [RIG-RUNBOOK.md](RIG-RUNBOOK.md). (Scaling's in-combat HP/posture *effect* itself is
+  no longer treated as a blocker — see "Pending validations".)
+- **Event toasts** — the player join/leave presence feature landing on the session layer (the
+  notifications surface Michael wants expanded); the side-channel already toasts
+  connect/version/liveness, so this slots in with the session layer. (Distinct from the *read-correctness*
+  of effect toasts in normal play — see "Pending validations".)
+
+## Pending validations (not blockers)
+
+Low-risk things we **expect to work** and will confirm by *noticing them in normal play*, not by
+gating progress on a dedicated rig run. These are explicitly **not blockers** — if Michael spots one
+behaving wrong, it's a quick fix, not a reason to hold the line. (We were blocking on too much that can
+just be corrected when noticed.)
+
+- **Crit co-op** — a partner can damage an enemy during the riposte/backstab/guard-counter crit window.
+- **Boot master volume** — the configured boot volume is *audibly* applied (the write lifecycle is
+  already rig-confirmed; this is the human-ear check).
+- **Death debuffs** — a debuff lands on death and then clears at a Site of Grace.
+- **Scaling** — the in-combat enemy/boss HP/posture effect (the rate-row writes are already rig-verified).
+- **Gameplay toasts** — ER-voiced effect toasts (death debuffs, presence, etc.) read correctly in play.
 
 ## Won't-do
 
+- **Original-MP modes & evil sessions** — enemy rush, boss rush, arena waves, custom mod goods
+  (`MODGOODS_*`), and "evil" / invasion-style sessions. unseamless-coop is a **co-op-only**
+  reimplementation targeting core co-op gameplay; original PvP/invasion modes and bolted-on game
+  modes are out of scope. See [FEATURES.md](FEATURES.md) > "Custom content, modes & original-MP
+  sessions — WON'T DO". (Rune-arc sharing is *not* dropped.)
 - **Offline title-screen popup suppression + FMG watermark** — Arxan-walled / superseded by the
   overlay watermark. RE record kept in [OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md); do not bump
   the SDK pin for FMG access.

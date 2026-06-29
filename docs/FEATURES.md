@@ -43,13 +43,16 @@ From `OPTIONSELECT_*` / `YKNX3_*` keys. All ride on the networking layer.
 
 - Open / Join / Lock / Unlock / Leave world
 - Session password (`cooppassword`, show-password action)
-- "Evil session": start / seek / view / leave (invasion-style sessions)
+
+(ERSC's "Evil session" — invasion-style sessions — is **dropped**; see "Custom content, modes &
+original-MP sessions — WON'T DO" below.)
 
 ## Combat & PvP toggles (M, gated on session layer)
 
 - Toggle PvP, PvP teams, friendly fire
-- Crit co-op (`crit_coop`): co-op partners can damage enemies during crits (riposte/backstab/guard
-  counter), instead of the enemy being invulnerable to all but the player who landed it. On by default.
+
+(Crit co-op is **not** in this group — it's built, host-enforced, and solo-observable, so it's
+**not session-gated**; see "Gameplay modifiers" below.)
 
 ## Per-player scaling ([SCALING.md](SCALING.md)) — **built; live, rig-verified**
 
@@ -71,6 +74,7 @@ confirmation is the one remaining rig-TODO. See [SCALING.md](SCALING.md).
 
 | Feature | Config | Diff |
 |---|---|---|
+| Crit co-op | `crit_coop` (on by default) | **built; not session-gated** — `coop/features/crit_coop.rs` clears the crit-invuln flag on open-field enemies every frame so a co-op partner can damage them during a riposte/backstab/guard-counter crit window (instead of only the player who landed it). Host-enforced and **solo-observable**: the flag clear runs *regardless of session*, so it is not gated on the session layer. |
 | Death debuffs (Rot Essence SpEffects, cured at grace) ([DEATH-DEBUFFS.md](DEATH-DEBUFFS.md)) | `death_debuffs` | **built** — `coop/features/death_debuffs.rs` advances the host-tested stacking model on the debounced death edge and applies each tier's `SpEffectParam` row; the grace-rest flag (9000, rig-confirmed) clears the stack. Tier rows `7210..7250`, both rig blanks resolved. **Data path rig-confirmed (2026-06-29):** the startup probe shows all five tier rows defined with correct `SpEffectRates` (Emaciation/Hopelessness/Decay/Vulnerability/Despair), `rows_defined=true`, feature healthy. Remaining: an actual death to confirm the debuff lands / clears at grace (needs gameplay; not solo-automatable). |
 | Spirit summons allowed in MP | `allow_summons` | E |
 | Skip splash screens ([SKIP-INTROS.md](SKIP-INTROS.md)) | `skip_splash_screens` | M |
@@ -79,16 +83,22 @@ confirmation is the one remaining rig-TODO. See [SCALING.md](SCALING.md).
 | Lock time of day (permanent day/night) | `world_time.{lock,hour,minute}` | **built** — `coop/features/world_time.rs` re-asserts `WorldAreaTime::request_time` each frame (charted). Menu-adjustable. Local config; host-enforced sync is a follow-up. |
 | Overhead player display (ping / soul level / death count / Steam ID) ([NAMEPLATES.md](NAMEPLATES.md)) | `overhead_player_display`, `append_steam_id_to_players` | **built; pending real peer feed (rung 3)** — the **label-content model** (`unseamless-core/nameplate.rs`: `PeerLabelData` + `nameplate_lines`/`nameplate_text`) is host-tested, and `coop/features/nameplates.rs` projects each peer's head to screen and draws via that one seam (projection/LOD/edge/stable-color **rig-confirmed solo 2026-06-26**). Stats are all `None` today (labels degrade to name-only); the *only* gap is filling the real per-peer name/ping/SL/death-count at that seam once the session core maps a phantom to an identity. |
 
-## Custom content & modes (M)
+## Custom content, modes & original-MP sessions — WON'T DO
 
+Dropped (decided 2026-06): unseamless-coop is a **co-op-only** reimplementation targeting core
+co-op gameplay. No original PvP/invasion modes and no bolted-on game modes:
+
+- **"Evil session"** (`OPTIONSELECT_*`: start / seek / view / leave) — invasion-style /
+  original-multiplayer sessions, out of scope for a co-op-only mod.
 - **Enemy rush:** easy / med / hard / infinite
 - **Boss rush** (+ base-DLC variants); arena waves (`YKBR2_*` battle start/wave/end)
-- **Custom mod goods** (`MODGOODS_*`): hosting / joining / leaving / game-rule-change
-  / rune-arc / Rot items ×5 — custom inventory items driving session actions.
-  **Divergence: not a build target.** These exist in ERSC only because items were its easiest
-  action trigger; we use the overlay menu instead (ARCHITECTURE.md > Divergences). Catalogued
-  here for reference only.
-- Rune arc sharing
+- **Custom mod goods** (`MODGOODS_*`): hosting / joining / leaving / game-rule-change / rune-arc
+  / Rot items ×5 — custom inventory items driving session actions. (Also superseded by the overlay
+  menu; ARCHITECTURE.md > Divergences.) Only the *item triggers* are dropped here, including the
+  rune-arc one; the rune-arc *sharing feature* itself survives (below).
+
+Catalogued here for reference only. **Rune arc sharing** (the feature, not its MODGOODS item) is
+*not* dropped — it rides on the session layer; see [ROADMAP.md](ROADMAP.md).
 
 ## UI / locale (M)
 
@@ -125,8 +135,9 @@ Full parity is large. A sane path that front-loads the genuinely hard part:
    in the 2026-06-27 friend test**.
 4. **M3 — minimal shared session:** two players, position + basic state sync, one shared world.
    "First playable." ← current frontier (rung 3; the in-world session FSM, blocked in leg B's session registry/init chain — likely needs a real peer).
-5. **M4+ — layer on:** session actions, PvP toggles, debuffs, then modes (boss/enemy rush) and
-   custom goods.
+5. **M4+ — layer on:** session actions, PvP toggles, debuffs. (Original-MP modes — boss/enemy
+   rush, arena waves, custom goods — and evil sessions are **out of scope**; see "Custom content,
+   modes & original-MP sessions — WON'T DO".)
 
 > Reality check from the triage: ERSC's binary is Themida-virtualized, so we reimplement from
 > **observed behavior + the public `fromsoftware-rs` SDK + the ER modding community's
