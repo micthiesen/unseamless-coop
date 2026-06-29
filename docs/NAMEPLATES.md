@@ -1,9 +1,27 @@
 # Overhead Nameplates
 
-Screen-space labels over co-op partners — who's where, at a glance. This is the design + the build
-order; the projection math is `crates/unseamless-core/src/projection.rs`, the feature is
-`crates/unseamless-coop/src/features/nameplates.rs`, and the draw is in `coop/overlay.rs`
-(`draw_nameplates`). See also [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) for the overlay it draws on.
+A per-player colored **dot** over each co-op partner — who's where, at a glance. **This is shipped and
+on by default.** It's drawn natively by the game's own `CSEzDraw` renderer (world-space, depth-tested,
+**no overlay / no present-hook**), not as an imgui projected label. The feature is
+`crates/unseamless-coop/src/features/native_nameplates.rs` and the draw substrate is
+`coop/native_draw.rs` (`draw_billboard_disc`); it marks **your own head** too, so it's verifiable solo
+on the rig with no session. Config: `[nameplates] enabled` (default `true`; surfaced in the settings
+menu as "Overhead nameplates").
+
+> **The imgui projected-label nameplates were removed (2026-06-28).** An earlier design rendered
+> screen-space text labels over peers via a host-tested projection (`unseamless_core::projection` →
+> `coop/features/nameplates.rs` → `coop/overlay.rs::draw_nameplates`). The decision is settled:
+> nameplates are a native colored dot, not imgui labels. That whole pipeline (the projector feature,
+> the `unseamless_core::projection` / `unseamless_core::nameplate` core modules, the `OverheadDisplay`
+> text-content selector, and the overlay draw path) was deleted — it's in git history if ever revived.
+> The **RE/projection insights** it produced are preserved below so a revival doesn't start cold.
+>
+> **Only remaining nameplate follow-up: color-by-SteamID.** The dot color is currently keyed off the
+> phantom's `ChrIns` pointer (stable per loaded phantom across frames, so a peer keeps its color as the
+> roster reorders) — a stand-in until the session core can map a phantom to a peer *identity*. Swapping
+> the key to the SteamID is **rung-3-gated** (needs the co-op/session core — see
+> [COOP-CONNECTION.md](COOP-CONNECTION.md)); the TODO is marked at the seam in `native_nameplates.rs`
+> (`gather`).
 
 ## Native rendering (no overlay) — spike 2026-06-28
 
@@ -12,7 +30,9 @@ debug renderer (`RendMan.debug_ez_draw`) from a frame task, instead of the hudho
 Motivation: it sidesteps the present-hook entirely (so it renders even where the overlay crashes — the
 native-Windows RTX-3080 case in OVERLAY-RENDERING.md), and it's a path toward dropping imgui. The
 substrate is `coop/native_draw.rs`; the marker feature is `coop/features/native_nameplates.rs`, gated by
-`[nameplates] native_spike` (config-only, off by default, coexists with the overlay nameplates).
+`[nameplates] enabled` (on by default — the shipped nameplate). *(At spike time this was a
+config-only `native_spike` knob alongside the imgui overlay nameplates; both the knob and the overlay
+nameplates are now gone — see the header.)*
 
 What the spike established (all rig-confirmed):
 
@@ -50,7 +70,7 @@ right tool for a dense custom menu.
 - [x] **Native nameplate dots — KEPT.** A colored, camera-facing filled **disc** per player
       ([`native_draw::draw_billboard_disc`]) — world-space (so it doesn't swim), depth-tested,
       present-hook-free, no LOD; appropriate as a dot. The one surface where CSEzDraw is a good fit.
-      Gated by `[nameplates] native_spike`.
+      **Shipped, on by default** (`[nameplates] enabled`).
 - [reverted] **Native toasts / banners / menu** → back to the imgui overlay. The `ui::render`/`ui::input`
       libraries + the bitmap-font/Proggy pipeline + the screen-space bits of `native_draw` were removed
       (in git history if revived). The CSEzDraw `draw_text` finding (RVA `0x264efd0`, font-dead in retail)
@@ -58,118 +78,44 @@ right tool for a dense custom menu.
 
 [`native_draw::draw_billboard_disc`]: ../crates/unseamless-coop/src/native_draw.rs
 
-## Status
+## Current state
 
-- **Projection — rig-confirmed (2026-06-26).** Solo `show_self` check on the rig: the label is upright,
-  floats correctly above the head (on foot and on horseback), tracks the player, is **not** mirrored,
-  and is crisp (no squash). That validates every convention the math left open: `forward` sign, `+Y`
-  world-up, the `right`-vector sign, fov-is-vertical-**radians**, and aspect. No knobs needed.
-- **Base styling — shipped.** Semi-transparent text (`NAMEPLATE_ALPHA = 0.65`) with a near-opaque
-  contrast shadow so it stays legible, tinted per-label by [`palette::peer_color`]. Present but
-  unobtrusive over the world.
-- **Pure utilities — shipped + host-tested, ready to wire:** the per-peer color palette
-  ([`unseamless_core::palette`]) and the off-screen edge-clamp math
-  ([`unseamless_core::projection::clamp_ndc_to_edge`]). Built now so the 2-player work below is just
-  wiring, not new math.
-- **Peer feed — stub.** Solo, `player_chr_set` holds only the local player, so nothing draws unless
-  `show_self` is on (a config-only debug knob — never in the menu, never on in real play). Mapping a
-  phantom to a real peer *identity* needs the co-op/session core (rung 3, see
-  [COOP-CONNECTION.md](COOP-CONNECTION.md)); until then peers get placeholder `Player N` labels.
+- **Shipped: native colored dot, on by default.** A camera-facing filled disc per player
+  (`native_draw::draw_billboard_disc`), drawn from `coop/features/native_nameplates.rs` at
+  `ChrIns_PostPhysics`. Marks your own head + every fully-loaded phantom. World-space, depth-tested,
+  fixed world radius (shrinks naturally with distance — no LOD by design). Config `[nameplates] enabled`.
+- **Per-peer color — keyed off a stable handle.** Each player reads as a distinct palette color
+  ([`unseamless_core::palette::peer_color_for_id`], a fixed set of high-value hues with headroom over
+  the 6-player cap). The key is the phantom's `ChrIns` pointer (stable per loaded phantom across frames),
+  so a peer keeps its color as the roster reorders.
+- **Peer feed — rung-3-gated.** Solo, `player_chr_set` holds only the local player (your own dot still
+  draws). Real phantoms appear in a live session; mapping one to a peer *identity* needs the co-op/session
+  core (see [COOP-CONNECTION.md](COOP-CONNECTION.md)).
 
-## The Design (the full vision)
+## Remaining follow-up: color-by-SteamID (rung-3-gated)
 
-What a finished nameplate system should do, as discussed — most of it verifies only with two players
-and rides on the real peer feed, so it's deliberately staged after the co-op core.
+The **one** remaining nameplate follow-up. The dot color is keyed off the phantom pointer today; swap it
+for the peer's **SteamID** so a given player keeps their color for the whole session across reconnects.
+This needs the session core to map a phantom → identity, so it's **rung-3-gated** — the TODO is marked at
+the seam in `native_nameplates.rs` (`gather`). Do not implement before the session layer lands.
 
-### Content: other players only
-In real co-op a nameplate labels **other** players, never yourself. `show_self` exists purely to make
-the projection + draw verifiable solo on the rig; it's a config-file-only knob (no settings-menu entry,
-so zero menu bloat) and is off in normal play.
+## Projection insights — preserved from the removed imgui pipeline
 
-A label's content grows from a placeholder name today to the peer's **name + ping + soul level + death
-count** ([`OverheadDisplay`] already selects what's shown) once the session layer can attach an identity
-to a phantom. Those become fields on [`NameplateLabel`].
+The deleted imgui projected-label nameplates produced rig-validated RE results worth keeping if a
+screen-space surface (e.g. richer per-peer info) is ever built. Recorded here (the code is in git
+history):
 
-### Per-player colors
-Each partner reads as a distinct, clear color — name **and** dot — from a fixed palette of high-value
-hues ([`palette::peer_color`], 8 colors, headroom over the 6-player cap). The palette + lookup ship now.
+- **Projection conventions — rig-confirmed (2026-06-26).** A solo self-label check validated every
+  convention the camera→NDC math left open: `forward` points where the camera looks; `fov` is the
+  engine's **vertical** fov and **in radians**; world **`+Y` is up** (a head-clearance offset lifts the
+  marker above the head); the `right`-vector sign is correct (not mirrored); and aspect is width/height
+  (no squash). The label was upright, correctly placed, and tracked the player on foot and on horseback —
+  **no knobs needed**. The camera basis was read from `CSCamera.pers_cam_1` (the composited camera the
+  game renders from) via the SDK's named `CSCamExt` basis accessors, null-guarding the sub-camera pointer
+  (an unwired deref is a segfault `catch_unwind` can't catch). `native_nameplates.rs` still reads the same
+  `pers_cam_1` basis to billboard the disc.
+- **The native renderer's limits** (why the dot, not text) are in the spike + Outcome sections above:
+  `CSEzDraw::draw_text` is font-dead in retail (RVA `0x264efd0`), screen-space CSEzDraw UI swims, and it's
+  per-primitive-slow for dense content — so a colored world-space dot is the right native nameplate.
 
-The open piece is **stable assignment**: the color must key off a *stable peer identity* (the SteamID),
-so a given player keeps their color for the whole session. Today the cdylib indexes by roster
-*iteration order* (`peer_n`), which shifts as peers join/leave — so a color can currently flicker. The
-fix lands with the real peer feed (rung 3): index the palette by a stable per-peer key, not iteration
-order.
-
-### Distance LOD: text up close, a dot far away
-Don't scale the bitmap font with distance (it turns mushy). Instead, **switch representation by depth**:
-the full nameplate (colored text) up close, and past a depth threshold a small **colored dot** that
-reads as the same marker but takes almost no screen space. `NameplateLabel::depth` already carries the
-view distance for this; the threshold is a new tuning knob (a second distance, inside the existing
-`max_distance_m` hard cull). The dot uses the peer's palette color.
-
-Verifying the transition "feels right" needs a peer at a real distance → 2-player.
-
-### Off-screen indicator: clamp a dot to the screen edge
-When a partner is outside your view, pin a small colored **dot to the screen border** in their
-direction — a lightweight "teammate is over here" indicator, like a co-op compass. The pure clamp math
-([`projection::clamp_ndc_to_edge`]) ships now: an off-screen NDC point is scaled onto the `±limit`
-border along its bearing from center (with an inset so the dot isn't half off-screen), and an on-screen
-point passes through unchanged.
-
-Two pieces remain, both for the wiring step: (1) a peer **behind** the camera has no valid NDC
-(`project` returns `None`), so the indicator must derive its bearing from the peer's view-space
-direction before clamping; (2) the dot rendering itself. Verifying it helps (vs. clutters) needs a real
-off-screen peer → 2-player.
-
-## Build Order / TODO
-
-Ship-ready now (done): projection, base styling, palette, clamp math.
-
-**Rendering geometry — wired (host-tested math + cdylib draw).** The three rendering behaviors below are
-built against the core math and draw solo (against the placeholder peer set / `show_self`); what's left
-is the real peer **content** and tuning the *feel* with a partner at a real distance (2-player):
-- [x] **Stable per-peer color** — palette keyed off a stable per-peer handle
-      ([`palette::peer_color_for_id`]), not iteration order, so a peer's color can't flicker as the
-      roster reorders. *Still TODO:* swap the handle (the phantom `ChrIns` pointer today) for the SteamID
-      once the session core maps phantom→identity.
-- [x] **Distance LOD** — a peer publishes as a `Plate` carrying its view depth; the overlay degrades it
-      from text to a colored dot past [`projection::is_dot_lod`]'s threshold
-      ([`projection::DEFAULT_DOT_DISTANCE_M`], a constant inside the `max_distance_m` hard cull — the
-      rendering lane doesn't own the config surface, so it's not a config knob yet). *Tune the threshold
-      + dot size at 2-player.*
-- [x] **Off-screen edge indicator** — an off-screen / behind-camera peer publishes as an `Edge` at a
-      border-clamped NDC ([`Camera::edge_indicator_ndc`], which derives the behind-camera bearing from
-      the view-space lateral offset and clamps it); the overlay draws the palette-colored dot. *Tune at
-      2-player.*
-
-Still gated on the **co-op/session core** (rung 3 — real peer feed + identity), then **2-player**:
-- [ ] **Real label content** — name + ping + soul level + death count, driven by [`OverheadDisplay`]. The
-      *formatting* is done + host-tested: [`nameplate::nameplate_text`] turns a per-peer `PeerLabelData`
-      (name + optional ping/SL/death-count) into the drawable label, and the cdylib already renders peers
-      through that seam ([`features::nameplates::gather_labels`]). All that's left at rung 3 is filling the
-      real `PeerLabelData` fields (today: placeholder name, every stat `None` → name-only labels).
-      *Multi-line centering — done:* a multi-stat label is multiple lines joined with `\n`, and the overlay
-      now centers **each line independently** on the projected point (`draw_nameplates` measures each line
-      and places it via the host-tested [`projection::centered_line_origin`]), so the stat lines sit
-      centered under the name rather than left-aligned within the widest line's block. Single-line
-      (name-only) labels — everything drawn today — land pixel-identically (no regression). *Still
-      2-player-gated:* the visual feel of a real multi-stat plate at distance.
-- [ ] **Stable color by SteamID** — swap the per-peer color key from the phantom pointer to the SteamID.
-
-Pure-logic pieces (palette, clamp, LOD threshold, edge-bearing) are host-tested in `unseamless-core` so
-the remaining work is real content + visual tuning, not new math.
-
-[`palette::peer_color_for_id`]: ../crates/unseamless-core/src/palette.rs
-[`projection::centered_line_origin`]: ../crates/unseamless-core/src/projection.rs
-[`projection::is_dot_lod`]: ../crates/unseamless-core/src/projection.rs
-[`projection::DEFAULT_DOT_DISTANCE_M`]: ../crates/unseamless-core/src/projection.rs
-[`Camera::edge_indicator_ndc`]: ../crates/unseamless-core/src/projection.rs
-
-[`NameplateLabel`]: ../crates/unseamless-coop/src/nameplates.rs
-[`OverheadDisplay`]: ../crates/unseamless-core/src/config.rs
-[`nameplate::nameplate_text`]: ../crates/unseamless-core/src/nameplate.rs
-[`features::nameplates::gather_labels`]: ../crates/unseamless-coop/src/features/nameplates.rs
-[`palette::peer_color`]: ../crates/unseamless-core/src/palette.rs
-[`unseamless_core::palette`]: ../crates/unseamless-core/src/palette.rs
-[`projection::clamp_ndc_to_edge`]: ../crates/unseamless-core/src/projection.rs
-[`unseamless_core::projection::clamp_ndc_to_edge`]: ../crates/unseamless-core/src/projection.rs
+[`unseamless_core::palette::peer_color_for_id`]: ../crates/unseamless-core/src/palette.rs

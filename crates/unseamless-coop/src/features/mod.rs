@@ -7,7 +7,6 @@ pub mod auto_session;
 pub mod boot_volume;
 pub mod crit_coop;
 pub mod death_debuffs;
-pub mod nameplates;
 pub mod native_nameplates;
 pub mod notifications;
 pub mod observer;

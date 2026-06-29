@@ -235,11 +235,12 @@ rig-verifiable via the log + a screenshot ([RIG-RUNBOOK.md](RIG-RUNBOOK.md), `/t
    dimmed, settings showing `value`), and forward the toggle/nav keys to
    `select_next`/`select_prev`/`activate`/`adjust`. The model already returns `MenuOutcome`; the cdylib
    turns those into session actions / config writes. Home the cursor on open (`Menu::home`).
-6. **Overhead nameplates (projection rig-confirmed 2026-06-26).** Screen-space text from projected peer
-   world coordinates on this same imgui draw surface (a background draw list), via the host-tested
-   `unseamless_core::projection` (camera data is the SDK `cs/camera.rs`). Base styling is shipped; the
-   richer design (per-peer colors, distance LOD to a dot, off-screen edge indicator, real
-   name/ping/SL/death) rides on the co-op core. Full design + status: [NAMEPLATES.md](NAMEPLATES.md).
+6. **Overhead nameplates — NOT on this overlay (shipped natively instead).** Nameplates are a per-player
+   colored **dot** drawn by the game's own `CSEzDraw` renderer (world-space, depth-tested,
+   present-hook-free — `coop/features/native_nameplates.rs`), not imgui projected labels. The earlier
+   imgui screen-space projection path (`unseamless_core::projection` → `overlay.rs::draw_nameplates`) was
+   removed; the only follow-up is color-by-SteamID (rung-3-gated). Full design + status:
+   [NAMEPLATES.md](NAMEPLATES.md).
 
 ## Shipped UI Behavior (Final State)
 
@@ -543,7 +544,8 @@ run); decide #3/#4 with Michael from that data.
       toggles the window; text enlarged via `set_window_font_scale`.
 - [x] Decided egui vs imgui: **imgui via hudhook** (egui is hudhook-roadmap-only). Shipped on imgui;
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
-- [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.
+- [x] Overhead nameplates: **shipped as native `CSEzDraw` dots** (`coop/features/native_nameplates.rs`),
+      not on this overlay. The imgui world→screen projection path was removed — see [NAMEPLATES.md](NAMEPLATES.md).
 - [ ] ⚠️ **Native-Windows overlay crash** (friend test 2026-06-27, RTX 3080): fatal on the first hooked
       Present on native NVIDIA DX12; works on our vkd3d rig. **Narrowed 2026-06-28:** the
       `crates/dx12-harness` + `/windows-test` VM run was CLEAN on WARP (5690 hooked-Present frames, no

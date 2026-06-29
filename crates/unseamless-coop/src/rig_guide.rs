@@ -2,7 +2,7 @@
 //! draw — the pinned step-banner **and** choice-modal channel, plus the overlay→game modal-input
 //! return path.
 //!
-//! Mirrors [`crate::nameplates`]: the overlay must never read game singletons or run engine logic, so
+//! Like [`crate::debug_panel`]: the overlay must never read game singletons or run engine logic, so
 //! the game-thread feature ([`crate::features::rig_guide`]) ticks the host-tested
 //! [`GuideRunner`](unseamless_core::guide::GuideRunner) and **publishes** what to draw here — either a
 //! pinned [`RigBanner`] (a normal/stub step) or a [`ChoiceView`] modal (a choice step). The overlay
@@ -35,8 +35,8 @@ pub enum RigView {
     Choice(ChoiceView),
 }
 
-/// Latest published view (`None` = no guide active / finished), like [`crate::nameplates`]'s label
-/// cell — a `Mutex<Option<_>>` read non-blocking from the Present thread.
+/// Latest published view (`None` = no guide active / finished), like [`crate::debug_panel`]'s
+/// snapshot cell — a `Mutex<Option<_>>` read non-blocking from the Present thread.
 static VIEW: OnceLock<Mutex<Option<RigView>>> = OnceLock::new();
 
 /// One frame of overlay→game **choice-modal input**: edge-latched nav/confirm (OR-accumulated by the

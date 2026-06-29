@@ -56,49 +56,24 @@ pub struct Config {
     pub nameplates: Nameplates,
 }
 
-/// Overhead peer **nameplates**: screen-space labels drawn over each co-op partner, projected from
-/// their world position (see [`crate::projection`] and `docs/OVERLAY-RENDERING.md`). The *content*
-/// shown is selected by [`Gameplay::overhead_display`]; this block holds the nameplate-specific
-/// rendering knobs. Off by default — it's a Wave-2 surface that only has peers to draw in a real
-/// co-op session, so a fresh install pays nothing.
+/// Overhead co-op **nameplates**: a per-player colored **disc** drawn over each player's head by the
+/// game's own `CSEzDraw` renderer (world-space, depth-tested, present-hook-free — see
+/// `coop/features/native_nameplates` and `docs/NAMEPLATES.md`). This is the shipped nameplate: a
+/// colored dot, **on by default**. (The earlier imgui projected-label nameplates were removed — the
+/// native dot is the one nameplate surface.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Nameplates {
-    /// Master switch for drawing overhead nameplates. Default off.
+    /// Draw the overhead nameplate disc over each player (and your own head, so it's visible solo).
+    /// Default on; set `false` to turn the dots off.
     pub enabled: bool,
-    /// Cull peers farther than this many meters from the camera (a label on a peer across the map is
-    /// noise). Clamped to [`MIN_NAMEPLATE_DISTANCE`]..=[`MAX_NAMEPLATE_DISTANCE`] by
-    /// [`Config::validate`]. Integer meters (so [`Config`] stays `Eq` and it maps to a menu `Range`).
-    pub max_distance_m: u32,
-    /// Debug/solo aid: also draw a nameplate over your *own* character. Off in normal play (you don't
-    /// label yourself), but it makes the projection + draw verifiable solo on the rig before the real
-    /// remote-peer feed lands. Default off.
-    pub show_self: bool,
-    /// **Native nameplate dots (debug/config-only):** draw a colored **disc** over each player via the
-    /// game's own `CSEzDraw` renderer (world-space, depth-tested, no present-hook) instead of the imgui
-    /// overlay's projected labels. Draws over your own head + phantoms so it's verifiable solo on the rig.
-    /// Off by default; never in the settings menu (like [`show_self`]). The lone native UI surface kept
-    /// after the native-UI exploration (toasts/banners/menu are the imgui overlay) — see
-    /// `docs/NAMEPLATES.md` > Outcome.
-    pub native_spike: bool,
 }
 
 impl Default for Nameplates {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            max_distance_m: DEFAULT_NAMEPLATE_DISTANCE,
-            show_self: false,
-            native_spike: false,
-        }
+        Self { enabled: true }
     }
 }
-
-/// Bounds + default for [`Nameplates::max_distance_m`], shared by [`Config::validate`] and the
-/// settings registry so the file and the menu agree on the range.
-pub const MIN_NAMEPLATE_DISTANCE: u32 = 5;
-pub const MAX_NAMEPLATE_DISTANCE: u32 = 300;
-pub const DEFAULT_NAMEPLATE_DISTANCE: u32 = 60;
 
 /// Lock the in-game time of day. Host-enforced: it's part of the shared subset
 /// ([`crate::protocol::SharedSettings`]) the host syncs across the party, so co-op players share
@@ -284,7 +259,6 @@ pub struct Gameplay {
     /// area (the defining "seamless" behavior). Host-enforced across the session. The mod holds the
     /// game's `disable_multiplay_restriction` to this. Default on.
     pub roam_anywhere: bool,
-    pub overhead_display: OverheadDisplay,
     pub skip_splash_screens: bool,
     /// Re-enable Elden Ring's online **multiplayer items** (Tarnished's Furled Finger, Furlcalling
     /// Finger Remedy, Small Golden Effigy, the duelist/invader fingers, Taunter's Tongue, …) when the
@@ -403,45 +377,6 @@ pub struct Language {
     pub override_locale: String,
 }
 
-/// What to show above other players' heads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[repr(u8)]
-pub enum OverheadDisplay {
-    #[default]
-    Normal = 0,
-    None = 1,
-    Ping = 2,
-    SoulLevel = 3,
-    DeathCount = 4,
-    SoulLevelAndPing = 5,
-}
-
-impl OverheadDisplay {
-    /// All variants in display order — for cycling the value in the menu.
-    pub const ALL: [OverheadDisplay; 6] = [
-        Self::Normal,
-        Self::None,
-        Self::Ping,
-        Self::SoulLevel,
-        Self::DeathCount,
-        Self::SoulLevelAndPing,
-    ];
-
-    /// Human-readable label. Single source of truth for the menu choice list (see
-    /// `crate::settings`), so adding a variant updates the menu automatically.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Normal => "Normal",
-            Self::None => "None",
-            Self::Ping => "Ping",
-            Self::SoulLevel => "Soul level",
-            Self::DeathCount => "Death count",
-            Self::SoulLevelAndPing => "Soul level and ping",
-        }
-    }
-}
-
 impl Default for Gameplay {
     fn default() -> Self {
         Self {
@@ -449,7 +384,6 @@ impl Default for Gameplay {
             death_debuffs: true,
             allow_summons: true,
             roam_anywhere: true,
-            overhead_display: OverheadDisplay::Normal,
             skip_splash_screens: true,
             enable_offline_multiplayer: true,
             force_online_menu_mode: false,
@@ -602,21 +536,6 @@ impl Config {
             self.debug.probes.event_flag_scan_count = MAX_FLAG_SCAN;
         }
 
-        if self.nameplates.max_distance_m < MIN_NAMEPLATE_DISTANCE
-            || self.nameplates.max_distance_m > MAX_NAMEPLATE_DISTANCE
-        {
-            let clamped =
-                self.nameplates.max_distance_m.clamp(MIN_NAMEPLATE_DISTANCE, MAX_NAMEPLATE_DISTANCE);
-            warnings.push(ConfigWarning {
-                field: "nameplates.max_distance_m".into(),
-                message: format!(
-                    "{} out of range {MIN_NAMEPLATE_DISTANCE}..={MAX_NAMEPLATE_DISTANCE}; clamped to {clamped}",
-                    self.nameplates.max_distance_m
-                ),
-            });
-            self.nameplates.max_distance_m = clamped;
-        }
-
         if self.world_time.hour > 23 {
             warnings.push(ConfigWarning {
                 field: "world_time.hour".into(),
@@ -699,15 +618,6 @@ mod tests {
                 .unwrap();
         assert!(!cfg.gameplay.crit_coop);
         assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn overhead_display_serializes_as_snake_case() {
-        let mut cfg = Config::default();
-        cfg.gameplay.overhead_display = OverheadDisplay::SoulLevelAndPing;
-        assert!(cfg.to_toml_string().contains("overhead_display = \"soul_level_and_ping\""));
-        let (round, _) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
-        assert_eq!(round.gameplay.overhead_display, OverheadDisplay::SoulLevelAndPing);
     }
 
     #[test]

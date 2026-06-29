@@ -6,8 +6,17 @@
 > then reverted to the imgui overlay for all of them. **Net final state:** imgui draws the menu /
 > toasts / banners; the only native (CSEzDraw) surface kept is the **overhead nameplate dot**
 > (`coop/features/native_nameplates.rs` + the slimmed `coop/native_draw.rs::draw_billboard_disc`) —
-> a world-space marker where CSEzDraw is a genuinely good fit. The `ui::render`/`ui::input` libraries
-> and the bitmap-font/Proggy pipeline were removed (they live in git history if ever revived).
+> a world-space marker where CSEzDraw is a genuinely good fit, and it is the **shipped nameplate, on by
+> default** (`[nameplates] enabled`). The `ui::render`/`ui::input` libraries and the bitmap-font/Proggy
+> pipeline were removed (they live in git history if ever revived).
+>
+> **The imgui projected-label nameplates were also removed (2026-06-28).** A separate path once
+> rendered screen-space text labels over peers (a host-tested `unseamless_core::projection` →
+> `coop/features/nameplates.rs` → `overlay.rs::draw_nameplates`); the decision is settled that
+> nameplates are the native colored dot, so that whole pipeline (projector feature, the
+> `projection`/`nameplate` core modules, the `OverheadDisplay` content selector, the overlay draw) was
+> deleted. The native dot is the one nameplate surface; the only follow-up left is color-by-SteamID
+> (rung-3-gated). See [NAMEPLATES.md](NAMEPLATES.md).
 >
 > **Why we reverted (don't re-explore without new information):**
 > - **CSEzDraw can't do good 2D UI.** It draws only world-space geometry, so screen-space UI is a

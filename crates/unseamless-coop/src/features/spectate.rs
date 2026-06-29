@@ -38,7 +38,7 @@ use unseamless_core::spectate::{SpectateCandidate, select_target};
 use unseamless_core::util::{Edge, Transition};
 
 use crate::feature::{Feature, Tick};
-use crate::features::nameplates::active_characters;
+use crate::features::native_nameplates::active_characters;
 
 pub struct SpectateFeature {
     /// Debounced "the local player really died" detector (sustained `death_flag`), so one death enters

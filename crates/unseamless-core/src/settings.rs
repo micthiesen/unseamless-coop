@@ -10,8 +10,7 @@
 //! `docs/ARCHITECTURE.md` > Divergences.
 
 use crate::config::{
-    Config, MAX_MASTER_VOLUME, MAX_NAMEPLATE_DISTANCE, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS,
-    MIN_NAMEPLATE_DISTANCE, MIN_SESSION_PLAYERS, OverheadDisplay,
+    Config, MAX_MASTER_VOLUME, MAX_SCALING_PERCENT, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS,
 };
 
 /// Stable identifier for a setting, used to address it from the menu / over the wire. Discriminant
@@ -26,7 +25,9 @@ pub enum SettingId {
     SkipSplashScreens = 3,
     AppendSteamId = 4,
     AlwaysSpectateOnDeath = 5,
-    OverheadDisplay = 6,
+    // 6 was OverheadDisplay (removed with the imgui projected-label nameplates — only the native
+    // colored dot remains, which has no text-content choice). Discriminants are stable/append-only,
+    // so the value is retired rather than reused.
     BootMasterVolume = 7,
     EnemyHealth = 8,
     EnemyDamage = 9,
@@ -42,7 +43,8 @@ pub enum SettingId {
     CritCoop = 19,
     BootMasterVolumeEnabled = 20,
     Nameplates = 21,
-    NameplateDistance = 22,
+    // 22 was NameplateDistance (removed with the imgui projected-label nameplates; the native dot
+    // has no distance-cull knob). Retired, not reused.
     EnableOfflineMultiplayer = 23,
     ForceOnlineMenuMode = 24,
     BypassSessionCreateGate = 25,
@@ -90,7 +92,7 @@ pub enum SettingKind {
         get: fn(&Config) -> u32,
         set: fn(&mut Config, u32),
     },
-    /// A cycle through named choices (e.g. the overhead-display modes).
+    /// A cycle through named choices (a multi-option mode, derived from a source enum).
     Choice {
         /// `(wire_value, label)` for each choice, in cycle order. Owned so the list can be
         /// derived from the source enum rather than hand-duplicated as a `'static` literal.
@@ -154,15 +156,6 @@ impl Setting {
             }
         }
     }
-}
-
-/// Overhead-display choices, genuinely derived from [`OverheadDisplay::ALL`] + its `label()`, so
-/// the enum is the single source of truth and adding a variant updates the menu automatically.
-fn overhead_choices() -> Vec<(u32, &'static str)> {
-    OverheadDisplay::ALL
-        .into_iter()
-        .map(|d| (d as u32, d.label()))
-        .collect()
 }
 
 /// The full, ordered registry of tunable settings. Add a new option here (and a `Config` field)
@@ -261,37 +254,13 @@ pub fn registry() -> Vec<Setting> {
             },
         },
         Setting {
-            id: OverheadDisplay,
-            label: "Overhead player display",
-            kind: Choice {
-                choices: overhead_choices(),
-                get: |c| c.gameplay.overhead_display as u32,
-                set: |c, v| {
-                    if let Some(d) =
-                        crate::config::OverheadDisplay::ALL.into_iter().find(|d| *d as u32 == v)
-                    {
-                        c.gameplay.overhead_display = d;
-                    }
-                },
-            },
-        },
-        Setting {
+            // Toggles the native overhead nameplate disc (`coop/features/native_nameplates`) — the
+            // shipped nameplate, a per-player colored dot drawn by `CSEzDraw`. On by default.
             id: Nameplates,
             label: "Overhead nameplates",
             kind: Toggle {
                 get: |c| c.nameplates.enabled,
                 set: |c, v| c.nameplates.enabled = v,
-            },
-        },
-        Setting {
-            id: NameplateDistance,
-            label: "Nameplate distance (m)",
-            kind: Range {
-                min: MIN_NAMEPLATE_DISTANCE,
-                max: MAX_NAMEPLATE_DISTANCE,
-                step: 5,
-                get: |c| c.nameplates.max_distance_m,
-                set: |c, v| c.nameplates.max_distance_m = v,
             },
         },
         Setting {
@@ -390,7 +359,6 @@ pub fn registry() -> Vec<Setting> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::OverheadDisplay;
     use std::collections::HashMap;
 
     /// Mutate `s` so its displayed value is *guaranteed* to change: flip a toggle, advance a choice,
@@ -455,29 +423,20 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 25, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 23, "registry size changed — update this if you added a setting");
     }
 
     #[test]
-    fn nameplate_settings_bind_to_their_own_config_fields() {
-        // Guard the two nameplate settings' get/set against a copy-paste pointing at a sibling field.
+    fn nameplate_setting_binds_to_its_own_config_field() {
+        // Guard the native-nameplate toggle's get/set against a copy-paste pointing at a sibling field.
         let reg = registry();
         let mut cfg = Config::default();
 
         let toggle = reg.iter().find(|s| s.id == SettingId::Nameplates).unwrap();
         cfg.nameplates.enabled = false;
-        cfg.nameplates.max_distance_m = 42; // neighbour sentinel
         toggle.adjust(&mut cfg, true);
         assert!(cfg.nameplates.enabled, "toggle must write nameplates.enabled");
-        assert_eq!(cfg.nameplates.max_distance_m, 42, "toggle must not touch the distance");
         assert_eq!(toggle.display_value(&cfg), "On");
-
-        let dist = reg.iter().find(|s| s.id == SettingId::NameplateDistance).unwrap();
-        cfg.nameplates.max_distance_m = 60;
-        cfg.nameplates.show_self = true; // neighbour sentinel
-        dist.adjust(&mut cfg, true); // +5
-        assert_eq!(cfg.nameplates.max_distance_m, 65, "distance must write nameplates.max_distance_m");
-        assert!(cfg.nameplates.show_self, "distance must not touch show_self");
     }
 
     #[test]
@@ -673,15 +632,25 @@ mod tests {
 
     #[test]
     fn choice_cycles_both_ways_and_wraps() {
-        let reg = registry();
-        let s = reg.iter().find(|s| s.id == SettingId::OverheadDisplay).unwrap();
+        // No registry setting is a `Choice` today, so exercise the cycle machinery on a synthetic one
+        // backed by a real `u32` field (`session.max_players`), choosing among three of its values.
+        let s = Setting {
+            id: SettingId::Nameplates,
+            label: "synthetic-cycle",
+            kind: SettingKind::Choice {
+                choices: vec![(2, "two"), (4, "four"), (6, "six")],
+                get: |c| c.session.max_players,
+                set: |c, v| c.session.max_players = v,
+            },
+        };
         let mut cfg = Config::default();
-        assert_eq!(cfg.gameplay.overhead_display, OverheadDisplay::Normal);
-        assert_eq!(s.display_value(&cfg), "Normal");
+        cfg.session.max_players = 2;
+        assert_eq!(s.display_value(&cfg), "two");
         s.adjust(&mut cfg, false); // wrap backwards from first -> last
-        assert_eq!(cfg.gameplay.overhead_display, OverheadDisplay::SoulLevelAndPing);
+        assert_eq!(cfg.session.max_players, 6);
+        assert_eq!(s.display_value(&cfg), "six");
         s.adjust(&mut cfg, true); // forward wraps back to first
-        assert_eq!(cfg.gameplay.overhead_display, OverheadDisplay::Normal);
+        assert_eq!(cfg.session.max_players, 2);
     }
 
     // ----- binding-integrity audit (w3-settings-audit) -----
@@ -818,7 +787,7 @@ mod tests {
         // The Choice fallback branch: a `get` returning a value absent from `choices` must render the
         // raw number rather than panic (guards the `find(...).unwrap_or` in `display_value`).
         let synthetic = Setting {
-            id: SettingId::OverheadDisplay,
+            id: SettingId::Nameplates,
             label: "synthetic",
             kind: SettingKind::Choice { choices: vec![(0, "zero")], get: |_| 999, set: |_, _| {} },
         };

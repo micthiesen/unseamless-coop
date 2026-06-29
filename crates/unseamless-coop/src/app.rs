@@ -17,7 +17,6 @@ use crate::feature::{Feature, Tick};
 use crate::features::boot_volume::BootVolume;
 use crate::features::crit_coop::CritCoop;
 use crate::features::death_debuffs::DeathDebuffsFeature;
-use crate::features::nameplates::Nameplates;
 use crate::features::native_nameplates::NativeNameplates;
 use crate::features::notifications::NotificationsTick;
 use crate::features::observer::SessionObserver;
@@ -132,8 +131,6 @@ fn init_subsystems(
     crate::actionq::init();
     // Snapshot cell the debug-panel publisher posts into and the overlay reads. Before any tick.
     crate::debug_panel::init();
-    // Label cell the nameplates feature posts projected peer labels into and the overlay draws.
-    crate::nameplates::init();
     // Rig-testing guide pinned-banner cell the overlay reads (debug-only). Before any feature ticks
     // or the overlay draws; inert until a `[debug] guide` is configured (the banner stays `None`).
     #[cfg(debug_assertions)]
@@ -267,12 +264,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         // On local death, aims the game's death camera at a living co-op partner (PostPhysics). Reads
         // live config; no-op when off (default). Camera half only — respawn-suppression is rig-gated.
         Box::new(SpectateFeature::new()),
-        // Projects peer positions to screen-space labels for the overlay to draw (PostPhysics, reads
-        // camera + positions only). Reads live config; no-op (publishes nothing) when off.
-        Box::new(Nameplates::new()),
         // Overhead nameplate dots drawn natively via CSEzDraw (world-space, present-hook-free) — the one
-        // native UI surface we kept; toasts/banners/menu are the imgui overlay. Config-file-only
-        // (`[nameplates] native_spike`); no-op when off. See docs/UI-LIBRARY.md > OUTCOME.
+        // nameplate surface (toasts/banners/menu are the imgui overlay). On by default; gated by
+        // `[nameplates] enabled`. See docs/NAMEPLATES.md and docs/UI-LIBRARY.md > OUTCOME.
         Box::new(NativeNameplates::new()),
         // Holds the time of day when locked (reads live config; no-op when off).
         Box::new(WorldTimeLock::new()),
@@ -632,14 +626,7 @@ fn disable_feature(index: usize) {
             slot.name
         ))
     });
-    // Clear the nameplates overlay surface. A disabled feature never publishes again, so a feature
-    // that fed a *world-locked* overlay would otherwise leave its last labels frozen at stale screen
-    // positions while the camera/world move under them (a visible glitch — unlike an aging toast or a
-    // static debug panel). nameplates is the only such surface; clearing it here is the graceful-
-    // degrade that "a panicking feature is disabled, the game keeps running" intends. Cheap + idempotent
-    // for every other feature's disable, and inside the caller's firewall so a re-panic stays contained.
-    crate::nameplates::publish(Vec::new());
-    // Same rationale, higher stakes: if the rig-guide feature died with a CHOICE modal published, the
+    // If the rig-guide feature died with a CHOICE modal published, the
     // stale `Choice` view keeps the overlay's `set_blocked`/input-focus latched, stranding the game's
     // keyboard/mouse blocked (the overlay toggle can't clear it, and skip can't rescue since the dead
     // feature no longer ticks). Clear the view so a dead modal releases input focus. Debug-only (the

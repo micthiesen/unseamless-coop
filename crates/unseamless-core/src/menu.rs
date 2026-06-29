@@ -376,11 +376,11 @@ mod tests {
     fn rows_cover_actions_and_settings() {
         let menu = Menu::new();
         let rows = menu.rows(&Config::default(), &SessionContext::default());
-        // 8 actions + 25 settings.
-        assert_eq!(rows.len(), 33);
+        // 8 actions + 23 settings.
+        assert_eq!(rows.len(), 31);
         // Action rows have no value; setting rows do.
         assert!(rows[0].value.is_none());
-        assert!(rows.iter().filter(|r| r.value.is_some()).count() == 25);
+        assert!(rows.iter().filter(|r| r.value.is_some()).count() == 23);
     }
 
     #[test]

@@ -105,14 +105,13 @@ solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay 
   are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
   Accelerates the co-op core below. See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md),
   [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
-- **Overhead nameplates** — *projection rig-confirmed (2026-06-26)*, base styling shipped, **and the
-  rendering geometry is now wired** (commit `6c377ce`): stable per-peer color (keyed off a stable peer
-  handle, not iteration order), distance LOD (text→colored dot past a depth threshold), and the
-  off-screen/behind-camera edge indicator all draw against the host-tested core math. What remains is
-  purely co-op-core + 2-player gated: **real label content** (name/ping/SL/death, driven by
-  `OverheadDisplay`) and **swapping the color key from the phantom pointer to the SteamID** once the
-  session core maps phantom→identity — plus tuning the LOD threshold / dot size with a partner at a real
-  distance. No solo wiring left. Full design in [NAMEPLATES.md](NAMEPLATES.md).
+- **Overhead nameplates** — **shipped: a native per-player colored dot, on by default**
+  (`[nameplates] enabled`), drawn by the game's own `CSEzDraw` renderer (world-space, depth-tested, no
+  present-hook) over each player and your own head — so it's verifiable solo. The earlier imgui
+  projected-label nameplates (and their projection/text-content core modules) were removed; the dot is
+  the one nameplate surface. The **one** remaining follow-up is **color-by-SteamID** (the dot color is
+  keyed off the phantom pointer today) — rung-3-gated, since it needs the session core to map a
+  phantom→identity. Full design in [NAMEPLATES.md](NAMEPLATES.md).
 
 ### 2-player-gated (the co-op core + everything riding on it)
 

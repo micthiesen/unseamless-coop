@@ -22,7 +22,6 @@
 use std::ffi::c_void;
 
 use hudhook::hooks::dx12::ImguiDx12Hooks;
-use hudhook::imgui::draw_list::DrawListMut;
 use hudhook::imgui::{
     Condition, Context, FontConfig, FontId, FontSource, Io, Key, MouseButton, TabItemFlags, Ui,
     WindowFlags,
@@ -106,23 +105,6 @@ const MODAL_BG_ALPHA: f32 = 0.92;
 /// "blocking" cue — we can't freeze ER's own loop, so the scrim + input focus stand in for it).
 #[cfg(debug_assertions)]
 const MODAL_SCRIM: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
-
-// Overhead nameplates: bright white text with a dark drop shadow (one pixel down-right) so a label
-// stays legible over any part of the game world. The projected NDC points come from the game-thread
-// feature (see [`crate::nameplates`]); the shadow is the same contrast trick the cursor orb uses.
-// Per-label tint comes from the published `NameplateLabel::color` (the peer palette); the overlay only
-// owns the shared alpha + the contrast shadow. The text is drawn semi-transparent so a label is present
-// but unobtrusive over the world; the near-opaque shadow keeps it legible at that alpha.
-const NAMEPLATE_ALPHA: f32 = 0.65;
-const NAMEPLATE_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
-const NAMEPLATE_SHADOW_OFFSET: f32 = 1.0;
-// Dot markers: the distance-LOD dot a far peer's plate degrades to, and the off-screen edge indicator
-// dot. Both are a filled colored core ringed by a near-opaque dark outline (the same contrast trick the
-// text shadow uses) so a small dot stays legible over any part of the world. The edge dot is a touch
-// larger so an at-the-border "teammate is over here" marker reads at a glance. Tune at 2-player.
-const NAMEPLATE_DOT_R: f32 = 3.0;
-const NAMEPLATE_EDGE_DOT_R: f32 = 4.5;
-const NAMEPLATE_DOT_OUTLINE: f32 = 1.5;
 
 /// One inset, in pixels, from the viewport edge, shared by every overlay surface: the top-left
 /// watermark (left + top), the top-right notifications (right + top), and the utility window's
@@ -318,10 +300,8 @@ impl Overlay {
             self.config = cfg;
         }
         self.draw_notifications(ui);
-        // Overhead peer nameplates: screen-space labels the game-thread feature
-        // (`crate::features::nameplates`) projected and published to `crate::nameplates`. Drawn over
-        // the world but behind our own windows; a no-op when nothing's published (off / no peers).
-        self.draw_nameplates(ui);
+        // Overhead nameplates are drawn natively (a colored disc per player via `CSEzDraw`, see
+        // `coop/features/native_nameplates`), not on this overlay — no present-hook projection here.
         // Branded corner stamp — only off the playfield (title/main menu, character select, loading),
         // never a persistent in-play banner. The game-thread probe (`crate::features::playstate`)
         // publishes the flag; we read it non-blocking here. Suppressed whenever the debug panel is up:
@@ -487,9 +467,8 @@ impl Overlay {
 
         let disp = ui.io().display_size;
         // Dim the whole screen behind the modal (the "blocking" cue). The background draw list is a
-        // distinct instance from the foreground one `draw_cursor_marker` binds, and this runs before
-        // `draw_nameplates` binds its own — so imgui-rs's one-live-instance rule holds. Scope it so the
-        // list drops before the window builds.
+        // distinct instance from the foreground one `draw_cursor_marker` binds — so imgui-rs's
+        // one-live-instance rule holds. Scope it so the list drops before the window builds.
         {
             let dl = ui.get_background_draw_list();
             dl.add_rect([0.0, 0.0], disp, MODAL_SCRIM).filled(true).build();
@@ -559,64 +538,6 @@ impl Overlay {
 
         // Our software cursor, so the keyboard note field is visibly clickable to focus.
         draw_cursor_marker(ui);
-    }
-
-    /// Draw overhead peer nameplates from the projected labels the game-thread feature publishes
-    /// ([`crate::nameplates`]). Reads them non-blocking; maps each NDC point to pixels with this
-    /// frame's `display_size` (the projection deliberately stops at NDC — see
-    /// [`unseamless_core::projection`]) and draws centered text with a drop shadow. Uses the
-    /// **background** draw list so labels sit over the game world but behind our own windows (the
-    /// utility menu stays on top). A no-op when the list is empty or momentarily contended, so it's
-    /// cheap on the present hook.
-    fn draw_nameplates(&self, ui: &Ui) {
-        let Some(mut labels) = crate::nameplates::snapshot() else {
-            return; // contended this frame, or not initialized — skip
-        };
-        if labels.is_empty() {
-            return; // off, or no peers visible — nothing to draw
-        }
-        // Paint farthest-first so a nearer peer's label draws on top when two overlap on screen.
-        labels.sort_by(|a, b| b.depth.total_cmp(&a.depth));
-        let disp = ui.io().display_size;
-        // Crisp menu font for the labels (held to function end); toasts keep the compact default.
-        let _font = self.font.as_ref().map(|f| ui.push_font(f.0));
-        // One background draw list, reused for every label and dropped at function end. It's a
-        // different list from the foreground one `draw_cursor_marker`/`draw_title_hint` bind, and this
-        // runs before the utility window's `draw_ghost_box` (the other background-list user), so the
-        // imgui-rs one-live-instance rule isn't violated.
-        let dl = ui.get_background_draw_list();
-        for n in &labels {
-            let p = unseamless_core::projection::ndc_to_screen(n.ndc, disp);
-            let color = rgba(n.color, NAMEPLATE_ALPHA);
-            match n.kind {
-                // Off-screen peer: a colored dot pinned to the screen border, pointing toward them.
-                crate::nameplates::NameplateKind::Edge => draw_nameplate_dot(&dl, p, NAMEPLATE_EDGE_DOT_R, color),
-                // On-screen peer: full text up close, degrading to a colored dot past the LOD distance
-                // (the `is_dot_lod` threshold) — switching representation rather than scaling the bitmap
-                // font, which would turn mushy. The dot uses the same per-peer palette color.
-                crate::nameplates::NameplateKind::Plate => {
-                    if unseamless_core::projection::is_dot_lod(n.depth, unseamless_core::projection::DEFAULT_DOT_DISTANCE_M) {
-                        draw_nameplate_dot(&dl, p, NAMEPLATE_DOT_R, color);
-                    } else {
-                        // Center EACH line of a (possibly multi-line) label on the projected point and
-                        // stack them downward: a label is the peer's name plus optional stat lines joined
-                        // with '\n' (`unseamless_core::nameplate::nameplate_text`), and a single `add_text`
-                        // of the whole block left-aligns the narrower lines under the widest one. Measure
-                        // each line's width and place it via the host-tested `centered_line_origin` (the
-                        // single-line name-only label drawn today lands pixel-identically). The vertical
-                        // advance is one font line height (constant for the baked font), measured once so it
-                        // matches imgui's own internal line advance for a multi-line string.
-                        let line_height = ui.calc_text_size("X")[1];
-                        for (i, line) in n.text.lines().enumerate() {
-                            let width = ui.calc_text_size(line)[0];
-                            let origin = unseamless_core::projection::centered_line_origin(p, width, line_height, i);
-                            dl.add_text([origin[0] + NAMEPLATE_SHADOW_OFFSET, origin[1] + NAMEPLATE_SHADOW_OFFSET], NAMEPLATE_SHADOW, line);
-                            dl.add_text(origin, color, line);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// Draw the branded corner stamp — mod name + version + the backtick hint — anchored to the
@@ -1206,16 +1127,6 @@ fn session_context() -> SessionContext {
         pvp_teams_on: false,
         friendly_fire_on: false,
     }
-}
-
-/// Draw a nameplate marker dot — a filled colored core ringed by a near-opaque dark outline (the same
-/// contrast trick the text shadow uses) so a small dot stays legible over any part of the world. Used
-/// for both the distance-LOD dot a far plate degrades to and the off-screen edge indicator. Added to the
-/// caller's already-bound background draw list (the same `dl` the text labels use), so it never binds a
-/// second draw list — imgui-rs's one-live-instance rule stays satisfied.
-fn draw_nameplate_dot(dl: &DrawListMut, center: [f32; 2], r: f32, color: [f32; 4]) {
-    dl.add_circle(center, r + NAMEPLATE_DOT_OUTLINE, NAMEPLATE_SHADOW).filled(true).build();
-    dl.add_circle(center, r, color).filled(true).build();
 }
 
 /// Draw our software cursor — a small faded orb at the mouse hotspot, on the foreground draw list (over
