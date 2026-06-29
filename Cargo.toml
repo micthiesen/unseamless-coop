@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/unseamless-core", "crates/unseamless-coop", "crates/harness", "crates/launcher"]
+members = ["crates/unseamless-core", "crates/unseamless-coop", "crates/harness", "crates/launcher", "crates/dx12-harness"]
 
 [workspace.package]
 version = "0.10.0"

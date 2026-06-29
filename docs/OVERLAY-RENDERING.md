@@ -383,18 +383,27 @@ first hooked present — overwhelmingly likely **the call into the game's origin
 
 ### Why native NVIDIA dies where vkd3d tolerates it (ranked hypotheses)
 
-1. **First hooked Present faults under MinHook on native (most likely).** The detour is applied to a
-   live swapchain vtable while presents are in flight; native NVIDIA's frames-in-flight / present
-   threading hits a window vkd3d's different scheduling dodges. Consistent with "dies on the very
-   first hooked present, our code never ran."
+> **Narrowed by the local Windows VM harness (`dx12-harness`, 2026-06-28).** A clean WARP run (below)
+> **rules out the hardware-independent parts of #1 and all of #3.** The crash is now pinned to
+> something **NVIDIA-driver-specific**: the present-threading *trigger* of #1, or the #2 interposer.
+
+1. **First hooked Present faults under MinHook on native — NVIDIA-driver-specific (most likely).** The
+   detour is applied to a live swapchain vtable while presents are in flight; native NVIDIA's
+   frames-in-flight / present threading hits a window vkd3d's different scheduling dodges. **The VM
+   harness reproduced the *mechanism* (off-thread MinHook detour on an already-presenting swapchain)
+   on a real Windows loader and it did NOT crash — so the mechanism alone is fine; the fatal part is
+   the NVIDIA driver's present path specifically, which WARP doesn't share.** Confirm on the friend's
+   machine / a GPU-passthrough VM.
 2. **A swapchain proxy on native shifts the present target / CQ layout.** Anything interposing a DXGI
    swapchain proxy (NVIDIA App / GeForce overlay, an FPS/RTSS overlay, DLSS Streamline) would diverge
    the detour target or the CQ scan. ER ships DLSS *super-resolution* (no swapchain proxy), not
    frame-gen, so rank this below #1 — but **ruling out other in-game overlays on the friend's machine
-   is a cheap test.**
-3. **The fault is later than the log suggests** (CQ eventually completes, our `initialize`/render runs,
-   imgui's DX12 font upload faults on native). The friend's log shows context never completed before
-   death, so this is lower — the breadcrumb build will confirm or kill it.
+   is a cheap test.** Not reproducible in the VM (no such interposer), so still open.
+3. **~~The fault is later than the log suggests — imgui's DX12 font upload faults on native.~~ RULED
+   OUT (VM harness, 2026-06-28).** The harness bakes + GPU-uploads the *identical* font atlas via
+   imgui's DX12 backend, and it completed cleanly on a real Windows loader (`initialize() reached` →
+   `first render frame reached`, 5690 hooked-Present frames, no crash). The font-upload path is not
+   hardware-dependent and is not the crash.
 
 ### Version reality (no bump available)
 
@@ -464,12 +473,27 @@ loop is runnable here.
    Present (hypothesis #1); if `initialize() reached` / `first render frame reached` are absent on
    native, the context never completed (matching the friend's older logs). The breadcrumb build +
    per-record fsync (`#[cfg(debug_assertions)]`, already shipped) make the native run's tail trustworthy.
-2. **Friend native run (current build `7c8c746`, breadcrumbs on), `level = "trace"`, once — with
-   per-record log flushing forced** (else the decisive tail line is lost, as in 3/4 of the first
-   logs). Capture: do `initialize() reached` / `first render frame reached` appear? Is `Call … Present
-   trampoline` the last line? Does `Found command queue pointer` ever appear on native? Diff against
-   the baseline → localizes the divergence.
-3. **Any code fix stays UNVALIDATED on native until a subsequent friend session.** Flag it as such.
+2. **Local Windows VM harness (`crates/dx12-harness`, the `/windows-test` skill) — RAN CLEAN
+   2026-06-28.** A minimal D3D12 app that presents then injects the *same* hudhook present-hook + imgui
+   font bake into its own live swapchain mid-flight, driven into the existing quickemu Win11 VM via
+   `scripts/win.sh`. The VM is a **real native Windows DXGI/D3D12 loader + present path** (not vkd3d)
+   but runs **WARP, not the NVIDIA driver**. **Result:** swapchain up → hook injected mid-flight → CQ
+   found at offset **+0x138** (vs the rig's +0x8 — the offset-agnostic scan handled it) → `initialize()
+   reached (baking fonts)` → `first render frame reached` → **5690 hooked-Present frames, no crash.**
+   So the MinHook-on-a-live-swapchain *mechanism* (hyp #1) and the imgui DX12 font upload (hyp #3) are
+   **ruled out as hardware-independent causes** — the crash is NVIDIA-driver-specific, which WARP can't
+   reproduce and the VM can't validate. The VM was the cheap filter that did its job (narrowed the
+   space); it can't be the verdict. (Run gotchas it surfaced, now baked into `win.sh`: the harness
+   needs WARP forced + an Interactive scheduled task with a logged-in desktop, since an SSH session has
+   no window station for a DXGI swapchain — see the `/windows-test` skill.)
+3. **Friend native run (current build, breadcrumbs on), `level = "trace"`, once — with per-record log
+   flushing forced** (else the decisive tail line is lost, as in 3/4 of the first logs). Capture: do
+   `initialize() reached` / `first render frame reached` appear? Is `Call … Present trampoline` the
+   last line? Does `Found command queue pointer` ever appear on native? Diff against the baseline →
+   localizes the divergence. This is the **single super-validated gate** — spend it only when the
+   lighter loop (rig baseline + VM harness) already puts confidence ~95%.
+4. **A code fix is only "validated" if the VM harness reproduced the crash and then stopped after the
+   fix; otherwise it stays UNVALIDATED on native until a subsequent friend session.** Flag it as such.
 
 ### Candidate fixes (ranked)
 
@@ -521,10 +545,13 @@ run); decide #3/#4 with Michael from that data.
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [ ] (Later) Overhead nameplates: world→screen projection (`cs/camera.rs`) or `CSEzDraw` markers.
 - [ ] ⚠️ **Native-Windows overlay crash** (friend test 2026-06-27, RTX 3080): fatal on the first hooked
-      Present on native NVIDIA DX12; works on our vkd3d rig. Investigated blind — see "Native-Windows
-      Crash" above. **Next:** rig trace-level baseline + one friend trace-level run on build `7c8c746`
-      to localize the fatal step; mitigate now with `[debug] overlay = false`. No safe fix identified
-      blind; a hudhook fork or install-timing change needs Michael's sign-off + the breadcrumb data.
+      Present on native NVIDIA DX12; works on our vkd3d rig. **Narrowed 2026-06-28:** the
+      `crates/dx12-harness` + `/windows-test` VM run was CLEAN on WARP (5690 hooked-Present frames, no
+      crash), **ruling out the hardware-independent MinHook mechanism (#1) and the imgui font upload
+      (#3)**. The crash is **NVIDIA-driver-specific** (the present-threading trigger of #1, or the #2
+      interposer) — WARP can't reproduce it and the VM can't validate a fix. **Next:** a friend
+      trace-level run (the super-validated gate) and/or single-GPU VFIO passthrough of the RTX 5080 into
+      the VM for a real-NVIDIA repro. Mitigate meanwhile with `[debug] overlay = false`.
 
 ## Sources
 

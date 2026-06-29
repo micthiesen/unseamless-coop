@@ -143,6 +143,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dx12-harness"
+version = "0.10.0"
+dependencies = [
+ "hudhook",
+ "log",
+ "simplelog",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "eldenring"
 version = "0.14.0"
 source = "git+https://github.com/vswarte/fromsoftware-rs?rev=8c67a84f394bd58efdb06a5be47f988e0c1a9995#8c67a84f394bd58efdb06a5be47f988e0c1a9995"

@@ -1,0 +1,33 @@
+[package]
+name = "dx12-harness"
+description = "Native-Windows DX12 present-hook validation harness: a minimal D3D12 app that presents, then injects the same hudhook present-hook + imgui font bake the overlay uses into its own live swapchain mid-flight, to exercise the native-Windows overlay crash off the game (docs/OVERLAY-RENDERING.md)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dx12-harness"
+path = "src/main.rs"
+
+[dependencies]
+log = { workspace = true }
+simplelog = { version = "0.12", default-features = false }
+
+# The exact machinery under test: hudhook's DX12 present-hook + Dear ImGui, same version/features the
+# cdylib pins (crates/unseamless-coop/Cargo.toml). Vendors minhook (C) + imgui-sys (C++) built for the
+# windows target; build.rs links the C++/GCC runtime statically (mirrors the cdylib's build.rs) so the
+# exe is self-contained — a native Windows box has no libstdc++-6.dll either.
+hudhook = { version = "0.9", default-features = false, features = ["dx12"] }
+
+# Minimal D3D12 swapchain + present loop (the thing hudhook hooks). Same windows 0.62 pin as the cdylib.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",               # HBRUSH for the window class
+    "Win32_System_LibraryLoader",       # GetModuleHandleW (hmodule for hudhook)
+    "Win32_System_Threading",           # fence event: CreateEventW / WaitForSingleObject
+    "Win32_UI_WindowsAndMessaging",     # window + message pump
+] }

@@ -332,6 +332,11 @@ These are loaded only when relevant (not in this always-on file):
 - **Driving a Steam Deck / second machine as player 2** (over SSH, for two-player networking tests):
   the **`/steam-deck`** skill (`scripts/deck.sh` + `scripts/deck/deck-remote.sh`). The local rig is
   player 1; the Deck is a near-stateless player 2 we build-here-and-push-to.
+- **Validating the overlay's DX12 present-hook on real Windows** (the native-Windows crash in
+  [`docs/OVERLAY-RENDERING.md`](docs/OVERLAY-RENDERING.md)) — the **`/windows-test`** skill
+  (`crates/dx12-harness` + `scripts/win.sh`): runs the same hudhook hook + imgui font bake on a real
+  Windows loader in the local quickemu Win11 VM, no game. A cheap filter (WARP, not NVIDIA), with the
+  friend's machine as the super-validated gate.
 
 ## Safety / legitimacy
 
