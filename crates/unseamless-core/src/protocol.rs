@@ -46,6 +46,11 @@ const SETTINGS_BOOL_COUNT: usize = 4;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
+// The `Log` frame writes its message length as a `u16` length prefix. If the cap ever grew past
+// what a `u16` can hold, the `(len as u16)` cast in `encode` would silently wrap and desync the
+// prefix from the bytes that follow — corrupting every longer frame. Pin the invariant at compile
+// time so a future cap bump fails the build instead of shipping a silent truncation defect.
+const _: () = assert!(MAX_LOG_MSG <= u16::MAX as usize);
 
 /// Length of the per-session authentication nonce carried in `Hello` (128 bits). Each peer draws a
 /// fresh random nonce per session; it is what makes an [`crate::crypto::auth_proof`] non-replayable
@@ -661,6 +666,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_superseded_v3_frame() {
+        // v4 added `roam_anywhere` as a 4th settings bit (same wire width), so a v3 decoder would
+        // silently drop the new flag. The version gate rejects the older frame instead of misreading.
+        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        bytes[2] = 3;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(3)));
+    }
+
+    #[test]
     fn rejects_superseded_v4_frame() {
         // v5 repurposed settings bit 0 (`allow_invaders` -> `crit_coop`) at unchanged wire width, so a
         // v4 frame would parse but silently misread the flag. This pins the 4->5 bump: it fails the
@@ -802,5 +816,286 @@ mod tests {
         // magic, version, LOG tag, seq=0, level=Info(2), len=1, then an invalid UTF-8 byte.
         let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 0, 2, 0, 1, 0xff];
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::BadValue));
+    }
+
+    // ---- Wire-format hardening: version gate, boundaries, truncation, and fuzz ----
+
+    /// Deterministic SplitMix64 — a self-contained PRNG so the fuzz tests are reproducible and
+    /// dependency-free (the core crate pulls in no `rand`). Seeded per-test; never `Date`/`thread`.
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn byte(&mut self) -> u8 {
+            self.next_u64() as u8
+        }
+    }
+
+    #[test]
+    fn every_prior_version_is_rejected_and_current_is_accepted() {
+        // The decoder gates on `version != VERSION`, so *every* version below the current one must be
+        // rejected and the current one accepted. Iterating `1..VERSION` (rather than a hardcoded list)
+        // means a future `VERSION` bump automatically extends rejection coverage to the freshly-old
+        // version (and version 0) — locking the gate against a silent regression where a bump forgets
+        // to reject the prior wire format. The per-version `rejects_superseded_vN_frame` tests pin the
+        // specific payload-shift reasons; this one guarantees the whole closed range stays rejected.
+        const { assert!(VERSION >= 6) }; // test premise: extend the reasoning if VERSION ever drops below 6
+        let current = ModMessage::Ping { frame: 0x0102_0304_0506_0708 }.encode();
+        for v in 0..VERSION {
+            let mut bytes = current.clone();
+            bytes[2] = v;
+            assert_eq!(
+                ModMessage::decode(&bytes),
+                Err(DecodeError::UnknownVersion(v)),
+                "version {v} must be rejected by the gate",
+            );
+        }
+        // Sanity: the only accepted version is the current one, and it round-trips.
+        assert_eq!(
+            ModMessage::decode(&current),
+            Ok(ModMessage::Ping { frame: 0x0102_0304_0506_0708 }),
+        );
+        // And one above the current is rejected too (a peer ahead of us on the wire format).
+        let mut ahead = current.clone();
+        ahead[2] = VERSION.wrapping_add(1);
+        assert_eq!(
+            ModMessage::decode(&ahead),
+            Err(DecodeError::UnknownVersion(VERSION.wrapping_add(1))),
+        );
+    }
+
+    #[test]
+    fn config_sync_clamps_every_scaling_field_at_its_boundaries() {
+        // For each of the six scaling fields independently, sweep the boundary values {0, 1, MAX,
+        // MAX+1}: 0/1/MAX must survive untouched, MAX+1 must clamp to MAX, and crucially flipping one
+        // field must not perturb the other five (catches a clamp that reads/writes the wrong field).
+        let max = crate::config::MAX_SCALING_PERCENT;
+        let set = |s: &mut Scaling, i: usize, v: u32| {
+            *[
+                &mut s.enemy_health,
+                &mut s.enemy_damage,
+                &mut s.enemy_posture,
+                &mut s.boss_health,
+                &mut s.boss_damage,
+                &mut s.boss_posture,
+            ][i] = v;
+        };
+        let get = |s: &Scaling, i: usize| {
+            [
+                s.enemy_health,
+                s.enemy_damage,
+                s.enemy_posture,
+                s.boss_health,
+                s.boss_damage,
+                s.boss_posture,
+            ][i]
+        };
+        for field in 0..6 {
+            for (wire, expected) in [(0u32, 0u32), (1, 1), (max, max), (max + 1, max), (u32::MAX, max)] {
+                let mut s = shared();
+                // Zero the baseline so an unexpected in-range value can't accidentally match `expected`.
+                s.scaling = Scaling {
+                    enemy_health: 0,
+                    enemy_damage: 0,
+                    enemy_posture: 0,
+                    boss_health: 0,
+                    boss_damage: 0,
+                    boss_posture: 0,
+                };
+                set(&mut s.scaling, field, wire);
+                let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+                match ModMessage::decode(&frame).unwrap() {
+                    ModMessage::ConfigSync { settings, .. } => {
+                        assert_eq!(
+                            get(&settings.scaling, field),
+                            expected,
+                            "field {field}: wire {wire} should decode to {expected}",
+                        );
+                        for other in 0..6 {
+                            if other != field {
+                                assert_eq!(get(&settings.scaling, other), 0, "field {other} perturbed");
+                            }
+                        }
+                    }
+                    other => panic!("wrong variant: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn config_sync_max_players_decodes_at_the_exact_bounds() {
+        // The accepted range endpoints must pass through unclamped (a `.clamp(MIN, MAX)` that wrongly
+        // excluded an endpoint would surface here), while just-outside values snap to the nearest bound.
+        let min = crate::config::MIN_SESSION_PLAYERS;
+        let max = crate::config::MAX_SESSION_PLAYERS;
+        for (wire, expected) in [
+            (min, min),
+            (max, max),
+            (min - 1, min),
+            (max + 1, max),
+            (0, min),
+            (u32::MAX, max),
+        ] {
+            let mut s = shared();
+            s.max_players = wire;
+            let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+            match ModMessage::decode(&frame).unwrap() {
+                ModMessage::ConfigSync { settings, .. } => {
+                    assert_eq!(settings.max_players, expected, "wire {wire} -> {expected}");
+                }
+                other => panic!("wrong variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_proper_prefix_of_a_valid_frame_is_rejected() {
+        // Truncate each canonical frame at *every* byte boundary. A short read must always be a clean
+        // `Err` (never a panic, never a partial-but-`Ok` decode): only the full frame is valid, since
+        // every layout is fixed-or-length-prefixed and a missing byte runs the reader dry. This is the
+        // exhaustive form of the hand-written `rejects_truncated_*` cases.
+        for msg in samples() {
+            let full = msg.encode();
+            for cut in 0..full.len() {
+                let got = ModMessage::decode(&full[..cut]);
+                assert!(
+                    got.is_err(),
+                    "prefix len {cut} of {msg:?} decoded to {got:?}; only the full frame is valid",
+                );
+            }
+            assert_eq!(ModMessage::decode(&full), Ok(msg.clone()), "full frame must still decode");
+        }
+    }
+
+    #[test]
+    fn appending_a_byte_to_any_frame_is_rejected() {
+        // The mirror of truncation: a frame plus one trailing byte must be rejected (TrailingBytes for
+        // a well-formed body, or another clean error), never silently accepted. Guards the
+        // "consumed exactly the frame" invariant for every message type, not just one.
+        for msg in samples() {
+            let mut bytes = msg.encode();
+            bytes.push(0x5A);
+            assert_eq!(
+                ModMessage::decode(&bytes),
+                Err(DecodeError::TrailingBytes),
+                "a trailing byte after {msg:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn single_bit_flips_never_panic_and_stay_self_consistent() {
+        // Flip every bit of every canonical frame, one at a time. Two invariants: (1) decode never
+        // panics — it returns `Ok` or `Err` for any input; (2) whenever a flipped frame still decodes,
+        // re-encoding the decoded message and decoding *that* yields the same message (the codec is
+        // idempotent on accepted inputs — e.g. a flip that pushes a clamped field out of range decodes
+        // to its clamped form, which then re-encodes stably). A flip that changes which value clamps is
+        // fine; what would be a bug is a non-round-tripping accepted decode.
+        for msg in samples() {
+            let base = msg.encode();
+            for byte_idx in 0..base.len() {
+                for bit in 0..8u32 {
+                    let mut m = base.clone();
+                    m[byte_idx] ^= 1 << bit;
+                    if let Ok(decoded) = ModMessage::decode(&m) {
+                        assert_eq!(
+                            ModMessage::decode(&decoded.encode()),
+                            Ok(decoded.clone()),
+                            "flip @ byte {byte_idx} bit {bit} of {msg:?} decoded to a non-round-tripping {decoded:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decode_never_panics_on_arbitrary_bytes() {
+        // Throw a large volume of pseudo-random buffers (varying lengths, including short ones that
+        // stress the header boundaries) at the decoder. The contract is total: any `&[u8]` yields a
+        // `Result`, never a panic/overflow/over-read. Seeds are fixed, so a failure reproduces.
+        let mut rng = Rng(0xDEAD_BEEF_CAFE_F00D);
+        for _ in 0..50_000 {
+            let len = (rng.next_u64() % 70) as usize; // span the 0..=64ish region around the headers
+            let mut buf = Vec::with_capacity(len);
+            for _ in 0..len {
+                buf.push(rng.byte());
+            }
+            // Bias a slice toward real frames by stamping the magic, version, and a valid tag, so the
+            // field decoders (not just the type dispatch) get exercised on otherwise-random payloads
+            // rather than bouncing off `BadMagic`/`UnknownType` every time.
+            if len >= 4 && rng.next_u64() & 1 == 0 {
+                buf[0] = MAGIC[0];
+                buf[1] = MAGIC[1];
+                buf[2] = VERSION;
+                buf[3] = (rng.next_u64() % 6) as u8; // one of the six defined tags (HELLO..=AUTH)
+            }
+            let _ = ModMessage::decode(&buf); // must not panic; value intentionally ignored
+        }
+    }
+
+    #[test]
+    fn structured_fuzz_round_trips_every_accepted_frame() {
+        // Generate well-typed random messages and assert the strong codec property end-to-end:
+        // decode(encode(m)) == m for any in-range message (and the clamped equivalent for ConfigSync,
+        // whose decode normalizes untrusted fields). Complements the byte-level fuzz above with
+        // structure-level coverage of the encoder.
+        let mut rng = Rng(0x0123_4567_89AB_CDEF);
+        for _ in 0..20_000 {
+            let msg = match rng.next_u64() % 6 {
+                0 => ModMessage::Hello {
+                    mod_version: rng.next_u64() as u32,
+                    nonce: std::array::from_fn(|_| rng.byte()),
+                },
+                1 => ModMessage::Auth {
+                    to: rng.next_u64(),
+                    proof: std::array::from_fn(|_| rng.byte()),
+                },
+                2 => ModMessage::Ping { frame: rng.next_u64() },
+                3 => {
+                    let action = SessionAction::ALL[(rng.next_u64() as usize) % SessionAction::ALL.len()];
+                    ModMessage::SessionAction { seq: rng.next_u64() as u32, action }
+                }
+                4 => {
+                    // Draw scaling/max_players from the *valid* range so the message is its own clamp
+                    // fixpoint (decode won't normalize it), giving a clean round-trip equality.
+                    let max = crate::config::MAX_SCALING_PERCENT;
+                    let pct = |r: &mut Rng| (r.next_u64() as u32) % (max + 1);
+                    let players = crate::config::MIN_SESSION_PLAYERS
+                        + (rng.next_u64() as u32) % (crate::config::MAX_SESSION_PLAYERS - crate::config::MIN_SESSION_PLAYERS + 1);
+                    let settings = SharedSettings {
+                        scaling: Scaling {
+                            enemy_health: pct(&mut rng),
+                            enemy_damage: pct(&mut rng),
+                            enemy_posture: pct(&mut rng),
+                            boss_health: pct(&mut rng),
+                            boss_damage: pct(&mut rng),
+                            boss_posture: pct(&mut rng),
+                        },
+                        crit_coop: rng.byte() & 1 != 0,
+                        death_debuffs: rng.byte() & 1 != 0,
+                        allow_summons: rng.byte() & 1 != 0,
+                        roam_anywhere: rng.byte() & 1 != 0,
+                        max_players: players,
+                    };
+                    ModMessage::ConfigSync { generation: rng.next_u64() as u32, settings }
+                }
+                _ => {
+                    let level = LogLevel::try_from((rng.next_u64() % 5) as u8).unwrap();
+                    // Keep the message short and ASCII so it's well under MAX_LOG_MSG (no truncation),
+                    // making the expected round-trip an exact equality.
+                    let n = (rng.next_u64() % 24) as usize;
+                    let message: String = (0..n).map(|_| (b'a' + rng.byte() % 26) as char).collect();
+                    ModMessage::Log(LogRecord { seq: rng.next_u64() as u32, level, message })
+                }
+            };
+            assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg.clone()), "round-trip failed for {msg:?}");
+        }
     }
 }

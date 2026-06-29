@@ -173,6 +173,63 @@ mod tests {
     }
 
     #[test]
+    fn one_byte_under_max_frame_is_accepted() {
+        // The low side of the MAX_FRAME boundary: a frame one byte under the cap must decode normally.
+        // Together with `exactly_max_frame_is_accepted` (at the cap) and
+        // `oversize_frame_is_rejected_and_buffer_cleared` (one over), this pins all three boundary cases.
+        let payload = vec![0xCDu8; MAX_FRAME - 1];
+        let mut dec = FrameDecoder::new();
+        let got = feed(&mut dec, &encode_frame(1, &payload));
+        assert_eq!(got, vec![(1, payload)]);
+    }
+
+    #[test]
+    fn max_u32_length_prefix_is_rejected_without_overrun() {
+        // The largest value the u32 length field can hold. The decoder must reject it as FrameTooLarge
+        // *before* trying to size the buffer to ~4 GiB — a bound check that ran after the add would
+        // either over-allocate or overflow `FRAME_HEADER_LEN + len`.
+        let mut dec = FrameDecoder::new();
+        let mut bad = u32::MAX.to_be_bytes().to_vec();
+        bad.extend_from_slice(&7u64.to_be_bytes());
+        dec.push(&bad);
+        assert_eq!(dec.drain(), Err(FrameTooLarge(u32::MAX as usize)));
+        // And it resyncs cleanly afterward.
+        assert_eq!(feed(&mut dec, &encode_frame(1, b"ok")), vec![(1, b"ok".to_vec())]);
+    }
+
+    #[test]
+    fn drain_never_panics_on_arbitrary_bytes() {
+        // SplitMix64 — deterministic, dependency-free (mirrors protocol.rs's fuzz PRNG).
+        struct Rng(u64);
+        impl Rng {
+            fn next_u64(&mut self) -> u64 {
+                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^ (z >> 31)
+            }
+        }
+        // Feed pseudo-random bytes in pseudo-random chunk sizes. `drain` must always return a `Result`
+        // (Ok frames or FrameTooLarge) and never panic on a malformed/partial header, an absurd length,
+        // or a chunk split mid-header. A FrameTooLarge clears the buffer; we keep going to resync.
+        let mut rng = Rng(0xF00D_FACE_1234_5678);
+        let mut dec = FrameDecoder::new();
+        for _ in 0..20_000 {
+            let chunk = (rng.next_u64() % 24) as usize;
+            let mut buf = Vec::with_capacity(chunk);
+            for _ in 0..chunk {
+                buf.push(rng.next_u64() as u8);
+            }
+            dec.push(&buf);
+            if dec.drain().is_err() {
+                // Buffer was cleared by the oversize path; the decoder stays usable.
+                dec = FrameDecoder::new();
+            }
+        }
+    }
+
+    #[test]
     fn header_split_across_reads_reassembles_correctly() {
         // Split a real frame *inside* its 12-byte header (non-zero len + sender), so a
         // mis-positioned header parse would change the decoded (sender, payload), not just yield
