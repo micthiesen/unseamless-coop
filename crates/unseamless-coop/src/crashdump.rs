@@ -10,10 +10,13 @@
 //! glue. It also logs the exception code, access-violation read/write target, and the faulting
 //! registers (`Rip`/`Rsp`/`Rbp`).
 //!
-//! Unsymbolicated by design — mingw builds ship no PDB. Resolve our *own* frames after the fact with
-//! `x86_64-w64-mingw32-addr2line -e <exe-or-dll> <offset>` (build `--diag`/`--profile diag` for line
-//! info); driver/interposer frames are read by module name. This is the artifact a real-NVIDIA run
-//! produces that the VM/WARP cannot, so it's staged now and fires the moment any NVIDIA box runs it.
+//! Unsymbolicated by design — mingw builds ship no PDB. The logged `+offset` is **module-relative**
+//! (an RVA), so to resolve our *own* frames give addr2line the PE virtual address = the module's
+//! `ImageBase` + the logged offset, against a `--diag` build (which keeps symbols):
+//! `x86_64-w64-mingw32-addr2line -f -C -e <diag exe/dll> $((ImageBase + offset))` — the exe links at
+//! `0x140000000`; read a DLL's ImageBase from `objdump -p`. Driver/interposer frames are read by module
+//! name. This is the artifact a real-NVIDIA run produces that the VM/WARP cannot, so it's staged now and
+//! fires the moment any NVIDIA box runs it. (Verified on WARP via the self-test, 2026-06-29.)
 //!
 //! Self-contained (only `std` + `windows` + `log`) so it is shared verbatim by the cdylib (the player
 //! build / a full ER friend run) and the `dx12-harness` (a friend's lightweight, ER-free repro) via a
@@ -137,7 +140,7 @@ unsafe extern "system" fn handler(info: *const EXCEPTION_POINTERS) -> i32 {
                 ctx.Rbp,
             );
         }
-        log::error!("crashdump: ==== end ==== (resolve our frames: x86_64-w64-mingw32-addr2line -e <module> <offset>)");
+        log::error!("crashdump: ==== end ==== (symbolicate our frames: addr2line on a --diag build at ImageBase+offset; see the /windows-test skill)");
         log::logger().flush();
     });
     EXECUTE_HANDLER

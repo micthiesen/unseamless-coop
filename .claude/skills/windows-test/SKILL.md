@@ -87,6 +87,22 @@ So `win.sh run` launches the harness via an **Interactive-principal scheduled ta
   the default adapter fails the same `0x887A0022`. Pass `DX12_HARNESS_WARP=0` only on a
   GPU-passthrough / native target.
 
+### Reading a crash report (the faulting module is the prize)
+
+Both the harness and the cdylib install a shared crash handler (`unseamless-coop/src/crashdump.rs`).
+On a hard SEH fault it logs the **faulting module+offset**, the exception code, the access-violation
+target, and `rip`/`rsp`/`rbp` — e.g. `crashdump: UNHANDLED EXCEPTION code=0xc0000005 (ACCESS_VIOLATION)
+at nvwgf2umx.dll+0x…`. That module name is what decides the open hypotheses: `nvwgf2umx.dll`/
+`nvd3dumx.dll` ⇒ inside the NVIDIA driver (hyp #1 trigger); a Streamline/overlay interposer DLL ⇒ hyp #2;
+`hudhook`/our own module ⇒ the detour glue. The line survives the crash (per-record flush).
+
+- **Self-test it** on WARP (where the real crash won't fire): `DX12_HARNESS_FORCE_CRASH=1 win.sh run`
+  null-derefs on purpose and you should see the `crashdump:` lines in the pulled log (verified
+  2026-06-29 → `dx12-harness.exe+0x2fa0`, write to `0x0`).
+- **Symbolicate our own frames** (the `+offset` is module-relative): build `--diag` (keeps symbols),
+  then `x86_64-w64-mingw32-addr2line -f -C -e <diag exe/dll> $((ImageBase + offset))` — the exe links
+  at `0x140000000`; read a DLL's ImageBase from `objdump -p`. Driver/interposer frames stay name-only.
+
 ## The loop
 
 ```bash

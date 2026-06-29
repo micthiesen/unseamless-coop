@@ -552,6 +552,12 @@ run); decide #3/#4 with Michael from that data.
       interposer) — WARP can't reproduce it and the VM can't validate a fix. **Next:** a friend
       trace-level run (the super-validated gate) and/or single-GPU VFIO passthrough of the RTX 5080 into
       the VM for a real-NVIDIA repro. Mitigate meanwhile with `[debug] overlay = false`.
+- [x] **Crash handler staged (2026-06-29):** `unseamless-coop/src/crashdump.rs` (in the cdylib *and* the
+      harness) installs an unhandled-exception filter that logs the **faulting module+offset** + AV
+      target + registers on a hard fault — so the next real-NVIDIA run names the culprit module
+      (`nvwgf2umx.dll` ⇒ #1 trigger; an interposer ⇒ #2; `hudhook`/ours ⇒ detour glue) instead of just
+      a last-breadcrumb. Verified on WARP via `DX12_HARNESS_FORCE_CRASH=1` (caught the AV, resolved
+      `dx12-harness.exe+0x2fa0`). Read-a-report recipe is in the `/windows-test` skill.
 
 ## Sources
 
