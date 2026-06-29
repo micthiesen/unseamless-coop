@@ -13,8 +13,10 @@
 //! is sufficient on its own. (A later task phase, or zeroing `time_passage_multiplier`, were the
 //! fallbacks if the game's own time task had clobbered our write; the rig showed neither is needed.)
 //!
-//! Local config for now (each player sets their own time); host-enforced sync is a noted follow-up —
-//! time-of-day desync between co-op players is a known annoyance worth syncing later.
+//! Host-enforced (synced across the party): the world-time lock is part of the shared subset
+//! ([`SharedSettings`](unseamless_core::protocol::SharedSettings)), so a client adopts the host's
+//! `lock`/`hour`/`minute` and the whole party shares time-of-day, rather than each player locking
+//! their own.
 
 use eldenring::cs::WorldAreaTime;
 use unseamless_core::util::Latch;
@@ -47,8 +49,9 @@ impl Feature for WorldTimeLock {
         if !lock {
             return; // stop re-asserting → normal time progression resumes
         }
-        // Defensive clamp before writing live game memory: config + the menu already bound these, but
-        // this feature shouldn't trust every (future, e.g. host-synced) path did so — mirrors session_limit.
+        // Defensive clamp before writing live game memory: config + the menu already bound these, and
+        // the host-synced path clamps on decode too, but this feature shouldn't trust every path did so
+        // — mirrors session_limit.
         let (hour, minute) = (hour.min(23), minute.min(59));
 
         // Re-assert the target every frame to pin the clock. `None` = no WorldAreaTime singleton yet

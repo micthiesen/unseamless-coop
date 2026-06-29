@@ -100,8 +100,9 @@ pub const MIN_NAMEPLATE_DISTANCE: u32 = 5;
 pub const MAX_NAMEPLATE_DISTANCE: u32 = 300;
 pub const DEFAULT_NAMEPLATE_DISTANCE: u32 = 60;
 
-/// Lock the in-game time of day. Local for now (each player sets their own); host-enforced sync is a
-/// follow-up, since time-of-day desync between co-op players is a known annoyance worth syncing later.
+/// Lock the in-game time of day. Host-enforced: it's part of the shared subset
+/// ([`crate::protocol::SharedSettings`]) the host syncs across the party, so co-op players share
+/// time-of-day rather than each locking their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorldTime {

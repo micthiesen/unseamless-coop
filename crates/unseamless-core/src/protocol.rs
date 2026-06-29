@@ -21,7 +21,7 @@
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::config::{Config, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS, Scaling};
+use crate::config::{Config, MAX_SESSION_PLAYERS, MIN_SESSION_PLAYERS, Scaling, WorldTime};
 use crate::diagnostics::{LogLevel, LogRecord};
 
 /// Magic prefix identifying one of our side-channel frames.
@@ -36,13 +36,16 @@ pub const MAGIC: [u8; 2] = *b"UC";
 /// decoder would misread the flag — the bump rejects it cleanly instead. v6 added a per-session
 /// `nonce` to `Hello` (shifting its payload) and the new `Auth` proof message, so a v5 decoder would
 /// misparse the longer `Hello` — the bump rejects it cleanly.
-pub const VERSION: u8 = 6;
+/// v7 host-enforced the world-time lock: it added `world_time.hour`/`world_time.minute` as two u32s to
+/// `ConfigSync` (shifting the payload) and `world_time.lock` as a 5th bit in the settings byte, so a v6
+/// decoder would misparse the longer frame — the bump rejects it cleanly instead.
+pub const VERSION: u8 = 7;
 
 /// Number of bools packed into the `ConfigSync` settings byte (`crit_coop`, `death_debuffs`,
-/// `allow_summons`, `roam_anywhere`). Single-sources the count so the encode (`pack_bools`) and decode
-/// (`unpack_bools`) can't drift to different `N` and silently cross-map bits — a count change here is a
-/// compile error at both call sites until their arrays/destructures match.
-const SETTINGS_BOOL_COUNT: usize = 4;
+/// `allow_summons`, `roam_anywhere`, `world_time.lock`). Single-sources the count so the encode
+/// (`pack_bools`) and decode (`unpack_bools`) can't drift to different `N` and silently cross-map bits —
+/// a count change here is a compile error at both call sites until their arrays/destructures match.
+const SETTINGS_BOOL_COUNT: usize = 5;
 /// Cap on a forwarded log message's bytes, to keep side-channel packets small. Longer messages
 /// are truncated on a UTF-8 boundary at encode time.
 pub const MAX_LOG_MSG: usize = 2048;
@@ -124,6 +127,10 @@ pub struct SharedSettings {
     /// The session player cap. Host-enforced: a client adopts the host's so the whole party agrees
     /// on session size. Clamped on decode like `scaling`, since it comes from an untrusted peer.
     pub max_players: u32,
+    /// The world-time lock (`lock`/`hour`/`minute`). Host-enforced so the whole party shares
+    /// time-of-day instead of each player locking their own. `hour`/`minute` are clamped on decode
+    /// (like `scaling`/`max_players`), since they come from an untrusted peer.
+    pub world_time: WorldTime,
 }
 
 /// Project a [`Config`] into the host-enforced subset broadcast over the wire. Keeps the
@@ -137,6 +144,7 @@ impl From<&Config> for SharedSettings {
             allow_summons: c.gameplay.allow_summons,
             roam_anywhere: c.gameplay.roam_anywhere,
             max_players: c.session.max_players,
+            world_time: c.world_time,
         }
     }
 }
@@ -152,6 +160,7 @@ impl SharedSettings {
         cfg.gameplay.allow_summons = self.allow_summons;
         cfg.gameplay.roam_anywhere = self.roam_anywhere;
         cfg.session.max_players = self.max_players;
+        cfg.world_time = self.world_time;
     }
 }
 
@@ -268,11 +277,14 @@ impl ModMessage {
                     w.extend_from_slice(&v.to_be_bytes());
                 }
                 w.extend_from_slice(&s.max_players.to_be_bytes());
+                w.extend_from_slice(&s.world_time.hour.to_be_bytes());
+                w.extend_from_slice(&s.world_time.minute.to_be_bytes());
                 w.push(pack_bools::<SETTINGS_BOOL_COUNT>([
                     s.crit_coop,
                     s.death_debuffs,
                     s.allow_summons,
                     s.roam_anywhere,
+                    s.world_time.lock,
                 ]));
             }
             ModMessage::SessionAction { seq, action } => {
@@ -333,7 +345,12 @@ impl ModMessage {
                 scaling.clamp_percentages();
                 // Same reasoning for the player cap: clamp to the config's accepted range.
                 let max_players = r.u32()?.clamp(MIN_SESSION_PLAYERS, MAX_SESSION_PLAYERS);
-                let [crit_coop, death_debuffs, allow_summons, roam_anywhere] =
+                // Untrusted peer again: bound hour/minute to the same range `Config::validate` enforces
+                // for a local file (0..=23 / 0..=59), so a malicious host can't push an out-of-range
+                // time the WorldTimeLock feature would then write to live game memory.
+                let world_time_hour = r.u32()?.min(23);
+                let world_time_minute = r.u32()?.min(59);
+                let [crit_coop, death_debuffs, allow_summons, roam_anywhere, world_time_lock] =
                     unpack_bools::<SETTINGS_BOOL_COUNT>(r.u8()?);
                 ModMessage::ConfigSync {
                     generation,
@@ -344,6 +361,11 @@ impl ModMessage {
                         allow_summons,
                         roam_anywhere,
                         max_players,
+                        world_time: WorldTime {
+                            lock: world_time_lock,
+                            hour: world_time_hour,
+                            minute: world_time_minute,
+                        },
                     },
                 }
             }
@@ -451,6 +473,7 @@ mod tests {
             allow_summons: true,
             roam_anywhere: true,
             max_players: 4,
+            world_time: WorldTime { lock: true, hour: 22, minute: 30 },
         }
     }
 
@@ -489,6 +512,7 @@ mod tests {
         cfg.gameplay.roam_anywhere = false; // non-default (default on)
         cfg.scaling.boss_health = 200;
         cfg.session.max_players = 4; // non-default, host-enforced
+        cfg.world_time = WorldTime { lock: true, hour: 22, minute: 30 }; // non-default, host-enforced
         cfg.session.password = "secret".into(); // machine-local; SharedSettings has no such field
         let shared = SharedSettings::from(&cfg);
         assert!(!shared.crit_coop);
@@ -497,6 +521,7 @@ mod tests {
         assert!(!shared.roam_anywhere);
         assert_eq!(shared.scaling.boss_health, 200);
         assert_eq!(shared.max_players, 4);
+        assert_eq!(shared.world_time, WorldTime { lock: true, hour: 22, minute: 30 });
         let msg = ModMessage::ConfigSync { generation: 3, settings: shared };
         assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg));
     }
@@ -513,6 +538,7 @@ mod tests {
         host.gameplay.roam_anywhere = false;
         host.scaling.enemy_health = 80;
         host.session.max_players = 3; // non-default + != the client's default, so apply must override
+        host.world_time = WorldTime { lock: true, hour: 6, minute: 15 }; // non-default world-time lock
         let shared = SharedSettings::from(&host);
 
         // A client with different local settings receives and applies the host's subset.
@@ -522,6 +548,7 @@ mod tests {
 
         assert_eq!(SharedSettings::from(&client), shared, "client now agrees on the shared subset");
         assert_eq!(client.session.max_players, shared.max_players, "host's player cap adopted");
+        assert_eq!(client.world_time, host.world_time, "host's world-time lock adopted");
         assert_eq!(client.session.password, "client-local", "machine-local fields untouched");
     }
 
@@ -597,6 +624,30 @@ mod tests {
     }
 
     #[test]
+    fn config_sync_clamps_out_of_range_world_time_from_the_wire() {
+        // hour/minute come from an untrusted peer, so decode must bound them to the same range
+        // `Config::validate` enforces for a local file (0..=23 / 0..=59), and leave in-range values
+        // untouched. `lock` is a bool, so it can't be out of range — just verify it survives.
+        for (wire_hour, exp_hour) in [(0u32, 0u32), (23, 23), (24, 23), (u32::MAX, 23)] {
+            for (wire_min, exp_min) in [(0u32, 0u32), (59, 59), (60, 59), (u32::MAX, 59)] {
+                let mut s = shared();
+                s.world_time = WorldTime { lock: true, hour: wire_hour, minute: wire_min };
+                let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+                match ModMessage::decode(&frame).unwrap() {
+                    ModMessage::ConfigSync { settings, .. } => {
+                        assert_eq!(
+                            settings.world_time,
+                            WorldTime { lock: true, hour: exp_hour, minute: exp_min },
+                            "wire {wire_hour}:{wire_min} should decode to {exp_hour}:{exp_min}",
+                        );
+                    }
+                    other => panic!("wrong variant: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn config_sync_preserves_all_fields() {
         let msg = ModMessage::ConfigSync { generation: 9, settings: shared() };
         match ModMessage::decode(&msg.encode()).unwrap() {
@@ -610,14 +661,15 @@ mod tests {
 
     #[test]
     fn bool_packing_is_independent_across_all_combinations() {
-        // Every one of the 2^4 flag combinations must round-trip exactly — proves no bit
+        // Every one of the 2^5 flag combinations must round-trip exactly — proves no bit
         // cross-contaminates another (a single-combo test couldn't catch an OR-ing bug).
-        for bits in 0u8..16 {
+        for bits in 0u8..32 {
             let mut s = shared();
             s.crit_coop = bits & 1 != 0;
             s.death_debuffs = bits & 2 != 0;
             s.allow_summons = bits & 4 != 0;
             s.roam_anywhere = bits & 8 != 0;
+            s.world_time.lock = bits & 16 != 0;
             let msg = ModMessage::ConfigSync { generation: 1, settings: s };
             assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:04b} corrupted");
         }
@@ -692,6 +744,16 @@ mod tests {
         let mut bytes = ModMessage::Hello { mod_version: 1, nonce: [0; AUTH_NONCE_LEN] }.encode();
         bytes[2] = 5;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(5)));
+    }
+
+    #[test]
+    fn rejects_superseded_v6_frame() {
+        // v7 added `world_time.hour`/`world_time.minute` (two u32s) to ConfigSync and a 5th settings
+        // bit (`world_time.lock`), so a v6 frame is shorter by 8 bytes. The version gate rejects the
+        // older frame instead of misparsing the shifted payload.
+        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        bytes[2] = 6;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(6)));
     }
 
     #[test]
@@ -844,7 +906,7 @@ mod tests {
         // version (and version 0) — locking the gate against a silent regression where a bump forgets
         // to reject the prior wire format. The per-version `rejects_superseded_vN_frame` tests pin the
         // specific payload-shift reasons; this one guarantees the whole closed range stays rejected.
-        const { assert!(VERSION >= 6) }; // test premise: extend the reasoning if VERSION ever drops below 6
+        const { assert!(VERSION >= 7) }; // test premise: extend the reasoning if VERSION ever drops below 7
         let current = ModMessage::Ping { frame: 0x0102_0304_0506_0708 }.encode();
         for v in 0..VERSION {
             let mut bytes = current.clone();
@@ -1083,6 +1145,13 @@ mod tests {
                         allow_summons: rng.byte() & 1 != 0,
                         roam_anywhere: rng.byte() & 1 != 0,
                         max_players: players,
+                        // Draw hour/minute from the valid range so the message is its own clamp
+                        // fixpoint (decode won't normalize it), giving a clean round-trip equality.
+                        world_time: WorldTime {
+                            lock: rng.byte() & 1 != 0,
+                            hour: (rng.next_u64() as u32) % 24,
+                            minute: (rng.next_u64() as u32) % 60,
+                        },
                     };
                     ModMessage::ConfigSync { generation: rng.next_u64() as u32, settings }
                 }

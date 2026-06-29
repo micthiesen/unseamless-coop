@@ -53,6 +53,8 @@ to apply changes.
   override each client's own:
   - `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
   - the `[gameplay]` *rules*: `crit_coop`, `allow_summons`, `death_debuffs`, `roam_anywhere`.
+  - `[world_time]` — the time-of-day lock (`lock`, `hour`, `minute`), so the whole party shares
+    time-of-day.
 - **Per-player** — each person sets their own; not shared:
   - the rest of `[gameplay]` — overhead display, skip splash screens, append steam id,
     spectate-on-death, the set-volume-on-boot toggle and its level.

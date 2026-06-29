@@ -69,6 +69,9 @@ impl SettingId {
                 | AllowSummons
                 | RoamAnywhere
                 | MaxPlayers
+                | WorldTimeLock
+                | WorldTimeHour
+                | WorldTimeMinute
         )
     }
 }
@@ -490,11 +493,13 @@ mod tests {
             allow_summons: _,
             roam_anywhere: _,
             max_players: _,
+            world_time: _, // expands to the 3 world-time settings (lock/hour/minute)
         } = crate::protocol::SharedSettings::from(&Config::default());
 
         let expected = [
             EnemyHealth, EnemyDamage, EnemyPosture, BossHealth, BossDamage, BossPosture,
             CritCoop, DeathDebuffs, AllowSummons, RoamAnywhere, MaxPlayers,
+            WorldTimeLock, WorldTimeHour, WorldTimeMinute,
         ];
         let shared: Vec<SettingId> = registry().iter().map(|s| s.id).filter(|id| id.is_shared()).collect();
         assert_eq!(shared.len(), expected.len(), "shared-setting count drifted from SharedSettings");
