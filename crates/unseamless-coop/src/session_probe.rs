@@ -96,11 +96,120 @@ const SESSION_JOIN_SITE: Option<HookSite> = None;
 /// install. Best-effort throughout — a probe never aborts the game (it's not a `guard::fatal`
 /// condition; it's a diagnostic).
 pub fn install_hooks(config: &Config) {
-    if !config.debug.probes.session_probe {
-        return; // probe disabled — fully inert, the common case
+    if config.debug.probes.session_probe {
+        install_one("create-session", &SESSION_CREATE_SITE);
+        install_one("join-session", &SESSION_JOIN_SITE);
     }
-    install_one("create-session", &SESSION_CREATE_SITE);
-    install_one("join-session", &SESSION_JOIN_SITE);
+    // Independently gated on `drive_create` (you only want the gate trace alongside a driven create).
+    install_create_gate_trace(config);
+}
+
+// --- Leg-B create-gate tracer (pairs with `drive_create`) ---------------------------------------
+//
+// Static RE (docs/SESSION-DRIVE.md > "Leg-B re-charted") narrowed the offline create failure to two
+// synchronous gates inside leg B (the network-create vmethod), both reading fields a real peer/match
+// context populates. This tracer reads those fields at runtime on a driven create, so the log says
+// exactly WHICH gate stops it and the exact zero fields — the artifact to have before the 2-player run.
+// Both targets are clean (non-Arxan) functions reached only during session create, so they stay quiet
+// offline outside our one-shot drive. Resolved by fixed offset from the live exe base (like
+// SessionCreateDriver), not an AOB — the addresses are charted.
+//
+// Re-derive after a game update: re-chart leg B per SESSION-DRIVE.md and update the two offsets.
+
+/// Leg-B network-create entry (`0x1423f5c00`). Its first act tests reject #1 (`[NetworkSession+0x10]`);
+/// `rcx` here IS the live `NetworkSession`, so reading `[rcx+0x10]` at this entry resolves the
+/// `*(this+0x60)` P-drift caveat the `force_netsession_ready` probe hit.
+const LEGB_ENTRY_OFFSET: usize = 0x1_423f_5c00 - 0x1_4000_0000;
+/// The **4th create gate** (`0x1423fd7a0` = `[new_obj_vtable+8]`), reached only if rejects #1–3 passed.
+/// `rcx` is the freshly-built `0x5f8`-byte session object; the gate vetoes (offline) when its config
+/// fields are zero.
+const CREATE_GATE4_OFFSET: usize = 0x1_423f_d7a0 - 0x1_4000_0000;
+
+/// Place read-only `jmp-back` tracers on leg-B entry and the 4th create gate when `drive_create` is on.
+/// No-op otherwise. Best-effort: a failed hook logs and is skipped, never aborts (it's a diagnostic).
+fn install_create_gate_trace(config: &Config) {
+    if !config.debug.probes.drive_create {
+        return;
+    }
+    let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::error!("session-probe: gate-trace — GetModuleHandle(NULL) failed: {e}");
+            return;
+        }
+    };
+    install_offset_hook("legb-entry", exe_base + LEGB_ENTRY_OFFSET, log_legb_entry);
+    install_offset_hook("create-gate4", exe_base + CREATE_GATE4_OFFSET, log_create_gate4);
+}
+
+/// Place one read-only `jmp-back` hook at a resolved address. `mem::forget`s the handle (resident for
+/// the process lifetime, like every hook here — never unhook a live code path).
+fn install_offset_hook(name: &'static str, addr: usize, body: fn(&'static str, *mut Registers)) {
+    // SAFETY: `addr` is a charted, clean function entry (exe base + a fixed offset to a verified
+    // prologue); the detour body is read-only and panic-firewalled (see the log_* fns).
+    let hook = unsafe {
+        hook_closure_jmp_back(
+            addr,
+            move |regs: *mut Registers| body(name, regs),
+            CallbackOption::None,
+            HookFlags::empty(),
+        )
+    };
+    match hook {
+        Ok(h) => {
+            std::mem::forget(h);
+            log::info!("session-probe: gate-trace hooked {name} at {addr:#x}");
+        }
+        Err(e) => log::error!("session-probe: gate-trace failed to hook {name}: {e:?}"),
+    }
+}
+
+/// Leg-B entry tracer: confirms we reach leg B and reads reject #1's readiness flag (`[NetworkSession
+/// +0x10]`) at the real call site. Read-only; firewalled against unwind across the FFI boundary.
+fn log_legb_entry(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook hands us the saved registers; rcx is the NetworkSession the game just passed
+        // to leg B, so `+0x10` is an in-bounds read of that live object.
+        let r = unsafe { &*regs };
+        let ns = r.rcx as usize;
+        if ns == 0 {
+            log::info!("session-probe: gate-trace legb-entry — NetworkSession (rcx) null");
+            return;
+        }
+        let reject1 = unsafe { ((ns + 0x10) as *const u32).read_volatile() };
+        log::info!(
+            "session-probe: gate-trace legb-entry REACHED — NetworkSession={ns:#x} reject#1 [+0x10]={reject1} (0 => leg B fails at reject #1)",
+        );
+    }));
+}
+
+/// 4th-gate tracer: reaching here means rejects #1–3 passed. Reads the session-object config fields the
+/// gate (`0x1423fd7a0`) + its helper (`0x1423faf60`) require nonzero — all-zero is the offline veto.
+/// Read-only; firewalled against unwind across the FFI boundary.
+fn log_create_gate4(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: rcx is the freshly-built `0x5f8`-byte session object; every offset read below is
+        // well within its bounds. Read-only.
+        let r = unsafe { &*regs };
+        let o = r.rcx as usize;
+        if o == 0 {
+            log::info!("session-probe: gate-trace create-gate4 — session obj (rcx) null");
+            return;
+        }
+        let rd = |off: usize| unsafe { ((o + off) as *const u32).read_volatile() };
+        log::info!(
+            "session-probe: gate-trace create-gate4 REACHED (rejects #1-3 passed) — obj={o:#x} \
+             gate[+0x3b0]={} gate[+0x3b4]={} helper[+0x68..0x78]=[{},{},{},{},{}] \
+             (gate vetoes iff +0x3b0==0 && +0x3b4==0; helper bails if any of the five is 0)",
+            rd(0x3b0),
+            rd(0x3b4),
+            rd(0x68),
+            rd(0x6c),
+            rd(0x70),
+            rd(0x74),
+            rd(0x78),
+        );
+    }));
 }
 
 /// Resolve one initiation-function entry from its (currently-`None`) landmark and place a `jmp-back`
