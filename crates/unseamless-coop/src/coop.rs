@@ -575,11 +575,15 @@ fn run_session(
     }
 
     let transport = SteamP2PTransport { net, local_id: self_id, peer_id };
-    let mut session =
-        Session::new(
-            Peer::new(self_id, host_id, PROTOCOL_VERSION, crate::state::snapshot(), crate::config::fresh_auth_nonce()),
-            transport,
-        );
+    let mut peer =
+        Peer::new(self_id, host_id, PROTOCOL_VERSION, crate::state::snapshot(), crate::config::fresh_auth_nonce());
+    if is_host {
+        // Fresh per-hosted-session epoch (binding-supplied, like the auth nonce): a client lingering
+        // from a previous session we hosted sees the epoch change and adopts our restarted config
+        // generation instead of stalling on the old session's high-water mark.
+        peer.set_config_epoch(crate::config::fresh_config_epoch());
+    }
+    let mut session = Session::new(peer, transport);
     session.connect();
 
     // Enable client log-forwarding for the session behind an RAII guard, so it's reset on *every* exit —

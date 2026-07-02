@@ -121,8 +121,11 @@ either, and we'll only know from the rig. So the side-channel is designed to **c
 which is robust to whatever the rig reveals:
 
 - The host **re-asserts** its authoritative `ConfigSync` every `maintain()` tick, tagged with a
-  monotonic **generation**. A dropped sync heals on the next tick; a stale/reordered one is ignored
-  (generation guard); a duplicate is a no-op.
+  per-host-session **epoch** (random, binding-supplied like the auth nonce) and a **generation**
+  monotonic within it. A dropped sync heals on the next tick; a same-epoch stale/reordered one is
+  ignored (generation guard); a duplicate is a no-op; a *new epoch* — the host restarted, its
+  generation counter reset — supersedes unconditionally, so a lingering client can't stall on the
+  previous session's generation high-water mark.
 - Session actions and forwarded logs carry a per-sender **sequence** and are deduped (`SeqGate`), so
   a duplicated/reordered frame applies exactly once.
 - A heartbeat `Ping` drives **liveness** (stale-peer banners). The timeout is tuned conservatively
@@ -132,10 +135,12 @@ This whole layer is **host-testable** (`unseamless-core/{peer,transport}.rs` + t
 seeded `FaultModel` proving convergence under drop/duplicate/reorder — so it's verified on the host
 before the rig, and the design holds whether the transport turns out reliable or not.
 
-One thing is deliberately **deferred to the rig**: a host *restart/migration* resets the host's
-generation counter, which the monotonic guard would stall on. Handling that needs a host-instance
-epoch, and its shape depends on how the game's session FSM signals a host change — a Layer-2
-observation, not something to guess at blind.
+A host *restart* resets the host's generation counter, which the monotonic guard alone would stall
+on. The per-host-session epoch above handles it: the binding layer stamps a fresh random epoch each
+time it hosts (`Peer::set_config_epoch`), and a client adopts any sync whose epoch differs from the
+last applied one, resetting its generation high-water mark. A host *migration* — a different peer
+taking over as host — remains deferred to the rig: a client only applies `ConfigSync` from its
+fixed `host_id`, and how the game's session FSM signals a host change is a Layer-2 observation.
 
 ## Divergences from ERSC (deliberate — don't "fix" these back)
 

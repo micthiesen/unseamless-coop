@@ -84,6 +84,15 @@ pub(crate) fn fresh_auth_nonce() -> AuthNonce {
         .expect("random_bytes(AUTH_NONCE_LEN) returns exactly AUTH_NONCE_LEN bytes")
 }
 
+/// A fresh per-hosted-session config epoch, from the same OS CSPRNG. Carried on every `ConfigSync`
+/// beside the generation so a client lingering from a previous host session adopts the new host's
+/// settings instead of stalling on the old generation high-water mark (see
+/// `Peer::set_config_epoch`). It only has to differ from prior sessions' epochs, so a u32 draw is
+/// plenty. Same binding-layer split as the nonce: core has no entropy source.
+pub(crate) fn fresh_config_epoch() -> u32 {
+    u32::from_be_bytes(random_bytes(4).try_into().expect("random_bytes(4) returns exactly 4 bytes"))
+}
+
 fn random_bytes(n: usize) -> Vec<u8> {
     let mut buf = vec![0u8; n];
     // No algorithm handle: the system-preferred-RNG flag selects the OS CSPRNG.

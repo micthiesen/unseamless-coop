@@ -113,8 +113,8 @@ the one genuinely hard step — driving the game's own session so players see ea
   "Authentication failed with <peer> (wrong co-op password)" banner and never links. The proof is domain-separated
   from the world-readable `lobby_discovery_token` (distinct domain tags), replay-resistant (fresh
   per-session nonces) and reflection-resistant (bound to the directed peer-id pair). Both password-keyed
-  hashes live together in [`crypto.rs`](../crates/unseamless-core/src/crypto.rs); the wire `VERSION` is 6
-  (the `nonce` + `Auth` bumped it from 5), and `MIN_PASSWORD_LEN` is 8 (a short password is
+  hashes live together in [`crypto.rs`](../crates/unseamless-core/src/crypto.rs); the `nonce` + `Auth`
+  bumped the wire `VERSION` 5→6 (it has moved on since — `protocol.rs` is canonical), and `MIN_PASSWORD_LEN` is 8 (a short password is
   offline-brute-forceable against this fast hash).
 - **Log-forwarding is now wired** ([`coop/forward.rs`](../crates/unseamless-coop/src/forward.rs)): a
   `ForwardLogger` tees records into a bounded queue that the driver drains through `Peer::forward_log`

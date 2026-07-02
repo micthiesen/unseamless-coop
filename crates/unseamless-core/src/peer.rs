@@ -157,8 +157,7 @@ pub struct Peer {
     /// Like `peers`/`peer_nonces`/`last_seen`, this is keyed by the transport [`PeerId`] (the stable
     /// Steam id in production) and is **never pruned** here: re-linking a peer after a transient
     /// liveness blip is a no-op, which is what makes the handshake self-heal. Eviction on a real
-    /// session-*leave* is deferred to the binding layer (Layer 2), which owns the game's session FSM —
-    /// the same boundary the `applied_config_gen` host-restart note (below) defers to.
+    /// session-*leave* is deferred to the binding layer (Layer 2), which owns the game's session FSM.
     linked: BTreeSet<PeerId>,
     notifications: Notifications,
     /// Host-side aggregation of forwarded debug logs.
@@ -167,6 +166,12 @@ pub struct Peer {
     // --- outbound identity (so receivers can dedup/order our frames) ---
     /// Host's authoritative config generation; bumped whenever the shared settings change.
     config_generation: u32,
+    /// Host's session epoch, carried on every outbound `ConfigSync` beside `generation` so a client
+    /// can tell a NEW host session (whose generation restarts at 1) from a stale/reordered frame
+    /// within the current one. Defaults to 0; a hosting binding layer stamps a fresh random value
+    /// once per session via [`Peer::set_config_epoch`] (like the auth nonce in [`Peer::new`], core
+    /// has no entropy source). Unused on a non-host (`broadcast_config` is empty for it).
+    config_epoch: u32,
     /// Monotonic sequence for our own outbound session actions.
     out_action_seq: u32,
     /// Monotonic sequence for our own outbound log records.
@@ -175,11 +180,18 @@ pub struct Peer {
     ping_frame: u64,
 
     // --- inbound high-water marks (drop stale/duplicate frames) ---
-    /// Highest config generation we've applied from the host (`None` until the first sync). This
-    /// assumes the host's generation is monotonic across our lifetime, which holds within one host
-    /// session. A host *restart* or host migration resets the source counter and would stall here;
-    /// handling that needs a host-instance epoch, deferred until the rig shows how the game's
-    /// session FSM signals a host change (it's a Layer-2 concern — see ARCHITECTURE.md).
+    /// Host-session epoch of the last applied `ConfigSync` (`None` until the first sync). A sync
+    /// whose epoch **differs** is a new session of the host (it restarted and its generation
+    /// counter reset): it is adopted unconditionally and `applied_config_gen` is reset to its
+    /// generation, so a fresh host's gen-1 sync can't be stalled by the previous session's
+    /// high-water mark. This covers only a *restart* of the same host: a ConfigSync is applied
+    /// solely from the fixed `host_id`, so a host *migration* (a different peer taking over) is a
+    /// separate, still-unhandled Layer-2 concern.
+    applied_config_epoch: Option<u32>,
+    /// Highest config generation we've applied from the host *within* `applied_config_epoch`
+    /// (`None` until the first sync). Generation is compared only against same-epoch syncs, so it
+    /// only needs to be monotonic within one host session — which `mark_config_changed` guarantees
+    /// short of 2^32 changes in a single session (see the wrap test).
     applied_config_gen: Option<u32>,
     /// Dedup gate for inbound session actions (exactly-once apply per sender).
     action_gate: SeqGate,
@@ -233,9 +245,11 @@ impl Peer {
             notifications: Notifications::new(),
             log_bundle: LogBundle::new(),
             config_generation: 1,
+            config_epoch: 0,
             out_action_seq: 0,
             out_log_seq: 0,
             ping_frame: 0,
+            applied_config_epoch: None,
             applied_config_gen: None,
             action_gate: SeqGate::default(),
             log_gate: SeqGate::default(),
@@ -316,7 +330,7 @@ impl Peer {
                 }
                 self.verify_auth(from, proof)
             }
-            ModMessage::ConfigSync { generation, settings } => {
+            ModMessage::ConfigSync { epoch, generation, settings } => {
                 if !self.is_linked(from) {
                     // Unauthenticated sender — a stranger, or the host before its proof verifies. Drop
                     // quietly: no warn toast (a stranger could otherwise spam toasts and evict
@@ -326,9 +340,18 @@ impl Peer {
                 } else if from != self.host_id {
                     self.notifications
                         .warn(format!("Ignored ConfigSync from non-host {}", peer_tag(from)));
-                } else if generation > self.applied_config_gen.unwrap_or(0) {
-                    // Newer than anything we've applied: adopt it. A re-asserted or reordered older
-                    // generation falls through to the else and is ignored (idempotent + ordered).
+                } else if self.applied_config_epoch != Some(epoch)
+                    || generation > self.applied_config_gen.unwrap_or(0)
+                {
+                    // A differing epoch is a NEW session of the host (it restarted) — adopt it and
+                    // reset the generation high-water mark, so the fresh host's restarted counter
+                    // isn't stalled by the old session's. Within the same epoch only a strictly
+                    // newer generation applies; a re-asserted or reordered older one falls through
+                    // to the else and is ignored (idempotent + ordered). A late frame from a
+                    // *previous* epoch also "differs" and can transiently apply, but the live
+                    // host's periodic `maintain` re-assert supersedes it again (its epoch differs
+                    // in turn), so the party converges on the live host.
+                    self.applied_config_epoch = Some(epoch);
                     self.applied_config_gen = Some(generation);
                     settings.apply_to(&mut self.config);
                     self.notifications.info(CONFIG_SYNCED_MESSAGE);
@@ -432,12 +455,27 @@ impl Peer {
     pub fn broadcast_config(&self) -> Vec<ModMessage> {
         if self.is_host() {
             vec![ModMessage::ConfigSync {
+                epoch: self.config_epoch,
                 generation: self.config_generation,
                 settings: SharedSettings::from(&self.config),
             }]
         } else {
             vec![]
         }
+    }
+
+    /// Host: stamp this session's config epoch, carried on every outbound `ConfigSync`. The binding
+    /// layer supplies a **fresh random** value once per hosted session (core has no entropy source —
+    /// the same split as the auth nonce in [`Peer::new`]), so a client lingering from a previous
+    /// host session sees the epoch change and adopts the new host's settings instead of stalling on
+    /// the old generation high-water mark. Freshness only has to beat prior sessions' epochs, so a
+    /// random u32 is plenty; the default (0) is fine for a peer that never hosts. Note the epoch is
+    /// an unordered *discriminator* — random values can't rank sessions, so a receiver can only test
+    /// "differs", which is why a late frame from a dead session can transiently re-apply until the
+    /// live host's next re-assert (see the `ConfigSync` handle arm). An *ordered* epoch (a persisted
+    /// counter or clock) would close that residual, at the cost of binding-layer state.
+    pub fn set_config_epoch(&mut self, epoch: u32) {
+        self.config_epoch = epoch;
     }
 
     /// Host: record that the shared settings just changed (bump the generation) and return the
@@ -865,7 +903,7 @@ mod tests {
         let mut client = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
         let mut s = SharedSettings::from(&Config::default());
         s.scaling.boss_health = 250;
-        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: s });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 5, settings: s});
         assert_eq!(
             client.config().scaling.boss_health,
             Config::default().scaling.boss_health,
@@ -1108,12 +1146,12 @@ mod tests {
         let mut client = linked_client(v); // HOST authenticated; ConfigSync from it now applies
         let mut first = SharedSettings::from(&Config::default());
         first.scaling.boss_health = 175;
-        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: first });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 5, settings: first});
         assert_eq!(client.config().scaling.boss_health, 175);
 
         let mut spoof = SharedSettings::from(&Config::default());
         spoof.scaling.boss_health = 999;
-        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: spoof });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 5, settings: spoof});
         assert_eq!(client.config().scaling.boss_health, 175, "same generation must not re-apply");
     }
 
@@ -1127,9 +1165,9 @@ mod tests {
         let mut older = SharedSettings::from(&Config::default());
         older.scaling.boss_health = 120;
 
-        client.handle(HOST, ModMessage::ConfigSync { generation: 5, settings: newer });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 5, settings: newer});
         assert_eq!(client.config().scaling.boss_health, 300);
-        client.handle(HOST, ModMessage::ConfigSync { generation: 4, settings: older });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 4, settings: older });
         assert_eq!(client.config().scaling.boss_health, 300, "older generation ignored");
     }
 
@@ -1700,12 +1738,12 @@ mod tests {
         for (generation, hp) in [(2u32, 120u32), (3, 175), (4, 250)] {
             let mut s = SharedSettings::from(&Config::default());
             s.scaling.boss_health = hp;
-            client.handle(HOST, ModMessage::ConfigSync { generation, settings: s });
+            client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation, settings: s });
             assert_eq!(client.config().scaling.boss_health, hp, "generation {generation} applied");
         }
         let mut stale = SharedSettings::from(&Config::default());
         stale.scaling.boss_health = 999;
-        client.handle(HOST, ModMessage::ConfigSync { generation: 3, settings: stale });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 3, settings: stale });
         assert_eq!(client.config().scaling.boss_health, 250, "a redelivered older generation is ignored");
     }
 
@@ -1719,7 +1757,7 @@ mod tests {
         let before = host.config().scaling.boss_health;
         let mut s = SharedSettings::from(&Config::default());
         s.scaling.boss_health = before.wrapping_add(50);
-        host.handle(CLIENT, ModMessage::ConfigSync { generation: 9, settings: s });
+        host.handle(CLIENT, ModMessage::ConfigSync { epoch: 1, generation: 9, settings: s });
         assert_eq!(host.config().scaling.boss_health, before, "a non-host ConfigSync never mutates config");
         assert!(
             host.notifications().toasts().iter().any(|t| t.message.contains("non-host")),
@@ -1728,26 +1766,121 @@ mod tests {
     }
 
     #[test]
-    fn config_generation_wrap_is_a_known_unhandled_boundary() {
-        // Generation comparison is a plain `>`, which assumes a monotonic source within a session. If
-        // the host's u32 generation ever WRAPPED (2^32 changes) — or a host restart reset the counter —
-        // a post-wrap gen 0 compares below the applied high-water mark and stalls. This is the same
-        // deferred host-epoch concern documented on `applied_config_gen`; pinned here so the boundary
-        // is explicit. A future host-instance epoch is what fixes it, not a change to this comparison.
+    fn config_generation_wrap_within_one_epoch_is_a_known_unhandled_boundary() {
+        // Within one epoch the generation comparison is a plain `>`, which assumes a monotonic source.
+        // If the host's u32 generation ever WRAPPED (2^32 changes in a single host session — not
+        // reachable in practice), a post-wrap gen 0 compares below the applied high-water mark and
+        // stalls until the next host session's fresh epoch. Pinned so the residual boundary is
+        // explicit. The realistic version of this — a host *restart* resetting the counter — is
+        // handled: the restarted host stamps a fresh epoch, which supersedes regardless of generation
+        // (see `new_host_epoch_supersedes_the_old_generation_high_water`).
         let v = Version::new(0, 1, 0);
         let mut client = linked_client(v);
         let mut hi = SharedSettings::from(&Config::default());
         hi.scaling.boss_health = 250;
-        client.handle(HOST, ModMessage::ConfigSync { generation: u32::MAX, settings: hi });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: u32::MAX, settings: hi });
         assert_eq!(client.config().scaling.boss_health, 250, "the high-water generation applies");
         let mut wrapped = SharedSettings::from(&Config::default());
         wrapped.scaling.boss_health = 120;
-        client.handle(HOST, ModMessage::ConfigSync { generation: 0, settings: wrapped });
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 0, settings: wrapped });
         assert_eq!(
             client.config().scaling.boss_health,
             250,
-            "a wrapped gen-0 sync is currently ignored — known limitation, not a silent rollback"
+            "a same-epoch wrapped gen-0 sync is ignored — known limitation, not a silent rollback"
         );
+    }
+
+    #[test]
+    fn new_host_epoch_supersedes_the_old_generation_high_water() {
+        // The host-restart fix: a lingering client has applied a high generation from the previous
+        // host session; the restarted host stamps a fresh epoch and its generation restarts at 1.
+        // The differing epoch must adopt immediately (resetting the high-water mark) — before this
+        // existed, the client ignored the new host until it out-counted the old session.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        let mut old = SharedSettings::from(&Config::default());
+        old.scaling.boss_health = 250;
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 1, generation: 40, settings: old });
+        assert_eq!(client.config().scaling.boss_health, 250);
+
+        let mut fresh = SharedSettings::from(&Config::default());
+        fresh.scaling.boss_health = 120;
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 2, generation: 1, settings: fresh });
+        assert_eq!(
+            client.config().scaling.boss_health,
+            120,
+            "a new epoch supersedes despite a lower generation"
+        );
+
+        // The high-water mark reset to the new epoch's generation, and ordering holds within it:
+        // a same-generation redelivery (stale-duplicate shape) is a no-op…
+        let mut dup = SharedSettings::from(&Config::default());
+        dup.scaling.boss_health = 999;
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 2, generation: 1, settings: dup });
+        assert_eq!(
+            client.config().scaling.boss_health,
+            120,
+            "same epoch + same generation must not re-apply"
+        );
+        // …and a strictly newer generation still applies.
+        let mut newer = SharedSettings::from(&Config::default());
+        newer.scaling.boss_health = 175;
+        client.handle(HOST, ModMessage::ConfigSync { epoch: 2, generation: 2, settings: newer });
+        assert_eq!(client.config().scaling.boss_health, 175, "same-epoch newer generation applies");
+    }
+
+    #[test]
+    fn config_converges_across_a_host_restart_under_faults() {
+        // The epoch fix, end to end under the fault model. Session one: the client converges on the
+        // host's settings and its generation high-water mark climbs well past 1. Then the host
+        // "restarts": a brand-new host `Peer` (same PeerId — the same player re-hosting), a fresh
+        // epoch, and the generation counter back at its initial value. Without the epoch, every
+        // post-restart sync (generation 1 vs the client's high-water mark) would be ignored forever —
+        // `maintain` re-asserts the same generation, so the stall could never heal. With it, the
+        // client adopts the differing epoch even while drop/duplicate/reorder keep stale epoch-1
+        // frames circulating across the restart.
+        let v = Version::new(0, 1, 0);
+        let faults = FaultModel { drop_rate: 0.3, duplicate_rate: 0.4, reorder: true };
+        let (mut host, mut client) =
+            pair_over(Loopback::mesh_with_faults(&[HOST, CLIENT], faults, 0xE90C_0FF5), v, v);
+        host.peer_mut().set_config_epoch(1);
+        host.peer_mut().config_mut().scaling.boss_health = 250;
+        for _ in 0..40 {
+            host.peer_mut().mark_config_changed(); // drive the generation well past the restart's 1
+        }
+        run_lossy(&mut host, &mut client, 500, |c| c.peer().config().scaling.boss_health == 250);
+        assert_eq!(client.peer().config().scaling.boss_health, 250, "converged on session one");
+
+        let mut restarted = config_with_pw(PW);
+        restarted.scaling.boss_health = 120;
+        *host.peer_mut() = Peer::new(HOST, HOST, v, restarted, HOST_NONCE);
+        host.peer_mut().set_config_epoch(2); // the binding stamps a fresh epoch per hosted session
+        run_lossy(&mut host, &mut client, 500, |c| c.peer().config().scaling.boss_health == 120);
+        assert_eq!(
+            client.peer().config().scaling.boss_health,
+            120,
+            "the restarted host's fresh epoch supersedes the lingering client's old high-water mark"
+        );
+    }
+
+    #[test]
+    fn broadcast_config_carries_the_stamped_epoch_across_generation_bumps() {
+        // The host binding stamps the session epoch once (`set_config_epoch`); every subsequent
+        // broadcast carries it unchanged while `mark_config_changed` bumps only the generation.
+        fn sync_identity(msgs: &[ModMessage]) -> (u32, u32) {
+            match msgs {
+                [ModMessage::ConfigSync { epoch, generation, .. }] => (*epoch, *generation),
+                other => panic!("expected exactly one ConfigSync, got {other:?}"),
+            }
+        }
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.set_config_epoch(0xABCD_1234);
+        let (epoch, generation) = sync_identity(&host.broadcast_config());
+        assert_eq!(epoch, 0xABCD_1234, "broadcast carries the stamped epoch");
+        let (e2, g2) = sync_identity(&host.mark_config_changed());
+        assert_eq!(e2, 0xABCD_1234, "the epoch is stable across generation bumps");
+        assert_eq!(g2, generation + 1, "mark_config_changed bumps only the generation");
     }
 
     #[test]

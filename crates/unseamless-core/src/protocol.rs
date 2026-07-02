@@ -39,7 +39,10 @@ pub const MAGIC: [u8; 2] = *b"UC";
 /// v7 host-enforced the world-time lock: it added `world_time.hour`/`world_time.minute` as two u32s to
 /// `ConfigSync` (shifting the payload) and `world_time.lock` as a 5th bit in the settings byte, so a v6
 /// decoder would misparse the longer frame — the bump rejects it cleanly instead.
-pub const VERSION: u8 = 7;
+/// v8 added the per-host-session `epoch` (a u32) to `ConfigSync` ahead of `generation`, so a restarted
+/// host's syncs supersede a lingering client's generation high-water mark instead of stalling; the
+/// longer frame would misparse on a v7 decoder — the bump rejects it cleanly instead.
+pub const VERSION: u8 = 8;
 
 /// Number of bools packed into the `ConfigSync` settings byte (`crit_coop`, `death_debuffs`,
 /// `allow_summons`, `roam_anywhere`, `world_time.lock`). Single-sources the count so the encode
@@ -99,10 +102,14 @@ pub enum ModMessage {
     /// to ignores it. See
     /// [`crate::peer::Peer`] for the handshake flow.
     Auth { to: crate::transport::PeerId, proof: AuthProofBytes },
-    /// The host's authoritative shared settings, tagged with a monotonic `generation` so a client
-    /// applies only newer settings (a reordered/duplicated sync is ignored) and the host can safely
-    /// **re-assert** the same generation to heal drops.
-    ConfigSync { generation: u32, settings: SharedSettings },
+    /// The host's authoritative shared settings, tagged with the host session's `epoch` and a
+    /// `generation` monotonic within it. A client adopts a sync whose epoch **differs** from the last
+    /// applied one (a restarted host's fresh session always supersedes, resetting the generation
+    /// high-water mark) or whose generation is strictly newer within the same epoch (so a
+    /// reordered/duplicated sync is ignored and the host can safely **re-assert** the same generation
+    /// to heal drops). The epoch is random per hosted session, supplied by the binding layer like the
+    /// auth nonce (core has no entropy source) — see [`crate::peer::Peer::set_config_epoch`].
+    ConfigSync { epoch: u32, generation: u32, settings: SharedSettings },
     /// A session action the host (or a permitted client) is performing, tagged with the sender's
     /// monotonic `seq` so a receiver applies each action exactly once (a duplicated frame is a
     /// no-op).
@@ -263,8 +270,9 @@ impl ModMessage {
                 w.extend_from_slice(&to.to_be_bytes());
                 w.extend_from_slice(proof);
             }
-            ModMessage::ConfigSync { generation, settings: s } => {
+            ModMessage::ConfigSync { epoch, generation, settings: s } => {
                 w.push(tag::CONFIG_SYNC);
+                w.extend_from_slice(&epoch.to_be_bytes());
                 w.extend_from_slice(&generation.to_be_bytes());
                 for v in [
                     s.scaling.enemy_health,
@@ -331,6 +339,7 @@ impl ModMessage {
                 ModMessage::Auth { to, proof }
             }
             tag::CONFIG_SYNC => {
+                let epoch = r.u32()?;
                 let generation = r.u32()?;
                 let mut scaling = Scaling {
                     enemy_health: r.u32()?,
@@ -353,6 +362,7 @@ impl ModMessage {
                 let [crit_coop, death_debuffs, allow_summons, roam_anywhere, world_time_lock] =
                     unpack_bools::<SETTINGS_BOOL_COUNT>(r.u8()?);
                 ModMessage::ConfigSync {
+                    epoch,
                     generation,
                     settings: SharedSettings {
                         scaling,
@@ -481,7 +491,7 @@ mod tests {
         vec![
             ModMessage::Hello { mod_version: 0x0001_0203, nonce: [0xAB; AUTH_NONCE_LEN] },
             ModMessage::Auth { to: 0x7656_1199_0011_2233, proof: [0xCD; AUTH_PROOF_LEN] },
-            ModMessage::ConfigSync { generation: 7, settings: shared() },
+            ModMessage::ConfigSync { epoch: 3, generation: 7, settings: shared() },
             ModMessage::SessionAction { seq: 1, action: SessionAction::LockWorld },
             ModMessage::SessionAction { seq: u32::MAX, action: SessionAction::JoinWorld },
             ModMessage::Ping { frame: u64::MAX },
@@ -522,7 +532,7 @@ mod tests {
         assert_eq!(shared.scaling.boss_health, 200);
         assert_eq!(shared.max_players, 4);
         assert_eq!(shared.world_time, WorldTime { lock: true, hour: 22, minute: 30 });
-        let msg = ModMessage::ConfigSync { generation: 3, settings: shared };
+        let msg = ModMessage::ConfigSync { epoch: 1, generation: 3, settings: shared };
         assert_eq!(ModMessage::decode(&msg.encode()), Ok(msg));
     }
 
@@ -596,7 +606,7 @@ mod tests {
         for (wire, expected) in [(0u32, min), (1, min), (u32::MAX, max), (max + 1, max), (4, 4)] {
             let mut s = shared();
             s.max_players = wire;
-            let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+            let frame = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: s }.encode();
             match ModMessage::decode(&frame).unwrap() {
                 ModMessage::ConfigSync { settings, .. } => {
                     assert_eq!(settings.max_players, expected, "wire {wire} should decode to {expected}");
@@ -612,7 +622,7 @@ mod tests {
         let mut evil = shared();
         evil.scaling.enemy_health = u32::MAX;
         evil.scaling.boss_health = 9999;
-        let frame = ModMessage::ConfigSync { generation: 1, settings: evil }.encode();
+        let frame = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: evil }.encode();
         match ModMessage::decode(&frame).unwrap() {
             ModMessage::ConfigSync { settings: s, .. } => {
                 assert_eq!(s.scaling.enemy_health, crate::config::MAX_SCALING_PERCENT);
@@ -632,7 +642,7 @@ mod tests {
             for (wire_min, exp_min) in [(0u32, 0u32), (59, 59), (60, 59), (u32::MAX, 59)] {
                 let mut s = shared();
                 s.world_time = WorldTime { lock: true, hour: wire_hour, minute: wire_min };
-                let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+                let frame = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: s }.encode();
                 match ModMessage::decode(&frame).unwrap() {
                     ModMessage::ConfigSync { settings, .. } => {
                         assert_eq!(
@@ -649,9 +659,10 @@ mod tests {
 
     #[test]
     fn config_sync_preserves_all_fields() {
-        let msg = ModMessage::ConfigSync { generation: 9, settings: shared() };
+        let msg = ModMessage::ConfigSync { epoch: 5, generation: 9, settings: shared() };
         match ModMessage::decode(&msg.encode()).unwrap() {
-            ModMessage::ConfigSync { generation, settings } => {
+            ModMessage::ConfigSync { epoch, generation, settings } => {
+                assert_eq!(epoch, 5);
                 assert_eq!(generation, 9);
                 assert_eq!(settings, shared());
             }
@@ -670,7 +681,7 @@ mod tests {
             s.allow_summons = bits & 4 != 0;
             s.roam_anywhere = bits & 8 != 0;
             s.world_time.lock = bits & 16 != 0;
-            let msg = ModMessage::ConfigSync { generation: 1, settings: s };
+            let msg = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: s };
             assert_eq!(ModMessage::decode(&msg.encode()).unwrap(), msg, "combo {bits:04b} corrupted");
         }
     }
@@ -712,7 +723,7 @@ mod tests {
     fn rejects_superseded_v2_frame() {
         // v3 added `max_players` to ConfigSync, so a v2 frame is shorter by 4 bytes. The whole point
         // of the version bump is that the gate rejects it rather than misparsing the shifted payload.
-        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        let mut bytes = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: shared() }.encode();
         bytes[2] = 2;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(2)));
     }
@@ -721,7 +732,7 @@ mod tests {
     fn rejects_superseded_v3_frame() {
         // v4 added `roam_anywhere` as a 4th settings bit (same wire width), so a v3 decoder would
         // silently drop the new flag. The version gate rejects the older frame instead of misreading.
-        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        let mut bytes = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: shared() }.encode();
         bytes[2] = 3;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(3)));
     }
@@ -732,7 +743,7 @@ mod tests {
         // v4 frame would parse but silently misread the flag. This pins the 4->5 bump: it fails the
         // moment someone reverts `VERSION` to 4 (which the generic `rejects_unknown_version`'s 99 can't
         // catch, since 99 != 4 would still reject).
-        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        let mut bytes = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: shared() }.encode();
         bytes[2] = 4;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(4)));
     }
@@ -751,9 +762,19 @@ mod tests {
         // v7 added `world_time.hour`/`world_time.minute` (two u32s) to ConfigSync and a 5th settings
         // bit (`world_time.lock`), so a v6 frame is shorter by 8 bytes. The version gate rejects the
         // older frame instead of misparsing the shifted payload.
-        let mut bytes = ModMessage::ConfigSync { generation: 1, settings: shared() }.encode();
+        let mut bytes = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: shared() }.encode();
         bytes[2] = 6;
         assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(6)));
+    }
+
+    #[test]
+    fn rejects_superseded_v7_frame() {
+        // v8 added the per-host-session `epoch` (a u32) to ConfigSync ahead of `generation`, so a v7
+        // frame is shorter by 4 bytes and a v7 decoder would read the epoch as the generation. The
+        // version gate rejects the older frame instead of misparsing the shifted payload.
+        let mut bytes = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: shared() }.encode();
+        bytes[2] = 7;
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::UnknownVersion(7)));
     }
 
     #[test]
@@ -774,12 +795,19 @@ mod tests {
     }
 
     #[test]
-    fn config_sync_generation_sits_at_a_fixed_offset() {
-        // Pin the on-wire position of `generation` (bytes 4..8, right after magic+version+tag), so
-        // an encoder offset regression that a symmetric decode bug would hide is still caught.
-        let bytes = ModMessage::ConfigSync { generation: 0x0A0B_0C0D, settings: shared() }.encode();
+    fn config_sync_epoch_and_generation_sit_at_fixed_offsets() {
+        // Pin the on-wire positions of `epoch` (bytes 4..8, right after magic+version+tag) and
+        // `generation` (bytes 8..12), so an encoder offset regression that a symmetric decode bug
+        // would hide is still caught.
+        let bytes = ModMessage::ConfigSync {
+            epoch: 0x0102_0304,
+            generation: 0x0A0B_0C0D,
+            settings: shared(),
+        }
+        .encode();
         assert_eq!(&bytes[3..4], &[tag::CONFIG_SYNC]);
-        assert_eq!(&bytes[4..8], &0x0A0B_0C0Du32.to_be_bytes());
+        assert_eq!(&bytes[4..8], &0x0102_0304u32.to_be_bytes());
+        assert_eq!(&bytes[8..12], &0x0A0B_0C0Du32.to_be_bytes());
     }
 
     #[test]
@@ -970,7 +998,7 @@ mod tests {
                     boss_posture: 0,
                 };
                 set(&mut s.scaling, field, wire);
-                let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+                let frame = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: s }.encode();
                 match ModMessage::decode(&frame).unwrap() {
                     ModMessage::ConfigSync { settings, .. } => {
                         assert_eq!(
@@ -1006,7 +1034,7 @@ mod tests {
         ] {
             let mut s = shared();
             s.max_players = wire;
-            let frame = ModMessage::ConfigSync { generation: 1, settings: s }.encode();
+            let frame = ModMessage::ConfigSync { epoch: 1, generation: 1, settings: s }.encode();
             match ModMessage::decode(&frame).unwrap() {
                 ModMessage::ConfigSync { settings, .. } => {
                     assert_eq!(settings.max_players, expected, "wire {wire} -> {expected}");
@@ -1153,7 +1181,11 @@ mod tests {
                             minute: (rng.next_u64() as u32) % 60,
                         },
                     };
-                    ModMessage::ConfigSync { generation: rng.next_u64() as u32, settings }
+                    ModMessage::ConfigSync {
+                        epoch: rng.next_u64() as u32,
+                        generation: rng.next_u64() as u32,
+                        settings,
+                    }
                 }
                 _ => {
                     let level = LogLevel::try_from((rng.next_u64() % 5) as u8).unwrap();
