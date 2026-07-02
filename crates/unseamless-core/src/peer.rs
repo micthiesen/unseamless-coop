@@ -132,6 +132,20 @@ impl SeqGate {
             false
         }
     }
+
+    /// Drop the per-sender high-water mark for `peer`. A peer evicted and re-joining restarts its
+    /// outbound seq from 1, so a retained mark would reject its fresh frames as stale — forgetting
+    /// it puts the sender back at the `0` floor. Returns whether a mark existed.
+    ///
+    /// The trade: a late in-flight duplicate from the *departed* session can pass the reset gate
+    /// (re-applying an already-applied frame) until the rejoiner's new stream climbs past its seq.
+    /// Telling the two streams apart would need a per-peer session epoch — a per-sender analogue of
+    /// the host-session epoch `ConfigSync` now carries (`config_epoch`); acceptable to defer here
+    /// because eviction fires on a real session-leave, where the transport has stopped carrying the
+    /// old session's frames.
+    fn forget(&mut self, peer: PeerId) -> bool {
+        self.seen.remove(&peer).is_some()
+    }
 }
 
 pub struct Peer {
@@ -155,9 +169,10 @@ pub struct Peer {
     /// entry (merely discovered/known) from a linked one (authenticated).
     ///
     /// Like `peers`/`peer_nonces`/`last_seen`, this is keyed by the transport [`PeerId`] (the stable
-    /// Steam id in production) and is **never pruned** here: re-linking a peer after a transient
-    /// liveness blip is a no-op, which is what makes the handshake self-heal. Eviction on a real
-    /// session-*leave* is deferred to the binding layer (Layer 2), which owns the game's session FSM.
+    /// Steam id in production) and is **never pruned by the frame/maintenance paths**: re-linking a
+    /// peer after a transient liveness blip is a no-op, which is what makes the handshake self-heal.
+    /// The pruning mechanism for a real session-*leave* is [`Peer::evict`]; *deciding* when a peer
+    /// has left is deferred to the binding layer (Layer 2), which owns the game's session FSM.
     linked: BTreeSet<PeerId>,
     notifications: Notifications,
     /// Host-side aggregation of forwarded debug logs.
@@ -569,6 +584,37 @@ impl Peer {
             self.stale_peers.remove(&pid);
             self.notifications.clear_banner(&liveness_banner_key(pid));
         }
+    }
+
+    /// Fully forget a departed peer, so the SAME peer re-appearing (a fresh `Hello` + `Auth`) can
+    /// re-link cleanly from scratch. Removes it from the roster (`peers`), the nonce table
+    /// (`peer_nonces`), the link set, liveness (`last_seen`/`stale_peers`), and both per-sender
+    /// dedup gates. Dropping the nonce means the departed session's `Auth` proof can no longer
+    /// re-link the peer (a rejoin must present a fresh `Hello` and a proof bound to its new nonce —
+    /// a retained nonce would let a replayed stale proof re-link without one), and forgetting the
+    /// gates means the rejoiner's outbound seqs, restarted at 1, aren't rejected as stale by the
+    /// old high-water marks. Its per-peer banners (auth/version/liveness) are torn down too: none is
+    /// actionable once the peer is gone. Returns whether the peer was known (present in any of
+    /// those collections).
+    ///
+    /// This is the core half of session-leave eviction; nothing calls it yet. The binding layer
+    /// owns the game's session FSM (the same Layer-2 boundary the `linked` note defers to), so it
+    /// decides *when* a peer has truly left.
+    // TODO(rung-3): call this from the binding layer's session-leave handler when the game's
+    // session roster shrinks (no live session exists yet).
+    pub fn evict(&mut self, peer: PeerId) -> bool {
+        let mut known = false;
+        known |= self.peers.remove(&peer).is_some();
+        known |= self.peer_nonces.remove(&peer).is_some();
+        known |= self.linked.remove(&peer);
+        known |= self.last_seen.remove(&peer).is_some();
+        known |= self.stale_peers.remove(&peer);
+        known |= self.action_gate.forget(peer);
+        known |= self.log_gate.forget(peer);
+        self.notifications.clear_banner(&auth_banner_key(peer));
+        self.notifications.clear_banner(&version_banner_key(peer));
+        self.notifications.clear_banner(&liveness_banner_key(peer));
+        known
     }
 
     pub fn config(&self) -> &Config {
@@ -1972,5 +2018,171 @@ mod tests {
             client.forward_log(LogLevel::Trace, "x");
         }
         assert_eq!(client.dropped_logs(), 5 + 3, "second overflow adds 3 to the running total");
+    }
+
+    // --- eviction (session-leave) ----------------------------------------------------------------
+
+    #[test]
+    fn evicting_a_linked_peer_clears_roster_link_liveness_and_banners() {
+        // A linked, version-incompatible peer (so a version banner is up) is evicted: every per-peer
+        // collection empties and the banner is torn down. The private `last_seen` entry is verified
+        // indirectly — with it gone, ticking far past the liveness timeout can never flag the peer.
+        let v_us = Version::new(1, 0, 0);
+        let v_them = Version::new(2, 0, 0);
+        let mut host = Peer::new(HOST, HOST, v_us, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v_them.to_u32(), nonce: CLIENT_NONCE });
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(CLIENT), "test setup: linked");
+        assert!(host.notifications().banners().iter().any(|b| b.message.contains("version mismatch")));
+
+        assert!(host.evict(CLIENT), "a linked peer is known");
+
+        assert!(host.known_peers().is_empty(), "roster entry removed");
+        assert!(!host.is_linked(CLIENT), "link removed");
+        assert!(host.notifications().banners().is_empty(), "version banner torn down");
+        for _ in 0..=(LIVENESS_TIMEOUT_TICKS + 1) {
+            host.maintain();
+        }
+        assert!(!host.is_stale(CLIENT), "no liveness tracking survives eviction");
+        assert!(host.notifications().banners().is_empty(), "and no banner ever resurfaces");
+    }
+
+    #[test]
+    fn evicting_a_stale_peer_clears_the_lost_contact_banner_and_stale_flag() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        for _ in 0..=LIVENESS_TIMEOUT_TICKS {
+            host.maintain();
+        }
+        assert!(host.is_stale(CLIENT), "test setup: flagged as lost");
+        assert!(host.notifications().banners().iter().any(|b| b.message.contains("Lost contact")));
+
+        assert!(host.evict(CLIENT));
+        assert!(!host.is_stale(CLIENT), "stale flag removed");
+        assert!(host.notifications().banners().is_empty(), "lost-contact banner torn down");
+    }
+
+    #[test]
+    fn evicting_an_unlinked_wrong_password_peer_clears_its_auth_banner() {
+        // A wrong-password stranger never linked, but it does hold roster/nonce entries and an
+        // auth-failure banner — eviction forgets all of it.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT_NONCE });
+        let bad = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, "wrong-password");
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: bad });
+        assert!(host.notifications().banners().iter().any(|b| b.message.contains("Authentication failed")));
+
+        assert!(host.evict(CLIENT), "a discovered-but-unlinked peer is still known");
+        assert!(host.known_peers().is_empty());
+        assert!(host.notifications().banners().is_empty(), "auth banner torn down");
+    }
+
+    #[test]
+    fn an_evicted_peer_re_links_from_scratch_with_a_fresh_nonce_and_seqs() {
+        // The load-bearing eviction property: the SAME peer id re-appearing must re-link cleanly.
+        // That requires the old nonce to be gone (its stale proof must not verify), and both seq
+        // gates reset (the rejoiner restarts its outbound seqs at 1, which a retained high-water
+        // mark would reject as stale).
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        // Advance both per-sender gates well past the seqs the rejoiner will reuse.
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 5, action: SessionAction::JoinWorld });
+        host.handle(CLIENT, ModMessage::Log(LogRecord { seq: 5, level: LogLevel::Info, message: "pre".into() }));
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::JoinWorld)));
+        assert_eq!(host.log_bundle().len(), 1);
+
+        assert!(host.evict(CLIENT));
+
+        // A replay of the departed session's proof finds no nonce on file and drops quietly.
+        let stale = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &CLIENT_NONCE, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: stale });
+        assert!(!host.is_linked(CLIENT), "the departed session's proof must not re-link");
+        assert!(host.notifications().banners().is_empty(), "and drops without a banner");
+
+        // Fresh session: new Hello (new nonce) + a proof bound to it re-links from scratch, and the
+        // host treats it as newly linked (it pushes the current settings immediately).
+        let fresh_nonce: AuthNonce = [0x77; AUTH_NONCE_LEN];
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: fresh_nonce });
+        let fresh = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &fresh_nonce, PW);
+        let out = host.handle(CLIENT, ModMessage::Auth { to: HOST, proof: fresh });
+        assert!(host.is_linked(CLIENT), "a fresh Hello + Auth re-links the evicted peer");
+        assert!(
+            out.iter().any(|m| matches!(m, ModMessage::ConfigSync { .. })),
+            "re-linking is a fresh link: the host syncs settings to the rejoiner"
+        );
+
+        // The rejoiner's restarted seq streams are accepted from 1 — the gates were forgotten.
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::OpenWorld });
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT, SessionAction::OpenWorld)),
+            "a rejoiner's seq-1 action applies (action gate was reset)"
+        );
+        host.handle(CLIENT, ModMessage::Log(LogRecord { seq: 1, level: LogLevel::Info, message: "post".into() }));
+        assert_eq!(host.log_bundle().len(), 2, "a rejoiner's seq-1 log aggregates (log gate was reset)");
+    }
+
+    #[test]
+    fn evicting_an_unknown_peer_is_a_noop_returning_false() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        const NEVER_SEEN: PeerId = 42;
+        assert!(!host.evict(NEVER_SEEN), "an unknown peer is not known");
+        assert!(host.is_linked(CLIENT), "and nothing else is disturbed");
+
+        // Double-evict: the second call finds nothing left and reports unknown.
+        assert!(host.evict(CLIENT));
+        assert!(!host.evict(CLIENT), "an already-evicted peer is no longer known");
+    }
+
+    #[test]
+    fn a_ping_only_stranger_counts_as_known_to_evict() {
+        // A bare Ping registers the sender only in `last_seen` — eviction still reports it as known
+        // (it held per-peer state) and clears that liveness tracking.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        host.handle(CLIENT, ModMessage::Ping { frame: 1 });
+        assert!(host.evict(CLIENT), "liveness-only state still makes the peer known");
+        for _ in 0..=(LIVENESS_TIMEOUT_TICKS + 1) {
+            host.maintain();
+        }
+        assert!(!host.is_stale(CLIENT), "its liveness tracking is gone");
+    }
+
+    #[test]
+    fn evicting_one_peer_does_not_disturb_another() {
+        // Two linked clients — CLIENT at a compatible version, CLIENT2 version-incompatible (so it
+        // carries a banner) and with an advanced action-gate mark. Evicting CLIENT must leave all of
+        // CLIENT2's state exactly as it was: link, roster, banner, and gate high-water mark.
+        let v_us = Version::new(1, 0, 0);
+        let v_them = Version::new(2, 0, 0);
+        let mut host = Peer::new(HOST, HOST, v_us, config_with_pw(PW), HOST_NONCE);
+        link_client_into(&mut host, CLIENT, CLIENT_NONCE, v_us);
+        host.handle(CLIENT2, ModMessage::Hello { mod_version: v_them.to_u32(), nonce: CLIENT2_NONCE });
+        let proof2 = crate::crypto::auth_proof(HOST, CLIENT2, &HOST_NONCE, &CLIENT2_NONCE, PW);
+        host.handle(CLIENT2, ModMessage::Auth { to: HOST, proof: proof2 });
+        assert!(host.is_linked(CLIENT2), "test setup: CLIENT2 linked");
+        host.handle(CLIENT2, ModMessage::SessionAction { seq: 3, action: SessionAction::JoinWorld });
+
+        assert!(host.evict(CLIENT));
+
+        assert!(host.is_linked(CLIENT2), "the other peer stays linked");
+        assert!(host.known_peers().contains_key(&CLIENT2), "and stays on the roster");
+        assert!(
+            host.notifications().banners().iter().any(|b| b.message.contains("version mismatch")),
+            "its banner is untouched"
+        );
+        // Its gate high-water mark survives: a stale redelivery is still rejected...
+        host.handle(CLIENT2, ModMessage::SessionAction { seq: 3, action: SessionAction::OpenWorld });
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT2, SessionAction::JoinWorld)),
+            "CLIENT2's stale seq-3 redelivery is still rejected after evicting CLIENT"
+        );
+        // ...and its next real seq still advances.
+        host.handle(CLIENT2, ModMessage::SessionAction { seq: 4, action: SessionAction::OpenWorld });
+        assert_eq!(host.last_action(), Some((CLIENT2, SessionAction::OpenWorld)));
     }
 }
