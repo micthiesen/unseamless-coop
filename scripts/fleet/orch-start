@@ -23,6 +23,11 @@ else
   fleet_color_name() { :; }
 fi
 
+# Which CLI harness to launch (claude default, or codex); see _harness.
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
+harness="$(fleet_harness)"
+
 mkdir -p "$RIFTS"
 
 # Drop the orchestrator's terminal into the next free Alacritty tile-slot, same as
@@ -43,6 +48,31 @@ if tmux has-session -t "$sess" 2>/dev/null; then
 fi
 
 cd "$REPO"
+if [ "$harness" = "codex" ]; then
+  # codex: `--continue` (the orch-continue .desktop item / the claude flag) maps to
+  # `codex resume --last`, which cwd-filters to this repo. Trust is a session `-c`
+  # flag (never mutate the stowed ~/.codex/config.toml). No BUN_INSPECT (msg
+  # delivers over tmux paste), no /color, no /remote-control (Claude Code
+  # features). No --add-dir either: integration only READS worker repos
+  # (`git fetch <path>` writes to this repo's .git), and codex's workspace-write
+  # sandbox already reads the whole disk.
+  # Only the long flag maps: `-c` is codex's own config-override flag, so it must
+  # pass through untouched (it only means "continue" in claude's CLI).
+  codex_cmd=(codex)
+  if [ "${1:-}" = "--continue" ]; then
+    shift
+    codex_cmd=(codex resume --last)
+  fi
+  # network_access=true: the sandbox otherwise blocks unix sockets (seccomp), so
+  # the orchestrator's own `msg` to workers (a tmux client) would fail.
+  tmux new-session -d -s "$sess" -c "$REPO" \
+    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+    "${codex_cmd[@]}" -c "projects.\"$REPO\".trust_level=\"trusted\"" \
+    -c "sandbox_mode=\"workspace-write\"" \
+    -c "sandbox_workspace_write.network_access=true" "$@"
+  place_self
+  exec tmux attach -t "$sess"
+fi
 # `--name` is a display badge only (never resumes); "$@" comes last so a
 # user-supplied --name overrides this default. `BUN_INSPECT=...` opens the
 # orchestrator's inspector socket so workers can `msg usc-orch` into it (the same

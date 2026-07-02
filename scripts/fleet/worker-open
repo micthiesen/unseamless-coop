@@ -22,6 +22,14 @@ else
   fleet_color_name() { :; }
 fi
 
+# Which CLI harness to revive with: prefer the worker's own .harness marker (what
+# it was SPAWNED with -- reviving a claude worker with codex would find no codex
+# session in the workspace, and vice versa), falling back to the global setting
+# for markerless workers (pre-marker spawns). See _harness.
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
+harness="$(fleet_harness)"
+
 name="${1:-}"
 if [ -z "$name" ]; then
   echo "usage: worker-open <name>" >&2
@@ -57,6 +65,27 @@ elif [ -d "$ws" ]; then
   role="$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)"; [ -n "$role" ] || role="worker"
   overlay_rel="docs/roles/worker.md"
   if [ "$role" = "solo" ]; then overlay_rel="docs/roles/worker-solo.md"; fi
+  # The worker's own spawn harness wins over the current global setting (see the
+  # sourcing comment above); an absent/garbage marker keeps the global fallback.
+  h_marker="$(cat "$FLEET_DIR/assignments/$name.harness" 2>/dev/null || true)"
+  case "$h_marker" in claude|codex) harness="$h_marker" ;; esac
+  if [ "$harness" = "codex" ]; then
+    echo "$sess is dead; reviving the $role worker in $ws (codex resume --last)."
+    # `codex resume` cwd-filters by default, so --last inside the workspace
+    # continues THIS worker's own most recent conversation. No overlay re-injection
+    # needed: worker-new delivered the role as the first user turn, which resume
+    # keeps (it's conversation history, not a launch flag). Trust + the
+    # network_access sandbox flag are the same session `-c` flags worker-new
+    # uses (network_access=true is what lets the worker's own `msg`/tmux reach
+    # its unix socket from inside the sandbox); no inspector socket under codex.
+    tmux new-session -d -s "$sess" -c "$ws" \
+      env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+      codex resume --last -c "projects.\"$ws\".trust_level=\"trusted\"" \
+      -c "sandbox_mode=\"workspace-write\"" \
+      -c "sandbox_workspace_write.network_access=true"
+    pop_window
+    exit 0
+  fi
   echo "$sess is dead; reviving the $role worker in $ws (claude -c)."
   # Re-trust the workspace path so the worker's .claude/settings.json allow rules
   # load (an untrusted path drops them).

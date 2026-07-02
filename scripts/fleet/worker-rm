@@ -88,7 +88,7 @@ else
   echo "no workspace at $ws"
 fi
 
-rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
+rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role" "$FLEET_DIR/assignments/$name.harness"
 # Drop the worker's inspector socket (its messaging-transport endpoint). Killing the
 # tmux session above already closed it; remove the file so a stale socket can't
 # linger into a future same-named worker.

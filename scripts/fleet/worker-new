@@ -28,6 +28,12 @@ else
   fleet_color_name() { :; }
 fi
 
+# Which CLI harness to spawn (claude, the default, or codex) -- one file governs
+# the whole fleet; see _harness and `scripts/fleet/harness`.
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
+harness="$(fleet_harness)"
+
 # --solo (user-driven) is an optional LEADING flag; everything after is the normal
 # <name> [guidance...].
 solo=0
@@ -90,31 +96,56 @@ git -C "$ws" switch -c "$branch"
 # allow rules + additionalDirectories actually load. Claude Code drops a project's
 # permissions on an untrusted path, and each new rift workspace path is untrusted
 # by default. ~/.claude.json is live, not git-tracked; edit it atomically.
-echo "==> trust workspace in ~/.claude.json"
-trust_json="$HOME/.claude.json"
-if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
-  cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
-  if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-    mv "$tmp" "$trust_json"
-    echo "    trusted $ws"
+# (codex: trust is instead a session config flag on the launch line below --
+# `-c projects."<ws>".trust_level="trusted"` -- so we never mutate
+# ~/.codex/config.toml, which is a stowed dotfiles symlink, per workspace.)
+if [ "$harness" = "claude" ]; then
+  echo "==> trust workspace in ~/.claude.json"
+  trust_json="$HOME/.claude.json"
+  if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
+    cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
+    if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+      mv "$tmp" "$trust_json"
+      echo "    trusted $ws"
+    else
+      rm -f "${tmp:-}"
+      echo "    WARNING: could not set workspace trust; worker may drop its allow rules until you accept its trust dialog once." >&2
+    fi
   else
-    rm -f "${tmp:-}"
-    echo "    WARNING: could not set workspace trust; worker may drop its allow rules until you accept its trust dialog once." >&2
+    echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
   fi
-else
-  echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
 fi
 
 # Role marker (outside the workspace, so it survives the COW copy): lets worker-open
 # revive with the right overlay and worker-ls/worker-prune tell solo from orchestrator.
 mkdir -p "$FLEET_DIR/assignments"
 if [ "$solo" -eq 1 ]; then echo solo; else echo worker; fi >"$FLEET_DIR/assignments/$name.role"
+# Harness marker, same idea: pin the harness this worker was SPAWNED with, so a
+# global toggle between spawn and revive can't make worker-open revive a claude
+# worker with `codex resume` (which would find no codex session in the workspace)
+# or vice versa. worker-rm/worker-prune clean it with the .role marker.
+echo "$harness" >"$FLEET_DIR/assignments/$name.harness"
+
+# The ROLE reaches the two harnesses differently. claude: the overlay file is a
+# launch flag (--append-system-prompt-file, below), so the seed only points at the
+# assignment. codex: there is no append-system-prompt equivalent, so the role is
+# the FIRST THING in the seed prompt -- it lands as turn 1, which also means a
+# `codex resume` revive keeps it (it's in the conversation, not a launch flag).
+role_seed=""
+if [ "$harness" = "codex" ]; then
+  role_seed="Read $ws/$overlay_rel and adopt it as your role for this entire session; it overrides the default orchestrator framing in AGENTS.md."
+fi
 
 if [ "$solo" -eq 1 ]; then
   # Solo: user-driven, no assignment-file indirection. Guidance (if any) is the first
-  # prompt directly; with none, the session launches waiting for Michael's first turn.
+  # prompt directly; with none, the session launches waiting for Michael's first turn
+  # (claude) or with just the role turn (codex -- the role must still be delivered).
   echo "==> solo (user-driven) worker; no assignment file"
   seed="$guidance"
+  if [ -n "$role_seed" ]; then
+    seed="$role_seed"
+    [ -n "$guidance" ] && seed="$role_seed Then: $guidance"
+  fi
 else
   echo "==> assignment"
   assignment="$FLEET_DIR/assignments/$name.md"
@@ -136,9 +167,12 @@ else
   } >"$assignment"
   echo "    $assignment"
   seed="Read $assignment for your assignment (you are worker:$name). Then begin."
+  if [ -n "$role_seed" ]; then
+    seed="$role_seed Then read $assignment for your assignment (you are worker:$name). Then begin."
+  fi
 fi
 
-echo "==> launching Claude Code in tmux session $sess"
+echo "==> launching $harness in tmux session $sess"
 if [ ! -f "$ws/$overlay_rel" ]; then
   echo "worker-new: $ws/$overlay_rel missing -- the worker role overlay won't load." >&2
   echo "            Commit $overlay_rel so rift copies it into workspaces, then retry." >&2
@@ -150,22 +184,42 @@ fi
 seed_args=()
 if [ -n "$seed" ]; then seed_args=("$seed"); fi
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
-# `--name` is a display badge only (prompt box / window title / resume picker); it
-# never resumes, so every spawn is a fresh session regardless of the badge.
-# `BUN_INSPECT=ws+unix://...` opens this session's inspector socket -- the one
-# transport `msg`/`_inject`/coloring deliver through (the socket path is derived
-# from $sess on both ends). Opening it is inert until something connects; clear any
-# stale socket from a prior same-named session first. FLEET_DIR is propagated so the
-# session and msg agree on the socket dir.
 # The seed stays a LAUNCH ARG so it can never be dropped; coloring (below) is
 # layered on separately and is purely best-effort.
-mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
-rm -f "$FLEET_DIR/insp/$sess.sock"
-tmux new-session -d -s "$sess" -c "$ws" \
-  env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-  BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-  claude --name "usc-$name" \
-  --append-system-prompt-file "$ws/$overlay_rel" "${seed_args[@]}"
+if [ "$harness" = "codex" ]; then
+  # codex: no inspector socket (msg delivers over tmux paste), the role rides in
+  # the seed (built above), and workspace trust is a session `-c` flag so the
+  # stowed ~/.codex/config.toml is never mutated. FLEET_DIR is propagated so the
+  # worker's own `msg` calls agree with the orchestrator on fleet state.
+  # network_access=true: codex's workspace-write sandbox otherwise blocks unix
+  # sockets (seccomp), which breaks the worker's own `msg` (the tmux client
+  # can't reach /tmp/tmux-1000/default -- verified live; the network keys under
+  # `network.*` do NOT lift it). Also lets `cargo fetch/build` reach the network,
+  # matching what claude workers already have.
+  # sandbox_mode is pinned so the network_access override is load-bearing even if
+  # the stowed ~/.codex/config.toml ever changes its default sandbox.
+  tmux new-session -d -s "$sess" -c "$ws" \
+    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+    codex -c "projects.\"$ws\".trust_level=\"trusted\"" \
+    -c "sandbox_mode=\"workspace-write\"" \
+    -c "sandbox_workspace_write.network_access=true" "${seed_args[@]}"
+else
+  # claude:
+  # `--name` is a display badge only (prompt box / window title / resume picker); it
+  # never resumes, so every spawn is a fresh session regardless of the badge.
+  # `BUN_INSPECT=ws+unix://...` opens this session's inspector socket -- the one
+  # transport `msg`/`_inject`/coloring deliver through (the socket path is derived
+  # from $sess on both ends). Opening it is inert until something connects; clear any
+  # stale socket from a prior same-named session first. FLEET_DIR is propagated so the
+  # session and msg agree on the socket dir.
+  mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
+  rm -f "$FLEET_DIR/insp/$sess.sock"
+  tmux new-session -d -s "$sess" -c "$ws" \
+    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
+    BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
+    claude --name "usc-$name" \
+    --append-system-prompt-file "$ws/$overlay_rel" "${seed_args[@]}"
+fi
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
@@ -185,7 +239,11 @@ fi
 # injector waits for the session's inspector socket + prompt to be ready, then sends
 # `/color` through it (queued behind the seed turn); if it never becomes injectable,
 # or the helper is missing, the worker just goes uncolored -- never unseeded.
-color="$(fleet_color_name "$name" 2>/dev/null || true)"
+# claude-only: `/color` and the inspector transport are Claude Code features.
+color=""
+if [ "$harness" = "claude" ]; then
+  color="$(fleet_color_name "$name" 2>/dev/null || true)"
+fi
 if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
   echo "    coloring session $color (best-effort, once injectable)"
   setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true

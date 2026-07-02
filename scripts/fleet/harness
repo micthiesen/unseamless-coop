@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# harness [claude|codex|toggle]
+#
+# Print or switch the CLI harness the fleet runs on: Claude Code ("claude", the
+# default) or Codex ("codex"). With no argument, prints the current harness.
+#
+# This is the *fleet/agent* harness (which CLI worker-new/orch-start/msg drive),
+# not the co-op test harness (scripts/harness.sh) -- unrelated tools that share a
+# word. State lives at $UNSEAMLESS_FLEET_DIR/harness (see _harness for why it's
+# in the shared fleet dir and not the repo). Sessions already running keep the
+# harness they launched with; toggle between fleets, not mid-fleet.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
+
+cur="$(fleet_harness)"
+case "${1:-}" in
+  "")
+    echo "$cur"
+    exit 0
+    ;;
+  toggle)
+    new="codex"; [ "$cur" = "codex" ] && new="claude"
+    ;;
+  claude|codex)
+    new="$1"
+    ;;
+  *)
+    echo "usage: harness [claude|codex|toggle]   (no argument: print current)" >&2
+    exit 2
+    ;;
+esac
+
+file="$(fleet_harness_file)"
+mkdir -p "$(dirname "$file")"
+printf '%s\n' "$new" >"$file"
+echo "fleet harness: $cur -> $new"
+
+# Always notify on a set/toggle -- the unseamless-toggle-harness .desktop item
+# runs this with no terminal, so the notification is its only feedback. Best
+# effort: no notify-send (or no display), no problem.
+if command -v notify-send >/dev/null 2>&1; then
+  notify-send -a unseamless-coop -i steam_icon_1245620 \
+    "unseamless fleet" "Harness: $new" 2>/dev/null || true
+fi
+
+# Live sessions keep the harness they launched with; flag them so a mid-fleet
+# toggle isn't mistaken for switching running sessions.
+live="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^usc-' || true)"
+if [ "${live:-0}" -gt 0 ] && [ "$new" != "$cur" ]; then
+  echo "note: $live live usc-* session(s) keep the harness they launched with."
+fi

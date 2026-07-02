@@ -7,7 +7,7 @@ description: >
   messaging or answering a worker, integrating a worker's branch into main, or
   tearing a worker down. TRIGGER on "spawn a worker", "parallelize this", "kick off
   a worker for X", "what are my workers doing", "integrate <worker>", "remove the
-  worker". Design + rationale live in docs/ORCHESTRATION.md.
+  worker".
 user_invocable: true
 ---
 
@@ -34,6 +34,12 @@ orchestrator-specific override of the global "be aggressive about spawning subag
 the aggression goes to workers for chunks, subagents only for support.)
 
 All tooling is in `scripts/fleet/`. tmux sessions are `usc-orch` (you) and `usc-worker-<name>`.
+
+The fleet runs all-Claude-Code or all-Codex (Michael toggles which; the scripts handle every
+difference). Only two things change for you under codex: **`msg` is a tmux paste** — still a live
+user turn that queues if the target is mid-turn, but it does not preserve a draft in the target's
+composer, and a paste into a just-spawned (still booting) TUI can be dropped, so retry if a fresh
+worker doesn't react; and **`/color` and `/rc` don't exist** — skip them.
 
 ## Spawn A Worker
 
@@ -132,6 +138,7 @@ scripts/fleet/msg usc-worker-<name> "/rc"
   like "let me watch <name>", "I want to view the worker", "follow it from my phone", "remote into it".
 - It's just another `msg` injection (live turn), so the usual delivery rules apply (idle → instant,
   busy → queued).
+- **Claude workers only.** A codex worker has no `/rc`; tell Michael that instead of sending it.
 
 ## Integrate A Worker's Branch
 

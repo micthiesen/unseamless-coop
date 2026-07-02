@@ -26,8 +26,9 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   orchestrator with no special flag. It owns: planning with the human, the rig, RE/validation,
   integration, the only commits to `main`, and the worker lifecycle (create, message, remove).
 - **Worker** is an overlay. A worker session is launched with
-  `--append-system-prompt-file docs/roles/worker.md`, which appends after `CLAUDE.md` and
-  overrides the default framing. A worker owns: one lane of feature work, WIP commits to its own
+  `--append-system-prompt-file docs/roles/worker.md` (claude; under codex the same file is instead
+  delivered as the first thing in the seed prompt — see Harness), which overrides the default
+  framing. A worker owns: one lane of feature work, WIP commits to its own
   branch, and asking the orchestrator (by message) for anything serial. A worker **never** drives
   the rig and **never** commits to `main`.
 - **Solo worker** is the same overlay mechanism with a different file
@@ -38,6 +39,39 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   on it). Which overlay a worker spawned with is recorded in `assignments/<name>.role` (in the shared
   fleet dir, outside every workspace, so it never COW-diverges) — `worker-open` reads it to revive
   with the right overlay; `worker-rm`/`worker-prune` clean it.
+
+## Harness (Claude Code Or Codex)
+
+The fleet runs on either **Claude Code** (`claude`, the default) or **Codex** (`codex`) — same
+scripts, same lifecycle, same roles. Which one is spawned is a single machine-global state file,
+`$UNSEAMLESS_FLEET_DIR/harness` (shared fleet dir, outside every workspace, for the same
+no-COW-divergence reason as the `.role` markers; missing file == claude):
+
+```
+scripts/fleet/harness              # print current: claude | codex
+scripts/fleet/harness codex        # set
+scripts/fleet/harness toggle       # flip (also the unseamless-toggle-harness .desktop item)
+```
+
+Every set/toggle fires a desktop notification with the new value (the .desktop item runs with no
+terminal, so that's its feedback). **The fleet is all-one-harness**: never mix, and sessions
+already running keep the harness they launched with — toggle between fleets, not mid-fleet. As a
+backstop, `worker-new` pins each worker's spawn harness in `assignments/<name>.harness` and
+`worker-open` revives with *that* (a global toggle can't make it `codex resume` a claude worker's
+workspace, which would have no codex session to continue).
+
+What differs per harness (all encapsulated in the scripts; verified end to end with a live codex
+ping worker, both message directions):
+
+| | claude | codex |
+|---|---|---|
+| Role injection | `--append-system-prompt-file` overlay at launch | the role instruction is the **first thing in the seed prompt** (no system-prompt flag exists; being turn 1, it survives `resume` revives for free) |
+| Messaging (`msg`) | inspector-socket injection (`_inject`): instant, draft-preserving | tmux **bracketed paste + Enter** into the pane: lands as a user turn, queues mid-turn like typing, but a draft in the composer is **not** preserved and a still-booting TUI can drop the paste |
+| Workspace trust | `~/.claude.json` `hasTrustDialogAccepted` (jq edit) | session flag `-c projects."<ws>".trust_level="trusted"` (never mutates `~/.codex/config.toml` — it's a stowed dotfiles symlink) |
+| Sandbox | `.claude/settings.json` allowlist | workspace-write **+ `-c sandbox_workspace_write.network_access=true`** — without it codex's seccomp blocks unix sockets, so the session's own `msg` (a tmux client) can't reach the tmux server (verified; the `network.*` keys do NOT lift it) |
+| Revive (`worker-open`) | `claude -c` + re-overlay + re-`BUN_INSPECT` | `codex resume --last` (cwd-filters to the workspace, so it continues that worker's own conversation) |
+| `/color`, `/rc` remote control | yes | not available (Claude Code features; codex sessions go uncolored) |
+| Repo instructions & skills | `CLAUDE.md`, `.claude/skills/` | same content via tracked symlinks: `AGENTS.md -> CLAUDE.md`, `.codex/skills -> .claude/skills` (codex does **not** read `.claude/skills` at project level; it does pick up user-level `~/.claude/skills` natively, and it reads only `name`+`description` frontmatter, tolerating the extra claude fields) |
 
 **Workers vs. `Agent`/`Task` subagents.** Fanning out a *chunk of buildable work* (a feature lane, a
 substantial RE pass, a migration — anything whose result is a branch to integrate) is **always** a fleet
@@ -78,6 +112,8 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 ~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
   ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
   ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
+  ├─ assignments/<name>.harness             harness marker: what the worker was SPAWNED with (revive pin)
+  ├─ harness                                fleet-wide harness: "claude" (default) | "codex" (see Harness)
   └─ insp/<session>.sock                    per-session inspector socket (messaging endpoint, 0700 dir)
 ```
 
@@ -88,8 +124,12 @@ access to every worker.
 
 ## Messaging
 
-The transport is **direct in-process injection through each session's inspector socket** — not typing
-into the target's TTY, and not a polled mailbox. Every fleet session launches under
+*(This section describes the **claude** transport. Under the **codex** harness, `msg` instead does a
+tmux bracketed paste + Enter into the target pane — see Harness above for the differences. The
+conventions — source prefixes, `usc-*`-only targets, no interrupting a busy session — apply to both.)*
+
+The claude transport is **direct in-process injection through each session's inspector socket** — not
+typing into the target's TTY, and not a polled mailbox. Every fleet session launches under
 `BUN_INSPECT=ws+unix://…/insp/<session>.sock` (worker-new / orch-start / worker-open), which exposes a
 JSC/WebKit inspector on a per-session unix socket. `msg <session> "<text>"` calls
 `scripts/fleet/_inject`, which connects to that socket, walks the live Ink/React fiber tree to the
@@ -242,6 +282,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
 | `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry (assignment + `.role` + inspector socket), for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
+| `harness [claude\|codex\|toggle]` | print or switch the CLI harness the fleet spawns (see Harness above). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
@@ -298,7 +339,11 @@ Implemented: the worker overlay (`docs/roles/worker.md`), `scripts/fleet/`
 (`worker-new`/`worker-ls`/`worker-open`/`worker-rm`/`worker-integrate`/`msg`/`orch-start`, plus the
 inspector-injection transport: `_inject`/`_color-inject`), `.rift.toml`, the
 `.claude/settings.json` allowlist + `additionalDirectories`, workspace-trust wiring, the `CLAUDE.md`
-role preamble, and the `/fleet` orchestrator skill.
+role preamble, and the `/fleet` orchestrator skill. Dual-harness support (`_harness`/`harness`, the
+codex branches of spawn/revive/msg/ls, the `AGENTS.md` + `.codex/skills` symlinks) landed 2026-07
+and was verified end to end with a live codex ping worker: spawn with role+assignment seed, trusted
+launch with no dialog, `worker-open` revive via `codex resume --last`, and `msg` delivery in both
+directions (including the sandbox `network_access=true` fix that makes a worker's own `msg` work).
 
 Exercised end to end: a live ping worker confirmed spawn, the seeded prompt auto-submitting, the
 worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown.

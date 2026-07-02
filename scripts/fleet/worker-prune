@@ -75,7 +75,7 @@ prune_one() {  # <name>
     (cd "$REPO" && rift remove --force "$ws" >/dev/null 2>&1) || echo "  WARNING: rift remove failed for $ws" >&2
     echo "  trashed workspace $ws"
   fi
-  rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role"
+  rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role" "$FLEET_DIR/assignments/$name.harness"
   rm -f "$FLEET_DIR/insp/$sess.sock"   # the new transport's per-session endpoint
   git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true
   echo "pruned solo '$name'"

@@ -1,0 +1,25 @@
+# _harness -- which CLI harness the fleet runs on: "claude" (default) or "codex".
+# Sourced (not executed) by every fleet script that spawns, revives, or messages
+# a session.
+#
+# The state is ONE file in the shared fleet dir ($UNSEAMLESS_FLEET_DIR/harness,
+# OUTSIDE every rift workspace, for the same reason as the .role markers: an
+# in-repo file would be COW-copied into workspaces and go stale on toggle).
+# Missing or invalid file == claude. Switch with `scripts/fleet/harness` (or the
+# unseamless-toggle-harness .desktop item). The fleet is all-one-harness: never
+# mix, and sessions already running keep the harness they launched with -- so
+# toggle between fleets, not mid-fleet.
+
+fleet_harness_file() {
+  echo "${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}/harness"
+}
+
+fleet_harness() {
+  local f h=""
+  f="$(fleet_harness_file)"
+  [ -r "$f" ] && h="$(tr -d '[:space:]' <"$f")"
+  case "$h" in
+    codex) echo codex ;;
+    *) echo claude ;;
+  esac
+}

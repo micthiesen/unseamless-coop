@@ -8,6 +8,9 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
+harness="$(fleet_harness)"
 
 cd "$REPO"
 
@@ -17,13 +20,15 @@ cd "$REPO"
 # this is computed per-workspace (`git -C "$ws"`), not from the orchestrator repo.
 # ROLE (worker|solo|-) comes from the `.role` marker; solo workers are the ones
 # `worker-prune` sweeps up.
-# SOCK = whether `msg`/`_inject` can reach a live session: its inspector socket
-# (worker-new/orch-start set BUN_INSPECT to $FLEET_DIR/insp/<sess>.sock) is present.
-# This is the cheap mirror of msg's first gate (`[ -S "$sock" ]`); it does NOT prove
-# something is *accepting* on it (a restarted session can leave a stale file -- msg's
-# deeper rc=8 check catches that). `up` = reachable, `off` = live but no socket (msg
-# would fail), `-` = no live session. We don't spawn a per-worker `_inject --selftest`
-# probe here; that'd fork a bun per row and make `ls` slow.
+# SOCK = whether `msg` can reach a live session. claude harness: its inspector
+# socket (worker-new/orch-start set BUN_INSPECT to $FLEET_DIR/insp/<sess>.sock) is
+# present -- the cheap mirror of msg's first gate (`[ -S "$sock" ]`); it does NOT
+# prove something is *accepting* on it (a restarted session can leave a stale file
+# -- msg's deeper rc=8 check catches that). codex harness: the tmux session itself
+# is the transport (msg pastes into the pane), so live == reachable. `up` =
+# reachable, `off` = live but no socket (claude msg would fail), `-` = no live
+# session. We don't spawn a per-worker `_inject --selftest` probe here; that'd
+# fork a bun per row and make `ls` slow.
 # LAST_COMMIT = the worker branch tip's subject -- *what* each worker is building, not
 # just that it's ahead. `(no commits yet)` when AHEAD is 0 (tip is still the base), so a
 # base-commit subject never reads as the worker's own work.
@@ -36,7 +41,11 @@ while IFS= read -r ws; do
   sess="usc-worker-$name"
   if tmux has-session -t "$sess" 2>/dev/null; then tstate="live"; else tstate="-"; fi
   if [ "$tstate" = "live" ]; then
-    [ -S "$FLEET_DIR/insp/$sess.sock" ] && sstate="up" || sstate="off"
+    if [ "$harness" = "codex" ]; then
+      sstate="up"   # tmux itself is the codex transport; live session == reachable
+    else
+      [ -S "$FLEET_DIR/insp/$sess.sock" ] && sstate="up" || sstate="off"
+    fi
   else
     sstate="-"
   fi

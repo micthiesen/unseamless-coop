@@ -14,10 +14,16 @@
 # socket lives at $UNSEAMLESS_FLEET_DIR/insp/<session>.sock. Convention:
 #   msg usc-orch                 "[worker:auth] need a rig run for the save hook"
 #   msg usc-worker-auth          "[orchestrator] rig says the hook fired; proceed"
+#
+# Under the codex harness (scripts/fleet/harness) the transport is different: the
+# Codex TUI is a Rust binary with no inspector socket, so delivery is a tmux
+# bracketed paste into the target pane + Enter (see the codex branch below).
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+# shellcheck source=scripts/fleet/_harness
+source "$SELF/_harness"
 
 sess="${1:-}"; shift || true
 if [ -z "$sess" ]; then
@@ -31,6 +37,30 @@ if ! [[ "$sess" =~ ^usc-(orch|worker-[a-z0-9][a-z0-9_-]*)$ ]]; then
 fi
 if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
+
+# Codex harness: deliver by tmux bracketed paste + Enter. Verified live: the
+# paste lands in the composer and Enter submits it as a normal user turn, and a
+# message sent while the target is mid-turn queues and runs when the turn ends
+# (same as typing). Two caveats vs the claude injector: a draft sitting in the
+# target's composer is NOT preserved (the paste appends to it and Enter submits
+# the combined text), and a TUI still booting can drop the paste -- if a worker
+# was spawned seconds ago, retry shortly. Multi-line text is fine: bracketed
+# paste (-p) keeps newlines literal in the composer.
+if [ "$(fleet_harness)" = "codex" ]; then
+  if ! tmux has-session -t "$sess" 2>/dev/null; then
+    echo "msg: $sess is offline (no tmux session); cannot deliver" >&2
+    exit 1
+  fi
+  # Per-process buffer name: a fixed name races when two msg calls overlap (the
+  # second load-buffer overwrites before the first paste-buffer fires).
+  buf="usc-msg-$$"
+  printf '%s' "$text" | tmux load-buffer -b "$buf" -
+  tmux paste-buffer -p -t "$sess" -b "$buf" -d
+  sleep 0.4
+  tmux send-keys -t "$sess" Enter
+  echo "msg: delivered to $sess (tmux paste)"
+  exit 0
+fi
 
 sock="$FLEET_DIR/insp/$sess.sock"
 if [ ! -S "$sock" ]; then
