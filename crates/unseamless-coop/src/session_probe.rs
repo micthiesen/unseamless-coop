@@ -258,6 +258,8 @@ fn log_legb_entry(_name: &'static str, regs: *mut Registers) {
         // if count < capacity (`cmp [+0x24],[+0x20]; jae fail`). If capacity (+0x20) is 0 offline, the
         // store can't happen even after a successful finalize → FailedToCreateSession (the capacity-0
         // hypothesis). See docs/SESSION-DRIVE.md > "Rig result (2026-06-29 …)".
+        // NB: rig-guide `rung3-create-drive`'s drive-watch branch matches the `cap=0 ` token below (the
+        // trailing space is load-bearing — it pins the exact zero); keep the `[+0x20]cap={}` rendering.
         log::info!(
             "session-probe: gate-trace legb-entry REACHED — NetworkSession={ns:#x} reject#1 [+0x10]={} \
              slot-array [+0x20]cap={} [+0x24]count={} (cap 0 => leg B tail can't store the session)",
@@ -515,6 +517,8 @@ impl Feature for SessionCreateDriver {
             return;
         };
         if lobby != LobbyState::None {
+            // rig-guide `rung3-create-drive`'s drive-watch also finishes on `drive-create skipped`
+            // (routes to its inspect step) — keep that substring.
             log::info!(
                 "session-probe: drive-create skipped — lobby_state is {:?}, need None (already in/at a session)",
                 lobby,
@@ -565,6 +569,8 @@ impl Feature for SessionCreateDriver {
         let after = crate::sdk::with_instance::<CSSessionManager, _>(|s| {
             crate::session::read(s).lobby_state
         });
+        // rig-guide `rung3-create-drive`'s drive-watch auto-finishes on `drive-create returned` and
+        // branches on `drive-create returned true` / `... false` — keep those substrings verbatim.
         log::info!(
             "session-probe: drive-create returned {} — lobby_state now {:?} (TryToCreateSession=driven OK; FailedToCreateSession=internal gate rejected)",
             ret,

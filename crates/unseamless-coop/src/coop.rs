@@ -675,8 +675,8 @@ fn adopt_host_config(session: &Session<SteamP2PTransport>, is_host: bool, mirror
         // the host's config. NOTE: this stays in the client's OWN log — `forward.rs` drops
         // `unseamless_coop::coop`-target records as side-channel noise, so it does not reach the host's
         // forwarded bundle (fine: the joiner's guide auto-finishes off its own log). One-shot per
-        // changed sync, so `info!` is right. rig-guide `two-player-join` auto-finishes on the stable
-        // substring `coop: adopted host config` — keep that fragment if you reword the rest.
+        // changed sync, so `info!` is right. rig-guides `two-player-join` + `rung3-create-drive`
+        // auto-finish on the stable substring `coop: adopted host config` — keep that fragment.
         log::info!("coop: adopted host config (settings synced)");
         toast(Severity::Info, CONFIG_SYNCED_MESSAGE);
     }
@@ -712,8 +712,8 @@ fn update_link_status(
         // OWN log — it does NOT reach the host's forwarded bundle, since `forward.rs` drops
         // `unseamless_coop::coop`-target records as side-channel noise (see there). Fine: each machine's
         // guide auto-finishes off its own `coop: linked`.
-        // rig-guide `two-player-join` auto-finishes on the stable substring `coop: linked` — keep that
-        // fragment if you reword the rest.
+        // rig-guides `two-player-join` + `rung3-create-drive` auto-finish on the stable substring
+        // `coop: linked` — keep that fragment if you reword the rest.
         log::info!(
             "coop: linked with partner {} (rung 2); versions {}",
             peer_tag(peer_id),

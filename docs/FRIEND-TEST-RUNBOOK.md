@@ -153,6 +153,14 @@ even a *failed* attempt fully diagnosable without a second session.
 
 ## Part B — Rung-3 create-drive test (does a real peer unblock create?)
 
+> **SUPERSEDED — use [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) for this leg.** This section
+> predates the confirmed root cause (leg B's slot-array **capacity 0**, not the registry lookup
+> below) and two staging corrections: the seed-config edits here never reach a `rig.sh package`
+> friend bundle (the probes must be appended to the bundle config by hand), and the shipped one-shot
+> driver fires at world-load — *before* the lobby/link can exist — so it must be re-timed before
+> this test means anything. The dedicated runbook carries the current procedure, config recipe, and
+> success/failure signatures; the text below is kept as the historical frame.
+
 > **This supersedes the old "capture the create/join initiation functions" leg — that's done.** The
 > create wrapper is charted (`0x140cad4c0`), the Arxan availability gate is bypassed, and leg B (the
 > network-create vmethod `0x1423f5c00`) is charted down to a deep session **registry/init lookup**

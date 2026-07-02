@@ -7,8 +7,13 @@ use super::{Advance, Guide, LobbyState, Role, after_secs, game_state_is, lobby_i
 use crate::game_state::GameState;
 
 /// Every committed guide's name, in registry order (for the "unknown guide" log + docs).
-pub const NAMES: &[&str] =
-    &["rung3-create-chart", "overlay-smoke", "two-player-join", "rig-observation"];
+pub const NAMES: &[&str] = &[
+    "rung3-create-chart",
+    "overlay-smoke",
+    "two-player-join",
+    "rig-observation",
+    "rung3-create-drive",
+];
 
 /// Build the guide named `name`, or `None` if there's no such guide (the binding logs the available
 /// [`NAMES`] and runs no guide). Each guide is rebuilt fresh on request — guides hold closures, so
@@ -19,6 +24,7 @@ pub fn by_name(name: &str) -> Option<Guide> {
         "overlay-smoke" => Some(overlay_smoke()),
         "two-player-join" => Some(two_player_join()),
         "rig-observation" => Some(rig_observation()),
+        "rung3-create-drive" => Some(rung3_create_drive()),
         _ => None,
     }
 }
@@ -220,6 +226,110 @@ fn rig_observation() -> Guide {
              WaitReentryToMap and whether the session persists (the heart of 'seamless').",
         )
         .stub("pending a real second player (session persistence is RE-gated)")
+}
+
+/// The **two-machine rung-3 create-drive run** (`docs/RUNG3-DRIVE-RUNBOOK.md`): with the drive
+/// probes staged on BOTH machines (`[debug.probes] session_probe + drive_create +
+/// force_netsession_ready`, `[gameplay] bypass_session_create_gate`), walk each tester through the
+/// connect (rungs 4 + 2, roles derived by the standard connect step), then WATCH the one-shot driven
+/// create and capture whether a real peer sizes leg B's session-slot array — the confirmed
+/// capacity-0 root cause of the solo create failure (`docs/SESSION-DRIVE.md` > "Why a direct create
+/// fails offline"). Every outcome step auto-finishes off `session-probe:` log lines and branches on
+/// what the window captured, so the verdict lands in the shareable/forwarded log instead of being
+/// relayed. Assumes the driver is re-timed to fire post-link (the runbook's prerequisite); if it
+/// fired early the drive-watch step degrades to skip -> `inspect`, never traps.
+fn rung3_create_drive() -> Guide {
+    Guide::new("rung3-create-drive")
+        .step("both-boot", "Both: load a character into the world.")
+        .done_when(game_state_is(GameState::InGame))
+        // The standard connect step: Open World derives Host, Join world derives Join. Both machines
+        // run this same guide; everything role-tagged after here filters by the derived role.
+        .connect_step()
+        // BOTH machines log `coop: linked ...` on the rung-2 link edge (a stable fragment pinned at
+        // coop::update_link_status), so both advance off the same captured signal.
+        .step("linked", "Both: wait for the Steam P2P link (the 'Co-op partner connected' toast).")
+        .done_when(log_contains("coop: linked"))
+        // JOINER only: the client adopts the host's shared settings (logged by
+        // coop::adopt_host_config); the host has nothing to adopt, so don't make it wait.
+        // Caveat: that line only fires when the synced config DIFFERS from the joiner's own — with
+        // both machines on the identical seed config (the Steam Deck path) it may never appear, and
+        // this degrades to a manual skip/done (never traps). The runbook notes this.
+        .step("config-adopt", "JOINER: wait for the host's settings to sync (the 'settings synced' toast).")
+        .role(Role::Join)
+        .done_when(log_contains("coop: adopted host config"))
+        // The drive is automatic (the one-shot SessionCreateDriver, [debug.probes] drive_create) —
+        // the tester only watches. Finish on the driver's terminal line ("drive-create returned
+        // <bool> — lobby_state now ...", logged by coop/session_probe.rs::SessionCreateDriver) or on
+        // the lobby FSM visibly leaving None, then branch on which outcome the window captured.
+        .step(
+            "drive-watch",
+            "Nothing to press: the create drive fires by itself now that the link is up. Watching \
+             for the drive-create result in the log.",
+        )
+        .done_when(
+            log_contains("drive-create returned")
+                // The driver declining to fire is a captured verdict too (`drive-create skipped —
+                // lobby_state is ..., need None`, same emitter) — route it through the branch
+                // (lands on inspect) instead of degrading to a manual skip.
+                .or(log_contains("drive-create skipped"))
+                .or(lobby_is(LobbyState::TryToCreateSession))
+                .or(lobby_is(LobbyState::Host))
+                .or(lobby_is(LobbyState::FailedToCreateSession)),
+        )
+        .branch(|ctx| {
+            if ctx.log_contains("drive-create returned true")
+                || ctx.state.lobby_state == LobbyState::TryToCreateSession
+                || ctx.state.lobby_state == LobbyState::Host
+            {
+                Advance::To("pass")
+            } else if ctx.log_contains("cap=0 ") {
+                // The gate-trace legb-entry line in this window still reads `slot-array
+                // [+0x20]cap=0 ` — the peer did NOT size the slot array. Logged by
+                // session_probe.rs::log_legb_entry. The trailing space pins the exact zero token
+                // defensively (a nonzero cap like `cap=10` can't substring-match `cap=0` anyway).
+                Advance::To("cap-zero")
+            } else if ctx.log_contains("drive-create returned false") {
+                // The drive DID run in this window and failed, but no capacity-0 line accompanied
+                // it: the runbook's PARTIAL signature (cap>0 yet the tail still rejected) — unless
+                // the legb-entry tracer simply didn't hook, which the banner tells the tester to
+                // check.
+                Advance::To("partial")
+            } else {
+                Advance::To("inspect")
+            }
+        })
+        .default_branch(Advance::To("inspect"))
+        .step(
+            "pass",
+            "PASS: the driven create succeeded (lobby left None toward Host) - a real peer sizes \
+             the session-slot array. Rung-3 create is unblocked; export next.",
+        )
+        .branch(|_| Advance::To("export"))
+        .default_branch(Advance::To("export"))
+        .step(
+            "cap-zero",
+            "Create still rejected with slot-array capacity 0 - a live lobby + peer alone does not \
+             size it. A real (negative) result; export next.",
+        )
+        .branch(|_| Advance::To("export"))
+        .default_branch(Advance::To("export"))
+        .step(
+            "partial",
+            "PARTIAL: create failed past the capacity check (confirm the gate-trace line shows \
+             cap > 0) - a new reject past everything charted. Export next.",
+        )
+        .branch(|_| Advance::To("export"))
+        .default_branch(Advance::To("export"))
+        .step(
+            "inspect",
+            "No create verdict in this window (the drive may have fired before this step, declined \
+             to fire, or not fired at all). Details, if any, are in the log; export next.",
+        )
+        .step("export", "Both: Actions tab -> Export diagnostics, then send the file back.")
+        // drive_create only drives CREATE; the join side (Call B: join the driven host's session by
+        // SteamID) has no driver yet — committed as documentation, revived when that lever lands.
+        .step("join-leg", "Drive the JOIN side (Call B) against the driven host session.")
+        .stub("pending a join-side driver (drive_create drives create only)")
 }
 
 #[cfg(test)]
@@ -474,6 +584,224 @@ mod tests {
                 .banner.unwrap().contains("Export diagnostics"),
             "host skips the joiner-only config-adopt -> export",
         );
+    }
+
+    #[test]
+    fn rung3_create_drive_walks_each_role_to_done_through_the_stub() {
+        // The two-machine drive guide must never trap: a Host runner and a Join runner each
+        // skip-walk the whole guide (through the drive-watch default branch, the inspect step, and
+        // the trailing join-leg stub) to the done toast. Also proves it's solo-walkable (a pinned
+        // role with no peer signals still escapes every step).
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, RigState, Role};
+        let state = RigState::default();
+        for role in [Role::Host, Role::Join, Role::Solo] {
+            let hints = ControlHints { done: "D", skip: "S" };
+            let mut r = GuideRunner::start(rung3_create_drive(), role, hints);
+            let mut finished = false;
+            for _ in 0..16 {
+                // release frame, then a skip-press (rising edge) frame
+                r.tick(&GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+                let press = GuideInput { delta: 0.016, state: &state, new_log_lines: &[], done_held: false, skip_held: true, choice: crate::guide::ChoiceInput::default() };
+                if r.tick(&press).finished_now {
+                    finished = true;
+                    break;
+                }
+            }
+            assert!(finished, "role {role:?} must reach the done toast (incl. past the stub)");
+        }
+    }
+
+    #[test]
+    fn rung3_create_drive_host_auto_finishes_to_pass_on_the_drive_success_line() {
+        // The run's whole point: starting UNRESOLVED, the connect step derives Host from the Open
+        // World action, the linked step auto-finishes on the rung-2 milestone (the joiner-only
+        // config-adopt is filtered out), and the drive-watch step auto-finishes on the driver's
+        // terminal line — branching to "pass" when it reports success. Guards the predicate + branch
+        // wiring against the real log-line formats.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(rung3_create_drive(), Role::Solo, hints);
+        let ingame = RigState { game_state: GameState::InGame, ..Default::default() };
+        let hosting =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Host, ..Default::default() };
+        let tick = |r: &mut GuideRunner, state: &RigState, lines: &[String]| {
+            r.tick(&GuideInput {
+                delta: 0.1,
+                state,
+                new_log_lines: lines,
+                done_held: false,
+                skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
+            })
+        };
+
+        // boot auto-finishes on InGame -> the connect step.
+        assert!(tick(&mut r, &ingame, &[]).banner.unwrap().contains("Open World to host or Join"), "boot -> connect");
+        // Open World resolves the intent -> Host derived -> linked.
+        assert!(tick(&mut r, &hosting, &[]).banner.unwrap().contains("Steam P2P link"), "connect (Open World) -> linked");
+        // linked auto-finishes on the rung-2 milestone; config-adopt is Join-only, so the host lands
+        // straight on drive-watch.
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        assert!(tick(&mut r, &hosting, &linked).banner.unwrap().contains("drive-create result"), "host: linked -> drive-watch");
+        // The driver's terminal line (real format, success shape) auto-finishes and branches to pass.
+        let drove = [
+            "session-probe: gate-trace legb-entry REACHED — NetworkSession=0x143dcdad0 reject#1 [+0x10]=1 slot-array [+0x20]cap=6 [+0x24]count=0 (cap 0 => leg B tail can't store the session)".to_string(),
+            "session-probe: drive-create returned true — lobby_state now TryToCreateSession (TryToCreateSession=driven OK; FailedToCreateSession=internal gate rejected)".to_string(),
+        ];
+        let banner = tick(&mut r, &hosting, &drove).banner.expect("drive-watch -> pass");
+        assert!(banner.contains("PASS"), "success line must branch to 'pass', got: {banner}");
+        // pass finishes (manual done) to export via its constant branch — the outcome steps must not
+        // fall through into each other serially.
+        tick(&mut r, &hosting, &[]); // release
+        let done = GuideInput { delta: 1.0, state: &hosting, new_log_lines: &[], done_held: true, skip_held: false, choice: crate::guide::ChoiceInput::default() };
+        assert!(r.tick(&done).banner.unwrap().contains("Export diagnostics"), "pass -> export");
+    }
+
+    #[test]
+    fn rung3_create_drive_joiner_walks_the_log_path_to_cap_zero_and_on_to_export() {
+        // The joiner leg end to end, on the negative verdict: the connect step derives Join, the
+        // joiner-only config-adopt auto-finishes on the adoption line, and a failed drive whose
+        // gate-trace window still shows `cap=0 ` branches to cap-zero (not the generic inspect) —
+        // then cap-zero's own constant branch converges on export (guarding that the outcome steps
+        // don't fall through into each other serially). Fixtures match the real emitter formats.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(rung3_create_drive(), Role::Solo, hints);
+        let joining =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Join, ..Default::default() };
+        let tick = |r: &mut GuideRunner, lines: &[String]| {
+            r.tick(&GuideInput {
+                delta: 0.1,
+                state: &joining,
+                new_log_lines: lines,
+                done_held: false,
+                skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
+            })
+        };
+        // boot -> connect; the Join action derives the role -> linked.
+        tick(&mut r, &[]); // boot -> connect
+        assert!(tick(&mut r, &[]).banner.unwrap().contains("Steam P2P link"), "connect (Join) -> linked");
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        assert!(tick(&mut r, &linked).banner.unwrap().contains("settings synced"), "joiner: linked -> config-adopt");
+        let adopt = ["coop: adopted host config (settings synced)".to_string()];
+        assert!(tick(&mut r, &adopt).banner.unwrap().contains("drive-create result"), "config-adopt -> drive-watch");
+        // Failure shape: the legb-entry trace still reads cap=0 and the driver returns false.
+        let failed = [
+            "session-probe: gate-trace legb-entry REACHED — NetworkSession=0x143dcdad0 reject#1 [+0x10]=1 slot-array [+0x20]cap=0 [+0x24]count=0 (cap 0 => leg B tail can't store the session)".to_string(),
+            "session-probe: drive-create returned false — lobby_state now FailedToCreateSession (TryToCreateSession=driven OK; FailedToCreateSession=internal gate rejected)".to_string(),
+        ];
+        let banner = tick(&mut r, &failed).banner.expect("drive-watch -> cap-zero");
+        assert!(banner.contains("capacity 0"), "cap=0 failure must branch to 'cap-zero', got: {banner}");
+        // cap-zero (manual done) must converge on export via its constant branch.
+        tick(&mut r, &[]); // release
+        let done = GuideInput { delta: 1.0, state: &joining, new_log_lines: &[], done_held: true, skip_held: false, choice: crate::guide::ChoiceInput::default() };
+        assert!(r.tick(&done).banner.unwrap().contains("Export diagnostics"), "cap-zero -> export");
+    }
+
+    #[test]
+    fn rung3_create_drive_drive_watch_finishes_on_live_lobby_state_alone() {
+        // The live-state fallback arms: with NO drive-create log line in the window, the lobby FSM
+        // visibly sitting at Host must still auto-finish drive-watch and branch to pass (the log
+        // drain could miss/reword; the FSM read is the backstop). Guards the lobby_is(...) arms of
+        // done_when and the state half of the branch, which the log-driven tests leave dead.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, LobbyState, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(rung3_create_drive(), Role::Solo, hints);
+        let hosting =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Host, ..Default::default() };
+        let tick = |r: &mut GuideRunner, state: &RigState| {
+            r.tick(&GuideInput {
+                delta: 0.1,
+                state,
+                new_log_lines: &[],
+                done_held: false,
+                skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
+            })
+        };
+        tick(&mut r, &hosting); // boot -> connect
+        tick(&mut r, &hosting); // connect (Open World) -> linked
+        // linked still needs its log line — feed it, landing on drive-watch.
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        let on_watch = r.tick(&GuideInput { delta: 0.1, state: &hosting, new_log_lines: &linked, done_held: false, skip_held: false, choice: crate::guide::ChoiceInput::default() });
+        assert!(on_watch.banner.unwrap().contains("drive-create result"), "-> drive-watch");
+        // Live FSM at Host, empty log window -> auto-finish -> pass.
+        let live_host = RigState {
+            game_state: GameState::InGame,
+            lobby_intent: LobbyIntent::Host,
+            lobby_state: LobbyState::Host,
+            ..Default::default()
+        };
+        let banner = tick(&mut r, &live_host).banner.expect("drive-watch -> pass on live state");
+        assert!(banner.contains("PASS"), "live lobby Host must branch to 'pass', got: {banner}");
+    }
+
+    #[test]
+    fn rung3_create_drive_discriminates_partial_from_cap_zero() {
+        // A failed drive WITHOUT a capacity-0 line (the gate-trace shows a sized array) is the
+        // runbook's PARTIAL verdict — it must land on the partial step, not cap-zero and not the
+        // generic inspect. Also proves a sized `cap=6` line can't satisfy the pinned `cap=0 `
+        // fragment.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(rung3_create_drive(), Role::Solo, hints);
+        let hosting =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Host, ..Default::default() };
+        let tick = |r: &mut GuideRunner, lines: &[String]| {
+            r.tick(&GuideInput {
+                delta: 0.1,
+                state: &hosting,
+                new_log_lines: lines,
+                done_held: false,
+                skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
+            })
+        };
+        tick(&mut r, &[]); // boot -> connect
+        tick(&mut r, &[]); // connect (Open World) -> linked
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        assert!(tick(&mut r, &linked).banner.unwrap().contains("drive-create result"), "-> drive-watch");
+        let failed_sized = [
+            "session-probe: gate-trace legb-entry REACHED — NetworkSession=0x143dcdad0 reject#1 [+0x10]=1 slot-array [+0x20]cap=6 [+0x24]count=0 (cap 0 => leg B tail can't store the session)".to_string(),
+            "session-probe: drive-create returned false — lobby_state now FailedToCreateSession (TryToCreateSession=driven OK; FailedToCreateSession=internal gate rejected)".to_string(),
+        ];
+        let banner = tick(&mut r, &failed_sized).banner.expect("drive-watch -> partial");
+        assert!(banner.contains("PARTIAL"), "cap=6 + returned false must branch to 'partial', got: {banner}");
+        // partial (manual done) must converge on export via its constant branch, like its siblings.
+        tick(&mut r, &[]); // release
+        let done = GuideInput { delta: 1.0, state: &hosting, new_log_lines: &[], done_held: true, skip_held: false, choice: crate::guide::ChoiceInput::default() };
+        assert!(r.tick(&done).banner.unwrap().contains("Export diagnostics"), "partial -> export");
+    }
+
+    #[test]
+    fn rung3_create_drive_routes_a_skipped_drive_to_inspect() {
+        // The driver declining to fire (`drive-create skipped — lobby_state is ..., need None`,
+        // logged by session_probe.rs::SessionCreateDriver) is a captured verdict: drive-watch must
+        // auto-finish on it and land on inspect via the branch's else arm — not strand the tester
+        // on a step waiting for a result line that will never come.
+        use crate::guide::{ControlHints, GuideInput, GuideRunner, LobbyIntent, RigState, Role};
+        let hints = ControlHints { done: "D", skip: "S" };
+        let mut r = GuideRunner::start(rung3_create_drive(), Role::Solo, hints);
+        let hosting =
+            RigState { game_state: GameState::InGame, lobby_intent: LobbyIntent::Host, ..Default::default() };
+        let tick = |r: &mut GuideRunner, lines: &[String]| {
+            r.tick(&GuideInput {
+                delta: 0.1,
+                state: &hosting,
+                new_log_lines: lines,
+                done_held: false,
+                skip_held: false,
+                choice: crate::guide::ChoiceInput::default(),
+            })
+        };
+        tick(&mut r, &[]); // boot -> connect
+        tick(&mut r, &[]); // connect (Open World) -> linked
+        let linked = ["coop: linked with partner peer-7 (rung 2); versions match".to_string()];
+        assert!(tick(&mut r, &linked).banner.unwrap().contains("drive-create result"), "-> drive-watch");
+        let skipped = ["session-probe: drive-create skipped — lobby_state is Host, need None (already in/at a session)".to_string()];
+        let banner = tick(&mut r, &skipped).banner.expect("drive-watch -> inspect");
+        assert!(banner.contains("No create verdict"), "a skipped drive must land on 'inspect', got: {banner}");
     }
 
     #[test]
