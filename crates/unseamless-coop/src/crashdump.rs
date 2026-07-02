@@ -21,8 +21,17 @@
 //! Self-contained (only `std` + `windows` + `log`) so it is shared verbatim by the cdylib (the player
 //! build / a full ER friend run) and the `dx12-harness` (a friend's lightweight, ER-free repro) via a
 //! `#[path]` include — keep it free of `crate::` references.
+//!
+//! **Displacement guard:** the top-level filter is a single process-global slot, and anything else in
+//! the process (Steam's overlay, the CRT, another mod) can silently overwrite it. That happened in the
+//! 2026-07-01 friend crash: the access violation reached WER, yet this handler — installed at t+0.03s —
+//! logged nothing (see OVERLAY-RENDERING.md > "WER Verdict"). So [`install`] also spawns a detached
+//! guard thread that re-asserts the filter every few seconds; `SetUnhandledExceptionFilter` returns the
+//! *previous* filter, so each re-assert doubles as detection, and the guard warns (once per displacement
+//! episode, not per tick) naming the module that took the slot — or that the slot was cleared to null.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
@@ -34,16 +43,97 @@ use windows::core::PCWSTR;
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// How often the guard thread re-asserts the filter. A sleeping thread at this cadence is free, and a
+/// few seconds caps how long a set-and-hold displacer keeps the slot unlogged (the 2026-07-01 crash
+/// landed ~16s after install; a displacer that re-hooks between ticks still gets detected and warned,
+/// though it keeps winning the slot).
+const REASSERT_PERIOD: Duration = Duration::from_secs(3);
+
+/// `LAST_DISPLACER` sentinel: no displacement episode is currently being reported. (`0` can't serve as
+/// the sentinel — it means the slot was found cleared to null.)
+const NO_DISPLACER: usize = usize::MAX;
+
+/// The foreign filter value already warned about for the current displacement episode, so a displacer
+/// that re-hooks between ticks logs once per episode, not per tick. Reset to [`NO_DISPLACER`] whenever
+/// the slot is observed intact, so a later, fresh displacement — same actor or not — warns again.
+static LAST_DISPLACER: AtomicUsize = AtomicUsize::new(NO_DISPLACER);
+
 /// Install the unhandled-exception filter once. Idempotent; safe to call before logging is up (the
 /// handler logs via `log`, which no-ops until a logger is set). Call as early as possible so it covers
 /// later hook installs (the overlay's DX12 present-hook in particular).
+///
+/// Also spawns the detached displacement-guard thread (module docs) — the DLL stays resident for the
+/// process lifetime, so a thread looping over its code is safe; it dies with the process.
 pub fn install() {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
     // SAFETY: registering a process-global top-level filter; `handler` is a valid `extern "system"` fn.
     unsafe { SetUnhandledExceptionFilter(Some(handler)) };
-    log::info!("crashdump: unhandled-exception handler installed (logs the faulting module on a hard crash)");
+    log::info!("crashdump: unhandled-exception handler installed (logs the faulting module on a hard crash; re-asserted every {}s against displacement)", REASSERT_PERIOD.as_secs());
+
+    let guard = std::thread::Builder::new()
+        .name("usc-crashdump-guard".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(REASSERT_PERIOD);
+                reassert_filter();
+            }
+        });
+    if let Err(e) = guard {
+        // Best-effort: the handler is still installed, just unguarded against displacement.
+        log::warn!("crashdump: couldn't spawn the filter guard thread ({e}); the handler can be silently displaced");
+    }
+
+    force_test_displacement_if("UNSEAMLESS_TEST_FILTER_DISPLACEMENT");
+}
+
+/// Guard self-test (inert by default): if `env_var` is set to `1`, hand the slot to a dummy foreign
+/// filter right away — the guard's first tick must then log the DISPLACED warning (naming our own
+/// module, since the dummy lives in it) and re-assert ours. Validates the detect/warn/re-assert cycle
+/// on any box, WARP/VM included, without waiting for a real displacer (same idea as
+/// [`force_test_crash_if`]).
+fn force_test_displacement_if(env_var: &str) {
+    if std::env::var(env_var).as_deref() != Ok("1") {
+        return;
+    }
+    log::warn!("crashdump: {env_var}=1 — installing a dummy top-level filter to validate the displacement guard");
+    // SAFETY: registering a valid `extern "system"` filter fn; displaces ours on purpose.
+    unsafe { SetUnhandledExceptionFilter(Some(test_displacer)) };
+}
+
+/// The self-test's stand-in "foreign" filter (see [`force_test_displacement_if`]). Well-behaved: if a
+/// real crash lands inside the ≤one-tick test window, it defers to the OS default (WER) rather than
+/// swallowing it. Trivial body — nothing here can panic across the FFI boundary.
+unsafe extern "system" fn test_displacer(_info: *const EXCEPTION_POINTERS) -> i32 {
+    0 // EXCEPTION_CONTINUE_SEARCH
+}
+
+/// One guard tick: re-assert our filter and inspect what held the slot. The return value of
+/// `SetUnhandledExceptionFilter` is the *previous* top-level filter, so re-asserting is also the
+/// detection: ours back means intact; anything else means we were displaced — warn loudly (once per
+/// displacement episode) with the owning module, because a hard crash during that window would have
+/// bypassed our logging entirely (exactly the 2026-07-01 silence).
+fn reassert_filter() {
+    // SAFETY: same process-global registration as `install`.
+    let prev = unsafe { SetUnhandledExceptionFilter(Some(handler)) };
+    let prev_addr = prev.map_or(0usize, |f| f as *const () as usize);
+    if prev_addr == handler as *const () as usize {
+        // Intact — close any open episode so a fresh displacement warns again.
+        LAST_DISPLACER.store(NO_DISPLACER, Ordering::Relaxed);
+        return;
+    }
+    if LAST_DISPLACER.swap(prev_addr, Ordering::Relaxed) == prev_addr {
+        return; // same episode — the displacer re-hooks between ticks; don't spam
+    }
+    if prev_addr == 0 {
+        log::warn!("crashdump: unhandled-exception filter had been CLEARED (top-level filter was null) — re-asserted ours");
+    } else {
+        log::warn!(
+            "crashdump: unhandled-exception filter had been DISPLACED by {} — re-asserted ours (a crash while displaced logs nothing here; check WER)",
+            module_at(prev_addr),
+        );
+    }
 }
 
 /// Deliberately crash (null write) if `env_var` is set to `1`, to validate the handler + its log format
