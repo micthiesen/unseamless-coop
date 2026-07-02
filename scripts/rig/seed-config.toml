@@ -8,7 +8,7 @@
 # run captures the verbose lines (CLAUDE.md's logging rule keeps these silent by default). The
 # [session].password is now the co-op trigger: with it set, lobby discovery runs on launch (creates a
 # lobby + becomes host solo, finds + joins a partner's with two players), so a rig run exercises the
-# real connection path. It must be 5+ chars (the mod rejects a shorter one at startup).
+# real connection path. It must be 8+ chars (the mod rejects a shorter one at startup).
 
 [gameplay]
 crit_coop = true

@@ -53,7 +53,10 @@ skipped_live=0
 solo_seen=0
 
 prune_one() {  # <name>
-  local name="$1" sess="usc-worker-$name" ws="$rroot/$name" alive=no
+  # Two `local`s: in a single one, $name in the later assignments expands BEFORE this local takes
+  # effect (SC2318) — it only worked because the caller's loop variable happened to also be $name.
+  local name="$1"
+  local sess="usc-worker-$name" ws="$rroot/$name" alive=no
   tmux has-session -t "$sess" 2>/dev/null && alive=yes
   if [ "$dry" -eq 1 ]; then
     local wstate=gone; [ -d "$ws" ] && wstate=present

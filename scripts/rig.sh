@@ -97,7 +97,8 @@ DIST_SRC="$ROOT/scripts/dist"
 # tester's real saves are never touched. Matches the rig seed's isolation choice.
 FRIEND_SAVE_EXT="${FRIEND_SAVE_EXT:-uco}"
 # Where the shared co-op password comes from (precedence: --password flag, this env, then this
-# gitignored file). Must be >= 5 chars (the mod's startup guard rejects shorter).
+# gitignored file). Must be >= 8 chars (unseamless_core::config::MIN_PASSWORD_LEN — the mod's
+# startup guard rejects shorter).
 SHARED_PASSWORD_FILE="${SHARED_PASSWORD_FILE:-$DIST_SRC/.shared-password}"
 # GitHub prerelease tag `share` uploads to (a rolling bucket of test builds, not a version release).
 SHARE_TAG="${SHARE_TAG:-friends-test}"
@@ -770,9 +771,9 @@ resolve_password() {
   [[ -z "$pw" ]] && pw="${UNSEAMLESS_SHARED_PASSWORD:-}"
   [[ -z "$pw" && -f "$SHARED_PASSWORD_FILE" ]] && pw="$(tr -d '[:space:]' < "$SHARED_PASSWORD_FILE")"
   [[ -n "$pw" ]] || die "no shared password. Pass --password X, set UNSEAMLESS_SHARED_PASSWORD, or write one to $SHARED_PASSWORD_FILE"
-  # 5 is unseamless_core::config::MIN_PASSWORD_LEN — a fail-fast so we don't ship a config the mod
+  # 8 is unseamless_core::config::MIN_PASSWORD_LEN — a fail-fast so we don't ship a config the mod
   # rejects at startup on a friend's machine; the runtime guard (password_is_valid) stays authoritative.
-  [[ ${#pw} -ge 5 ]] || die "shared password must be >= 5 characters (the mod rejects shorter)."
+  [[ ${#pw} -ge 8 ]] || die "shared password must be >= 8 characters (the mod rejects shorter)."
   # Restrict to a safe charset: the seed config is written via an UNquoted heredoc (so $build_id et al.
   # expand) and as a TOML basic string, so a `$`, backtick, or `\` would shell-expand/execute and a `"`
   # would break the TOML. The mod's own generated passwords are [A-Z0-9], so this never rejects a real one.
@@ -1007,16 +1008,19 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          so only run this on initial apply or when you want to reset/refresh it.
                          Game must be closed.
   dismiss [N]            Click through the startup popups (offline-mode / connection-error) by
-                         injecting N confirm presses (default 8) into the focused game window via
-                         ydotool, re-focusing the window before each. Run if a popup is still up.
+                         injecting N confirm presses (default 30, RIG_DISMISS_PRESSES) into the focused game window via
+                         ydotool, re-focusing the window periodically. Run if a popup is still up.
+  enter-world [secs]     From the main menu, select "Continue" and wait (default 150s) until the log
+                         reports in_gameplay = true. Also 'cycle --in-world' does this after launch.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
                          Auto-dismisses the startup popups; pass --no-dismiss to skip that.
+                         --in-world additionally loads the save and waits until in-world.
   package [opts]         Build + assemble a Windows friend-install zip in dist/. Bundles our binaries,
                          a shared seed config, a sha256 MANIFEST, and the PowerShell installer. The zip
                          is password-protected ('$FRIEND_ZIP_PASSWORD') to dodge browser/AV false-positives.
         --release          Ship the lean profile (default: diag — symbols + the build id in-overlay).
         --password X       Shared co-op password (else $UNSEAMLESS_SHARED_PASSWORD, else the file
-                           scripts/dist/.shared-password). Must be >= 5 chars.
+                           scripts/dist/.shared-password). Must be >= 8 chars.
         --apply            Also install the same build locally (host) with the shared config.
   share [zip]            Upload a packaged zip (default: newest in dist/) to the GitHub prerelease
                          '$SHARE_TAG', recreating it fresh each time so it re-pins to the top of the

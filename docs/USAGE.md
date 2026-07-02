@@ -48,7 +48,7 @@ to apply changes.
 **Who sets what** (once co-op is wired up):
 
 - **Everyone must match** — `[session] password`, the matchmaking key. It has to be identical for
-  the whole party (≥ 5 characters).
+  the whole party (≥ 8 characters).
 - **The host decides for everyone** — the host's values for these are pushed to the party and
   override each client's own:
   - `[scaling]` — per-extra-player enemy/boss health, damage, and posture percentages.
