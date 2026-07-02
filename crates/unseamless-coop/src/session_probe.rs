@@ -4,7 +4,9 @@
 //! The SDK gives us the FSM *state* (`CSSessionManager.{lobby_state, protocol_state}`), the roster,
 //! and the transport vtable — but **not** the internal functions that drive
 //! `lobby_state None -> TryToCreateSession -> Host` (host) and `None -> TryToJoinSession -> Client`
-//! (joiner). Finding those is rig-gated RE; this module is the scaffold that makes that run cheap.
+//! (joiner). Static RE has since charted those entries
+//! ([`docs/SESSION-RE-FINDINGS.md`](../../../docs/SESSION-RE-FINDINGS.md)); this module instruments
+//! them, so the two-player rig run confirms them live cheaply.
 //!
 //! It ships **gated** (`[debug.probes] session_probe`, off by default) and splits into two surfaces,
 //! both emitting the unique, greppable `session-probe:` prefix so a *batched* rig run (several lanes,
@@ -16,16 +18,18 @@
 //!    detection machinery runs and is correct, ready for the two-player run. Reads through the shared
 //!    [`crate::session::read`] (the same path the observer + diag report use) so the probe sees the
 //!    session identically and there's one session-read path, not a parallel one to drift.
-//! 2. **Create/join entry hooks** ([`install_hooks`]) — once the initiation-function AOBs are charted
-//!    on the rig, a `jmp-back` hook at each entry logs the call and its argument registers (the
-//!    candidate `this` pointer + peer SteamID), correlated by frame/timestamp to the FSM transition
-//!    the call triggers. This half is **inert until an address lands**: the AOB landmarks below are
-//!    `None` (a precise TODO), so `install_hooks` logs "not yet charted" and installs nothing. Filling
-//!    [`SESSION_CREATE_SITE`] / [`SESSION_JOIN_SITE`] is the *only* remaining step — the whole install
-//!    path (resolve landmark, place the hook, log) already compiles and is in place.
+//! 2. **Create/join entry hooks** ([`install_hooks`]) — a `jmp-back` hook at each charted initiation
+//!    entry (the create/join *wrappers*, statically charted 2026-06-27) logs the call and its argument
+//!    registers (the candidate `this` pointer + peer SteamID), correlated by frame/timestamp to the
+//!    FSM transition the call triggers. Resolved by **fixed offset** from the live exe base like the
+//!    gate tracers + [`SessionCreateDriver`] below (no static AOB is derivable — the exe's on-disk
+//!    `.text` is Arxan/Steam-encrypted), with a prologue-bytes guard so a drifted offset after a game
+//!    update fails safe (warn, no hook) instead of patching the wrong bytes. What remains rig-gated is
+//!    only the live *confirm*: watch a real host/join fire these hooks on the two-player run (the
+//!    create leg is solo-confirmable — `drive_create` calls the very function the create hook sits on).
 //!
-//! The hand-off recipe (which two functions, why they're the create/join initiation, how to AOB-scan
-//! for them, what `session-probe:` lines mean) is [`docs/SESSION-RE-RUNBOOK.md`](../../../docs/SESSION-RE-RUNBOOK.md).
+//! The hand-off recipe (which two functions, why they're the create/join initiation, what the
+//! `session-probe:` lines mean) is [`docs/SESSION-RE-RUNBOOK.md`](../../../docs/SESSION-RE-RUNBOOK.md).
 //!
 //! ## Clean-room
 //! Everything here is grounded in the public SDK (the charted FSM enums/fields) or in our own
@@ -39,7 +43,6 @@
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
-use pelite::pattern::Atom;
 use unseamless_core::config::Config;
 use unseamless_core::util::{FrameThrottle, Latch};
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
@@ -47,61 +50,118 @@ use windows::core::PCSTR;
 
 use crate::feature::{Feature, Tick};
 
-/// A landmark-relative function entry to hook: scan for the unique `landmark`, step `offset` bytes to
-/// the entry, and verify the first byte equals `expect` (the prologue opcode) before hooking — the
-/// same fail-loud-and-safe contract [`crate::patch::resolve_landmark`] gives the code patches. The
-/// fields stay `None` at the const sites below until the rig RE fills them; see the module docs.
-struct HookSite {
-    /// pelite masked-AOB pattern that uniquely locates a fixed point near the function entry.
-    landmark: &'static [Atom],
-    /// Signed byte distance from the landmark match-start to the function entry (0 if the landmark
-    /// *is* the entry).
-    offset: isize,
-    /// The opcode byte expected at the entry, as an anti-drift guard (e.g. `0x48` for a
-    /// `48 8B C4` / `48 83 EC ..` prologue, `0x40` for `40 53 ..`).
-    expect: u8,
-}
-
 // ---------------------------------------------------------------------------------------------------
-// RIG TODO (rung 3): the create/join initiation function entries are not charted by the SDK and can
-// only be found with the game running. Until then both sites are `None` and the hook half is inert
-// (the FSM logger above still works solo). A static pass (docs/SESSION-RE-FINDINGS.md) charted the
-// supporting anchors and proved this must be a *runtime write-watch*, not a static byte scan:
-//   - The live `CSSessionManager` is `[0x143d7a4d0]`, == the `base` the FSM logger prints below.
-//   - `lobby_state` (+0xc; the vftable is 8 bytes + `unk8` u32, so the FSM pair is at +0xc/+0x10, NOT
-//     +0x8) is written on the singleton by a *register* store, never an immediate — so scanning for
-//     `C7 4? 0C 01/04` finds only unrelated objects (it was tried; see the findings doc).
-// To chart, follow docs/SESSION-RE-RUNBOOK.md > step 2 (strategy A):
-//   1. Frida-watch a 4-byte write on `base + 0xc`; host once (→1 = create) and join once (→4 = join).
-//      The watch names the writing instruction on the first `None →` edge.
-//   2. Walk back to the enclosing function's prologue; translate ~16 unique entry bytes to a pelite
-//      pattern (one `?` per wildcard byte). Mind that the writer is a `this`-param callee — hook the
-//      outermost initiation entry the host/join path calls, per the captured stack.
-//   3. Set the const below to `Some(HookSite { landmark: pattern!("…"), offset: …, expect: 0x.. })`
-//      and rebuild. `install_hooks` then resolves + hooks it; watch for the `session-probe: hooked …`
-//      line, then the `session-probe: create-session initiated …` line on a real connect.
+// Create/join initiation entries — CHARTED (static pass 2026-06-27) and wired. Both chains landed
+// bottom-up from the `lobby_state` write (docs/SESSION-RE-FINDINGS.md > "Session create/join
+// initiation — STATIC chart"):
+//   create: driver 0x140a23010 → wrapper 0x140cad4c0 → inner 0x140cb1f70 (store `[this+0xc]=1` @ 0x140cb208e)
+//   join:   driver 0x1406fa850 → wrapper 0x140cae640 → inner 0x140cb2470 (store `[this+0xc]=4` @ 0x140cb25f0)
+// What remains rig-gated is only the live *confirm* (a real host/join firing these hooks on the
+// two-player run) — the hooks below are that instrument.
+//
+// Wrapper vs. inner: we hook the WRAPPERS, not the inners, per the findings doc ("hooking the
+// wrapper is preferable … and is the right altitude to observe the call + args anyway"). The wrapper
+// is the outermost *initiation* entry on each chain — the drivers above it are flow plumbing that
+// load `this=[G]` out of a request object — and it owns the failure path: it forwards its registers
+// to the inner untouched (so the hook reads the same args the inner gets) and on an inner `false`
+// sets `lobby_state = FailedToCreateSession/FailedToJoinSession`, so one hook at this altitude sees
+// every initiation attempt, synchronously-rejected ones included. Mechanically it's also the safer
+// site: both wrappers open with the clean relocatable prologue `88 54 24 10 / 57 / 48 83 ec ..`
+// (plenty of position-independent bytes for ilhook's 14-byte jmp-back), where the inners open a
+// large 0x3c0 stack frame.
+//
+// Resolution is by FIXED OFFSET from the live GetModuleHandle(NULL) base, exactly like the gate
+// tracers + SessionCreateDriver below: a static AOB is not derivable here (the exe's on-disk .text
+// is Arxan/Steam-encrypted, and the shared `88 54 24 10` prologue is too common to be unique
+// anyway), so we keep the charted offsets and guard drift by verifying the entry's charted prologue
+// bytes before patching — after a game update the check fails safe (warn + no hook), never hooks
+// garbage. Re-derive the offsets per docs/SESSION-RE-FINDINGS.md > "Re-derivation recipe" (scan the
+// CSSessionManager method block 0x140cad000..0x140cb3000 for the `mov [reg+0xc], imm` setter family;
+// the →1/→4 functions are the inners, their sole callers the wrappers).
 // ---------------------------------------------------------------------------------------------------
 
-/// Entry of the function that starts hosting (drives `lobby_state -> TryToCreateSession`). `None`
-/// until charted on the rig — see the RIG TODO above and `docs/SESSION-RE-RUNBOOK.md`.
-const SESSION_CREATE_SITE: Option<HookSite> = None;
+/// Join-initiation entry: the join **wrapper** (`0x140cae640`), offset from the exe preferred base
+/// (`0x140000000`). Signature `join(this /*rcx*/, u8 flag /*dl*/, HostBlob* blob /*r8*/, u32 arg4
+/// /*r9d*/, stack arg5)` — the peer/host identity (SteamID64) rides inside the `{begin,end}` blob
+/// `r8` points at; the hook logs the pointer value only, never derefs (read-only contract). The
+/// create entry needs no twin const: it's the same wrapper the drive probe calls,
+/// [`CREATE_WRAPPER_OFFSET`].
+const JOIN_WRAPPER_OFFSET: usize = 0x140c_ae640 - 0x1_4000_0000;
 
-/// Entry of the function that starts joining (drives `lobby_state -> TryToJoinSession`). `None` until
-/// charted on the rig — see the RIG TODO above and `docs/SESSION-RE-RUNBOOK.md`.
-const SESSION_JOIN_SITE: Option<HookSite> = None;
+/// Charted entry bytes of the create wrapper (`88 54 24 10` = `mov [rsp+0x10], dl` spilling the
+/// `flag` arg; `57` = `push rdi`; `48 83 EC 30` = `sub rsp, 0x30`), verified at the resolved address
+/// before hooking as the anti-drift guard — the same role `expect` plays in
+/// [`crate::patch::resolve_landmark`], but multi-byte: the lead `0x88` alone is one of the most
+/// common x64 opcode bytes, so a single byte would wave a drifted offset through. Nine bytes reach
+/// the `sub rsp` immediate, which also differs between the two wrappers (`0x30` vs `0x40`), so each
+/// guard pins its own wrapper, not just "some wrapper-shaped prologue". Source:
+/// docs/SESSION-RE-FINDINGS.md > "Landmark hints for `session_probe.rs`".
+const CREATE_WRAPPER_PROLOGUE: [u8; 9] = [0x88, 0x54, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30];
+/// The join wrapper's charted entry bytes — same shape as [`CREATE_WRAPPER_PROLOGUE`] but with a
+/// `sub rsp, 0x40` frame.
+const JOIN_WRAPPER_PROLOGUE: [u8; 9] = [0x88, 0x54, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x40];
 
-/// Install the create/join entry hooks if the probe is enabled. A no-op when the probe is off; when
-/// on but the AOBs aren't charted yet, logs that each hook is inert and installs nothing. Mirrors
-/// [`crate::saves::install`] / [`crate::app::apply_boot_patches`]: call once, on the init thread, at
-/// install. Best-effort throughout — a probe never aborts the game (it's not a `guard::fatal`
-/// condition; it's a diagnostic).
+/// Install the create/join initiation hooks and the leg-B gate tracers, each per its own config gate.
+/// Mirrors [`crate::saves::install`] / [`crate::app::apply_boot_patches`]: call once, on the init
+/// thread, at install. Best-effort throughout — a probe never aborts the game (it's not a
+/// `guard::fatal` condition; it's a diagnostic).
 pub fn install_hooks(config: &Config) {
-    if config.debug.probes.session_probe {
-        install_one("create-session", &SESSION_CREATE_SITE);
-        install_one("join-session", &SESSION_JOIN_SITE);
-    }
+    install_initiation_hooks(config);
     // Independently gated on `drive_create` (you only want the gate trace alongside a driven create).
     install_create_gate_trace(config);
+}
+
+/// Place the read-only create/join initiation hooks when `session_probe` is on. No-op otherwise.
+///
+/// **Call-once / init-thread precondition** (same contract as [`crate::saves::install`]): the only
+/// caller is [`install_hooks`] from `app::pre_task_startup`, which runs once on the short-lived init
+/// thread before the hooked paths can fire. Like every `ilhook` install this rewrites the entries'
+/// first bytes *without suspending other threads* (the unsuspended-install race `saves.rs` documents
+/// at length) — safe here because the wrappers are event-driven initiation entries (called once off
+/// a host/join action), necessarily idle at boot-time install.
+fn install_initiation_hooks(config: &Config) {
+    if !config.debug.probes.session_probe {
+        return;
+    }
+    let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::error!("session-probe: initiation hooks — GetModuleHandle(NULL) failed: {e}");
+            return;
+        }
+    };
+    // The create entry reuses the drive probe's [`CREATE_WRAPPER_OFFSET`] (`0x140cad4c0`): the hook
+    // sits on exactly the function `drive_create` calls, so a driven create also fires it — a free
+    // solo self-test of the hook before the two-player run.
+    install_initiation_hook("create-session", exe_base + CREATE_WRAPPER_OFFSET, &CREATE_WRAPPER_PROLOGUE);
+    install_initiation_hook("join-session", exe_base + JOIN_WRAPPER_OFFSET, &JOIN_WRAPPER_PROLOGUE);
+}
+
+/// Verify the wrapper's charted prologue bytes at `addr`, then place the read-only
+/// [`log_initiation`] `jmp-back` hook there. Logs and returns on any failure — degrade, never abort.
+/// `name` is `'static` because the detour closure captures it for the lifetime of the (forgotten,
+/// process-resident) hook.
+fn install_initiation_hook(name: &'static str, addr: usize, expect: &'static [u8]) {
+    // Anti-drift guard: confirm the charted entry is still what we expect before rewriting live
+    // code — after a game update a stale offset would land mid-function and patch garbage. The warn
+    // line dumps the observed bytes, so a drift report doubles as the first re-chart datum.
+    // SAFETY: `addr..addr+expect.len()` is the live exe base + a charted `.text` offset — inside the
+    // mapped, readable image (the image is orders of magnitude larger than the offset). Read-only,
+    // byte-at-a-time (no reference formed over memory we don't own).
+    let seen: Vec<u8> =
+        (0..expect.len()).map(|i| unsafe { ((addr + i) as *const u8).read_volatile() }).collect();
+    if seen != expect {
+        log::warn!(
+            "session-probe: {name} entry at {addr:#x} reads {seen:02x?}, expected {expect:02x?} \
+             (offset drifted — game update?); hook not placed. Re-chart per docs/SESSION-RE-FINDINGS.md"
+        );
+        return;
+    }
+    // jmp-back so the original initiation runs untouched right after we log — we only observe.
+    match place_jmp_back_hook(name, addr, log_initiation) {
+        Ok(()) => log::info!("session-probe: hooked {name} initiation at {addr:#x}"),
+        Err(e) => log::error!("session-probe: failed to hook {name}: {e}"),
+    }
 }
 
 // --- Leg-B create-gate tracer (pairs with `drive_create`) ---------------------------------------
@@ -142,11 +202,27 @@ fn install_create_gate_trace(config: &Config) {
     install_offset_hook("create-gate4", exe_base + CREATE_GATE4_OFFSET, log_create_gate4);
 }
 
-/// Place one read-only `jmp-back` hook at a resolved address. `mem::forget`s the handle (resident for
-/// the process lifetime, like every hook here — never unhook a live code path).
+/// Place one read-only `jmp-back` hook at a resolved address for the gate tracers, logging the
+/// outcome under their `gate-trace` tag.
 fn install_offset_hook(name: &'static str, addr: usize, body: fn(&'static str, *mut Registers)) {
-    // SAFETY: `addr` is a charted, clean function entry (exe base + a fixed offset to a verified
-    // prologue); the detour body is read-only and panic-firewalled (see the log_* fns).
+    match place_jmp_back_hook(name, addr, body) {
+        Ok(()) => log::info!("session-probe: gate-trace hooked {name} at {addr:#x}"),
+        Err(e) => log::error!("session-probe: gate-trace failed to hook {name}: {e}"),
+    }
+}
+
+/// Place one read-only `jmp-back` hook at a resolved address, `mem::forget`ing the handle (resident
+/// for the process lifetime, like every hook here — never unhook a live code path). Outcome logging
+/// is the caller's (each hook surface has its own log-line contract); a failure comes back with the
+/// ilhook error pre-rendered.
+fn place_jmp_back_hook(
+    name: &'static str,
+    addr: usize,
+    body: fn(&'static str, *mut Registers),
+) -> Result<(), String> {
+    // SAFETY: `addr` is a charted, clean function entry (exe base + a fixed offset; the initiation
+    // sites are additionally prologue-verified by their caller); the detour body is read-only and
+    // panic-firewalled (see the log_* fns).
     let hook = unsafe {
         hook_closure_jmp_back(
             addr,
@@ -158,9 +234,9 @@ fn install_offset_hook(name: &'static str, addr: usize, body: fn(&'static str, *
     match hook {
         Ok(h) => {
             std::mem::forget(h);
-            log::info!("session-probe: gate-trace hooked {name} at {addr:#x}");
+            Ok(())
         }
-        Err(e) => log::error!("session-probe: gate-trace failed to hook {name}: {e:?}"),
+        Err(e) => Err(format!("{e:?}")),
     }
 }
 
@@ -219,53 +295,6 @@ fn log_create_gate4(_name: &'static str, regs: *mut Registers) {
             rd(0x78),
         );
     }));
-}
-
-/// Resolve one initiation-function entry from its (currently-`None`) landmark and place a `jmp-back`
-/// logging hook there. Logs and returns on any failure — degrade, never abort.
-///
-/// **Call-once / init-thread precondition** (same contract as [`crate::saves::install`]): the only
-/// caller is `install_hooks` from `app::pre_task_startup`, which runs once on the short-lived init
-/// thread before the hooked path can fire. Like every `ilhook` install it rewrites the entry's first
-/// bytes *without suspending other threads* (the unsuspended-install race `saves.rs` documents at
-/// length), so the charted site must be a real, idle-at-install function prologue. `name` is `'static`
-/// because the detour closure captures it for the lifetime of the (forgotten, process-resident) hook.
-fn install_one(name: &'static str, site: &Option<HookSite>) {
-    let Some(site) = site else {
-        log::info!(
-            "session-probe: {name} hook AOB not yet charted (rig RE pending); hook inert — see docs/SESSION-RE-RUNBOOK.md"
-        );
-        return;
-    };
-    // resolve_landmark bounds-checks the site against the mapped image and verifies the entry opcode,
-    // logging any miss under its own `patch '<name>':` prefix; a too-loose/drifted landmark fails safe
-    // (no hook placed). The opcode check confirms the *byte*, not that the entry has enough relocatable
-    // prologue for the 14-byte jmp-back — confirm the landmark sits on a clean function prologue (see
-    // the RIG TODO). Emit a `session-probe:` line on the miss too, so a `grep session-probe:` of an RE
-    // log still tells the whole story (the resolve detail is in the adjacent `patch '<name>':` line).
-    let Some(addr) = crate::patch::resolve_landmark(name, site.landmark, site.offset, site.expect)
-    else {
-        log::warn!("session-probe: {name} landmark did not resolve; hook not placed (see patch log above)");
-        return;
-    };
-    // jmp-back so the original initiation runs untouched right after we log — we only observe.
-    // SAFETY: `hook_closure_jmp_back` is unsafe (it patches live `.text`); `addr` was bounds-checked +
-    // opcode-verified by `resolve_landmark`, and the closure body is panic-firewalled (see `log_initiation`).
-    let hook = unsafe {
-        hook_closure_jmp_back(
-            addr as usize,
-            move |regs: *mut Registers| log_initiation(name, regs),
-            CallbackOption::None,
-            HookFlags::empty(),
-        )
-    };
-    match hook {
-        Ok(h) => {
-            std::mem::forget(h); // resident for the process lifetime — never unhook a live code path
-            log::info!("session-probe: hooked {name} initiation at {:#x}", addr as usize);
-        }
-        Err(e) => log::error!("session-probe: failed to hook {name}: {e:?}"),
-    }
 }
 
 /// `jmp-back` detour body for a session create/join initiation call, shared by both entries (they
@@ -395,6 +424,8 @@ impl Feature for SessionFsmProbe {
 
 /// Offset of the create wrapper (`0x140cad4c0`) from the exe preferred base (`0x140000000`). Resolved
 /// against the live `GetModuleHandle(NULL)` base so it survives a rebase, rather than a hardcoded VA.
+/// Shared with the create-initiation hook ([`install_initiation_hooks`]): observer and driver point
+/// at the same charted function, so they can't drift apart.
 const CREATE_WRAPPER_OFFSET: usize = 0x140c_ad4c0 - 0x1_4000_0000;
 /// `flag` arg (`dl`). Sign data supplies this in the natural path; `0` is the first guess for a driven
 /// create — change here and rebuild if a run lands on `FailedToCreate`.

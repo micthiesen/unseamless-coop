@@ -54,12 +54,13 @@ uses that one prefix, so a batched rig run greps `session-probe:` and gets exact
    *missing* `TryTo*` line means "too fast to catch at FrameBegin," not "the game skipped it." The
    entry hooks (below) are the authoritative capture; the FSM log is the correlation timeline.
 
-2. **Create/join entry hooks** (`install_hooks`) — **inert until the AOBs below are charted**. With
-   the probe on but the addresses unset it logs, once each at boot:
-   `session-probe: create-session hook AOB not yet charted (rig RE pending); hook inert — see docs/SESSION-RE-RUNBOOK.md`
-   Once charted (below), each hook logs on a real connect, **at `debug!` level** (so enable `[debug]
-   verbosity` for the RE run — the line carries a raw peer SteamID64, kept out of the default `info`
-   shareable log):
+2. **Create/join entry hooks** (`install_hooks`) — **wired**: with the probe on, each hooks the
+   charted create/join initiation *wrapper* by fixed offset from the exe base and logs
+   `session-probe: hooked create-session initiation at 0x…` (same for `join-session`) once at boot. A
+   drifted offset after a game update fails safe — `session-probe: <name> entry at 0x… reads […],
+   expected […]; hook not placed` — never patching the wrong bytes. Each hook then logs on a real
+   connect, **at `debug!` level** (so enable `[debug] verbosity` for the RE run — the line carries a
+   raw peer SteamID64, kept out of the default `info` shareable log):
    `session-probe: create-session initiated | rcx=0x… rdx=0x… r8=0x… r9=0x… (rdx/r8/r9 may carry a raw peer SteamID64 — do not share this log verbatim)`
    (win64 ABI: `rcx` = `this`, then `rdx`/`r8`/`r9` — the candidate `CSSessionManager` pointer and the
    peer SteamID argument; read-only, the registers are dumped, never dereferenced. **Privacy:** that
@@ -151,27 +152,19 @@ Strategies, in the order that now actually pays off:
   bytes (CLAUDE.md > Clean-room).
 
 The win64 prologue at the entry is typically `48 8B C4` (`mov rax, rsp`), `40 53` (`push rbx`), or
-`48 83 EC ..` (`sub rsp, ..`); use ~16 unique bytes from there as the landmark and note the opcode
-byte for the `expect` guard. (FINDINGS lists the concrete ~18-byte landmarks for the current build's
-four charted entries — start from those; re-derive only after a patch.)
+`48 83 EC ..` (`sub rsp, ..`). (FINDINGS lists the concrete ~18-byte entry bytes for the current
+build's four charted entries — the create/join *wrappers* are the ones the hooks use; re-derive their
+offsets only after a patch.)
 
-### 3. Fill the scaffold and rebuild
+### 3. Update the wired offsets (only after a game update)
 
-In `crates/unseamless-coop/src/session_probe.rs`, replace the two `None` consts (look for the
-`RIG TODO` block):
-
-```rust
-const SESSION_CREATE_SITE: Option<HookSite> = Some(HookSite {
-    landmark: pelite::pattern!("48 8B C4 ?? ?? .."),   // ~16 unique entry bytes; one `?` per wildcard
-    offset: 0,                                          // landmark match-start IS the entry
-    expect: 0x48,                                       // first prologue byte, anti-drift guard
-});
-const SESSION_JOIN_SITE: Option<HookSite> = Some(HookSite { /* the join entry */ });
-```
-
-(If the unique landmark sits a few bytes *before* the prologue, point it there and set `offset` to the
-signed distance to the entry — same convention as the skip-intros patch in `coop/app.rs`.) Rebuild
-(`cargo build --release`), redeploy, relaunch.
+The hooks are already wired in `crates/unseamless-coop/src/session_probe.rs`: they resolve the create
+wrapper (`CREATE_WRAPPER_OFFSET`, shared with the drive probe) and the join wrapper
+(`JOIN_WRAPPER_OFFSET`) by **fixed offset from the live exe base** — a static AOB isn't derivable (the
+on-disk `.text` is Arxan-encrypted), so there's no scaffold to fill on the current build. You only
+touch this **after a game update shifts the addresses**, which the prologue-bytes guard catches (the
+boot warn above). Then re-chart per FINDINGS, update the two `*_WRAPPER_OFFSET` consts and their
+`*_WRAPPER_PROLOGUE` guard bytes, rebuild (`cargo build --release`), redeploy, relaunch.
 
 ### 4. Verify
 

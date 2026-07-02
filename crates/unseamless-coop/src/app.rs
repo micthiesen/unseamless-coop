@@ -225,9 +225,10 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
     }
 
     // Rung-3 RE prep: install the session create/join logging hooks (gated by `[debug.probes]
-    // session_probe`, off by default). Inert when off, and inert-but-announced when on until the
-    // create/join AOBs are charted on the rig — see `coop/session_probe` + docs/SESSION-RE-RUNBOOK.md.
-    // A pure diagnostic, so it degrades (logs) and never aborts.
+    // session_probe`, off by default). Inert when off; when on, hooks the charted create/join
+    // initiation wrappers by fixed offset (prologue-guarded, fail-safe on drift) — see
+    // `coop/session_probe` + docs/SESSION-RE-RUNBOOK.md. A pure diagnostic, so it degrades (logs)
+    // and never aborts.
     crate::session_probe::install_hooks(config);
 
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so

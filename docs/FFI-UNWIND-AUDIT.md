@@ -39,7 +39,7 @@ entry points.
 | `dinput8` proxy exports | `proxy.rs` | game / loader (`extern "system"`) | not needed — panic-free by construction |
 | DirectInput / XInput / cursor detours | `input.rs` | ilhook trampoline (`extern "win64"`) | **added** (in `install_hook`) |
 | `CreateFileW` save-redirect detour | `saves.rs` | ilhook trampoline (`extern "win64"`) | **added** |
-| session create/join probe detours | `session_probe.rs` | ilhook trampoline (`extern "win64"`) | **yes** (in `log_initiation`) — gated, currently inert |
+| session create/join probe detours | `session_probe.rs` | ilhook trampoline (`extern "win64"`) | **yes** (in `log_initiation`) — gated (`[debug.probes] session_probe`), off by default |
 | code patch (`apply`) | `patch.rs` | — (not an entry point) | n/a |
 | Steam networking send/receive/methods | `steam.rs` | — (us → Steam) | n/a |
 | Steam lobby discovery (rung 4) | `steam.rs` | — (us → Steam; poll via `ISteamUtils`) | n/a (poll-based — no foreign→us boundary; see note) |
@@ -121,13 +121,14 @@ tail, now made safe in the direction that matters.
 
 ### `session_probe.rs` — session create/join probe detours (firewall in `log_initiation`)
 Two read-only logging detours on the session create/join initiation functions, installed via ilhook's
-jmp-back hook (same boundary class as `saves.rs`), gated behind `[debug.probes] session_probe` and
-**currently inert** (both `HookSite` consts are `None` until the AOBs are charted on the rig). When
-live they call the shared `log_initiation`, whose body is wrapped in `catch_unwind` for exactly this
-reason — the diag build (used on the rig to first fire these) is `panic = "unwind"`, and the callback
-runs from ilhook's `extern "win64"` trampoline. The body only reads scalar registers and logs (at
-`debug!`, since the dump carries a raw peer SteamID), so a panic is unlikely, but the firewall makes
-the "fill two consts and rebuild" path sound by construction rather than relying on a later re-audit.
+jmp-back hook (same boundary class as `saves.rs`), gated behind `[debug.probes] session_probe` (off
+by default). When on, each hooks the charted create/join initiation *wrapper* by fixed offset from
+the exe base (a prologue-bytes guard fails safe on drift). They call the shared `log_initiation`,
+whose body is wrapped in `catch_unwind` for exactly this reason — the diag build (used on the rig to
+first fire these) is `panic = "unwind"`, and the callback runs from ilhook's `extern "win64"`
+trampoline. The body only reads scalar registers and logs (at `debug!`, since the dump carries a raw
+peer SteamID), so a panic is unlikely, but the firewall makes the path sound by construction rather
+than relying on a later re-audit.
 Added in the parallel rung-3-RE-prep lane; cross-referenced here so the boundary enumeration stays
 complete.
 

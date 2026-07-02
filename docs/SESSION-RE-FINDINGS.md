@@ -312,11 +312,12 @@ a known-idle point (manager live, `lobby_state == None`), and confirm the move b
 rather than trusting the call's return. Capturing real args read-only first also removes the guesswork
 about `flag`/`arg4`/blob, so prefer it before any injection.
 
-## Landmark hints for `session_probe.rs` (do NOT fill until runtime-confirmed)
+## Charted entry bytes for `session_probe.rs` (the prologue-guard source)
 
-Entry bytes (18) for the four hookable entries, for when the scaffold's `SESSION_CREATE_SITE` /
-`SESSION_JOIN_SITE` get filled **after** the runtime confirm (left to the orchestrator per the
-scaffold boundary — these are hints, not a committed AOB):
+Entry bytes (18) for the four hookable entries. The create/join **wrapper** rows are what the wired
+hooks use: their first 9 bytes are the `CREATE_WRAPPER_PROLOGUE` / `JOIN_WRAPPER_PROLOGUE` anti-drift
+guards in `session_probe.rs` (the hooks resolve the entries by fixed offset, not by scanning these).
+Re-chart these after a game update:
 
 ```
 create wrapper 0x140cad4c0:  88 54 24 10 57 48 83 ec 30 48 c7 44 24 20 fe ff ff ff
