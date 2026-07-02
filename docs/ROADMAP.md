@@ -67,11 +67,14 @@ the create/join initiation function, no item needed (the multiplayer items becom
 **overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. **Narrowed to
 NVIDIA-driver-specific (2026-06-29):** a local Windows-VM harness (`crates/dx12-harness` + the
 [`/windows-test`] skill) ran the same hook + imgui font-bake clean on a real native-Windows D3D12
-loader (WARP), ruling out the hardware-independent MinHook mechanism and the font upload; the crash
-needs real NVIDIA. A `crashdump` handler (`coop/crashdump.rs`, in every build, verified) now logs the
-**faulting module** on the crash, and a crash-trace friend bundle is one command
-(`rig.sh package --trace && rig.sh share`). What's left is one run on any real NVIDIA box (a *light*
-solo friend ask, or VFIO passthrough); mitigation meanwhile is `[debug] overlay = false`. See
+loader (WARP), ruling out the hardware-independent MinHook mechanism and the font upload. **The
+friend trace run landed (2026-07-01) and refuted the first-present model:** on native NVIDIA the
+overlay initializes and renders fine (CQ found at +0x140, fonts baked, presents flowing), then the
+process dies **silently ~16s in, ~2s after a `ResizeBuffers`** — bypassing both the `crashdump`
+handler and the panic hook. Next: the friend's Event Viewer Event-1000 record / WER dump (decisive,
+no new run needed), a resize-under-hook repro attempt in `dx12-harness` + on the rig, and
+`crashdump.rs` hardening (re-assert the filter, log replacement); mitigation meanwhile is
+`[debug] overlay = false`. See
 [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "Native-Windows Crash" and
 [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > Part C.
 

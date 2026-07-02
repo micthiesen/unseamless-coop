@@ -119,8 +119,10 @@ Where the friction lives (all to verify on the rig, where the game actually runs
   *swapchain object's* memory layout. That layout is **vkd3d-proton's**, not Microsoft's DXGI, so the
   offset differs from Windows — but the scan is offset-agnostic (it searches a range), so this should
   survive translation. *Confirmed on rig (2026-06-28):* the scan found the CQ at offset **+0x8** under
-  vkd3d (and at **+0x138** on the WARP VM — the offset-agnostic scan handled both). Its absence in a
-  log means the scan failed.
+  vkd3d, at **+0x138** on the WARP VM, and at **+0x140** on native NVIDIA (friend run 2026-07-01) —
+  the offset-agnostic scan handled all three. On native it first *rejects* the game's second D3D12
+  queue a few times (`Couldn't find command queue pointer` warns) — normal multi-queue noise, not
+  failure; the failure tell is `Found command queue pointer` never appearing at all.
 - **vkd3d swapchain-extension churn.** Recent vkd3d-proton/Proton combos have produced black-but-
   running DX12 screens fixed by disabling swapchain extensions, e.g.
   `VKD3D_DISABLE_EXTENSIONS=VK_KHR_present_id,VK_KHR_present_wait %command%` or disabling
@@ -301,18 +303,116 @@ diagnostic report is already built ASCII-only for the same reason (`crate::diag:
   RVA bundle (ER 2.6.2.0 WW / 2.6.2.1 JP); confirm before relying on it. (We decided **not** to ship it
   as a notification fallback — see [ROADMAP.md](ROADMAP.md) > Won't-do; this is RE record only.)
 
-## Native-Windows Crash (First Friend Test, 2026-06-27)
+## Native-Windows Crash (Friend Tests 2026-06-27 + 2026-07-01)
 
-> **Status: investigated blind, no Windows box. Root-cause *anatomy* below is solid; the exact fatal
-> instruction and any fix are UNVALIDATED on native Windows.** The overlay works on our rig
-> (vkd3d/Proton) and is fatal on the friend's native machine. This section is the analysis + a
-> validation plan that needs no Windows box for the baseline.
->
-> **Update: a crash handler now names the culprit directly (shipped, verified on WARP — see "Status &
-> Next Steps").** `crashdump.rs` logs the faulting **module+offset** on a hard fault, mapping straight
-> to a hypothesis, so the next real-NVIDIA run identifies the faulting module outright; the
-> last-trace-line inference threaded through the sections below is now the cross-check, not the only
-> localizer.
+> **Status: the 2026-07-01 trace run landed and rewrote the picture — read the subsection directly
+> below first.** The overlay **initializes and renders fine on native NVIDIA**; the process dies
+> ~16s in, past a `ResizeBuffers`, silently (no exception reached the crash handler or the panic
+> hook). The older first-test analysis below it is kept for the record, with its refuted conclusions
+> marked inline — the "fatal at first hooked Present" model is dead.
+
+### Second Friend Run (2026-07-01, Trace Build): The Crash Is NOT At First Present
+
+The exact run Part C of [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) asked for: build
+`eb61c07-dirty` v0.10.0, diag (debug-assertions + per-record flush, so the tail is trustworthy),
+`level = "trace"`, overlay on, solo launch, same friend/NVIDIA box as the first test (RTX 3080 —
+env re-confirm still open). One run, one crash. Raw bundle archived locally at
+`reference/friend-crash-2026-07-01/` (gitignored; log `unseamless_coop-1782957572-6248.log`).
+
+The timeline (t = seconds after first log line, 01:59:32.79Z):
+
+```
+t+0.0          logging up, config loaded, crashdump filter installed (t+0.03)
+t+8.5          hudhook found IDXGISwapChain::Present (0x7ff939fed7e0); present hook installed
+t+10.1         frame-1 gap: `Initialization context incomplete` + `Render error 0xFFFFFFFF`  <- same as rig
+t+10.1..10.5   ~8x `Couldn't find command queue pointer ... (512 out of 512 readable)`       <- see below
+t+10.5         `Found command queue pointer ... at offset +0x140` -> context Complete
+t+12.7         overlay: hudhook initialize() reached (fonts baked -- ON NATIVE NVIDIA)
+t+12.8         overlay: first render frame reached (render_inner); hooked presents flow
+t+13.7         `ResizeBuffers` trampoline (mode switch; ~1.3s present pause, then presents resume)
+t+15.0..15.56  steady hooked presents, ~25ms cadence (~40 Hz)
+t+15.56        last `Call IDXGISwapChain::Present trampoline`
+t+15.58        last log line (a SteamID retry, attempt 29/60) -- process dead, nothing further
+```
+
+What this run **proves**:
+
+- **The first-present model (old hypothesis #1) is refuted on the friend's own machine.** The first
+  hooked Present survived, the CQ matched, imgui init + font bake ran, our `render_inner` ran, and
+  dozens of hooked presents flowed for ~3 seconds — including across a `ResizeBuffers`. The crash is
+  a *later, separate* event, not the hook-activation fault the first-test logs suggested.
+- **The CQ scan works on native NVIDIA: offset +0x140** (vs +0x8 vkd3d, +0x138 WARP — the
+  offset-agnostic scan handled all three). The ~8 `Couldn't find command queue pointer` warns before
+  the match are the scan rejecting the game's **second** D3D12 queue (`0x…fed20`), which also invokes
+  `ExecuteCommandLists` on native — normal multi-queue rejection noise, *not* failure. The failure
+  tell remains `Found command queue pointer` never appearing at all.
+- **The first test's log-tail ambiguity is (probably) resolved.** The old v0.8.0 logs (info level, no
+  flush, no breadcrumbs) ended right after the input-hook lines and we read that as "died at first
+  present". Everything between the input hooks and this run's death is trace/debug-level or a
+  breadcrumb that didn't exist in v0.8.0 — so those old logs are fully consistent with **this**
+  timeline (init fine, died ~16s in). The "buffering vs died-earlier" fork below was likely a false
+  dichotomy caused by log level.
+
+The death signature — what did **not** appear (each absence is load-bearing):
+
+- **No `crashdump:` line.** The `SetUnhandledExceptionFilter` handler (installed t+0.03) never fired.
+- **No panic-hook output.** The global Rust panic hook (`logger.rs::install_panic_hook`) logs any
+  in-process Rust panic; silence + per-record flush means **no Rust panic happened anywhere** (ours
+  are additionally firewalled — `render_inner` is `catch_unwind`-wrapped and a caught panic logs).
+- **No hudhook `Render error`** after the structural frame-1 gap — rendering never *reported* failure.
+- **The last present-path line is a trampoline trace, followed 26ms later by an unrelated Steam-retry
+  line.** At the ~25ms present cadence, the *next* present had entered but never reached its
+  trampoline trace. So *if* the death was on the present thread, it was inside hudhook's render work
+  (`prepare_render` / `GetBuffer` / engine render — before the trampoline), **not** in the game's
+  original Present. But a fail-fast on any other thread leaves the identical signature, so this
+  localizer is suggestive, not conclusive.
+
+Ways a Windows process dies without tripping our filter, the panic hook, or any log line — the
+remaining candidate mechanisms:
+
+1. **Fail-fast** (`__fastfail`, exception code `0xc0000409` — GS-cookie stack-buffer-overrun check,
+   invalid-handle, CRT abort). Raises no catchable SEH: bypasses our filter *and* any vectored
+   handler. A GS failure inside the game/driver/mingw code is silent everywhere in-process.
+2. **Our filter was replaced.** `SetUnhandledExceptionFilter` is last-writer-wins; the game, the
+   NVIDIA driver stack, or steamclient can install their own *after* our t+0.03 install. A plain AV
+   then dies through *their* filter, invisibly to us.
+3. **Deliberate exit** — e.g. the game detecting `DXGI_ERROR_DEVICE_REMOVED` on its own fence/wait
+   path and error-boxing/exiting. (Would usually also surface as hudhook `Render error`s on
+   subsequent presents — none seen — so ranked below the first two.)
+
+**New prime suspect: the post-`ResizeBuffers` present path.** hudhook 0.9.1's `ResizeBuffers` detour
+is a **pure pass-through** (verified in its `dx12.rs` — trampoline call only, no render-target or
+engine teardown), and its per-frame `swap_chain.GetBuffer(...)` avoids holding stale back-buffer
+refs, but the `D3D12RenderEngine`'s internal heaps/pipeline are **never rebuilt for the new mode**.
+The crash landed ~1.9s (a few dozen presents) after the run's only `ResizeBuffers`. Neither the rig
+baseline nor the WARP harness ever exercised a resize with the hook live — an untested window on
+every platform where the overlay *passed*.
+
+**Next steps (in order):**
+
+1. **Friend-side Windows evidence — now the decisive datum**, since every in-process handler was
+   bypassed: Event Viewer > Windows Logs > Application > **Event ID 1000** (Application Error) for
+   `eldenring.exe` names the **faulting module + exception code** (`0xc0000409` = fail-fast,
+   `0xc0000005` = AV; module `nvwgf2umx.dll` = NVIDIA driver, `unseamless_coop.dll` = us/hudhook).
+   Also grab any `%LOCALAPPDATA%\CrashDumps\eldenring.exe.*.dmp`. Two minutes, **no new run needed**.
+2. **Ask the friend** (not derivable from the log): what did the crash look like (game error dialog /
+   straight to desktop / display reset)? Was Steam running + logged in — the log shows `ISteamUser`
+   null for the *entire* 16s (29 retry attempts), which is anomalous. Any other overlay enabled
+   (NVIDIA App/GeForce overlay, RTSS)? What was on screen at ~16s (title screen, after the
+   fullscreen/mode switch)?
+3. **Exercise a live resize under the hook, locally.** Add a mid-run `ResizeBuffers` (+ continued
+   presents) phase to `crates/dx12-harness` (`/windows-test`), and alt-enter/mode-switch on the rig
+   at title. If WARP or the rig reproduces a post-resize death, we finally have a **local repro** —
+   the piece the first VM run couldn't provide — and a fix becomes validatable.
+4. **Harden `crashdump.rs`:** periodically re-assert the filter and **log when it was found replaced**
+   (a replaced filter is itself the datum that mechanism #2 above is in play). A log-only vectored
+   exception handler is an option for AVs but cannot see fail-fast; weigh its spam/reentrancy risk
+   before adding.
+
+---
+
+The remainder of this section is the **first-test (2026-06-27) analysis**, kept for the record with
+refuted parts marked.
 
 ### What happened
 
@@ -345,6 +445,11 @@ the same way:
 
 Either way: **the file tail is not a reliable last-line death oracle**, the crash clusters tightly at
 first-present activation, and the trace diagnostic below must force per-record flushing to be trusted.
+
+> **[Resolved 2026-07-01 — a third reading won.]** The trace run showed everything between the
+> input-hook lines and the actual death (~16s in) is trace/debug-level or a breadcrumb v0.8.0 didn't
+> have, so these logs never implied a first-present death at all — the "clusters tightly at
+> first-present activation" conclusion was a log-level artifact. See the 2026-07-01 subsection above.
 
 ### What the log proves — and what it does *not*
 
@@ -388,11 +493,20 @@ Michael's rig logs the same two errors and recovers — and why removing those e
 first hooked present — overwhelmingly likely **the call into the game's original Present trampoline**
 (step 4→5) on native NVIDIA DXGI, where our detour did nothing but `AddRef` the swapchain.
 
+> **[Refuted 2026-07-01.]** The trace run survived the first hooked present *and* the trampoline
+> (every present logged its trampoline trace for ~3s); the death is a later event. The frame-1-gap
+> anatomy above remains correct and useful; the "fatal at step 4→5" conclusion is dead.
+
 ### Why native NVIDIA dies where vkd3d tolerates it (ranked hypotheses)
 
 > **Narrowed by the local Windows VM harness (`dx12-harness`, 2026-06-28).** A clean WARP run (below)
 > **rules out the hardware-independent parts of #1 and all of #3.** The crash is now pinned to
 > something **NVIDIA-driver-specific**: the present-threading *trigger* of #1, or the #2 interposer.
+>
+> **[Re-ranked 2026-07-01.]** The friend trace run refuted #1 outright (first hooked Present, CQ
+> match, init, and render all succeeded on the same machine) and left #2 open-but-unobserved. The
+> live ranking is in the 2026-07-01 subsection above: post-`ResizeBuffers` present path first, then
+> filter-replacement/fail-fast mechanisms.
 
 1. **First hooked Present faults under MinHook on native — NVIDIA-driver-specific (most likely).** The
    detour is applied to a live swapchain vtable while presents are in flight; native NVIDIA's
@@ -494,11 +608,10 @@ loop is runnable here.
    needs WARP forced + an Interactive scheduled task with a logged-in desktop, since an SSH session has
    no window station for a DXGI swapchain — see the `/windows-test` skill.)
 3. **Friend native run (current build, breadcrumbs on), `level = "trace"`, once — with per-record log
-   flushing forced** (else the decisive tail line is lost, as in 3/4 of the first logs). Capture: do
-   `initialize() reached` / `first render frame reached` appear? Is `Call … Present trampoline` the
-   last line? Does `Found command queue pointer` ever appear on native? Diff against the baseline →
-   localizes the divergence. This is the **single super-validated gate** — spend it only when the
-   lighter loop (rig baseline + VM harness) already puts confidence ~95%.
+   flushing forced** — **CAPTURED 2026-07-01** (the subsection above). Answers: `initialize()
+   reached` / `first render frame reached` **do** appear on native; `Call … Present trampoline` is
+   **not** the last line; `Found command queue pointer` **does** appear (+0x140). The divergence from
+   the rig baseline is not at hook activation at all — it's a silent process death ~16s in.
 4. **A code fix is only "validated" if the VM harness reproduced the crash and then stopped after the
    fix; otherwise it stays UNVALIDATED on native until a subsequent friend session.** Flag it as such.
 
@@ -553,20 +666,22 @@ run); decide #3/#4 with Michael from that data.
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [x] Overhead nameplates: **shipped as native `CSEzDraw` dots** (`coop/features/native_nameplates.rs`),
       not on this overlay. The imgui world→screen projection path was removed — see [NAMEPLATES.md](NAMEPLATES.md).
-- [ ] ⚠️ **Native-Windows overlay crash** (friend test 2026-06-27, RTX 3080): fatal on the first hooked
-      Present on native NVIDIA DX12; works on our vkd3d rig. **Narrowed 2026-06-28:** a CLEAN WARP VM
-      run (`crates/dx12-harness` + `/windows-test`) ruled out the hardware-independent MinHook mechanism
-      (#1) and the imgui font upload (#3), pinning the crash as **NVIDIA-driver-specific** (the
-      present-threading trigger of #1, or the #2 interposer); WARP can't reproduce it and the VM can't
-      validate a fix. Full analysis: "Native-Windows Crash" above. **Next:** a friend trace-level run
-      (the super-validated gate) and/or single-GPU VFIO passthrough of the RTX 5080 into the VM for a
-      real-NVIDIA repro. Mitigate meanwhile with `[debug] overlay = false`.
+- [ ] ⚠️ **Native-Windows overlay crash** (friend tests 2026-06-27 + 2026-07-01, RTX 3080): works on
+      our vkd3d rig; on native NVIDIA the **trace run (2026-07-01) showed the overlay initialize and
+      render fine** (CQ at +0x140, fonts baked, presents flowing) and the process then **die silently
+      ~16s in**, ~2s after a `ResizeBuffers` — no crashdump line, no panic-hook output, no render
+      error. First-present hypotheses are refuted. Full analysis: "Native-Windows Crash" above.
+      **Next:** friend-side Event Viewer Event 1000 / WER dump (decisive, no new run needed); a
+      resize-under-hook phase in `dx12-harness` + an alt-enter test on the rig (local repro attempt);
+      harden `crashdump.rs` (re-assert the filter, log replacement). Mitigate meanwhile with
+      `[debug] overlay = false`.
 - [x] **Crash handler staged (2026-06-29):** `unseamless-coop/src/crashdump.rs` (in the cdylib *and* the
       harness) installs an unhandled-exception filter that logs the **faulting module+offset** + AV
-      target + registers on a hard fault — so the next real-NVIDIA run names the culprit module
-      (`nvwgf2umx.dll` ⇒ #1 trigger; an interposer ⇒ #2; `hudhook`/ours ⇒ detour glue) instead of just
-      a last-breadcrumb. Verified on WARP via `DX12_HARNESS_FORCE_CRASH=1` (caught the AV, resolved
-      `dx12-harness.exe+0x2fa0`). Read-a-report recipe is in the `/windows-test` skill.
+      target + registers on a hard fault. Verified on WARP via `DX12_HARNESS_FORCE_CRASH=1` (caught the
+      AV, resolved `dx12-harness.exe+0x2fa0`). Read-a-report recipe is in the `/windows-test` skill.
+      **Caveat (2026-07-01): the real friend crash bypassed it** — either a fail-fast (no SEH) or the
+      filter was replaced after install (`SetUnhandledExceptionFilter` is last-writer-wins). Hardening
+      is a listed next step; friend-side Event Viewer is the fallback datum.
 
 ## Sources
 

@@ -194,11 +194,28 @@ decompiler output into source/commits ([CLAUDE.md](../CLAUDE.md) > Clean-room hy
 
 ## Part C — Native overlay-crash trace (solo friend, any NVIDIA box)
 
-Independent of Parts A/B (no co-op session needed): the overlay crashes at the first hooked `Present`
-on native NVIDIA but works on our vkd3d rig and on WARP in the VM, so the crash is NVIDIA-driver-specific
-and only a real NVIDIA Windows machine can produce the decisive datum. The `crashdump` handler
-(`coop/crashdump.rs`, in every build) turns that crash into a logged **faulting module+offset**. This
-is a *light* ask — one friend, no co-op, often crashes at launch.
+> **Ran 2026-07-01 — the trace run landed and rewrote the analysis** (full picture:
+> [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "Second Friend Run"). The overlay **initialized and
+> rendered fine on native NVIDIA** (CQ found at +0x140, fonts baked, presents flowing); the process
+> then died **silently ~16s in, ~2s after a `ResizeBuffers`** — and the crashdump handler did NOT
+> fire (fail-fast, or our filter got replaced). So the current asks are **friend-side and cheap, no
+> new run needed**:
+>
+> 1. **Event Viewer** > Windows Logs > Application > **Event ID 1000** (Application Error) for
+>    `eldenring.exe` — screenshot/paste it. It names the faulting module + exception code
+>    (`0xc0000409` = fail-fast, `0xc0000005` = AV; `nvwgf2umx.dll` = NVIDIA driver).
+> 2. Any dump under `%LOCALAPPDATA%\CrashDumps\eldenring.exe.*.dmp`.
+> 3. Answers: what did the crash look like (error dialog / straight to desktop / display reset)?
+>    Was Steam running + logged in (the log shows SteamID unresolved for the whole run — odd)?
+>    Any other overlay on (NVIDIA App/GeForce overlay, RTSS)? What was on screen at ~16s?
+>
+> The original run recipe below stays valid for any future re-run.
+
+Independent of Parts A/B (no co-op session needed): the overlay crash is NVIDIA-driver-specific
+(works on our vkd3d rig and on WARP in the VM), so only a real NVIDIA Windows machine can produce
+the decisive datum. The `crashdump` handler (`coop/crashdump.rs`, in every build) logs a
+**faulting module+offset** on a hard SEH fault — though note the 2026-07-01 crash bypassed it. This
+is a *light* ask — one friend, no co-op.
 
 **Build + share the bundle** (diag = symbols + reliable crash tail; `--trace` adds the hudhook
 breadcrumbs alongside the crashdump line):
@@ -215,12 +232,15 @@ crashing, so it can't display. Hand the friend the release link; they Install + 
 **What to read in the returned logs** (they zip `unseamless-coop\logs\`; the Export button is
 unreachable if the overlay crashed — README-FRIENDS tells them this):
 
-- The decisive line: `crashdump: ==== UNHANDLED EXCEPTION ==== code=0xc0000005 (ACCESS_VIOLATION) at <module>+0x…`.
-  `nvwgf2umx.dll`/`nvd3dumx.dll` ⇒ inside the NVIDIA driver (hyp #1 trigger); a Streamline/overlay
-  interposer DLL ⇒ hyp #2; `hudhook`/`unseamless_coop.dll` ⇒ the detour glue.
-- The breadcrumbs before it (`overlay: DX12 present-hook installed` → `initialize() reached` →
-  `Call IDXGISwapChain::Present trampoline`) localize *where* in the flow it died; diff against the rig
-  baseline in [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
+- The decisive line *when it fires*: `crashdump: ==== UNHANDLED EXCEPTION ==== code=0xc0000005 (ACCESS_VIOLATION) at <module>+0x…`.
+  `nvwgf2umx.dll`/`nvd3dumx.dll` ⇒ inside the NVIDIA driver; a Streamline/overlay interposer DLL ⇒
+  an interposer; `hudhook`/`unseamless_coop.dll` ⇒ the detour/render glue. **If it's absent (as on
+  2026-07-01), that absence is itself the datum** — fail-fast or replaced filter — and Event Viewer
+  (above) becomes the decisive source.
+- The breadcrumbs (`overlay: DX12 present-hook installed` → `initialize() reached` → `first render
+  frame reached` → `Call IDXGISwapChain::Present trampoline` / `ResizeBuffers trampoline`) localize
+  *where* in the flow it died; diff against the rig baseline in
+  [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md).
 - Symbolicate our own frames: `x86_64-w64-mingw32-addr2line -f -C -e <diag dll/exe> $((ImageBase + offset))`
   (DLL ImageBase via `objdump -p`). Full recipe + the WARP self-test in the [`/windows-test`] skill.
 

@@ -6,11 +6,14 @@ description: Validate the overlay's DX12 present-hook on a REAL Windows loader (
 # Windows overlay-injection testing (the local Win11 VM)
 
 The in-game overlay (hudhook DX12 present-hook + Dear ImGui, `coop/overlay.rs`) renders fine on our
-Linux rig (vkd3d/Proton) but **crashes on native Windows NVIDIA** at the first hooked `Present` (first
-friend test, RTX 3080 — full anatomy in [`docs/OVERLAY-RENDERING.md`](../../docs/OVERLAY-RENDERING.md)
-> "Native-Windows Crash"). That was investigated *blind* because there was no Windows box. This skill
-is the Windows box stand-in: it runs the crashing machinery on a **real Windows loader** in the
-existing quickemu Win11 VM, with **no ELDEN RING**.
+Linux rig (vkd3d/Proton) but **crashes on native Windows NVIDIA** (friend tests, RTX 3080 — full
+anatomy in [`docs/OVERLAY-RENDERING.md`](../../docs/OVERLAY-RENDERING.md) > "Native-Windows Crash").
+**Update 2026-07-01:** the friend trace run showed the overlay **initialize and render fine on native
+NVIDIA**, with the process dying silently ~16s in, ~2s after a `ResizeBuffers` — so the old
+"first hooked Present" framing is refuted, and the top local-repro candidate is now a
+**resize-under-hook phase** this harness doesn't exercise yet (add: call `ResizeBuffers` mid-run
+while hooked + keep presenting). This skill is the Windows box stand-in: it runs the crashing
+machinery on a **real Windows loader** in the existing quickemu Win11 VM, with **no ELDEN RING**.
 
 ## What it is
 
@@ -38,6 +41,7 @@ path** (genuinely different from vkd3d), but **not NVIDIA hardware**. The fideli
 |---|---|---|
 | MinHook detour on a live swapchain vtable, off-thread (hyp #1 mechanism) | ✅ ran clean — ruled out as the cause | this VM |
 | imgui DX12 font bake + GPU upload (hyp #3) | ✅ ran clean — ruled out as the cause | this VM |
+| Post-`ResizeBuffers` presenting under the hook (2026-07-01 prime suspect) | ⚠️ NOT yet exercised — add a mid-run resize phase | this VM |
 | ELDEN RING's exact swapchain flags | ⚠️ only if mirrored via env knobs (pin them with a rig probe) | this VM |
 | DLSS swapchain interposer (hyp #2) | ❌ | friend's real machine |
 | NVIDIA-driver-specific present threading (hyp #1 trigger) | ❌ (no NVIDIA in a VM) | GPU passthrough / friend |
