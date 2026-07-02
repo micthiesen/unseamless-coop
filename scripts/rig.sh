@@ -159,6 +159,25 @@ need_game_dir() { [[ -d "$GAME_DIR" ]] || die "game folder not found: $GAME_DIR 
 backup_exists() { [[ -f "$BACKUP_DIR/MANIFEST" ]]; }
 applied()       { [[ -f "$MARKER" ]]; }
 
+# PIDs of the actual running game, EXCLUDING our own RE tooling. The Ghidra decompile
+# (scripts/re/*) takes the game's `eldenring.exe` *path* as a command-line argument, so a bare
+# `pgrep -f eldenring.exe` also matches it — a false "game is running" that misfires the apply/seed
+# guards and, worse, would let `kill`'s `pkill` terminate a running decompile. So: match the exe,
+# then drop any hit whose command line is our decompile/ghidra helper. (`pgrep` already excludes its
+# own pid, so there's no self-match to bracket-trick around.)
+game_pids() {
+  local pid cmd
+  for pid in $(pgrep -f 'eldenring\.exe' 2>/dev/null); do
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    case "$cmd" in
+      *decompile*|*ghidra*) continue ;;   # our RE tooling referencing the exe path, not the game
+      *) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
+# Is the actual game running? (Excludes the decompile — see `game_pids`.)
+game_running() { [[ -n "$(game_pids)" ]]; }
+
 # ---- backup --------------------------------------------------------------------------------------
 cmd_backup() {
   need_game_dir
@@ -268,7 +287,7 @@ cmd_apply() {
   # Refuse to apply over a RUNNING game: the process has dinput8.dll mmap'd from disk and our plain
   # `cp` truncates that inode in place, corrupting the live image's not-yet-faulted pages — and a
   # running game usually means Michael is playing. Kill it first (rig.sh kill) or pass --force.
-  if (( force == 0 )) && pgrep -f '[e]ldenring.exe' >/dev/null; then
+  if (( force == 0 )) && game_running; then
     die "ELDEN RING is running — refusing to apply over a live install. If Michael is playing, leave it alone; otherwise 'scripts/rig.sh kill' first (or apply --force)."
   fi
 
@@ -530,7 +549,7 @@ cmd_dismiss() {
   command -v ydotool >/dev/null 2>&1 || { warn "ydotool not installed (pacman -S ydotool; enable ydotoold) — skipping auto-dismiss"; return 1; }
   [[ "$presses" =~ ^[0-9]+$ ]] || { warn "dismiss: press count must be a number, got '$presses'"; return 1; }
   [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
-  pgrep -f '[e]ldenring.exe' >/dev/null || warn "eldenring.exe doesn't look like it's running yet"
+  game_running || warn "eldenring.exe doesn't look like it's running yet"
   local refocus="$RIG_DISMISS_REFOCUS_EVERY"
   [[ "$refocus" =~ ^[0-9]+$ && "$refocus" -gt 0 ]] || refocus=1
   say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart, re-focusing every ${refocus})…"
@@ -607,7 +626,7 @@ cmd_seed_save() {
   [[ "$dst_ext" == "sl2" ]] && die "configured save ext is 'sl2' (vanilla) — refusing to overwrite your single-player save"
   [[ "$src_ext" == "sl2" ]] && die "refusing to copy *from* the vanilla 'sl2' — pass a co-op extension (e.g. co2)"
   [[ "$src_ext" == "$dst_ext" ]] && die "source and destination extension are both '$src_ext' — nothing to do"
-  pgrep -f '[e]ldenring.exe' >/dev/null && die "Elden Ring is running — close it before seeding the save"
+  game_running && die "Elden Ring is running — close it before seeding the save"
   local dir; dir="$(resolve_save_dir)" || die "couldn't find the Elden Ring save folder (set SAVE_DIR=…)"
   local src="$dir/ER0000.$src_ext"
   [[ -f "$src" ]] || die "source save not found: $src"
@@ -636,19 +655,27 @@ cmd_log() {
 
 cmd_kill() {
   # The game + our launcher run under Wine/Proton, where SIGTERM is routinely ignored — so escalate
-  # to SIGKILL and verify, instead of leaving stragglers that the next launch trips over. Kills both
-  # the game and the launcher. Bracket trick so pkill doesn't match its own command line.
+  # to SIGKILL and verify, instead of leaving stragglers that the next launch trips over. The game is
+  # killed by RESOLVED PID (game_pids, which excludes our RE-tooling decompile referencing the exe
+  # path) so a concurrent Ghidra run is never caught; the launcher is a `pkill` on its own pattern
+  # (nothing else references `start_protected_game`, so it's collision-free — bracket trick avoids
+  # pkill's own command line).
   rm -f "$RIG_GS_FLAG"  # clear any stale rig-size flag so the next manual launch is fullscreen
-  local procs=('[e]ldenring.exe' '[s]tart_protected_game')
-  if ! pgrep -f '[e]ldenring.exe' >/dev/null && ! pgrep -f '[s]tart_protected_game' >/dev/null; then
+  local gpids; gpids="$(game_pids)"
+  if [[ -z "$gpids" ]] && ! pgrep -f '[s]tart_protected_game' >/dev/null; then
     warn "game not running"
     return 0
   fi
-  for p in "${procs[@]}"; do pkill -f "$p" 2>/dev/null || true; done          # SIGTERM
-  for _ in 1 2 3; do pgrep -f '[e]ldenring.exe' >/dev/null || break; sleep 1; done
-  for p in "${procs[@]}"; do pkill -9 -f "$p" 2>/dev/null || true; done        # SIGKILL stragglers
+  # SIGTERM
+  [[ -n "$gpids" ]] && kill $gpids 2>/dev/null || true
+  pkill -f '[s]tart_protected_game' 2>/dev/null || true
+  for _ in 1 2 3; do [[ -z "$(game_pids)" ]] && break; sleep 1; done
+  # SIGKILL stragglers
+  gpids="$(game_pids)"
+  [[ -n "$gpids" ]] && kill -9 $gpids 2>/dev/null || true
+  pkill -9 -f '[s]tart_protected_game' 2>/dev/null || true
   sleep 1
-  if pgrep -f '[e]ldenring.exe' >/dev/null; then
+  if game_running; then
     warn "eldenring.exe STILL running after SIGKILL — investigate"
   else
     ok "game stopped"
@@ -710,7 +737,7 @@ cmd_enter_world() {
   command -v ydotool >/dev/null 2>&1 || { warn "enter-world: ydotool not installed — load the save manually"; return 1; }
   log="$(latest_log || true)"
   [[ -n "$log" ]] || { warn "enter-world: no log yet — launch the game first"; return 1; }
-  pgrep -f '[e]ldenring.exe' >/dev/null || { warn "enter-world: game not running"; return 1; }
+  game_running || { warn "enter-world: game not running"; return 1; }
   say "Loading into the world (Continue) — waiting up to ${timeout}s for in_gameplay…"
   start="${EPOCHREALTIME/,/.}"
   while :; do
@@ -996,7 +1023,7 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          size if you've set launch options to scripts/rig/gamescope-wrapper.sh.
                          --wait blocks until the framework comes up and prints the install lines.
   log [-f]               Print (or -f follow) the latest run log.
-  kill                   Stop the game (pkill eldenring.exe).
+  kill                   Stop the game + launcher (by resolved pid; a running RE decompile is spared).
   reposition             Move the running game window to the top-left (and reveal it if hidden). Only
                          moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
                          blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
