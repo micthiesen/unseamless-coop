@@ -181,6 +181,15 @@ runtime instrumentation per [RUNTIME-RE.md](RUNTIME-RE.md): a diagnostic build o
   overshoots into Continue → a loaded save), which makes the drive-probe / in-game RE solo-runnable. It
   needs the KWin + ydotool stack healthy; if a run sticks at the popups, a manual `scripts/rig.sh
   dismiss` clears them. Tune with `RIG_DISMISS_PRESETTLE` / `RIG_DISMISS_PRESSES`.
+- **Rig runs clamp the game's saved graphics config.** The game persists whatever display it saw:
+  inside the small rig gamescope it rewrites `GraphicsConfig.xml` (in the Proton prefix's
+  `AppData/Roaming/EldenRing/`) to WINDOW mode with resolutions clamped down, which would make the
+  next manual fullscreen launch a blurry upscale. `scripts/rig/gamescope-wrapper.sh` handles this on
+  its gaming path: it runs `scripts/rig/normalize-graphics-config.py` to reset the file to
+  FULLSCREEN at the native resolution before launching (defaults 3440x1440; override with
+  `UNSEAMLESS_GAMING_WIDTH/HEIGHT`). Two related gamescope facts: `-W/-H` default to **1280x720**
+  when omitted (a bare `gamescope -f` is a blurry 720p fullscreen — always pass the size), and the
+  file is **UTF-16** (don't sed it).
 
 ## Feeding results back
 

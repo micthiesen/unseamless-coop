@@ -22,6 +22,10 @@ set -euo pipefail
 # Must match RIG_GS_FLAG in scripts/rig.sh (same env override, same default path).
 FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
 COMMON=(--immediate-flips)
+# Gaming (fullscreen) resolution. gamescope's -W/-H default to 1280x720 when omitted, so a bare
+# `gamescope -f` fullscreens a blurry 720p buffer — the size must be passed explicitly.
+GAMING_W="${UNSEAMLESS_GAMING_WIDTH:-3440}"
+GAMING_H="${UNSEAMLESS_GAMING_HEIGHT:-1440}"
 
 if [[ -f "$FLAG" ]]; then
   W=1440 H=900                     # defaults match RIG_WINDOW_WIDTH/HEIGHT in scripts/rig.sh
@@ -31,5 +35,9 @@ if [[ -f "$FLAG" ]]; then
   exec gamescope -w "$W" -h "$H" -W "$W" -H "$H" "${COMMON[@]}" "$@"
 fi
 
-# Gaming default: true fullscreen at the output's native resolution.
-exec gamescope -f "${COMMON[@]}" "$@"
+# Gaming default: true fullscreen at the display's native resolution (must be explicit — see above).
+# First undo any resolution clamp a rig run left in the game's saved GraphicsConfig.xml (the game
+# persists the small rig display as WINDOW mode, which would upscale blurrily here). Best-effort:
+# never block the launch over it.
+"$(dirname "${BASH_SOURCE[0]}")/normalize-graphics-config.py" || true
+exec gamescope -w "$GAMING_W" -h "$GAMING_H" -W "$GAMING_W" -H "$GAMING_H" -f "${COMMON[@]}" "$@"
