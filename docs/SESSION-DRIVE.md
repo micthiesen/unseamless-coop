@@ -265,6 +265,16 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 > 2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
 >    = base and `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
 >    produces a malformed session the game can't run; only if (1) is impossible.
+> 3. **Static-decompile the allocator (alternative to needing a peer to *observe* it).** The open
+>    question in (1) — *what allocates the slot array and sizes it* — is answerable statically: decompile
+>    the `NetworkSession` init / match-setup path to find the site that allocates the array at
+>    `[[NetworkSession+8]+0x48]` and writes its capacity at `+0x20` (leg B is clean, not Arxan). If that
+>    size comes from a source we can set or a function we can call, it turns the risky blind fabrication
+>    in (2) into a *principled* solo sizing — drive create to `Host` with no peer for the create leg
+>    (join still needs a real peer). An **annotated** community / other-mod Ghidra DB of the
+>    session/network subsystem would short-cut the identification. *Clean-room (CLAUDE.md):* read it for
+>    the **game's** behavior and reimplement from that — never transcribe pseudocode/annotations; if it's
+>    ERSC's own decompilation, study the game, not ERSC.
 >
 > **Superseded hypotheses (tombstones — do not revisit):**
 > - *"The leg-A gate `0x140cb4b50` is the blocker."* Wrong. A hardware write-watch on `[G]+0x24`
