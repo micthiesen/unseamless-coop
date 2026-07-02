@@ -17,6 +17,13 @@ scripts/rig.sh log -f                 # follow the run log
 scripts/rig.sh restore                # explicit: put the original ERSC stack back
 ```
 
+**Check the game isn't already running before `apply`/`cycle`** (a running ELDEN RING you didn't
+launch = Michael is playing — hands off entirely: no apply, no launch, no kill). `apply` refuses on
+its own when `eldenring.exe` is up, both because of that and because the plain `cp` would truncate
+the process's mapped `dinput8.dll` inode in place, corrupting the live image's not-yet-faulted
+pages. `--force` overrides for the rare case you know the running instance is disposable
+(incident that motivated this: 2026-07-01, an autonomous `cycle` fired mid-play-session).
+
 **On a clean rig with no real ERSC stack to protect**, the bare primitive is:
 
 ```bash

@@ -446,21 +446,25 @@ probed COM methods (different mechanism, no evidence of conflict) and can stay.
 
 **Next steps (in order):**
 
-1. **Reimplement the XInput capture/blank as an IAT hook** on `eldenring.exe`'s
-   `XINPUT1_4.dll!XInputGetState` import (fix above). Interim mitigation for testers remains
-   `[debug] overlay = false` (skips the input hooks entirely).
-2. **Friend-side confirmation, no new run:** the WER report folder
+1. ~~**Reimplement the XInput capture/blank as an IAT hook**~~ **DONE (2026-07-01):**
+   `input.rs::install_xinput` now swaps `eldenring.exe`'s IAT slot (imported **by ordinal 2** — the
+   game's XINPUT1_4 imports carry no names) instead of inline-patching the function entry; the
+   replacement is a typed `extern "system"` fn (no ilhook register glue), chains through any prior
+   IAT interposer, and the log line is now `input: hooked XInput GetState via the game's IAT (…)`.
+   Compiles clean + reviewed; **rig re-verify pending** (the game was in use when the fix landed —
+   next cycle, confirm the new install line + pad nav/blank still work), then **native validation =
+   the next friend run** (his machine is the only environment that reproduces the collision).
+2. **Friend-side confirmation, optional:** the WER report folder
    (`C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_eldenring.exe_…`) — its
    `Report.wer` lists the **loaded modules**, confirming/denying `gameoverlayrenderer64.dll` (or
-   another XInput hooker: NVIDIA App, RTSS, DS4Windows/HidHide). Also ask: controller plugged in /
-   turned on around the crash? Steam running + logged in (the log's 16s of `ISteamUser` null is
-   still unexplained)?
+   another XInput hooker: NVIDIA App, RTSS, DS4Windows/HidHide). Nice-to-have; the fix doesn't
+   depend on it.
 3. **Harden `crashdump.rs`:** the AV *was* a plain SEH exception that reached WER, yet our
    `SetUnhandledExceptionFilter` handler logged nothing — so something replaced our filter after
    t+0.03s. Periodically re-assert it and **log when it was found replaced**.
-4. **Local repro if wanted** (validation, not discovery): the Win11 VM + `dx12-harness` grown an
-   XInput phase — install the same ilhook detour, then a second 5-byte hook over it, poll — should
-   AV at `+5` deterministically; then flip to the IAT hook and watch it not care.
+4. **Local repro if wanted** (retro-validation only, the fix shipped): the Win11 VM + `dx12-harness`
+   grown an XInput phase — install the old ilhook detour, then a second 5-byte hook over it, poll —
+   should AV at `+5` deterministically; the IAT hook shouldn't care.
 
 ---
 
@@ -719,16 +723,17 @@ run); decide #3/#4 with Michael from that data.
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [x] Overhead nameplates: **shipped as native `CSEzDraw` dots** (`coop/features/native_nameplates.rs`),
       not on this overlay. The imgui world→screen projection path was removed — see [NAMEPLATES.md](NAMEPLATES.md).
-- [ ] ⚠️ **Native-Windows overlay crash — ROOT-CAUSED (mechanism) 2026-07-01, fix pending.** The
-      trace run proved the DX12 present path healthy on native NVIDIA (CQ at +0x140, fonts baked,
-      presents flowing); the friend's WER Event 1001 then pinned the death: `c0000005` at
-      **`XINPUT1_4.dll+0x9a65` = `XInputGetState+5`** — an inline-hook collision between our ilhook
-      patch on `XInputGetState` and a second 5-byte hooker (likely Steam's gameoverlayrenderer)
-      whose trampoline jumps back to `entry+5`, mid-our-patch. Full analysis: "WER Verdict" above.
-      **Next:** reimplement the XInput capture as an **IAT hook** on `eldenring.exe`'s import (no
-      function-body patching); get the friend's `Report.wer` module list (confirms the other
-      hooker); harden `crashdump.rs` (re-assert the filter, log replacement — ours was bypassed).
-      Mitigate meanwhile with `[debug] overlay = false`.
+- [ ] ⚠️ **Native-Windows overlay crash — ROOT-CAUSED + FIX SHIPPED 2026-07-01, awaiting native
+      validation.** The trace run proved the DX12 present path healthy on native NVIDIA (CQ at
+      +0x140, fonts baked, presents flowing); the friend's WER Event 1001 then pinned the death:
+      `c0000005` at **`XINPUT1_4.dll+0x9a65` = `XInputGetState+5`** — an inline-hook collision
+      between our ilhook patch on `XInputGetState` and a second 5-byte hooker (likely Steam's
+      gameoverlayrenderer) whose trampoline jumps back to `entry+5`, mid-our-patch. Full analysis:
+      "WER Verdict" above. **Fix shipped:** the XInput capture is now an **IAT-slot swap** on
+      `eldenring.exe`'s ordinal-2 import (`input.rs::install_xinput`) — no function-body patching,
+      composes with other hookers by construction. Rig re-verify pending (game was in use), then
+      closes on the next friend run. Remaining hardening: `crashdump.rs` filter re-assert (ours was
+      silently replaced).
 - [x] **Crash handler staged (2026-06-29):** `unseamless-coop/src/crashdump.rs` (in the cdylib *and* the
       harness) installs an unhandled-exception filter that logs the **faulting module+offset** + AV
       target + registers on a hard fault. Verified on WARP via `DX12_HARNESS_FORCE_CRASH=1` (caught the

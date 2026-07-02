@@ -248,13 +248,14 @@ artifact_dir() { echo "$ROOT/target/$TRIPLE/$1"; }
 
 # ---- apply (safe, repeatable) --------------------------------------------------------------------
 cmd_apply() {
-  local profile=diag do_build=1 keep_config=0 with_mods=""
+  local profile=diag do_build=1 keep_config=0 with_mods="" force=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)     profile=release ;;
       --diag)        profile=diag ;;
       --no-build)    do_build=0 ;;
       --keep-config) keep_config=1 ;;
+      --force)       force=1 ;;
       --with-mods)   with_mods="${2:-}"; shift ;;
       --with-mods=*) with_mods="${1#*=}" ;;
       *) die "apply: unknown option '$1'" ;;
@@ -262,6 +263,13 @@ cmd_apply() {
     shift
   done
   need_game_dir
+
+  # Refuse to apply over a RUNNING game: the process has dinput8.dll mmap'd from disk and our plain
+  # `cp` truncates that inode in place, corrupting the live image's not-yet-faulted pages — and a
+  # running game usually means Michael is playing. Kill it first (rig.sh kill) or pass --force.
+  if (( force == 0 )) && pgrep -f '[e]ldenring.exe' >/dev/null; then
+    die "ELDEN RING is running — refusing to apply over a live install. If Michael is playing, leave it alone; otherwise 'scripts/rig.sh kill' first (or apply --force)."
+  fi
 
   # Invariant: never apply without a snapshot of the original first. This auto-runs the (guarded)
   # backup — which is a no-op if a snapshot already exists, and aborts if it'd capture our own mod.
@@ -972,8 +980,11 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   backup                 One-time snapshot of the current ERSC + Elden Mod Loader install.
                          Guarded & idempotent; this is your rollback point.
   apply [opts]           Build + install our mod over the original. Safe to repeat; auto-snapshots
-                         first if needed. Never restores.
+                         first if needed. Never restores. Refuses while the game is RUNNING
+                         (overwriting a mapped DLL corrupts the live image — and Michael may be
+                         playing); 'rig.sh kill' first, or --force.
         --release          Build/install the shipping profile (default: diag, with symbols).
+        --force            Apply even though the game is running (you know it's not a real session).
         --no-build         Install whatever's already in target/ (skip cargo build).
         --with-mods a,b    Also load these mods (by name) from the snapshot — for loader testing.
                            Default: mods/ is left empty (clean observation run).

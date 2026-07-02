@@ -14,14 +14,16 @@
 //!
 //! **Controller** rides the same idea on a different API: ER polls the pad through
 //! `xinput1_4!XInputGetState` (also immediate, also off the WndProc path, so `message_filter` can't
-//! stop it either). We detour it to do two things at once: (1) **read** the live pad from the game's
-//! own buffer into [`PAD_SNAPSHOT`] so the overlay can drive its menu (d-pad / left-stick to navigate,
-//! A to confirm, B to close, and the **RB+L3+R3 chord** to toggle the overlay); and (2) **blank**
-//! the pad while the overlay is open (zero the gamepad struct *and* bump `dwPacketNumber` — a game
-//! that skips re-reading on an unchanged packet would otherwise reuse the pre-open input rather than
-//! see the neutral one). The toggle is a chord of standard bits rather than the Guide/Home button on
-//! purpose: Steam Input intercepts Guide for most players, but the plain `XInputGetState` reports the
-//! chord, so there's nothing for it to eat and no need for the Guide-only `XInputGetStateEx`. The pure
+//! stop it either). We interpose it — via the **game's import table (IAT), not an inline patch on
+//! the function body; see [`install_xinput`] for why that distinction is load-bearing** — to do two
+//! things at once: (1) **read** the live pad from the game's own buffer into [`PAD_SNAPSHOT`] so the
+//! overlay can drive its menu (d-pad / left-stick to navigate, A to confirm, B to close, and the
+//! **RB+L3+R3 chord** to toggle the overlay); and (2) **blank** the pad while the overlay is open
+//! (zero the gamepad struct *and* bump `dwPacketNumber` — a game that skips re-reading on an
+//! unchanged packet would otherwise reuse the pre-open input rather than see the neutral one). The
+//! toggle is a chord of standard bits rather than the Guide/Home button on purpose: Steam Input
+//! intercepts Guide for most players, but the plain `XInputGetState` reports the chord, so there's
+//! nothing for it to eat and no need for the Guide-only `XInputGetStateEx`. The pure
 //! menu-translation ([`PadNav`] → per-frame edges) lives in [`unseamless_core::pad`] (host-tested);
 //! this module is just the OS binding that feeds it. (XInput is a flat C export, so unlike DirectInput
 //! there's no COM-vtable probe.)
@@ -36,9 +38,11 @@
 //! hooks are installed once and never removed (process-lifetime, like our task handles — unhooking a
 //! live input path is a use-after-free risk).
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_retn};
+use pelite::pe64::imports::Import;
+use pelite::pe64::{Pe, PeView};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows::core::{GUID, PCSTR, s};
@@ -147,38 +151,66 @@ fn release_pad(user_index: u32) {
     }
 }
 
-/// `DWORD XInputGetState(DWORD dwUserIndex = rcx, XINPUT_STATE* pState = rdx)`. Capture the pad for our
-/// menu, then (while the overlay is open) blank what the game sees.
+/// The pre-swap content of the game's `XInputGetState` IAT slot — whatever the loader (or an
+/// earlier IAT interposer) bound there. Set once in [`install_xinput`] *before* the slot is
+/// swapped; called by [`xinput_get_state_iat`] on every poll thereafter.
+static REAL_XINPUT_GET_STATE: AtomicUsize = AtomicUsize::new(0);
+/// One-shot flag so a (theoretically unreachable) panic in [`xinput_get_state_iat`] logs once, not
+/// at input-poll rate.
+static XINPUT_PANIC_LOGGED: AtomicBool = AtomicBool::new(false);
+
+type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
+
+/// Our replacement for the game's `XInputGetState` **import**: forward to the real function, then
+/// capture the pad for our menu and (while the overlay is open) blank what the game sees. Same
+/// logic as the retired inline detour, but reached through the game's IAT slot, so
+/// `XINPUT1_4.dll`'s code bytes are never touched (see [`install_xinput`] for why).
 ///
 /// # Safety
-/// `regs` must point at the saved registers for an `XInputGetState` call (the contract ilhook upholds
-/// at the hook site): `rdx` is null or a writable `XInputState`. `original` must be the real
-/// `XInputGetState` entry. Invoked only from the installed detour.
-unsafe fn xinput_get_state_detour(regs: *mut Registers, original: usize) -> usize {
-    let (user_index, state) = unsafe { ((*regs).rcx as u32, (*regs).rdx as *mut XInputState) };
-    let original: unsafe extern "system" fn(u32, *mut XInputState) -> u32 =
-        unsafe { std::mem::transmute(original) };
-    let ret = unsafe { original(user_index, state) };
-    if ret == 0 && !state.is_null() {
-        // Connected (ERROR_SUCCESS): `state` holds this poll's real pad. Capture it for our menu (read
-        // before any blanking), then blank what the game sees if the overlay is open.
-        let g = unsafe { (*state).gamepad };
-        capture_pad(user_index, g.buttons, g.thumb_lx, g.thumb_ly);
-        if is_blocked() {
-            unsafe {
-                (*state).gamepad = XInputGamepad::default();
-                // Also bump packet_number. A game that skips re-reading on an unchanged packet would
-                // otherwise keep reusing the last *real* input — a steadily-held stick leaves the
-                // device's packet constant, so zeroing the gamepad alone wouldn't be seen. Bumping
-                // guarantees the game re-reads the now-neutral gamepad every blanked poll.
-                (*state).packet_number = (*state).packet_number.wrapping_add(1);
+/// Called by the game with the documented `XInputGetState` ABI: `state` is null or points at a
+/// writable `XINPUT_STATE`. [`REAL_XINPUT_GET_STATE`] is non-zero before the slot is swapped
+/// (install-order invariant in [`install_xinput`]).
+unsafe extern "system" fn xinput_get_state_iat(user_index: u32, state: *mut XInputState) -> u32 {
+    // Acquire pairs (informally) with the SeqCst store in `swap_iat_slot`. The true publish edge is
+    // the IAT-slot store the game's own code reads, which the Rust memory model can't describe —
+    // on x86-64 TSO the store order (REAL first, slot second) is what actually guarantees this load
+    // sees the recorded original. Acquire is free on x86 and documents the intent.
+    let real = REAL_XINPUT_GET_STATE.load(Ordering::Acquire);
+    debug_assert!(real != 0, "IAT replacement installed before the original was recorded");
+    let real: XInputGetStateFn = unsafe { std::mem::transmute::<usize, XInputGetStateFn>(real) };
+    let ret = unsafe { real(user_index, state) };
+    // FFI firewall (docs/FFI-UNWIND-AUDIT.md): this is a game→us entry point, so a panic must not
+    // unwind out of it. The body below is allocation-free and panic-free by construction; the catch
+    // is soundness insurance, mirroring `install_hook`'s guard on the ilhook detours.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ret == 0 && !state.is_null() {
+            // Connected (ERROR_SUCCESS): `state` holds this poll's real pad. Capture it for our menu
+            // (read before any blanking), then blank what the game sees if the overlay is open.
+            let g = unsafe { (*state).gamepad };
+            capture_pad(user_index, g.buttons, g.thumb_lx, g.thumb_ly);
+            if is_blocked() {
+                unsafe {
+                    (*state).gamepad = XInputGamepad::default();
+                    // Also bump packet_number. A game that skips re-reading on an unchanged packet
+                    // would otherwise keep reusing the last *real* input — a steadily-held stick
+                    // leaves the device's packet constant, so zeroing the gamepad alone wouldn't be
+                    // seen. Bumping guarantees the game re-reads the now-neutral gamepad every
+                    // blanked poll.
+                    (*state).packet_number = (*state).packet_number.wrapping_add(1);
+                }
             }
+        } else if ret != 0 {
+            // Not connected (or error): if our nav pad vanished, drop to neutral so held dirs don't
+            // stick.
+            release_pad(user_index);
         }
-    } else if ret != 0 {
-        // Not connected (or error): if our nav pad vanished, drop to neutral so held dirs don't stick.
-        release_pad(user_index);
+    }));
+    if caught.is_err() && !XINPUT_PANIC_LOGGED.swap(true, Ordering::Relaxed) {
+        crate::logger::error_contained(format_args!(
+            "input: XInputGetState IAT hook panicked; suppressed at the FFI boundary"
+        ));
     }
-    ret as usize
+    ret
 }
 
 const DIRECTINPUT_VERSION: u32 = 0x0800;
@@ -380,7 +412,7 @@ pub unsafe fn install() -> Result<(), HookError> {
     // blanked and can't drive the menu — the backtick key still toggles and navigates.
     match unsafe { install_xinput() } {
         Ok(()) => log::info!(
-            "input: hooked XInput GetState (controller menu nav + RB+L3+R3 toggle; pad blanked while open)"
+            "input: hooked XInput GetState via the game's IAT (controller menu nav + RB+L3+R3 toggle; pad blanked while open)"
         ),
         Err(e) => log::warn!(
             "input: XInput hook not installed ({e}); controller won't drive the menu or be suppressed"
@@ -389,26 +421,99 @@ pub unsafe fn install() -> Result<(), HookError> {
     Ok(())
 }
 
-/// Hook `xinput1_4!XInputGetState`. ER statically imports `XINPUT1_4.dll`, so it's already loaded by
-/// the time install runs. The toggle chord (RB+L3+R3), A, B, d-pad and sticks are all standard bits
-/// the plain `XInputGetState` reports, so the detour reads the game's own buffer — no `XInputGetStateEx`
-/// / Guide-bit dependency, and nothing for Steam Input to intercept.
+/// Interpose `XInputGetState` through the **game's import table (IAT)** — never by patching
+/// `XINPUT1_4.dll`'s code. An earlier version inline-hooked the function entry (ilhook) and that
+/// was fatal in the wild (friend crash 2026-07-01, WER: `c0000005` at `XINPUT1_4.dll+0x9a65` =
+/// `XInputGetState+5`): the function opens with the 5-byte hot-patch prologue, other overlays
+/// (Steam's gameoverlayrenderer et al.) hook it with the 5-byte-jmp convention, and such a hooker's
+/// trampoline jumps back to `entry+5` — which sat mid-our-14-byte patch, executing garbage. The IAT
+/// swap touches only `eldenring.exe`'s own bound-import slot, so it composes with any
+/// function-body hooker by construction. Full analysis: docs/OVERLAY-RENDERING.md > "WER Verdict".
 ///
-/// KNOWN FATAL on native Windows (friend crash 2026-07-01, WER: `c0000005` at
-/// `XINPUT1_4.dll+0x9a65` = `XInputGetState+5`): this inline patch collides with other XInput
-/// hookers (likely Steam's gameoverlayrenderer). `XInputGetState` opens with the 5-byte hot-patch
-/// prologue, and a 5-byte-convention hooker's trampoline jumps back to `entry+5` — mid-our-14-byte
-/// ilhook jmp — executing garbage. Works on the vkd3d rig only because Wine's xinput stack has no
-/// colliding hooker. Fix direction: an IAT hook on `eldenring.exe`'s import (no function-body
-/// bytes touched). Full analysis: docs/OVERLAY-RENDERING.md > "WER Verdict".
+/// Re-derivation: `eldenring.exe` imports `XINPUT1_4.dll` **by ordinal** (no names in its import
+/// table — `x86_64-w64-mingw32-objdump -p eldenring.exe | grep -A5 XINPUT` shows ordinals 3 and 2
+/// only). Ordinal 2 = `XInputGetState`, ordinal 3 = `XInputSetState`, read from the DLL's export
+/// table (verified against xinput1_4.dll 10.0.26100.8521; stable because the game's own import
+/// binds by it). The `ByName` arm is future-proofing in case a game update switches to name imports.
 ///
 /// # Safety
-/// Same hooking caveats as [`install`]: patches executable memory in the loaded `xinput1_4.dll`; run
-/// once, off the main thread.
+/// Writes the game's IAT (loader data, not code). Run once, off the main thread. The slot is an
+/// 8-byte-aligned pointer and the swap is a single atomic store, so a concurrent poller sees either
+/// function — both valid.
 unsafe fn install_xinput() -> Result<(), HookError> {
-    let xinput = unsafe { GetModuleHandleA(s!("xinput1_4.dll")) }
-        .map_err(|e| HookError::ModuleNotLoaded { module: "xinput1_4.dll", err: e })?;
-    let get_state = resolve_proc(xinput, s!("XInputGetState"), "XInputGetState export")?;
-    unsafe { install_hook(get_state, |r, o| xinput_get_state_detour(r, o), "XInputGetState")? };
+    const XINPUT_GET_STATE_ORDINAL: u16 = 2;
+
+    let exe = unsafe { GetModuleHandleA(PCSTR::null()) }.map_err(HookError::ModuleHandle)?;
+    let base = exe.0 as *mut u8;
+    let view = unsafe { PeView::module(base.cast_const()) };
+    let imports = view.imports().map_err(|e| HookError::Install {
+        what: "XInputGetState IAT".to_string(),
+        detail: format!("no import directory: {e}"),
+    })?;
+    for desc in imports {
+        if !desc.dll_name().is_ok_and(|n| {
+            n.to_str().is_ok_and(|s| s.eq_ignore_ascii_case("xinput1_4.dll"))
+        }) {
+            continue;
+        }
+        let (Ok(int), Ok(iat)) = (desc.int(), desc.iat()) else { continue };
+        // Zip with the IAT purely to bound the index by the live array's length; the write pointer
+        // itself is derived from the module base + FirstThunk RVA (not from pelite's `&u64`), so it
+        // carries the mapping's provenance rather than a shared borrow's.
+        for (idx, (imp, _)) in int.zip(iat).enumerate() {
+            let is_get_state = match imp {
+                Ok(Import::ByOrdinal { ord }) => ord == XINPUT_GET_STATE_ORDINAL,
+                Ok(Import::ByName { name, .. }) => name.to_str() == Ok("XInputGetState"),
+                Err(_) => false,
+            };
+            if !is_get_state {
+                continue;
+            }
+            let slot = unsafe {
+                base.add(desc.image().FirstThunk as usize).cast::<usize>().add(idx)
+            };
+            return unsafe { swap_iat_slot(slot, xinput_get_state_iat as *const () as usize) };
+        }
+    }
+    Err(HookError::ExportNotFound("XInputGetState in eldenring.exe's import table"))
+}
+
+/// Record the slot's current value as [`REAL_XINPUT_GET_STATE`], then swap the slot to `new`:
+/// `VirtualProtect(RW)` → atomic store → restore. The slot is loader data (never executed), so no
+/// instruction-cache flush — this is deliberately not [`crate::patch::apply`], whose
+/// `copy_nonoverlapping` write has no atomicity guarantee against a concurrently-polling game
+/// thread.
+///
+/// # Safety
+/// `slot` must point at the game's live, 8-byte-aligned `XInputGetState` IAT entry.
+unsafe fn swap_iat_slot(slot: *mut usize, new: usize) -> Result<(), HookError> {
+    use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
+
+    let old = unsafe { slot.read() };
+    // Diagnostic only: if the slot no longer equals the DLL's export, someone IAT-interposed before
+    // us (we chain through them — `old` is still what the game would have called).
+    let export = unsafe { GetModuleHandleA(s!("xinput1_4.dll")) }
+        .ok()
+        .and_then(|m| unsafe { GetProcAddress(m, s!("XInputGetState")) })
+        .map(|p| p as usize);
+    if export.is_some_and(|e| e != old) {
+        log::info!(
+            "input: XInputGetState IAT slot already interposed (slot {old:#x} != export {:#x}); chaining through it",
+            export.unwrap_or(0)
+        );
+    }
+    // Order matters: the replacement must find the original the instant the slot flips.
+    REAL_XINPUT_GET_STATE.store(old, Ordering::SeqCst);
+    unsafe {
+        let mut prev = PAGE_PROTECTION_FLAGS(0);
+        VirtualProtect(slot.cast(), size_of::<usize>(), PAGE_READWRITE, &mut prev)
+            .map_err(HookError::Win32)?;
+        (*slot.cast::<AtomicUsize>()).store(new, Ordering::SeqCst);
+        let mut restored = PAGE_PROTECTION_FLAGS(0);
+        if let Err(e) = VirtualProtect(slot.cast(), size_of::<usize>(), prev, &mut restored) {
+            log::warn!("input: could not restore IAT page protection after swap: {e}");
+        }
+    }
+    log::debug!("input: XInputGetState IAT slot swapped ({old:#x} -> {new:#x})");
     Ok(())
 }

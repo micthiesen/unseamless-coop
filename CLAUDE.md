@@ -72,6 +72,11 @@ The only split is build-vs-run, both on this one machine:
 > when you finish a chunk. Don't swap his real ERSC stack back on your own initiative — he keeps
 > iterating across many cycles and will say when he wants it restored. `cycle` reliably lands in-game
 > autonomously (it reaches a loaded save via the ydotool popup-dismiss).
+>
+> **But NEVER while the game is already running** — a running ELDEN RING you didn't launch means
+> Michael is playing: don't apply (it overwrites the process's mapped `dinput8.dll` in place),
+> don't launch, don't kill. `rig.sh apply`/`cycle` now refuse on their own when the game is up
+> (`--force` overrides); treat that refusal as "come back later", not an obstacle to work around.
 
 The log-line contract (install → heartbeat → effect lines) keeps behavior legible — write code so
 its effects show up in the log.
