@@ -52,6 +52,21 @@ scripts/fleet/worker-new <name> "<guidance>"
 branches it, writes an assignment file, launches Claude there with the worker overlay
 (`docs/roles/worker.md`), and pops it open in Alacritty.
 
+> **Backtick/quoting hazard — for any non-trivial brief, pass guidance via `-` + a single-quoted
+> heredoc, NOT a `"..."` arg.** A guidance string in double quotes is processed by *your* shell before
+> `worker-new` sees it, so backticks and `$(...)` are command-substituted (a `` `Foo::bar` `` runs
+> `Foo::bar` and silently vanishes from the assignment — this has bitten a real spawn) and unescaped
+> `"`/`$`/`\` mangle it. Since briefs are full of `` `identifiers` ``, code snippets, and quotes, make
+> the heredoc form the default:
+> ```
+> scripts/fleet/worker-new my-lane - <<'EOF'
+> Implement `ScalingFeature`; write the absolute rate via `set_max_hp_rate(...)`, gate on $(cfg).
+> Boundary: crates/... only. Everything here is literal — no expansion.
+> EOF
+> ```
+> The `'EOF'` (quoted delimiter) is what disables expansion. Reserve the plain `"<guidance>"` arg for
+> short, punctuation-free briefs.
+
 Write the guidance like a focused brief: it becomes the worker's assignment file, which its seed
 prompt tells it to read first.
 - **The lane and its boundary** ("implement the boot_volume feature; don't touch the save path").

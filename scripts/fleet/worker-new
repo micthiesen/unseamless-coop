@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# worker-new [--solo] <name> [guidance...]
+# worker-new [--solo] <name> [guidance... | -]
 #
 # Materialize a worker: a rift copy-on-write workspace on its own branch, with a
 # Claude Code session running in a detached tmux session (popped open in
 # Alacritty), seeded to read its assignment. See docs/ORCHESTRATION.md.
 #
 #   worker-new boot-volume "Implement the boot_volume feature; see docs/FEATURES.md."
+#
+# For any brief with backticks, $(...), or quotes, pass '-' and pipe it via a
+# SINGLE-quoted heredoc — the shell would otherwise command-substitute/mangle
+# those in a "..." arg before this script sees them:
+#   worker-new scaling - <<'EOF'
+#   Implement `ScalingFeature`; write the absolute rate via `set_max_hp_rate(...)`.
+#   EOF
 #
 # --solo: a USER-DRIVEN worker. Michael drives the session interactively; it stays
 # silent toward the orchestrator until he hands off, revives with the worker-solo.md
@@ -43,7 +50,7 @@ fi
 
 name="${1:-}"; shift || true
 if [ -z "$name" ]; then
-  echo "usage: worker-new [--solo] <name> [guidance...]" >&2
+  echo "usage: worker-new [--solo] <name> [guidance... | -]   ('-' reads guidance from stdin)" >&2
   exit 2
 fi
 
@@ -57,7 +64,20 @@ if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   echo "worker-new: name must be kebab-case [a-z0-9_-], got '$name'" >&2
   exit 2
 fi
-guidance="$*"
+# Guidance source. A single `-` reads the whole assignment body from STDIN, so a caller can pass it
+# through a single-quoted heredoc — the ONLY hazard-free way to send text with backticks / `$(...)` /
+# quotes, which the shell would otherwise command-substitute or mangle in a double-quoted `"..."` arg
+# *before* this script ever sees it (that bit an orchestrator once — a `` `word` `` in the guidance
+# ran `word` as a command and vanished from the assignment). Recommended for any non-trivial brief:
+#   scripts/fleet/worker-new my-lane - <<'EOF'
+#   ...brief with `identifiers`, $(cmds), "quotes" all literal...
+#   EOF
+# Otherwise guidance is the remaining args joined (fine for short, punctuation-free briefs).
+if [ "${1:-}" = "-" ]; then
+  guidance="$(cat)"
+else
+  guidance="$*"
+fi
 
 sess="usc-worker-$name"
 branch="worker/$name"
