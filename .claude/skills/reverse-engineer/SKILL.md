@@ -80,6 +80,31 @@ For locating something in a clean binary, two scriptable tools beyond rz-bin (fu
   (you'd decompile the unpacker stub), and `eldenring.exe` is mostly SDK-charted, so this is
   occasional, not the default.
 
+### Persist the Ghidra project cache (don't re-analyze the 87MB exe)
+
+First-time PyGhidra analysis of `eldenring.exe` takes **~45 min** (single-threaded, ~235k
+functions). It caches per-binary, so *later* decompiles are near-instant — but only if the cache
+survives. `decompile.py` defaults its project dir to `tempfile.gettempdir()` = **`/tmp`, which is
+tmpfs (RAM) and wiped on every reboot**, so the default throws the 45 min away each boot.
+
+Point it at a **persistent, non-dotted** path via `GHX_PROJECT_DIR`. Non-dotted is mandatory:
+Ghidra's `ProjectLocator` rejects any path element starting with `.` (that's why the in-repo
+`.ghidra-projects/` and the dotted rift path can't hold it). `/var/tmp` is btrfs here (survives
+reboots) and works:
+
+```bash
+export GHX_PROJECT_DIR=/var/tmp/ghidra-projects        # persistent, ProjectLocator-safe
+scripts/re/ghidra-decompile.sh "$RE_BIN" 0x140xxxxxx   # first run ~45min; reuses after
+```
+
+- **`eldenring.exe` 2.6.2.0 (WW) is pre-analyzed at `/var/tmp/ghidra-projects/ghx_eldenring_exe`.**
+  With `GHX_PROJECT_DIR=/var/tmp/ghidra-projects`, decompiles return in seconds — no re-analysis.
+- Caveat: systemd-tmpfiles cleans `/var/tmp` after ~30 days of inactivity; if the cache is gone,
+  one run rebuilds it. For a truly permanent cache, use a home subdir (still non-dotted).
+- Long first analysis: run it detached and decompile when it exits, e.g.
+  `nohup scripts/re/ghidra-decompile.sh "$RE_BIN" <addr> & ` then poll the pid — the project is
+  built once the process exits, and every subsequent `<addr>` is fast.
+
 ## Finding unknown game state (the diagnostic pattern)
 
 When a behavior **isn't** a named SDK field, don't hand-diff memory dumps. `er-crit-coop`'s
