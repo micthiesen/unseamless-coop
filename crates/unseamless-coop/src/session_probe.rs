@@ -411,8 +411,10 @@ impl Feature for SessionFsmProbe {
 //
 // Where the FSM logger + entry hooks OBSERVE the create/join initiation, this DRIVES it: a one-shot
 // that CALLS the charted create-session wrapper on `[G]` to confirm we can move
-// `lobby_state None -> TryToCreateSession` with no in-game item and no peer (the pivot to driving
+// `lobby_state None -> TryToCreateSession` with no in-game item (the pivot to driving
 // `CSSessionManager` directly — docs/SESSION-DRIVE.md + the create chart in docs/SESSION-RE-FINDINGS.md).
+// It fires only once the rung-2 side-channel is linked (+ a settle), so the two-machine rung-3 run
+// drives create with a real peer present — see docs/RUNG3-DRIVE-RUNBOOK.md.
 //
 // Target: the create WRAPPER `bool 0x140cad4c0(this, u8 flag, u32 mode, void* settings)` — chosen over
 // the inner because it owns the failure path (sets `lobby_state = 2` + cleanup) so a rejected call
@@ -450,10 +452,23 @@ struct CreateSettings {
 type CreateFn =
     unsafe extern "system" fn(*mut CSSessionManager, u8, u32, *const CreateSettings) -> bool;
 
-/// One-shot driver: when in-game and `lobby_state == None`, call the create wrapper once and log the
-/// before/return/after under the `session-probe:` prefix (the FSM logger then traces the transition).
+/// How long the driver holds fire after the side-channel link is first observed (~1.5s at 60fps),
+/// so the Steam lobby + roster behind the link are fully live before the driven create reads them.
+/// See docs/RUNG3-DRIVE-RUNBOOK.md > "Prerequisite — re-time the driver".
+const LINK_SETTLE_FRAMES: u64 = 90;
+
+/// One-shot driver: when in-game with the rung-2 side-channel linked (plus a short settle) and
+/// `lobby_state == None`, call the create wrapper once and log the before/return/after under the
+/// `session-probe:` prefix (the FSM logger then traces the transition). The link precondition is the
+/// point of the two-machine rung-3 run: a live peer is what is hypothesized to size leg B's
+/// session-slot array, so a create driven *before* any peer exists (the old first-in-game-frame
+/// timing) only reproduces the solo capacity-0 failure.
 pub struct SessionCreateDriver {
     fired: bool,
+    /// Frame the side-channel link was first observed on (with the in-game preconditions above it
+    /// already met), anchoring the [`LINK_SETTLE_FRAMES`] delay. Cleared if the link drops
+    /// mid-settle, so the settle restarts against a recovered link.
+    linked_since: Option<u64>,
     /// When true, satisfy leg B's reject #1 by writing `NetworkSession+0x10` nonzero just before the
     /// create call (`force_netsession_ready` probe). The flag's pre-call value is logged either way.
     force_ready: bool,
@@ -461,7 +476,7 @@ pub struct SessionCreateDriver {
 
 impl SessionCreateDriver {
     fn new(force_ready: bool) -> Self {
-        Self { fired: false, force_ready }
+        Self { fired: false, linked_since: None, force_ready }
     }
 }
 
@@ -505,6 +520,28 @@ impl Feature for SessionCreateDriver {
         // bypass+force yet neither gate-trace hook fired). Require the active main player present so the
         // create runs with real world context (matches the create wrapper's own player/world needs).
         if crate::sdk::with_active_main_player(|_| ()).is_none() {
+            return;
+        }
+        // Hold fire until the rung-2 side-channel is LINKED, plus a short settle: the whole point of
+        // the two-machine run is driving create WITH a peer present, and Open/Join (the rung-4 lobby +
+        // rung-2 link) only come up after the in-game conditions above — firing on the first in-game
+        // frame would always beat them (docs/RUNG3-DRIVE-RUNBOOK.md > "Prerequisite"). The link is a
+        // separate Steam lobby, not the game's session FSM, so `lobby_state` stays None here and the
+        // None precondition below remains correct.
+        if !crate::coop::is_linked() {
+            // Link dropped (or never came up): restart the settle from the next link edge.
+            self.linked_since = None;
+            return;
+        }
+        let linked_since = *self.linked_since.get_or_insert_with(|| {
+            log::info!(
+                "session-probe: drive-create armed @frame {} — side-channel linked; firing after \
+                 {LINK_SETTLE_FRAMES}-frame settle",
+                tick.frame,
+            );
+            tick.frame
+        });
+        if tick.frame.saturating_sub(linked_since) < LINK_SETTLE_FRAMES {
             return;
         }
         // Need the live manager AND lobby_state == None (the inner guards on None; we also want a clean

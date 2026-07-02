@@ -213,6 +213,14 @@ pub fn status_line() -> &'static str {
     }
 }
 
+/// Whether the rung-2 side-channel handshake is currently complete (`Phase::Linked`), read from the
+/// game thread like [`status_line`]. `Lost` reads as *not* linked: the partner has gone silent, so a
+/// consumer gating work on a live peer (e.g. [`crate::session_probe::SessionCreateDriver`]) should
+/// hold fire until the link recovers.
+pub fn is_linked() -> bool {
+    Phase::from_u8(PHASE.load(Ordering::Relaxed)) == Phase::Linked
+}
+
 // ---- Connect report (the per-stage "why did this attempt fail" telemetry) -------------------------
 //
 // Where `PHASE`/[`status_line`] is the one-word verdict, the [`ConnectReport`] records each stage and
