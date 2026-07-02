@@ -7,6 +7,12 @@ EAC**, where the game greys them out because FromSoft matchmaking is unreachable
 unblock: with the items selectable, an item-use can drive the game's own `CSSessionManager` FSM (see
 [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) > "Blocker found (2026-06-27 friend test)").
 
+> **Scope & legitimacy.** The game already runs *outside* EAC by our own design (co-op-only), so
+> this isn't an anti-cheat bypass — it's re-enabling UI the game greys out purely because FromSoft
+> matchmaking is unreachable offline, so our own private co-op side-channel can use it. All RE is on
+> our own legitimately-owned binary, on the developer's own machine; behavioral notes only, no
+> upstream code copied. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 **Binary:** static RE on our own legitimately-owned **2026-06-02 `eldenring.exe`** (image base
 `0x140000000`, two `.text` sections at `0x140001000` + `0x144c0e000`, `.pdata` at `0x144863000`; the
 exe loads at its preferred base, so static VA == live VA — SESSION-RE-FINDINGS confirmed). Behavioral

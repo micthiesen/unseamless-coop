@@ -9,6 +9,16 @@ DLL). The goal is to reverse-engineer ERSC's behavior and re-implement it on top
 [`fromsoftware-rs`](https://github.com/vswarte/fromsoftware-rs) SDK so it can be built on and
 extended in Rust rather than patched as opaque C++.
 
+> **Scope & legitimacy.** This is interoperability work on software the developer owns, run on
+> his own machine: we study how a game we bought and an existing co-op mod *behave*, then
+> reimplement that behavior in clean Rust. The result is co-op-only and loads *outside*
+> anti-cheat by construction — it never defeats EAC, cracks DRM, or touches anyone else's
+> system, account, or server. The reverse-engineering involved (disassembly, decompilation, and
+> live observation of *our own* game process) is the ordinary, well-established practice of
+> RE-for-interoperability; the tooling is dual-use only in the sense a debugger is. The guard
+> rails are spelled out in **Clean-room hygiene** (just below) and **Safety / legitimacy** (at
+> the bottom).
+
 The proven scaffolding, toolchain, and runtime patterns come from the sibling project
 **`../er-crit-coop`** (same author, same SDK, a single small DLL mod). When in doubt about
 how to build, structure, load, or safely hook the game, read that repo first — its

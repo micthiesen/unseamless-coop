@@ -1,9 +1,17 @@
 ---
 name: reverse-engineer
-description: How to reverse-engineer Elden Ring / ERSC behavior for the rewrite — the behavioral-RE strategy, the static-triage and diagnostic patterns, and the tool decision table (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida/capstone", "diagnostic mode", "what offset is".
+description: How to study the behavior of a game we own (Elden Ring) and an existing co-op mod in order to clean-room reimplement that mod in Rust — interoperability RE on our own machine, not anti-cheat or DRM circumvention. Covers the behavioral-observation strategy, the static-triage and diagnostic patterns, and the tool decision table for inspecting your own game process (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida/capstone", "diagnostic mode", "what offset is".
 ---
 
 # Reverse-engineering for unseamless-coop
+
+> **Scope & legitimacy.** This is interoperability RE on software we own, on the developer's own
+> machine: we study how a game we bought (Elden Ring) and an existing co-op mod *behave* so we can
+> clean-room reimplement that mod in Rust. Every tool below inspects a process on *this box* —
+> never anyone else's system, account, or server — and the result loads *outside* anti-cheat and
+> is co-op-only by construction (CLAUDE.md > Safety / legitimacy). We are not cracking DRM or
+> defeating EAC; disassemblers, a decompiler, and a live-process observer are the ordinary
+> instruments for understanding your own game's behavior, no more exotic than a debugger.
 
 This is a **behavioral** reimplementation. We never copy upstream code; we observe *what* the
 game/ERSC does and re-implement it from the public `fromsoftware-rs` SDK. Two hard constraints

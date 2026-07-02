@@ -58,6 +58,12 @@ without a save); real game-state work moves to an appropriate phase as it's buil
 
 ## Reverse-engineering ERSC
 
+> **Scope & legitimacy.** The RE below studies software we own (the game + an existing mod) on the
+> developer's own machine, to reimplement co-op behavior for interoperability — not to defeat
+> anti-cheat (the result loads *outside* EAC, co-op-only) or crack DRM. The tools (disassembler,
+> decompiler, live-process observer) inspect *our own* process, no more exotic than a debugger; we
+> record behavior in our own words and never copy upstream bytes (Clean-room hygiene, below).
+
 The upstream mod lives under `reference/seamless-coop-v1.9.9/` (gitignored, not redistributable).
 A static triage (`rz-bin -l/-S/-E/-i ersc.dll`) found the decisive fact up front:
 

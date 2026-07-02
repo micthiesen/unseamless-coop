@@ -4,6 +4,13 @@ The design of the rewrite. This is the holistic view a step-by-step build wouldn
 write down; it's also where the load-bearing decisions live. Read [FEATURES.md](FEATURES.md)
 for *what* we're reproducing and [DEVELOPMENT.md](DEVELOPMENT.md) for the toolchain.
 
+> **Scope & legitimacy.** This is interop work on a game we own, on the developer's own machine:
+> observe how ERSC and the game *behave*, then reimplement in clean Rust. The result is co-op-only
+> and loads *outside* anti-cheat by construction — the launcher marker + abort (below) exist so a
+> modded build **can't** run under EAC, i.e. it keeps us off the official servers rather than
+> sneaking past them. No DRM-cracking, no reaching any other system or player. See CLAUDE.md >
+> Safety / legitimacy + Clean-room hygiene.
+
 ## Shape: a workspace split by verifiability
 
 ```

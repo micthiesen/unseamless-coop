@@ -1,6 +1,6 @@
 ---
 name: steam-deck
-description: Drive a REMOTE rig (a Steam Deck / second Linux machine) over SSH as player 2 for two-player networking tests — apply the mod, seed config + save, launch/kill the game, and click into gameplay, all from this PC via scripts/deck.sh. Use when setting up or running the Steam Deck second player, testing rung-3 / real co-op, or anything "on the Deck". TRIGGER on "steam deck", "second player", "remote rig", "deck.sh", "two real machines", "apply the mod on the deck", "player 2".
+description: Drive a REMOTE rig (a Steam Deck / second Linux machine the developer owns, on his own LAN) over SSH as player 2 for two-player co-op networking tests — apply our own mod, seed config + save, launch/kill the game, and click into gameplay, all from this PC via scripts/deck.sh. Use when setting up or running the Steam Deck second player, testing rung-3 / real co-op, or anything "on the Deck". TRIGGER on "steam deck", "second player", "remote rig", "deck.sh", "two real machines", "apply the mod on the deck", "player 2".
 ---
 
 # Remote rig over SSH (the Steam Deck — player 2)

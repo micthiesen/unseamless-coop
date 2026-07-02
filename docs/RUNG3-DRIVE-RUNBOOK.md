@@ -5,6 +5,12 @@ run that answers the one question the solo rig fundamentally can't. Staged now s
 second machine is available (a friend or the Steam Deck), the orchestrator sets the config below,
 launches both sides, and reads the verdict out of the logs; nothing is left to design on the day.
 
+> **Scope & legitimacy.** Two machines the developer owns (or a friend who owns the game), running a
+> co-op mod over a private Steam side-channel, *outside* anti-cheat and never on the official servers.
+> "Bypassed gate" = a check flipped in our own in-memory copy so our own co-op create can proceed
+> offline — not an anti-cheat defeat and not redistributed. See CLAUDE.md > Safety / legitimacy +
+> Clean-room hygiene.
+
 **Why this run exists (the confirmed root cause).** A solo driven create fires and passes *every*
 charted gate — the Arxan leg-A availability gate (bypassed), leg B's rejects #1/#2/#3, and the 4th
 gate — then dies in **leg B's tail capacity check**: the session-slot array on the `NetworkSession`

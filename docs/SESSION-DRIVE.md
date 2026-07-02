@@ -9,6 +9,13 @@ ordering against the rung-2 side-channel and the rung-4 Steam lobby.
 This is desk/static research — **no rig run**. It's the spec a future driven session implements
 against, not a record of a confirmed call.
 
+> **Scope & legitimacy.** Static RE on a game we own, on the developer's own machine, to drive its
+> session layer for our own co-op mod — co-op-only, *outside* anti-cheat, no DRM-cracking. Where the
+> text notes an "EAC / anti-tamper" check, that's us *identifying* why a function is encrypted so we
+> can reimplement around it on our own machine, not defeating protection to reach the official
+> servers. Behavioral notes only; no upstream code copied. See CLAUDE.md > Safety / legitimacy +
+> Clean-room hygiene.
+
 > **Scope.** This answers *"once we have the function address, how do we drive it?"* It does **not**
 > find the address — that's the runtime write-watch in SESSION-RE-RUNBOOK.md. The two dovetail: the RE
 > runbook hands back two function entries + a register→meaning mapping; this doc says what to put in

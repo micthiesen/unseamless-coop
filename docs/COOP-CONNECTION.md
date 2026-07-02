@@ -5,6 +5,11 @@ one another's worlds" problem from [ARCHITECTURE.md](ARCHITECTURE.md), planned o
 today, what's reverse-engineering-gated, the incremental build order, and the decided approach for
 talking to Steam.
 
+> **Scope & legitimacy.** Interop RE on a game we own, on the developer's own machine, to connect
+> two co-op players over our own private Steam side-channel — co-op-only, *outside* anti-cheat, no
+> DRM-cracking or reaching other players' systems. See CLAUDE.md > Safety / legitimacy +
+> Clean-room hygiene.
+
 > **Status: rungs 1, 2, and 4 shipped; rung 3 is the remaining hard RE.** The mod loads, configures,
 > observes a session, reads our own SteamID (rung 1, `coop/steam.rs`), and — on demand from the
 > in-overlay **Open World / Join world** actions — stands up a private Steam P2P **side-channel**

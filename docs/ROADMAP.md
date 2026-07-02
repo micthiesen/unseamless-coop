@@ -4,6 +4,13 @@ What's built vs. what's next, grouped by what **gates** each item. Detail lives 
 docs; this is the map. Work proceeds in **waves** (one fleet batch each — see
 [ORCHESTRATION.md](ORCHESTRATION.md)).
 
+> **Scope & legitimacy.** Everything here is interop work on a game we own, on the developer's own
+> machine, to reimplement a co-op mod — co-op-only, *outside* anti-cheat by construction, no
+> DRM-cracking or reaching other players' systems. Where an item mentions "bypassing a gate," it
+> means flipping a check in our own in-memory copy so our own private co-op path can proceed offline,
+> never defeating anti-cheat to touch the official servers. See CLAUDE.md > Safety / legitimacy +
+> Clean-room hygiene.
+
 ## Wave 1 — DONE (2026-06)
 
 Shipped to `main`, rig-verified where applicable:

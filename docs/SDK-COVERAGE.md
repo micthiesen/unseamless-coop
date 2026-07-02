@@ -5,6 +5,10 @@ needs. This is the inventory behind the "drive the game's own systems, not reinv
 decision in [ARCHITECTURE.md](ARCHITECTURE.md). Verdicts: **CHARTED** = a real API we can call;
 **PARTIAL** = struct layout we can read but no action method; **ABSENT** = needs our own RE.
 
+> **Scope & legitimacy.** All RE referenced here is on a game we own, on the developer's own machine,
+> to reimplement a co-op mod for interoperability — co-op-only, *outside* anti-cheat, no DRM-cracking.
+> See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / `instance_mut()`,
 `unsafe`, main-thread only — wrap with `coop::sdk::with_instance`). Source paths below are under
 `crates/eldenring/src/` in the pinned checkout.

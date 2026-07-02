@@ -6,6 +6,13 @@ which NOPs a conditional branch in the boot/title flow; future consumers include
 trigger suppression ([OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md), the "suppress the trigger"
 path) and any other "the SDK charts no field for this, so we patch the instruction" feature.
 
+> **Scope & legitimacy.** These patches rewrite instructions in *our own* copy of the game, in
+> memory, on the developer's own machine, to reimplement co-op behavior — not to defeat anti-cheat
+> (the mod runs *outside* EAC and never touches the official servers) or DRM. Rewriting your own
+> process's code is ordinary modding; where we neuter a code-integrity/anti-tamper check it is only
+> so our own in-memory patch can take effect on our own machine, never to redistribute a cracked
+> binary. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 This is a **research/design note**, not yet implemented. Everything game-internal below is grounded
 in the pinned `fromsoftware-rs` SDK source (cited) or is a behavioral observation to confirm on the
 rig. Per [CLAUDE.md](../CLAUDE.md) > clean-room hygiene: we reimplement from the mechanism + the

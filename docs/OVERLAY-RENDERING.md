@@ -6,6 +6,12 @@ later overhead player nameplates — on top of Elden Ring by hooking the game's 
 path, and getting that to work under **Proton/vkd3d**. This is the single biggest UI dependency: it's
 the renderer those two host-tested models have always assumed but never had.
 
+> **Scope & legitimacy.** We hook the DirectX 12 present path of *our own* game process, on the
+> developer's own machine, to draw our own co-op overlay — the same way any legitimate overlay (Steam,
+> Discord, RivaTuner) does. The "inline-hook vs. IAT-hook" discussion is about coexisting cleanly with
+> the game and other overlays, not evading detection; nothing here is anti-cheat/DRM circumvention (the
+> mod runs *outside* EAC, co-op-only). See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 **Status: the renderer shipped and is verified on the rig (vkd3d/Proton).** `coop/overlay.rs` draws
 the session-action menu, notification toasts/banners, the read-only settings view, and a live log tail
 through **hudhook (DX12 present-hook) + Dear ImGui** (the decision this note worked through, now built

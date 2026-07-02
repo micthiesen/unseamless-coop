@@ -3,6 +3,11 @@
 **Lane:** `worker:re-game-ui` — static RE over the clean `eldenring.exe`. No rig was driven;
 every "needs confirming live" item is flagged for the orchestrator.
 
+> **Scope & legitimacy.** Static RE on *our own* legitimately-owned game binary, on the developer's
+> own machine, to reimplement a co-op mod's UI for interoperability — not anti-cheat/DRM
+> circumvention. Findings are in our own words from reading disassembly; no decompiler output is
+> reproduced. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 **The question.** Our native UI text is bitmap glyphs rasterized to world-space `CSEzDraw` quads
 — it swims and is slow for dense text (see [NAMEPLATES.md](NAMEPLATES.md)). The game's own UI text
 (HUD, item names, damage numbers, prompts, menus) is pixel-perfect and GPU-textured with a font

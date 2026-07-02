@@ -4,6 +4,12 @@ How we observe live behavior — game state, hooked functions, network traffic �
 clean-room reimplementation. This is the work that needs the game running, on the Linux + Proton
 rig.
 
+> **Scope & legitimacy.** All observation here is of *our own* game process, on the developer's
+> own machine, to reimplement a co-op mod for interoperability — not to defeat anti-cheat (the
+> mod loads *outside* EAC and is co-op-only), crack DRM, or reach any other system or player. We
+> watch behavior and write it down in our own words; we never dump or ship upstream code. This is
+> ordinary RE-for-interop. See CLAUDE.md > Safety / legitimacy and Clean-room hygiene.
+
 Read this alongside [DEVELOPMENT.md](DEVELOPMENT.md) (toolchain, build/run workflow) and
 [FEATURES.md](FEATURES.md) (what we're trying to reproduce).
 

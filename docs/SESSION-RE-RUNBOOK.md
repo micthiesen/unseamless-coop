@@ -10,6 +10,12 @@
 > [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test". The write-watch
 > recipe below is kept for re-derivation after a game update (addresses shift), not as the current to-do.
 
+> **Scope & legitimacy.** This RE is on a game we own, on the developer's own machine, to reimplement
+> a co-op mod's session handling for interoperability — co-op-only, *outside* anti-cheat, no
+> DRM-cracking or reaching other players' systems. The write-watch/observation tools inspect *our own*
+> process, no more exotic than a debugger; findings are in our own words, no upstream code copied. See
+> CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 The exact recipe for the **one networking gap the SDK doesn't chart**: the internal functions that
 start a co-op session. This is rig-gated RE — it can only be done with the game running, ideally with
 two instances we control. It hands the rig operator (the orchestrator) a self-contained, batchable

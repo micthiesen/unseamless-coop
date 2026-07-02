@@ -8,6 +8,10 @@
 > `[debug] overlay = false` + `[debug] auto_session = "join"` (headless connect) to get around it; fixing
 > the overlay is a pre-release blocker (under investigation).
 
+> **Scope & legitimacy.** Two people who each own the game, on their own machines, connecting a
+> co-op mod over a private Steam side-channel — *outside* anti-cheat, never on the official servers,
+> no DRM-cracking. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+
 The recipe for the **one** thing the rig can't do alone: a real second player. It is built to move
 three rungs in a single friend session —
 

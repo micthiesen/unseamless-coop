@@ -4,6 +4,12 @@
 > EAC, and creates/validates your config — it does **not** connect you to friends. The flow below is
 > the intended end-to-end experience and how to set up for it now.
 
+> **What this is (and isn't).** unseamless-coop is a co-op mod for a game you own. It boots the game
+> *outside* EasyAntiCheat on purpose — that's what keeps a modded session **off the official servers**,
+> where it never belongs. It's for playing co-op with friends who also run it; it doesn't cheat online
+> players, and you should never take a modded session onto the official multiplayer servers (full note
+> at the bottom).
+
 A drop-in, no-installer bundle. Getting from download to a co-op session with friends:
 
 1. **Get the files.** From a [release](../../releases), extract the zip's contents into your
