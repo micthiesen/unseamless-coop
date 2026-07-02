@@ -305,11 +305,14 @@ diagnostic report is already built ASCII-only for the same reason (`crate::diag:
 
 ## Native-Windows Crash (Friend Tests 2026-06-27 + 2026-07-01)
 
-> **Status: the 2026-07-01 trace run landed and rewrote the picture — read the subsection directly
-> below first.** The overlay **initializes and renders fine on native NVIDIA**; the process dies
-> ~16s in, past a `ResizeBuffers`, silently (no exception reached the crash handler or the panic
-> hook). The older first-test analysis below it is kept for the record, with its refuted conclusions
-> marked inline — the "fatal at first hooked Present" model is dead.
+> **Status: ROOT-CAUSED (mechanism) 2026-07-01 — see "WER Verdict" below.** The crash was never in
+> the DX12 present path: the trace run showed the overlay initialize and render fine on native
+> NVIDIA, and the friend's WER record then named an ACCESS_VIOLATION at **`XINPUT1_4.dll+0x9a65` =
+> `XInputGetState+5`** — an **inline-hook collision** between our ilhook patch on `XInputGetState`
+> (the overlay's controller capture, `input.rs`) and a second 5-byte hooker (likely Steam's
+> gameoverlayrenderer). Fix direction: IAT hook instead. The older analysis below is kept for the
+> record with refuted conclusions marked inline — "fatal at first hooked Present" and
+> "NVIDIA-driver-specific" are both dead.
 
 ### Second Friend Run (2026-07-01, Trace Build): The Crash Is NOT At First Present
 
@@ -380,34 +383,84 @@ remaining candidate mechanisms:
    path and error-boxing/exiting. (Would usually also surface as hudhook `Render error`s on
    subsequent presents — none seen — so ranked below the first two.)
 
-**New prime suspect: the post-`ResizeBuffers` present path.** hudhook 0.9.1's `ResizeBuffers` detour
-is a **pure pass-through** (verified in its `dx12.rs` — trampoline call only, no render-target or
-engine teardown), and its per-frame `swap_chain.GetBuffer(...)` avoids holding stale back-buffer
-refs, but the `D3D12RenderEngine`'s internal heaps/pipeline are **never rebuilt for the new mode**.
-The crash landed ~1.9s (a few dozen presents) after the run's only `ResizeBuffers`. Neither the rig
-baseline nor the WARP harness ever exercised a resize with the hook live — an untested window on
-every platform where the overlay *passed*.
+~~**New prime suspect: the post-`ResizeBuffers` present path.**~~ **[Superseded the same evening by
+the WER verdict below — the crash isn't in the render path at all.]** (For the record: hudhook
+0.9.1's `ResizeBuffers` detour is a pure pass-through and its per-frame `GetBuffer` holds no stale
+back-buffer refs; the resize timing correlation was real but indirect — see below.)
+
+### WER Verdict (Same Evening): An Inline-Hook Collision On `XInputGetState`
+
+The friend's Event Viewer **Event 1001 (WER APPCRASH)** for the run names the crash outright:
+
+```
+P1: eldenring.exe   P2: 2.6.2.0          P3: 69e21187
+P4: XINPUT1_4.dll   P5: 10.0.26100.8521  P6: ce6efde6
+P7: c0000005 (ACCESS_VIOLATION)
+P8: 0000000000009a65   (fault offset into XINPUT1_4.dll)
+```
+
+**Not the DX12 present hook. Not NVIDIA. The faulting module is Windows' own `XINPUT1_4.dll` — the
+DLL whose `XInputGetState` we inline-hook for the overlay's controller nav** (`input.rs::install_xinput`,
+ilhook Retn detour). The DX12 path was healthy the whole run.
+
+The fault offset is exact and damning. We pulled the byte-identical DLL build from the Microsoft
+symbol server (winbindex → `msdl.microsoft.com/download/symbols/xinput1_4.dll/CE6EFDE61c000/` —
+timestamp `ce6efde6` matches WER P6, sha256 matches winbindex; archived in
+`reference/friend-crash-2026-07-01/`) and disassembled:
+
+- `XInputGetState` export RVA = **`0x9a60`**; its first instruction is the classic 5-byte
+  hot-patchable prologue `48 89 5c 24 08` (`mov [rsp+8], rbx`), so `+0x9a65` (`push rsi`) is the
+  **second instruction — the exact jump-back target of a standard 5-byte `E9 rel32` inline hook's
+  trampoline.**
+- Fault RVA = **`0x9a65` = `XInputGetState + 5`**.
+
+So: **a second XInput hooker with the 5-byte hook convention collided with our 14-byte ilhook patch
+on the same entry.** Its trampoline executes the saved 5-byte first instruction, then jumps back to
+`entry+5` — which, after our ilhook Retn patch (a 14-byte absolute `jmp [rip+0]`+addr), is the middle
+of our patch bytes. Executing that garbage → AV with RIP = `XInputGetState+5`, exactly WER's P8.
+(ilhook's glue itself was exonerated first: its prolog normalizes RSP parity and its own `movaps`
+saves ran on every poll for 7s.)
+
+The leading candidate for the other hooker is **Steam's `gameoverlayrenderer64.dll`** (hooks
+`XInputGetState` for overlay/Steam-Input controller support, and can engage late — plausibly around
+the t+13.7s fullscreen `ResizeBuffers`, which is what made the resize look like the trigger). The
+~7s of healthy hooked polling before death is consistent with the other detour fast-pathing (e.g.
+"no controller"/emulated state) and only taking its jump-back trampoline path on a later event
+(controller arrival / overlay engage). Actor + install order are unconfirmed pending the WER
+report's module list; the *mechanism* is confirmed by the address arithmetic.
+
+This retroactively explains every platform datum: native Windows + Steam crashes (collision);
+the vkd3d rig survives (Wine's different xinput + overlay stack, no colliding hooker); the WARP
+`dx12-harness` ran clean because **it never installs the input hooks at all** — it only ever tested
+the present hook + font bake, which were never the problem. "NVIDIA-driver-specific" was a red
+herring. It also likely explains the **first (2026-06-27) crashes**: same build path, same hook,
+same machine — not a first-present fault.
+
+**The fix direction: stop inline-hooking `XInputGetState`; hook the game's import (IAT) instead.**
+We only need to observe/blank what *the game* reads — `eldenring.exe` statically imports
+`XINPUT1_4.dll`, so patching its IAT entry for `XInputGetState` gives us the same interpose with
+**no function-body bytes touched**: immune to third-party inline hookers by construction (they
+patch the function body; we'd own only the game's call slot), a plain typed calling convention (no
+ilhook register glue), and trivially reversible. The DirectInput `GetDeviceState` hooks are vtable-
+probed COM methods (different mechanism, no evidence of conflict) and can stay.
 
 **Next steps (in order):**
 
-1. **Friend-side Windows evidence — now the decisive datum**, since every in-process handler was
-   bypassed: Event Viewer > Windows Logs > Application > **Event ID 1000** (Application Error) for
-   `eldenring.exe` names the **faulting module + exception code** (`0xc0000409` = fail-fast,
-   `0xc0000005` = AV; module `nvwgf2umx.dll` = NVIDIA driver, `unseamless_coop.dll` = us/hudhook).
-   Also grab any `%LOCALAPPDATA%\CrashDumps\eldenring.exe.*.dmp`. Two minutes, **no new run needed**.
-2. **Ask the friend** (not derivable from the log): what did the crash look like (game error dialog /
-   straight to desktop / display reset)? Was Steam running + logged in — the log shows `ISteamUser`
-   null for the *entire* 16s (29 retry attempts), which is anomalous. Any other overlay enabled
-   (NVIDIA App/GeForce overlay, RTSS)? What was on screen at ~16s (title screen, after the
-   fullscreen/mode switch)?
-3. **Exercise a live resize under the hook, locally.** Add a mid-run `ResizeBuffers` (+ continued
-   presents) phase to `crates/dx12-harness` (`/windows-test`), and alt-enter/mode-switch on the rig
-   at title. If WARP or the rig reproduces a post-resize death, we finally have a **local repro** —
-   the piece the first VM run couldn't provide — and a fix becomes validatable.
-4. **Harden `crashdump.rs`:** periodically re-assert the filter and **log when it was found replaced**
-   (a replaced filter is itself the datum that mechanism #2 above is in play). A log-only vectored
-   exception handler is an option for AVs but cannot see fail-fast; weigh its spam/reentrancy risk
-   before adding.
+1. **Reimplement the XInput capture/blank as an IAT hook** on `eldenring.exe`'s
+   `XINPUT1_4.dll!XInputGetState` import (fix above). Interim mitigation for testers remains
+   `[debug] overlay = false` (skips the input hooks entirely).
+2. **Friend-side confirmation, no new run:** the WER report folder
+   (`C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_eldenring.exe_…`) — its
+   `Report.wer` lists the **loaded modules**, confirming/denying `gameoverlayrenderer64.dll` (or
+   another XInput hooker: NVIDIA App, RTSS, DS4Windows/HidHide). Also ask: controller plugged in /
+   turned on around the crash? Steam running + logged in (the log's 16s of `ISteamUser` null is
+   still unexplained)?
+3. **Harden `crashdump.rs`:** the AV *was* a plain SEH exception that reached WER, yet our
+   `SetUnhandledExceptionFilter` handler logged nothing — so something replaced our filter after
+   t+0.03s. Periodically re-assert it and **log when it was found replaced**.
+4. **Local repro if wanted** (validation, not discovery): the Win11 VM + `dx12-harness` grown an
+   XInput phase — install the same ilhook detour, then a second 5-byte hook over it, poll — should
+   AV at `+5` deterministically; then flip to the IAT hook and watch it not care.
 
 ---
 
@@ -666,15 +719,16 @@ run); decide #3/#4 with Michael from that data.
       ARCHITECTURE.md's Divergences describe it as an "ImGui overlay … via hudhook."
 - [x] Overhead nameplates: **shipped as native `CSEzDraw` dots** (`coop/features/native_nameplates.rs`),
       not on this overlay. The imgui world→screen projection path was removed — see [NAMEPLATES.md](NAMEPLATES.md).
-- [ ] ⚠️ **Native-Windows overlay crash** (friend tests 2026-06-27 + 2026-07-01, RTX 3080): works on
-      our vkd3d rig; on native NVIDIA the **trace run (2026-07-01) showed the overlay initialize and
-      render fine** (CQ at +0x140, fonts baked, presents flowing) and the process then **die silently
-      ~16s in**, ~2s after a `ResizeBuffers` — no crashdump line, no panic-hook output, no render
-      error. First-present hypotheses are refuted. Full analysis: "Native-Windows Crash" above.
-      **Next:** friend-side Event Viewer Event 1000 / WER dump (decisive, no new run needed); a
-      resize-under-hook phase in `dx12-harness` + an alt-enter test on the rig (local repro attempt);
-      harden `crashdump.rs` (re-assert the filter, log replacement). Mitigate meanwhile with
-      `[debug] overlay = false`.
+- [ ] ⚠️ **Native-Windows overlay crash — ROOT-CAUSED (mechanism) 2026-07-01, fix pending.** The
+      trace run proved the DX12 present path healthy on native NVIDIA (CQ at +0x140, fonts baked,
+      presents flowing); the friend's WER Event 1001 then pinned the death: `c0000005` at
+      **`XINPUT1_4.dll+0x9a65` = `XInputGetState+5`** — an inline-hook collision between our ilhook
+      patch on `XInputGetState` and a second 5-byte hooker (likely Steam's gameoverlayrenderer)
+      whose trampoline jumps back to `entry+5`, mid-our-patch. Full analysis: "WER Verdict" above.
+      **Next:** reimplement the XInput capture as an **IAT hook** on `eldenring.exe`'s import (no
+      function-body patching); get the friend's `Report.wer` module list (confirms the other
+      hooker); harden `crashdump.rs` (re-assert the filter, log replacement — ours was bypassed).
+      Mitigate meanwhile with `[debug] overlay = false`.
 - [x] **Crash handler staged (2026-06-29):** `unseamless-coop/src/crashdump.rs` (in the cdylib *and* the
       harness) installs an unhandled-exception filter that logs the **faulting module+offset** + AV
       target + registers on a hard fault. Verified on WARP via `DX12_HARNESS_FORCE_CRASH=1` (caught the

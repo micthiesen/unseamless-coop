@@ -194,22 +194,20 @@ decompiler output into source/commits ([CLAUDE.md](../CLAUDE.md) > Clean-room hy
 
 ## Part C — Native overlay-crash trace (solo friend, any NVIDIA box)
 
-> **Ran 2026-07-01 — the trace run landed and rewrote the analysis** (full picture:
-> [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "Second Friend Run"). The overlay **initialized and
-> rendered fine on native NVIDIA** (CQ found at +0x140, fonts baked, presents flowing); the process
-> then died **silently ~16s in, ~2s after a `ResizeBuffers`** — and the crashdump handler did NOT
-> fire (fail-fast, or our filter got replaced). So the current asks are **friend-side and cheap, no
-> new run needed**:
+> **Resolved to a mechanism 2026-07-01** (full picture: [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
+> > "WER Verdict"). The trace run + the friend's WER Event 1001 pinned it: `c0000005` at
+> **`XINPUT1_4.dll+0x9a65` = `XInputGetState+5`** — an inline-hook collision between our ilhook
+> XInput hook and a second 5-byte hooker (likely Steam's gameoverlayrenderer). The DX12 present
+> path was healthy the whole run; "NVIDIA-driver-specific" was a red herring. Fix: IAT hook.
+> Remaining friend asks (cheap, no new run):
 >
-> 1. **Event Viewer** > Windows Logs > Application > **Event ID 1000** (Application Error) for
->    `eldenring.exe` — screenshot/paste it. It names the faulting module + exception code
->    (`0xc0000409` = fail-fast, `0xc0000005` = AV; `nvwgf2umx.dll` = NVIDIA driver).
-> 2. Any dump under `%LOCALAPPDATA%\CrashDumps\eldenring.exe.*.dmp`.
-> 3. Answers: what did the crash look like (error dialog / straight to desktop / display reset)?
->    Was Steam running + logged in (the log shows SteamID unresolved for the whole run — odd)?
->    Any other overlay on (NVIDIA App/GeForce overlay, RTSS)? What was on screen at ~16s?
+> 1. Zip + send the WER report folder: `C:\ProgramData\Microsoft\Windows\WER\ReportArchive\`, the
+>    `AppCrash_eldenring.exe_…` folder — its `Report.wer` lists loaded modules and confirms which
+>    other XInput hooker was present (gameoverlayrenderer64 / NVIDIA App / RTSS / DS4Windows).
+> 2. Answers: controller plugged in / turned on around the crash? Was Steam running + logged in
+>    (the log shows SteamID unresolved for the whole 16s — still unexplained)?
 >
-> The original run recipe below stays valid for any future re-run.
+> The original run recipe below stays valid for re-validating the IAT-hook fix on his machine.
 
 Independent of Parts A/B (no co-op session needed): the overlay crash is NVIDIA-driver-specific
 (works on our vkd3d rig and on WARP in the VM), so only a real NVIDIA Windows machine can produce

@@ -64,18 +64,16 @@ static candidate families were rig-eliminated** (`is_offline()`, `IsEnableOnline
 online-available chain — see [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), so that hunt is
 **parked**. The approach pivoted (2026-06-28) to **driving `CSSessionManager` directly** — chart and call
 the create/join initiation function, no item needed (the multiplayer items become removable harness). The
-**overlay crashes on native Windows** (hudhook DX12), a pre-release blocker. **Narrowed to
-NVIDIA-driver-specific (2026-06-29):** a local Windows-VM harness (`crates/dx12-harness` + the
-[`/windows-test`] skill) ran the same hook + imgui font-bake clean on a real native-Windows D3D12
-loader (WARP), ruling out the hardware-independent MinHook mechanism and the font upload. **The
-friend trace run landed (2026-07-01) and refuted the first-present model:** on native NVIDIA the
-overlay initializes and renders fine (CQ found at +0x140, fonts baked, presents flowing), then the
-process dies **silently ~16s in, ~2s after a `ResizeBuffers`** — bypassing both the `crashdump`
-handler and the panic hook. Next: the friend's Event Viewer Event-1000 record / WER dump (decisive,
-no new run needed), a resize-under-hook repro attempt in `dx12-harness` + on the rig, and
-`crashdump.rs` hardening (re-assert the filter, log replacement); mitigation meanwhile is
-`[debug] overlay = false`. See
-[OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "Native-Windows Crash" and
+**overlay crashes on native Windows**, a pre-release blocker — **ROOT-CAUSED (mechanism) 2026-07-01:
+not DX12/NVIDIA at all.** The friend trace run showed the present hook, imgui init, and rendering
+all healthy on native NVIDIA; his WER record then pinned the death at **`XINPUT1_4.dll+0x9a65` =
+`XInputGetState+5`**: an **inline-hook collision** between our ilhook patch on `XInputGetState`
+(the overlay's controller capture) and a second 5-byte hooker (likely Steam's gameoverlayrenderer)
+whose trampoline jumps back to `entry+5`, mid-our-patch. Fix: reimplement the XInput capture as an
+**IAT hook** on `eldenring.exe`'s import (no function-body patching, collision-immune); also harden
+`crashdump.rs` (our filter was bypassed) and confirm the other hooker via the friend's `Report.wer`
+module list. Mitigation meanwhile is `[debug] overlay = false`. See
+[OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "WER Verdict" and
 [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > Part C.
 
 ### Solo / host-doable (no 2nd player needed)

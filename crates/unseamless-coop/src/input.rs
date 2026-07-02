@@ -394,6 +394,14 @@ pub unsafe fn install() -> Result<(), HookError> {
 /// the plain `XInputGetState` reports, so the detour reads the game's own buffer — no `XInputGetStateEx`
 /// / Guide-bit dependency, and nothing for Steam Input to intercept.
 ///
+/// KNOWN FATAL on native Windows (friend crash 2026-07-01, WER: `c0000005` at
+/// `XINPUT1_4.dll+0x9a65` = `XInputGetState+5`): this inline patch collides with other XInput
+/// hookers (likely Steam's gameoverlayrenderer). `XInputGetState` opens with the 5-byte hot-patch
+/// prologue, and a 5-byte-convention hooker's trampoline jumps back to `entry+5` — mid-our-14-byte
+/// ilhook jmp — executing garbage. Works on the vkd3d rig only because Wine's xinput stack has no
+/// colliding hooker. Fix direction: an IAT hook on `eldenring.exe`'s import (no function-body
+/// bytes touched). Full analysis: docs/OVERLAY-RENDERING.md > "WER Verdict".
+///
 /// # Safety
 /// Same hooking caveats as [`install`]: patches executable memory in the loaded `xinput1_4.dll`; run
 /// once, off the main thread.
