@@ -89,7 +89,7 @@ overlay = true
 guide = "rung3-create-drive"
 # Headless Open/Join trigger (same gate + code path as the overlay actions): "host" on the rig,
 # "join" on the Deck, so the two-machine run needs no hands on either overlay. One-shot per launch.
-auto_session = "host"
+auto_session = "off"
 # Which role this machine plays for an active `guide`: "host" / "join" / "solo" (default "solo"). One
 # shared guide runs on every machine; each shows only the steps tagged for its role. For a two-player
 # guide set "host" on the hosting machine and "join" on the joiner.
@@ -119,7 +119,7 @@ fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_cr
                            # live NetworkSession from inside the leg-B entry hook, only if still empty). ON for
                            # the 2026-07-03 combo run: fabricated array + a real linked peer (solo runs proved
                            # each alone insufficient). See docs/SESSION-DRIVE.md > "fabricate the array".
-drive_fire_solo = false    # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
+drive_fire_solo = true     # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
                            # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
 force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
