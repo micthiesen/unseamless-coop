@@ -261,6 +261,14 @@ pub struct DebugProbes {
     /// `force_netsession_ready` + `gameplay.enable_offline_multiplayer` so legs A / reject #1 are
     /// already cleared. Off by default.
     pub fabricate_slot_array: bool,
+    /// **EXPERIMENTAL rung-3 timing lever** (pairs with [`drive_create`]): fire the driven create
+    /// without waiting for the rung-2 side-channel link. The driver's default is to hold fire until
+    /// `coop: linked` (+ a settle) so a two-machine run drives create with the peer present
+    /// (`docs/RUNG3-DRIVE-RUNBOOK.md`); flip this for a **solo** run (e.g. a pure
+    /// [`fabricate_slot_array`] proof), where no link will ever come up. Off by default — was
+    /// previously implied by `fabricate_slot_array`, decoupled so the fabricate+peer combination can
+    /// be tested (fabricated array AND a linked peer, 2026-07-03).
+    pub drive_fire_solo: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

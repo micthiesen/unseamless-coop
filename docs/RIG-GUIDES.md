@@ -32,6 +32,14 @@ diagnostics win too — the live log now shows *when* the link happened). When e
 yet (RE-gated), commit the step as a `.stub(...)` noting what's missing — never a manual "tell me it
 worked" relay.
 
+**Predicate caveat (rig-observed 2026-07-03): `in_gameplay`/`game_state_is(InGame)` reads true during
+the new-character intro cinematic.** On the Deck run, a fresh character made the "load into the world"
+step auto-finish while the opening movie was still playing (the world is loaded underneath it — the
+same reason `auto_session` fired there, harmlessly). For steps that genuinely need the player *in
+control* (not just the world loaded), don't rely on `in_gameplay` alone; today that's a known
+early-fire on brand-new characters (existing-save loads are unaffected). If a guide ever needs a
+strict "past the cinematic" signal, that's a new playstate datum to chart, not a manual step.
+
 ## Debug-only — zero release cost
 
 The **entire** subsystem is gated behind `#[cfg(debug_assertions)]` (on for the `dev`/test and

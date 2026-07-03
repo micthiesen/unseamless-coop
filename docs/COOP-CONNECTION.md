@@ -480,7 +480,16 @@ path now exists and lights up the moment two modded games link.
   may require the accounts to be Steam **friends** (or share a Steam networking session) for
   NAT-punch/auth. **Confirmed working for friends** (2026-06-27 test); whether *non-friends* can link is
   still open. This is a *Steam* connection detail, not the game's matchmaking lobby, so it doesn't violate
-  "defer the lobby."
+  "defer the lobby." (The 2026-07-03 rig↔Deck run linked a main account with the personal throwaway
+  without any friending step done for the test — suggestive, but the accounts' pre-existing friend
+  status wasn't verified, so "non-friends" stays unconfirmed.)
+- **DLC parity between peers (design question, undecided 2026-07-03).** Vanilla ER allows base-game
+  co-op with mixed DLC ownership and gates DLC-*area* sessions itself, so nothing blocks the current
+  rungs (link + create don't care; the Deck throwaway owns no DLC). Decide later whether the mod should
+  surface a friendly "partner lacks the DLC" notice (the side-channel handshake could carry a DLC bit)
+  instead of letting the game's own gating produce a confusing failure deep in a session. Related,
+  practical: a *save* containing DLC data refuses to load on a DLC-less account — that's a seeding
+  concern (see the steam-deck skill), not a connection one.
 - **`SteamNetworkingMessagesSessionRequest_t`.** ✅ Incoming sessions normally surface via this callback;
   since we avoid the callback queue, we rely on **proactive `AcceptSessionWithUser`** (we know the peer)
   and the implicit-open-on-send behavior. The friend test confirmed both sides establish without us

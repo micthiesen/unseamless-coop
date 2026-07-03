@@ -14,7 +14,13 @@ It exists because two things in this project are **inherently serial** and one t
 
 So: workers build in parallel; the orchestrator owns the serial parts (rig, integration, the
 commit to `main`) and helps the human decide what to build next. The orchestrator can also just
-do work itself; spawning workers is a tool, not a requirement.
+do work itself; spawning workers is a tool, not a requirement. That said, **be proactive about
+spawning one the moment a well-scoped chunk falls off the critical path** — e.g. mid-rig-session,
+a tooling gap surfaces (a save needs re-signing to load on the Deck): hand the durable fix to a
+worker with the verified facts in the guidance and keep driving the rig yourself. Michael has
+explicitly endorsed this pattern (2026-07-03); the failure mode to avoid is the orchestrator
+serially context-switching into side-quests while the live session (the scarce, human-present
+resource) idles.
 
 ## Roles
 

@@ -666,6 +666,7 @@ the teardown tradeoff (the game may free a foreign pointer at disconnect) is acc
 
 **Rig recipe (hand-off to the orchestrator).** On the local rig (solo, in-world), set all of:
 `[debug.probes] drive_create = true`, `fabricate_slot_array = true`, `force_netsession_ready = true`,
+`drive_fire_solo = true` (solo runs never link, so the drive must not wait for rung 2),
 `[gameplay] bypass_session_create_gate = true`, `enable_offline_multiplayer = true`. Watch the
 `session-probe:`/`gate-trace` lines:
 
@@ -685,8 +686,25 @@ context a fabricated array can't supply. **Conclusion: fabrication is not a solo
 drive (Steam Deck as player 2, or a friend) remains the path to rung-3 create.** The `fabricate_slot_array`
 probe stays as a charted lever (it *does* clear the slot-array gate, useful alongside the 2-player drive).
 Prereq found this run: the create-drive had been gated on a linked peer (commit `0a71d9b`), which never
-links solo — so `fabricate_slot_array` now also flags the driver to **fire solo** (skip the link wait),
-since the fabricated array stands in for the peer.
+links solo — so the drive's timing got a solo mode (skip the link wait). It was briefly implied by
+`fabricate_slot_array` itself; since 2026-07-03 it's the separate `[debug.probes] drive_fire_solo` key,
+decoupled so the fabricate+peer combination below can hold the drive for a real link *with* fabrication
+armed.
+
+**Two-machine result (2026-07-03, rig host + Steam Deck joiner, linked) — A REAL PEER DOES NOT SIZE THE
+ARRAY EITHER.** First full rig↔Deck run of `docs/RUNG3-DRIVE-RUNBOOK.md` (fabricate OFF, drive holding
+for the link): rungs 4+2 linked cleanly (password lobby found, `coop: linked` both sides, two-way
+messages, **no Steam-friends requirement**), the drive fired 90 frames after link on both machines — and
+both read `legb-entry … slot-array [+0x20]cap=0 [+0x24]count=0`, `drive-create returned false`,
+`None->FailedToCreateSession`. Symmetric on host and joiner. Two corollaries: (a) the hypothesized
+"real match/lobby allocates it" is narrower than 'any live rung-4 lobby + peer' — our private Steam
+lobby + an accepted P2P session with ~1400 messages flowing left `NetworkSession+0x10` at 0 *and* the
+array at cap 0, so the allocator is tied to the game's **own** matchmaking flow, not generic Steam
+session traffic; (b) with solo-fabricate also failing deeper, the one untested cheap combination is
+**fabricate + peer** (array sized while a real peer/lobby context exists) — staged next via
+`fabricate_slot_array = true` + `drive_fire_solo = false` on both machines. If that fails too, the
+remaining paths are charting the game's own match setup (waygate-server as protocol reference) or
+ERSC-style session neutralization.
 
 ### Tooling / re-derivation
 

@@ -5,6 +5,15 @@ run that answers the one question the solo rig fundamentally can't. Staged now s
 second machine is available (a friend or the Steam Deck), the orchestrator sets the config below,
 launches both sides, and reads the verdict out of the logs; nothing is left to design on the day.
 
+> **Run 1 done (2026-07-03, rig host + Steam Deck joiner): FAIL, unchanged, symmetric.** Rungs 4+2
+> linked cleanly (first rig↔Deck link; no Steam-friends requirement), the re-timed drive fired
+> post-link on both machines, and both still read `cap=0` / `returned false` /
+> `None->FailedToCreateSession` — a live lobby + linked peer does **not** size the slot array (it
+> also leaves reject #1's `NetworkSession+0x10` at 0). Full verdict + corollaries:
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Two-machine result". **Next variant: the fabricate+peer
+> combo** — same procedure, plus `fabricate_slot_array = true` with `drive_fire_solo = false` (the
+> 2026-07-03 decouple) on both machines, so the fabricated array meets a live peer context.
+
 > **Scope & legitimacy.** Two machines the developer owns (or a friend who owns the game), running a
 > co-op mod over a private Steam side-channel, *outside* anti-cheat and never on the official servers.
 > "Bypassed gate" = a check flipped in our own in-memory copy so our own co-op create can proceed
@@ -63,6 +72,8 @@ both sides before launch, not synced after.
 | `[debug.probes] session_probe` | `true` | `--session-probe` (but see the append block below) | the FSM rising-edge log (`session-probe:` prefix) |
 | `[debug.probes] drive_create` | `true` | **none — hand-set** | the one-shot driven create **and** the leg-B gate tracers |
 | `[debug.probes] force_netsession_ready` | `true` | **none — hand-set** | satisfies leg B's reject #1 just before the call |
+| `[debug.probes] fabricate_slot_array` | run 1: `false` / combo run: `true` | **none — hand-set** | sizes the slot array at leg-B entry if still empty (the combo variant) |
+| `[debug.probes] drive_fire_solo` | `false` | **none — hand-set** | keep the drive holding for the rung-2 link; `true` is only for peerless solo proofs |
 | `[debug] guide` | `"rung3-create-drive"` | `--guide rung3-create-drive` | the committed on-screen procedure (below) |
 | `[debug] rig_role` | leave default `solo` | none | the guide's connect step **derives** each machine's role from its Open/Join action |
 | `[debug] enabled` | `true` | baked by `package` | all the signal lines are `info!`, so the default level suffices (`debug` adds nothing here — the SteamID-bearing register-dump hooks are inert, their sites uncharted) |

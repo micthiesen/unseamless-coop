@@ -31,7 +31,7 @@ force_online_menu_mode = false
 # create proceed to the network create. Left OFF: do the runtime-verify FIRST (write-watch on [G]+0x24 to
 # see whether the gate or the network create is the reject). See docs/SESSION-DRIVE.md > "Why a direct
 # create fails offline".
-bypass_session_create_gate = false
+bypass_session_create_gate = true
 append_steam_id = false
 always_spectate_on_death = false
 # On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's
@@ -71,7 +71,7 @@ order = []
 [debug]
 enabled = true
 level = "debug"
-forward_to_host = false
+forward_to_host = true
 # Dev side-channel bridge on loopback (diag/rig builds only). Drive it from the host with:
 #   scripts/harness.sh bridge-host 47700
 bridge_port = 47700
@@ -86,7 +86,10 @@ overlay = true
 # below), "overlay-smoke" (guide self-test), "two-player-join" (role-tagged 2-player),
 # "rig-observation" (session-observer run), "rung3-create-drive" (two-machine create-drive; see
 # docs/RUNG3-DRIVE-RUNBOOK.md). See docs/RIG-GUIDES.md; author new ones per the rig-guides skill.
-guide = ""
+guide = "rung3-create-drive"
+# Headless Open/Join trigger (same gate + code path as the overlay actions): "host" on the rig,
+# "join" on the Deck, so the two-machine run needs no hands on either overlay. One-shot per launch.
+auto_session = "host"
 # Which role this machine plays for an active `guide`: "host" / "join" / "solo" (default "solo"). One
 # shared guide runs on every machine; each shows only the steps tagged for its role. For a two-player
 # guide set "host" on the hosting machine and "join" on the joiner.
@@ -101,18 +104,24 @@ snapshot_secs = 20         # >0: also log a full diagnostic snapshot every N sec
 event_flag_scan_start = 0  # event-flag scanner window start...
 event_flag_scan_count = 0  # ...and how many flags to watch (0 = off). Finds the flag behind an action
                            # (e.g. set a window, rest at a grace, see which flag flips = the cure flag).
-session_probe = false      # rung-3 RE: log every session lobby/protocol FSM transition + (once charted)
+session_probe = true      # rung-3 RE: log every session lobby/protocol FSM transition + (once charted)
                            # hook the create/join initiation, all under the `session-probe:` log prefix.
                            # Flip true for a two-player create/join RE run — see docs/SESSION-RE-RUNBOOK.md.
 lobby_callback_probe = false # rung-4 re-derivation probe (poll one private CreateLobby via ISteamUtils).
                            # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
-drive_create = false       # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
+drive_create = true        # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
                            # charted create-session fn on [G] (no item, no peer) and log whether lobby_state
                            # moves to TryToCreateSession. Pair with gameplay.enable_offline_multiplayer = true
                            # (the create builder calls is_offline twice). See docs/SESSION-DRIVE.md.
-force_netsession_ready = false # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
+fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_create; writes base/cap onto the
+                           # live NetworkSession from inside the leg-B entry hook, only if still empty). ON for
+                           # the 2026-07-03 combo run: fabricated array + a real linked peer (solo runs proved
+                           # each alone insufficient). See docs/SESSION-DRIVE.md > "fabricate the array".
+drive_fire_solo = false    # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
+                           # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
+force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
                            # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which
                            # likely needs a real peer); kept as a charted probe. Logs the flag's pre-call value
