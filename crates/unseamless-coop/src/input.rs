@@ -436,10 +436,17 @@ pub unsafe fn install() -> Result<(), HookError> {
 /// table (verified against xinput1_4.dll 10.0.26100.8521; stable because the game's own import
 /// binds by it). The `ByName` arm is future-proofing in case a game update switches to name imports.
 ///
+/// **Do not use pelite's `desc.iat()` here.** The game's XINPUT `FirstThunk` (IAT) lands at an RVA
+/// that is only 4-byte aligned (`0x4c0cedc` in the 2026-07 build, `& 7 == 4`), and pelite's
+/// `iat()` demands 8-byte alignment — it returns `Err("address misaligned")`, so a `let (Ok(int),
+/// Ok(iat)) = …` guard silently *skips the whole XINPUT descriptor* and the hook no-ops (found on
+/// the rig 2026-07-03; the earlier "compiles clean" IAT version had never actually installed). The
+/// `INT` (`desc.int()`, `OriginalFirstThunk`) is 8-byte aligned and parses fine, so we drive the
+/// match off it alone and derive each slot pointer manually from `base + FirstThunk RVA + idx*8`,
+/// reading/writing it **unaligned** (see [`swap_iat_slot`]).
+///
 /// # Safety
-/// Writes the game's IAT (loader data, not code). Run once, off the main thread. The slot is an
-/// 8-byte-aligned pointer and the swap is a single atomic store, so a concurrent poller sees either
-/// function — both valid.
+/// Writes the game's IAT (loader data, not code). Run once, off the main thread.
 unsafe fn install_xinput() -> Result<(), HookError> {
     const XINPUT_GET_STATE_ORDINAL: u16 = 2;
 
@@ -456,11 +463,11 @@ unsafe fn install_xinput() -> Result<(), HookError> {
         }) {
             continue;
         }
-        let (Ok(int), Ok(iat)) = (desc.int(), desc.iat()) else { continue };
-        // Zip with the IAT purely to bound the index by the live array's length; the write pointer
-        // itself is derived from the module base + FirstThunk RVA (not from pelite's `&u64`), so it
-        // carries the mapping's provenance rather than a shared borrow's.
-        for (idx, (imp, _)) in int.zip(iat).enumerate() {
+        // INT only — see the doc comment: the parallel IAT array is 4-byte aligned and pelite's
+        // `iat()` rejects it, so we index the IAT ourselves. INT[i] describes IAT[i] by PE spec.
+        let Ok(int) = desc.int() else { continue };
+        let first_thunk = desc.image().FirstThunk as usize;
+        for (idx, imp) in int.enumerate() {
             let is_get_state = match imp {
                 Ok(Import::ByOrdinal { ord }) => ord == XINPUT_GET_STATE_ORDINAL,
                 Ok(Import::ByName { name, .. }) => name.to_str() == Ok("XInputGetState"),
@@ -469,9 +476,9 @@ unsafe fn install_xinput() -> Result<(), HookError> {
             if !is_get_state {
                 continue;
             }
-            let slot = unsafe {
-                base.add(desc.image().FirstThunk as usize).cast::<usize>().add(idx)
-            };
+            // Derived from module base + FirstThunk RVA (not a pelite `&u64`), so it carries the
+            // mapping's provenance. Only 4-byte aligned — `swap_iat_slot` reads/writes it unaligned.
+            let slot = unsafe { base.add(first_thunk).cast::<usize>().add(idx) };
             return unsafe { swap_iat_slot(slot, xinput_get_state_iat as *const () as usize) };
         }
     }
@@ -479,17 +486,23 @@ unsafe fn install_xinput() -> Result<(), HookError> {
 }
 
 /// Record the slot's current value as [`REAL_XINPUT_GET_STATE`], then swap the slot to `new`:
-/// `VirtualProtect(RW)` → atomic store → restore. The slot is loader data (never executed), so no
+/// `VirtualProtect(RW)` → store → restore. The slot is loader data (never executed), so no
 /// instruction-cache flush — this is deliberately not [`crate::patch::apply`], whose
 /// `copy_nonoverlapping` write has no atomicity guarantee against a concurrently-polling game
 /// thread.
 ///
+/// The game's XINPUT IAT is only 4-byte aligned (see [`install_xinput`]), so this uses
+/// `read_unaligned`/`write_unaligned`, **not** an `AtomicUsize` store (which is UB on a misaligned
+/// pointer). The 8 bytes stay within a single 64-byte cache line, and an aligned-within-cache-line
+/// store is not torn on x86-64 in practice, so a concurrently-polling game thread still sees either
+/// the old or the new pointer — both valid.
+///
 /// # Safety
-/// `slot` must point at the game's live, 8-byte-aligned `XInputGetState` IAT entry.
+/// `slot` must point at the game's live `XInputGetState` IAT entry (any alignment).
 unsafe fn swap_iat_slot(slot: *mut usize, new: usize) -> Result<(), HookError> {
     use windows::Win32::System::Memory::{PAGE_PROTECTION_FLAGS, PAGE_READWRITE, VirtualProtect};
 
-    let old = unsafe { slot.read() };
+    let old = unsafe { slot.read_unaligned() };
     // Diagnostic only: if the slot no longer equals the DLL's export, someone IAT-interposed before
     // us (we chain through them — `old` is still what the game would have called).
     let export = unsafe { GetModuleHandleA(s!("xinput1_4.dll")) }
@@ -508,7 +521,7 @@ unsafe fn swap_iat_slot(slot: *mut usize, new: usize) -> Result<(), HookError> {
         let mut prev = PAGE_PROTECTION_FLAGS(0);
         VirtualProtect(slot.cast(), size_of::<usize>(), PAGE_READWRITE, &mut prev)
             .map_err(HookError::Win32)?;
-        (*slot.cast::<AtomicUsize>()).store(new, Ordering::SeqCst);
+        slot.write_unaligned(new);
         let mut restored = PAGE_PROTECTION_FLAGS(0);
         if let Err(e) = VirtualProtect(slot.cast(), size_of::<usize>(), prev, &mut restored) {
             log::warn!("input: could not restore IAT page protection after swap: {e}");
