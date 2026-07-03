@@ -259,6 +259,34 @@ const GATE4_VMETHOD_OFFSET: usize = 0x1_423f_afcc - 0x1_4000_0000;
 const GATE4_VMETHOD_PROLOGUE: [u8; 10] =
     [0x84, 0xC0, 0x0F, 0x84, 0xF7, 0x01, 0x00, 0x00, 0x48, 0x8D];
 
+/// **L3 capture — the live vmethod target, read at the helper's call site.** The helper calls
+/// `[[container]+8]` where the container's vtable is loaded at runtime from `[container]`
+/// (`0x1423fafc1: mov rax,[rcx]` → `0x1423fafc9: call [rax+8]`). The static vtable `0x1431f8360` is
+/// *not* the live object's vtable (a trampoline hook keyed off it never fired), so we read the real
+/// vtable + target live. Hook at `0x1423fafc4` (`lea rdx,[rsp+0x40]`, the instruction after `mov
+/// rax,[rcx]`), where `rax` = the live container vtable, so `[rax+8]` = the actual vmethod pointer —
+/// the function whose predicate is the create veto. Clean 5-byte `lea`, no collision with Hook B.
+const VMETHOD_TARGET_OFFSET: usize = 0x1_423f_afc4 - 0x1_4000_0000;
+/// Charted bytes at [`VMETHOD_TARGET_OFFSET`]: `48 8D 54 24 40` = `lea rdx,[rsp+0x40]`, `FF 50 08` =
+/// `call [rax+8]`. Guarded (mid-function) so drift skips rather than scribbles.
+const VMETHOD_TARGET_PROLOGUE: [u8; 8] = [0x48, 0x8D, 0x54, 0x24, 0x40, 0xFF, 0x50, 0x08];
+/// Latched once the live vmethod target is captured + logged.
+static VMETHOD_TARGET_CAPTURED: AtomicBool = AtomicBool::new(false);
+
+/// **The real create-veto vmethod** (`0x1423f4330`, live `[container_vtable+8]`). Its first predicate
+/// is `mov eax,[rcx+0x7c0]; shr eax,2; test al,1; je return-false` — i.e. **bit 2 of the dword at
+/// `[container+0x7c0]`** must be set or the vmethod returns false (create veto). `rcx` at entry = the
+/// container (`[session_obj+0x58]`). We hook the entry to read that field and confirm bit 2 is the
+/// offline veto. See docs/SESSION-DRIVE.md.
+const VETO_VMETHOD_OFFSET: usize = 0x1_423f_4330 - 0x1_4000_0000;
+/// Charted entry bytes at [`VETO_VMETHOD_OFFSET`]: `40 57` = `push rdi` (redundant REX, like leg B's
+/// entry), `48 81 EC A0 00 00 00` = `sub rsp,0xa0`.
+const VETO_VMETHOD_PROLOGUE: [u8; 8] = [0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00];
+/// Field on the container the veto vmethod reads; bit 2 gates create.
+const VETO_FIELD_OFF: usize = 0x7c0;
+/// Latched once the veto field is read + logged.
+static VETO_FIELD_READ: AtomicBool = AtomicBool::new(false);
+
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
 /// the resolved address before the fabrication lever is armed — the same anti-drift role
@@ -329,6 +357,16 @@ fn install_create_gate_trace(config: &Config) {
     let gb = exe_base + GATE4_VMETHOD_OFFSET;
     if prologue_ok("gate4-vmethod", gb, &GATE4_VMETHOD_PROLOGUE) {
         install_offset_hook("gate4-vmethod", gb, log_gate4_vmethod);
+    }
+    // vmethod-target (L3): capture the live vmethod target [rax+8] at the helper's call site.
+    let vt = exe_base + VMETHOD_TARGET_OFFSET;
+    if prologue_ok("vmethod-target", vt, &VMETHOD_TARGET_PROLOGUE) {
+        install_offset_hook("vmethod-target", vt, log_vmethod_target);
+    }
+    // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate).
+    let vv = exe_base + VETO_VMETHOD_OFFSET;
+    if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
+        install_offset_hook("veto-field", vv, log_veto_field);
     }
 }
 
@@ -613,6 +651,58 @@ fn log_gate4_vmethod(_name: &'static str, regs: *mut Registers) {
             "session-probe: gate-trace gate4-vmethod — Arxan-encoded vmethod [[session_obj+0x58]+8] \
              returned al={al} (0 => THIS is the create veto; the decisive predicate is inside the \
              encoded vmethod, so seed its input / capture its decoded target per L3)",
+        );
+    }));
+}
+
+/// L3 capture tracer: at the Arxan trampoline's `test rbx,rbx` (`0x14251c4a5`), `rbx` is the live
+/// decoded target of the encoded vmethod. The trampoline is generic, so fire only when the return
+/// address ([rsp+0x28], the trampoline pushed `rbx` then `sub rsp,0x20` over the call's return) is our
+/// helper's vmethod call site, and latch once. Logs the real function address to disassemble offline —
+/// the function whose predicate is the actual rung-3 create veto. Read-only; unwind-firewalled.
+fn log_vmethod_target(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if VMETHOD_TARGET_CAPTURED.load(Ordering::Relaxed) {
+            return;
+        }
+        // SAFETY: at `0x1423fafc4`, `rax` = the live container vtable (just loaded by `mov rax,[rcx]`),
+        // so `[rax+8]` is the vmethod pointer the next `call [rax+8]` will invoke. Read-only.
+        let r = unsafe { &*regs };
+        let vtable = r.rax as usize;
+        if vtable == 0 {
+            return;
+        }
+        let target = unsafe { ((vtable + 8) as *const usize).read_volatile() };
+        VMETHOD_TARGET_CAPTURED.store(true, Ordering::Relaxed);
+        log::info!(
+            "session-probe: vmethod-target CAPTURED — live container vtable={vtable:#x}, create-veto \
+             vmethod [vtable+8]={target:#x} (static chart assumed vtable 0x1431f8360; disassemble the \
+             target — its predicate is the veto)",
+        );
+    }));
+}
+
+/// veto-field tracer: at the real veto vmethod entry (`0x1423f4330`), `rcx` = the container. Reads
+/// `[container+0x7c0]` and reports bit 2 — the vmethod returns false when it's clear (the offline
+/// create veto). Confirms the field + points at the lever (set bit 2 before create). Read-only.
+fn log_veto_field(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if VETO_FIELD_READ.load(Ordering::Relaxed) {
+            return;
+        }
+        // SAFETY: `rcx` at this entry = the container object; `+0x7c0` is an in-bounds dword field
+        // (the object is ~0x800+ bytes). Read-only.
+        let r = unsafe { &*regs };
+        let container = r.rcx as usize;
+        if container == 0 {
+            return;
+        }
+        let field = unsafe { ((container + VETO_FIELD_OFF) as *const u32).read_volatile() };
+        VETO_FIELD_READ.store(true, Ordering::Relaxed);
+        log::info!(
+            "session-probe: veto-field — container={container:#x} [+0x7c0]={field:#x} bit2={} \
+             (vmethod returns false when bit2==0 => the create veto; lever: set bit2 before create)",
+            (field >> 2) & 1,
         );
     }));
 }

@@ -836,6 +836,40 @@ block that calls `session_obj->vtable[0x10]`, returns the session object to
 > (via the trampoline `0x14251c480` heal) and identify what it reads, so we can seed its input rather
 > than patch-bypass (L1/L2, which risk a malformed session).
 
+### L3 RESOLVED (2026-07-03, rig) — the veto is bit 2 of `[container+0x7c0]`; the "Arxan vmethod" was a live-vtable mismatch
+
+Capturing the vmethod's real target at the **helper call site** (hook at `0x1423fafc4`, reading `rax` =
+the live container vtable and `[rax+8]`) showed the static chart followed the **wrong vtable**: the live
+container's vtable is **`0x1431f8780`**, not the static `0x1431f8360`. Slot `+8` of the *live* vtable is
+a **direct function `0x1423f4330`** — no Arxan trampoline on the real path (the `0x14251c480`
+cookie-decode trampoline the static vtable pointed to is never executed for this call; a hook on its
+decode path never fired). So "statically undecodable Arxan vmethod" was an artifact of reading a
+sibling/base vtable, not the live one. *(Lesson: for a vmethod, capture `[live_vtable+slot]` at the call
+site — don't trust a statically-guessed vtable address.)*
+
+Disassembling the real vmethod `0x1423f4330`, its **first predicate is the veto**:
+
+```
+0x1423f434b: mov eax,[rcx+0x7c0]   ; rcx = container = [session_obj+0x58]
+0x1423f4354: shr eax,2
+0x1423f4357: test al,1              ; bit 2 of [container+0x7c0]
+0x1423f4359: je  0x1423f4390        ; clear -> xor al,al -> return FALSE (create veto)
+```
+
+**Rig-confirmed:** `veto-field — container=0x143dcd360 [+0x7c0]=0x0 bit2=0` → the field is **0 offline**,
+bit 2 clear, so the vmethod returns false at its first branch and create fails. This is the true,
+minimal rung-3 create root cause: **bit 2 of the dword at `[[session_obj+0x58]+0x7c0]` is clear when we
+drive create offline.**
+
+**The lever (next):** set bit 2 of `[container+0x7c0]` before/at the create call (a two-instruction
+field write, like `fabricate_slot_array`, keyed off the live container the veto vmethod reads) and see
+whether the vmethod passes and create walks toward `Host`. Caveats: the bit-2-set path in `0x1423f4330`
+does further work and *can* still return false (there may be a second predicate past `0x1423f435b`), and
+we don't yet know what that bit normally *means* (some "session/host capability enabled" state a real
+match sets) — so a naive set may yield a malformed session. But it's a precise, cheap next probe, and
+`0x7c0`/bit 2 is now the exact thing to chart upstream (who sets it, and to what) for a clean seed. The
+probes that found this (`vmethod-target`, `veto-field`) are committed gate-traces under `drive_create`.
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real
