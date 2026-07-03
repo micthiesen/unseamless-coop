@@ -29,6 +29,8 @@
 //!   DX12_HARNESS_WARP      1 = force the WARP software adapter   (default: 0 — default adapter)
 //!   DX12_HARNESS_HOOK_THREAD 1 = install hook off-thread         (default: 1 — mirrors the game)
 //!   DX12_HARNESS_NO_HOOK   1 = never install the hook (control)  (default: 0)
+//!   DX12_HARNESS_XINPUT    repro|iat = run an XInput-collision phase instead of the DX12 harness
+//!                          (see `xinput.rs`); also settable as `--xinput=repro|iat`. Unset = DX12.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +43,8 @@ use hudhook::{Hudhook, ImguiRenderLoop, RenderContext};
 // on a hard crash. Self-contained (std + windows + log), so a `#[path]` include is sound.
 #[path = "../../unseamless-coop/src/crashdump.rs"]
 mod crashdump;
+
+mod xinput;
 
 use windows::core::{w, Interface, Result, HRESULT};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM};
@@ -89,6 +93,17 @@ impl Config {
             hook: !env_bool("DX12_HARNESS_NO_HOOK", false),
         }
     }
+}
+
+/// The raw XInput phase selector, from `--xinput=<phase>` (any argv position) or `DX12_HARNESS_XINPUT`.
+/// The CLI arg wins so a run can override the env knob win.sh forwards — but an *empty* `--xinput=`
+/// falls through to the env var rather than blanking it. `main` parses (and rejects) the value.
+fn xinput_selector() -> Option<String> {
+    std::env::args()
+        .find_map(|a| a.strip_prefix("--xinput=").map(str::to_string))
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("DX12_HARNESS_XINPUT").ok())
+        .filter(|s| !s.trim().is_empty())
 }
 
 // ---- logging (per-record flush, so a crash keeps the tail line) ---------------------------------
@@ -412,9 +427,10 @@ fn install_hook(module: usize) {
 
 fn main() -> Result<()> {
     let cfg = Config::from_env();
+    let xinput_sel = xinput_selector();
     init_logging(&cfg.log_path);
     log::info!(
-        "dx12-harness start: build {} | warmup={} frames={} buffers={} vsync={} warp={} hook={} hook_thread={}",
+        "dx12-harness start: build {} | warmup={} frames={} buffers={} vsync={} warp={} hook={} hook_thread={} xinput={:?}",
         option_env!("UNSEAMLESS_BUILD_ID").unwrap_or("nogit"),
         cfg.warmup,
         cfg.frames,
@@ -423,13 +439,32 @@ fn main() -> Result<()> {
         cfg.warp,
         cfg.hook,
         cfg.hook_thread,
+        xinput_sel.as_deref(),
     );
 
-    // Record the faulting module on a hard crash (the native-Windows overlay AV). Installed before the
-    // window/hook so it covers the whole run. DX12_HARNESS_FORCE_CRASH=1 self-tests it on WARP, where
-    // the real crash won't fire.
+    // Record the faulting module on a hard crash (the native-Windows overlay AV, or the XInput repro's
+    // AV at XInputGetState+5). Installed before any hook so it covers the whole run. DX12_HARNESS_FORCE_CRASH=1
+    // self-tests it on WARP, where the real crash won't fire.
     crashdump::install();
     crashdump::force_test_crash_if("DX12_HARNESS_FORCE_CRASH");
+
+    // XInput inline-hook-collision phases (xinput.rs) — no window / DX12 / swapchain needed, so run and
+    // exit before any of the D3D12 plumbing. `repro` AVs mid-poll; `iat` polls and returns 0. A
+    // present-but-unparseable selector is rejected loudly rather than silently falling through to the
+    // DX12 harness (a different mode needing WARP + a desktop session).
+    if let Some(sel) = xinput_sel {
+        match xinput::Phase::parse(&sel) {
+            Some(phase) => {
+                log::info!("dx12-harness: running XInput phase {phase:?} (no DX12 window this run)");
+                xinput::run(phase);
+                log::info!("dx12-harness: XInput phase {phase:?} returned; exiting");
+            }
+            None => log::error!(
+                "dx12-harness: unknown XInput phase '{sel}' (valid: repro | iat); refusing to fall through to the DX12 harness"
+            ),
+        }
+        return Ok(());
+    }
 
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
     let module = hinstance.0 as usize; // Send-safe handle for the off-thread hook install

@@ -76,18 +76,19 @@ not DX12/NVIDIA at all.** The friend trace run showed the present hook, imgui in
 all healthy on native NVIDIA; his WER record then pinned the death at **`XINPUT1_4.dll+0x9a65` =
 `XInputGetState+5`**: an **inline-hook collision** between our ilhook patch on `XInputGetState`
 (the overlay's controller capture) and a second 5-byte hooker (likely Steam's gameoverlayrenderer)
-whose trampoline jumps back to `entry+5`, mid-our-patch. **FIX APPLIED + RIG-VERIFIED (install), awaiting
-native validation (collision):** the XInput capture is now an **IAT hook** on `eldenring.exe`'s import
-(no function-body patching, collision-immune by construction), and `crashdump.rs` re-asserts its
-exception filter every 3s + names any displacer (our filter had been silently bypassed). Both are on
-`main`. The rig re-verify (2026-07-03) caught that the first IAT version never installed — the game's
-XINPUT `FirstThunk` is 4-byte-aligned and pelite's `iat()` rejected it — now fixed (match off the INT,
-index the IAT manually; commit `0fde906`) and confirmed installing on the rig. The vkd3d rig still can't
-reproduce the *collision*, so that half needs one **native-Windows** run to confirm — mitigation
-meanwhile is `[debug] overlay = false`. **Alternative to a friend run** (validate solo): grow `crates/dx12-harness`
-an XInput phase — the old inline hook + a second 5-byte hook over it — in the Win11 VM to reproduce the
-collision and prove the IAT hook survives it, no friend needed (OVERLAY-RENDERING.md > "Next steps" #4).
-See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "WER Verdict" and
+whose trampoline jumps back to `entry+5`, mid-our-patch. **FIX APPLIED + FULLY VALIDATED (install
+rig-verified, collision solo-validated on real Windows):** the XInput capture is now an **IAT hook** on
+`eldenring.exe`'s import (no function-body patching, collision-immune by construction), and
+`crashdump.rs` re-asserts its exception filter every 3s + names any displacer (our filter had been
+silently bypassed). Both are on `main`. The rig re-verify (2026-07-03) caught that the first IAT version
+never installed — the game's XINPUT `FirstThunk` is 4-byte-aligned and pelite's `iat()` rejected it —
+now fixed (match off the INT, index the IAT manually; commit `0fde906`) and confirmed installing on the
+rig. The vkd3d rig can't reproduce the *collision*, so it was validated **solo on a real Windows loader**
+instead (2026-07-03): the `dx12-harness` XInput phases in the quickemu Win11 VM show the inline-hook
+collision AV at `XInputGetState+5` (the exact WER address) and the IAT hook surviving the same setup
+(`scripts/win.sh xinput repro|iat`). A friend run is now optional confirmation on his exact hooker stack,
+not a blocker; the pre-release overlay blocker is effectively retired (`[debug] overlay = false` no
+longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) > "WER Verdict" and
 [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > Part C.
 
 ### Solo / host-doable (no 2nd player needed)

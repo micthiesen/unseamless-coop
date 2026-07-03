@@ -12,7 +12,7 @@
 # Copy path is SSH/SCP over the port quickemu already forwards (host :22220 -> guest :22). One-time
 # guest setup (enable OpenSSH Server, trust an SSH key) is `win.sh setup-help`.
 #
-# Verbs:  build [--diag] | push | run | pull-log | apply | cycle | status | shell | setup-help | paths
+# Verbs:  build [--diag] | push | run | pull-log | apply | cycle | xinput <repro|iat> | status | shell | setup-help | paths
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -230,6 +230,24 @@ EOF
 cmd_apply() { cmd_build "$@"; cmd_push; }                 # the automated "apply the mod" step
 cmd_cycle() { cmd_build "${1:-}"; cmd_push; cmd_run; cmd_pull_log; }
 
+# Run one XInput inline-hook-collision phase (crates/dx12-harness/src/xinput.rs) end-to-end. These
+# phases don't create a DXGI swapchain (no window/GPU), so WARP is irrelevant here; the run still goes
+# through the interactive task for one consistent path. Exports DX12_HARNESS_XINPUT so knobs_lines
+# forwards it, then does the normal build+push+run+pull-log cycle.
+#   repro : install a 5-byte inline hooker + our inline patch on XInputGetState, poll -> AV at +5
+#           (crashdump logs `... ACCESS_VIOLATION at XINPUT1_4.dll+0x<rva>`; exit code is the AV code).
+#   iat   : same second hooker, our capture via the harness IAT slot -> polls survive, exit 0, no AV.
+cmd_xinput() {
+  local phase="${1:-}"
+  case "$phase" in
+    repro|iat) ;;
+    *) die "usage: win.sh xinput <repro|iat>";;
+  esac
+  export DX12_HARNESS_XINPUT="$phase"
+  say "XInput '$phase' phase (DX12_HARNESS_XINPUT=$phase) — build + run in the VM"
+  cmd_build; cmd_push; cmd_run; cmd_pull_log
+}
+
 case "${1:-}" in
   build)       shift; cmd_build "$@";;
   push)        cmd_push;;
@@ -237,6 +255,7 @@ case "${1:-}" in
   pull-log|log) cmd_pull_log;;
   apply)       shift; cmd_apply "$@";;
   cycle)       shift; cmd_cycle "$@";;
+  xinput)      shift; cmd_xinput "$@";;
   status)      cmd_status;;
   shell)       cmd_shell;;
   paths)       cmd_paths;;
@@ -251,6 +270,7 @@ win.sh — drive the dx12-harness native-Windows overlay test in the Win11 VM.
   pull-log         copy the harness log back here and tail it
   apply [--diag]   build + push (the automated "apply" step)
   cycle [--diag]   build + push + run + pull-log
+  xinput <repro|iat>  run an XInput inline-hook-collision phase (repro AVs at +5; iat survives)
   status           check the VM is reachable over SSH
   shell            interactive ssh into the VM
   paths            print the resolved paths/targets

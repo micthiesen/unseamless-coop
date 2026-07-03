@@ -463,9 +463,10 @@ probed COM methods (different mechanism, no evidence of conflict) and can stay.
    (`XInput hook not installed` every run). Fixed by matching off the INT (`OriginalFirstThunk`,
    8-byte aligned) alone and indexing the IAT manually with unaligned read/write (commit `0fde906`).
    Now confirmed on the rig: `input: hooked XInput GetState via the game's IAT` + a successful slot
-   swap. Pad-nav *feel* still wants a human on the controller. **Native validation = the next friend
-   run** (his machine is the only environment that reproduces the collision) or the local VM repro
-   (#4 below).
+   swap. Pad-nav *feel* still wants a human on the controller. **Native validation of the collision
+   fix: DONE via the local VM repro (#4 below, 2026-07-03)** — the inline-hook collision AVs at
+   `XInputGetState+5` and the IAT hook survives the same setup, on a real Windows loader. A friend run
+   is now purely optional confirmation on his exact hooker stack, no longer a blocker.
 2. **Friend-side confirmation, optional:** the WER report folder
    (`C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_eldenring.exe_…`) — its
    `Report.wer` lists the **loaded modules**, confirming/denying `gameoverlayrenderer64.dll` (or
@@ -474,9 +475,32 @@ probed COM methods (different mechanism, no evidence of conflict) and can stay.
 3. **Harden `crashdump.rs`:** the AV *was* a plain SEH exception that reached WER, yet our
    `SetUnhandledExceptionFilter` handler logged nothing — so something replaced our filter after
    t+0.03s. Periodically re-assert it and **log when it was found replaced**.
-4. **Local repro if wanted** (retro-validation only, the fix shipped): the Win11 VM + `dx12-harness`
-   grown an XInput phase — install the old ilhook detour, then a second 5-byte hook over it, poll —
-   should AV at `+5` deterministically; the IAT hook shouldn't care.
+4. **Local repro** (retro-validation, the fix shipped): **BUILT + RUN, BOTH PHASES PASS (2026-07-03)** —
+   ran in the quickemu Win11 VM (`scripts/win.sh xinput repro` / `… iat`): `repro` AV'd at
+   `xinput1_4.dll+0x9a65` (= `XInputGetState+5`, the exact WER P8 address from the friend crash),
+   reading null with `rip` at entry+5; `iat` swapped the harness IAT slot and survived all 10 polls
+   (`exit=0`, no crashdump). Prologue was the canonical `48 89 5c 24 08` both runs, so the results are
+   trustworthy. `dx12-harness` grew an
+   XInput phase (`crates/dx12-harness/src/xinput.rs`), selectable via `DX12_HARNESS_XINPUT=repro|iat`
+   (or `--xinput=`), driven by `scripts/win.sh xinput <repro|iat>`. Both phases install the same
+   simulated second hooker (a 5-byte `E9` over `XInputGetState`, whose trampoline runs the pristine
+   prologue then `jmp entry+5`), differing only in *our* capture:
+   - **`repro`** lays our inline patch on top (a 5-byte `E9`→detour + a deterministic read-`0` fault
+     instruction parked exactly at `entry+5`, standing in for ilhook's 14-byte abs-jmp whose `+5` tail
+     was ASLR-random garbage). Polling → the second hooker's trampoline blindly jumps to `entry+5` →
+     **ACCESS_VIOLATION at `XInputGetState+5`**, logged by `crashdump.rs` as a `XINPUT1_4.dll+0x<rva>`
+     fault (`XInputGetState+5` was WER P8 `0x9a65` on the original box; the exact RVA is build-specific,
+     and the phase logs the live entry RVA so the two can be matched by eye). Exits with the AV code.
+   - **`iat`** captures via the harness exe's own `XInputGetState` IAT slot (a `raw-dylib` import,
+     found + swapped exactly like `input.rs::install_xinput`) and never touches the function body, so
+     `entry+5` stays pristine and 10 polls **survive with no AV** (exit 0). This proves the shipped
+     IAT fix composes with an inline hooker by construction.
+
+   Expected in the Win11 VM (orchestrator runs `scripts/win.sh`): repro AVs at `+5`, iat survives —
+   confirmation pending the orchestrator's VM run. The VM is a real Windows loader but not NVIDIA
+   hardware; this phase validates the *mechanism* (byte-level collision + IAT immunity), which is
+   loader-level and hardware-independent, so a clean VM result is conclusive here — unlike the
+   present-hook crash, which needed the driver.
 
 ---
 
