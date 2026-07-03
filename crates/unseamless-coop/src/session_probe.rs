@@ -39,7 +39,12 @@
 //! The entry hooks (when live) follow the same invariants as [`crate::saves`]: installed once on the
 //! init thread, `mem::forget`-ten (resident for the process lifetime — never unhook a live code
 //! path). The callbacks are **read-only** — they log register values and never write game memory or
-//! dereference a pointer they were handed, so a probe can't perturb the session it's observing.
+//! dereference a pointer they were handed, so a probe can't perturb the session it's observing. The
+//! one exception is the leg-B tracer's opt-in slot-array **fabrication** (`fabricate_slot_array`, off
+//! by default): when armed it writes the `NetworkSession`'s empty slot-array fields so a solo create
+//! can reach `Host` — a deliberate experiment, gated and guarded (only writes an unallocated array).
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
@@ -185,6 +190,37 @@ const LEGB_ENTRY_OFFSET: usize = 0x1_423f_5c00 - 0x1_4000_0000;
 /// fields are zero.
 const CREATE_GATE4_OFFSET: usize = 0x1_423f_d7a0 - 0x1_4000_0000;
 
+/// Offsets of the session-slot array's control fields on the `NetworkSession` (`rcx` at leg-B entry),
+/// charted static (docs/SESSION-DRIVE.md > "Slot-array allocator charted"). Leg B's tail store is
+/// `if (count < capacity) base[count++] = session_obj;` — a bounded, no-grow push, so the array must
+/// be pre-sized. Offline all three are zero.
+const SLOT_ARRAY_BASE_OFF: usize = 0x18; // `T* base` (array of session-object pointers)
+const SLOT_ARRAY_CAP_OFF: usize = 0x20; //  `u32 capacity`
+const SLOT_ARRAY_COUNT_OFF: usize = 0x24; // `u32 count`
+
+/// Capacity to fabricate into an empty slot array (see [`FABRICATE_SLOT_ARRAY`]). One seat suffices to
+/// land the host's own session object at slot 0 and reach `Host`; we size for a generous co-op party so
+/// later peer inserts (each another leg-B push) have room without another fabrication.
+const FABRICATED_SLOT_CAPACITY: u32 = 16;
+
+/// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
+/// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
+/// the resolved address before the fabrication lever is armed — the same anti-drift role
+/// [`CREATE_WRAPPER_PROLOGUE`] plays for the initiation hooks. The read-only tracers tolerate a drift
+/// (a stale offset just logs the wrong bytes), but fabrication *writes* game memory keyed off `rcx`, so
+/// a drifted offset there would scribble a base/capacity into an unknown object — this guard refuses to
+/// arm the write unless the entry still looks like leg B. Re-chart per docs/SESSION-DRIVE.md if a game
+/// update shifts it.
+const LEGB_ENTRY_PROLOGUE: [u8; 10] =
+    [0x40, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0xC7, 0x44, 0x24];
+
+/// Armed by [`install_create_gate_trace`] from `[debug.probes] fabricate_slot_array` (only after the
+/// leg-B prologue verifies — see [`LEGB_ENTRY_PROLOGUE`]). When set, the leg-B entry tracer
+/// ([`log_legb_entry`]) fabricates the session-slot array if it's still empty — the one write the
+/// otherwise read-only tracer performs, kept behind this flag so the default tracer stays a pure
+/// observer. See the `[debug.probes] fabricate_slot_array` config flag.
+static FABRICATE_SLOT_ARRAY: AtomicBool = AtomicBool::new(false);
+
 /// Place read-only `jmp-back` tracers on leg-B entry and the 4th create gate when `drive_create` is on.
 /// No-op otherwise. Best-effort: a failed hook logs and is skipped, never aborts (it's a diagnostic).
 fn install_create_gate_trace(config: &Config) {
@@ -198,8 +234,41 @@ fn install_create_gate_trace(config: &Config) {
             return;
         }
     };
+    // Arm the slot-array fabrication (read by the leg-B tracer) — but only if requested AND the leg-B
+    // entry still carries its charted prologue. This must run BEFORE the hook is placed (ilhook
+    // overwrites the entry bytes we verify), and gating the write on the prologue keeps a post-update
+    // offset drift from turning the fabrication into a stray write at an arbitrary address. The
+    // read-only trace installs regardless; only the *write* is withheld on drift.
+    if config.debug.probes.fabricate_slot_array {
+        let arm = legb_prologue_ok(exe_base + LEGB_ENTRY_OFFSET);
+        FABRICATE_SLOT_ARRAY.store(arm, Ordering::Relaxed);
+        if !arm {
+            log::warn!(
+                "session-probe: fabricate_slot_array requested but leg-B entry prologue didn't verify \
+                 (offset drifted — game update?); NOT arming the slot-array write. Re-chart per \
+                 docs/SESSION-DRIVE.md"
+            );
+        }
+    }
     install_offset_hook("legb-entry", exe_base + LEGB_ENTRY_OFFSET, log_legb_entry);
     install_offset_hook("create-gate4", exe_base + CREATE_GATE4_OFFSET, log_create_gate4);
+}
+
+/// True iff the charted [`LEGB_ENTRY_PROLOGUE`] bytes are present at `addr`. Read-only, byte-at-a-time.
+fn legb_prologue_ok(addr: usize) -> bool {
+    // SAFETY: `addr` = live exe base + the charted leg-B `.text` offset — inside the mapped, readable
+    // image (orders of magnitude larger than the offset). Read-only, no reference over foreign memory.
+    let seen: Vec<u8> = (0..LEGB_ENTRY_PROLOGUE.len())
+        .map(|i| unsafe { ((addr + i) as *const u8).read_volatile() })
+        .collect();
+    if seen != LEGB_ENTRY_PROLOGUE {
+        log::warn!(
+            "session-probe: leg-B entry at {addr:#x} reads {seen:02x?}, expected {:02x?}",
+            LEGB_ENTRY_PROLOGUE,
+        );
+        return false;
+    }
+    true
 }
 
 /// Place one read-only `jmp-back` hook at a resolved address for the gate tracers, logging the
@@ -221,8 +290,9 @@ fn place_jmp_back_hook(
     body: fn(&'static str, *mut Registers),
 ) -> Result<(), String> {
     // SAFETY: `addr` is a charted, clean function entry (exe base + a fixed offset; the initiation
-    // sites are additionally prologue-verified by their caller); the detour body is read-only and
-    // panic-firewalled (see the log_* fns).
+    // sites are additionally prologue-verified by their caller); the detour bodies are panic-firewalled
+    // and read-only, except the leg-B tracer's opt-in `fabricate_slot_array` write, which is itself
+    // gated on a prologue check before it's armed (see the log_* fns).
     let hook = unsafe {
         hook_closure_jmp_back(
             addr,
@@ -241,7 +311,8 @@ fn place_jmp_back_hook(
 }
 
 /// Leg-B entry tracer: confirms we reach leg B and reads reject #1's readiness flag (`[NetworkSession
-/// +0x10]`) at the real call site. Read-only; firewalled against unwind across the FFI boundary.
+/// +0x10]`) at the real call site. Read-only **except** the opt-in [`fabricate_slot_array`] write when
+/// `fabricate_slot_array` is armed. Firewalled against unwind across the FFI boundary.
 fn log_legb_entry(_name: &'static str, regs: *mut Registers) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: ilhook hands us the saved registers; rcx is the NetworkSession the game just passed
@@ -264,10 +335,66 @@ fn log_legb_entry(_name: &'static str, regs: *mut Registers) {
             "session-probe: gate-trace legb-entry REACHED — NetworkSession={ns:#x} reject#1 [+0x10]={} \
              slot-array [+0x20]cap={} [+0x24]count={} (cap 0 => leg B tail can't store the session)",
             rd(0x10),
-            rd(0x20),
-            rd(0x24),
+            rd(SLOT_ARRAY_CAP_OFF),
+            rd(SLOT_ARRAY_COUNT_OFF),
         );
+        // Slot-array fabrication (only when armed by `fabricate_slot_array`). We're at leg-B entry, so
+        // `ns` (rcx) is the exact NetworkSession leg B will store into and we run BEFORE its tail
+        // `cmp count,capacity`; sizing the array here is what lets the tail push succeed offline.
+        if FABRICATE_SLOT_ARRAY.load(Ordering::Relaxed) {
+            fabricate_slot_array(ns);
+        }
     }));
+}
+
+/// Fabricate an empty session-slot array on the `NetworkSession` at `ns` (rcx at leg-B entry) so leg
+/// B's tail store has room. No-op unless the array is still unallocated (both `capacity @+0x20` and
+/// `base @+0x18` read 0), so we never clobber one a real session set up. Points `base` at a leaked,
+/// zero-filled pointer buffer, sets `capacity` = [`FABRICATED_SLOT_CAPACITY`], and explicitly zeroes
+/// `count @+0x24` so the buffer is indexed from slot 0 (leg B's tail store is `base[count++]`, so a
+/// stale nonzero count would store past slot 0 / past the buffer — offline `count` is 0, but we don't
+/// rely on that).
+///
+/// The buffer is process-**leaked** on purpose: leg B stores raw pointers into it and the session then
+/// reads them, so it must outlive the session, and we have no clean unhook point. The tradeoff (the
+/// game may try to free this foreign pointer on teardown) is documented on the
+/// `[debug.probes] fabricate_slot_array` config flag and is acceptable for a one-shot *does-create-
+/// reach-Host?* proof — the free would be at disconnect, after the transition we measure.
+fn fabricate_slot_array(ns: usize) {
+    // SAFETY: `ns` is the live NetworkSession leg B was just handed (rcx); `+0x18/+0x20/+0x24` are its
+    // slot-array control fields, well within the object. Read the current capacity/base to decide, then
+    // (only if empty) write the fabricated base+capacity. Data writes on a heap object — no code patch,
+    // no VirtualProtect needed.
+    let cap_ptr = (ns + SLOT_ARRAY_CAP_OFF) as *mut u32;
+    let base_ptr = (ns + SLOT_ARRAY_BASE_OFF) as *mut usize;
+    let count_ptr = (ns + SLOT_ARRAY_COUNT_OFF) as *mut u32;
+    let cap = unsafe { cap_ptr.read_volatile() };
+    let base = unsafe { base_ptr.read_volatile() };
+    if cap != 0 || base != 0 {
+        log::info!(
+            "session-probe: fabricate-slot-array — already sized (cap={cap} base={base:#x}); leaving intact",
+        );
+        return;
+    }
+    // Leaked, zero-filled backing store of `FABRICATED_SLOT_CAPACITY` pointer slots. `Vec::leak` gives
+    // a `'static` slice whose storage is never reclaimed by us — a stable base for the process lifetime.
+    let buf: &'static mut [usize] = vec![0usize; FABRICATED_SLOT_CAPACITY as usize].leak();
+    let new_base = buf.as_mut_ptr() as usize;
+    // Write base first, then count=0, then capacity last: capacity is the field leg B's tail gates on
+    // (`cmp count,capacity`), so publishing it last means any reader that sees a nonzero capacity also
+    // sees the matching base + a from-zero count. Zeroing count makes the "indexed from slot 0"
+    // postcondition real rather than assumed (offline it's already 0). All are `NetworkSession`-thread
+    // sequential (leg B is driven synchronously on the main thread), so there's no cross-thread reader.
+    unsafe {
+        base_ptr.write_volatile(new_base);
+        count_ptr.write_volatile(0);
+        cap_ptr.write_volatile(FABRICATED_SLOT_CAPACITY);
+    }
+    log::info!(
+        "session-probe: fabricate-slot-array — sized empty array on NetworkSession={ns:#x}: \
+         base(+0x18)={new_base:#x} capacity(+0x20)={FABRICATED_SLOT_CAPACITY} count(+0x24)=0 \
+         (leg B tail can now store the session; buffer is process-leaked — teardown caveat applies)",
+    );
 }
 
 /// 4th-gate tracer: reaching here means rejects #1–3 passed. Reads the session-object config fields the

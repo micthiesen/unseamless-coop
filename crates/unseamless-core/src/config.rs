@@ -240,6 +240,27 @@ pub struct DebugProbes {
     /// this only *writes* it. A rig experiment to see whether satisfying reject #1 lets create walk
     /// `None -> TryToCreateSession -> Host` offline. Off by default.
     pub force_netsession_ready: bool,
+    /// **EXPERIMENTAL rung-3 slot-array lever** (pairs with [`drive_create`]; requires it — the
+    /// fabrication rides the leg-B entry tracer that `drive_create` installs). The root-cause of the
+    /// solo create failure is that leg B's *tail* store is a bounded, no-grow push into a session-slot
+    /// array embedded on the `NetworkSession` (`base @+0x18`, `capacity @+0x20`, `count @+0x24`), and
+    /// offline that array is never allocated (`capacity == 0`), so `count < capacity` is `0 < 0` →
+    /// the finished session object can't be stored → `FailedToCreateSession`. No reachable game path
+    /// sizes it solo (the player-slot vmethods the session layer would call are stubs; a real
+    /// Steam session is what allocates it — see `docs/SESSION-DRIVE.md` > "Slot-array allocator
+    /// charted"). This lever *fabricates* the array: from inside the leg-B entry hook (where `rcx` is
+    /// the exact `NetworkSession` and we run before the tail check), if the array is still unallocated
+    /// (both `capacity` and `base` read 0), point `+0x18` at a leaked, zero-filled pointer buffer, set
+    /// `+0x20` to a small capacity, and zero `count` (+0x24). The write is armed only after the leg-B
+    /// entry's charted prologue verifies, so a post-update offset drift withholds it (fail-safe) rather
+    /// than scribbling into an arbitrary object. Then leg B's tail store lands the host's session object in slot 0 and create can
+    /// walk `None -> TryToCreateSession -> Host` with no peer. **Caveats:** the buffer is process-
+    /// leaked (never freed by us), so on session teardown the game may try to free a pointer it didn't
+    /// allocate — acceptable for a one-shot *does-it-reach-Host?* proof (that free is at disconnect,
+    /// after the transition we measure), not for shipping. Pair with `bypass_session_create_gate` +
+    /// `force_netsession_ready` + `gameplay.enable_offline_multiplayer` so legs A / reject #1 are
+    /// already cleared. Off by default.
+    pub fabricate_slot_array: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

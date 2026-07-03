@@ -556,7 +556,9 @@ drive-create returned false — FailedToCreateSession
 ```
 
 **Root cause: the slot-array capacity is 0.** Leg B's tail store is `mov eax,[rbx+0x24]; cmp
-eax,[rbx+0x20]; jae fail` with `rbx = [[NetworkSession+8]+0x48]`; `cap=0` → `0 >= 0` → fail, so the
+eax,[rbx+0x20]; jae fail` with `rbx = the NetworkSession` (the array is **embedded on it** at
+`+0x18/+0x20/+0x24`; the `[[NetworkSession+8]+0x48]` written here earlier is a mislabel — that's leg B's
+cleanup return-pool, corrected in "Slot-array allocator charted" below); `cap=0` → `0 >= 0` → fail, so the
 freshly-built (and likely finalized) session object **can't be stored** — the slot array was never
 allocated. It is not OOM, not the gate, not the 4th gate, not the finalize registry. It is precisely what
 a **real match/lobby allocates** (the slot array on the NetworkSession is sized when a multiplayer session
@@ -569,6 +571,108 @@ out: that chain is OOM-only (above).
 one-shot drive fires unattended. The leg-B gate tracer (entry: reject #1 + slot-array cap/count; 4th-gate:
 the config fields) stays a charted default-off probe under `drive_create`.
 
+## Slot-array allocator charted (static, 2026-07-02, worker:slot-allocator-re)
+
+A **static** pass over the same pinned 2026-06-02 `eldenring.exe` (base `0x140000000`) to answer the
+open question from "Paths forward": *who sizes the session-slot array, where does the size come from,
+and is there a solo path to size it without a real peer?* No game running; addresses are facts about
+the binary; behavior is in my own words (CLEAN-ROOM — no decompiler pseudocode transcribed).
+
+### Correction: the checked array is embedded directly on the `NetworkSession`, not behind `[[+8]+0x48]`
+
+The root-cause note above says leg B's tail check uses `rbx = [[NetworkSession+8]+0x48]`. That's a
+mislabel. Reading leg B (`0x1423f5c00`) end-to-end, `rbx` is the **entry `rcx` (the `NetworkSession`)
+unchanged** on the success path — the tail store is:
+
+```
+0x1423f5cbb  mov eax,[rbx+0x24]      ; count      (rbx = NetworkSession)
+0x1423f5cbe  cmp eax,[rbx+0x20]      ; capacity
+0x1423f5cc1  jae  fail
+0x1423f5cc3  mov ecx,eax
+0x1423f5cc5  mov rax,[rbx+0x18]      ; base
+0x1423f5cc9  mov [rax+rcx*8],rdi     ; base[count] = session_obj
+0x1423f5ccd  inc dword [rbx+0x24]    ; count++
+```
+
+i.e. `if (count < capacity) base[count++] = obj;` — a **bounded, no-grow push**. So the slot array is
+**three inline fields on the `NetworkSession` object itself**: `base` (`T*`) at **+0x18**, `capacity`
+(`u32`) at **+0x20**, `count` (`u32`) at **+0x24**. This matches the rig probe exactly (it read
+`NetworkSession+0x20`/`+0x24` and got 0/0). The `[[NetworkSession+8]+0x48]` expression only appears on
+leg B's **reject/cleanup** branches (`0x1423f5c96`, `0x1423f5cdb`): `[NetworkSession+8]` is a
+sub-manager and `+0x48` is the **session-object return pool** the cleanup hands the object back to
+(`pool->vtable[0x68](pool, obj)`), not the capacity array. Load-bearing because a fabrication/probe
+writes `NetworkSession+0x18/+0x20` **directly** — chasing `[[+8]+0x48]` would target the wrong object.
+
+### What the `NetworkSession` is, and why its slot-manager is a stub
+
+- **Type.** The object at `*([G]+0x60)+0x710` (RTTI on its vtable `0x1431f9140`) is
+  **`DLNR3D::SessionManagerSteam`**, derived from **`DLNR3D::SessionManager`** (base vtable
+  `0x1431f8fe8`, installed by the base ctor `0x1423f5b90`). Its size is `0xb0` (the deleting-dtor
+  `0x1423f7000` frees `0xb0`). Object shape used by leg B: `+0x00` vtable, `+0x08` sub-manager/lock+pool
+  (`[+8]+0x10` is a critical section leg B takes via `0x141ed6210`/releases via `0x141ed6280`; `[+8]
+  +0x48` the return pool), `+0x10` the reject-#1 readiness dword, `+0x18/+0x20/+0x24` the slot array,
+  `+0xa8` a session-object counter (bumped by the reject-#3 allocator).
+- **The player-slot vmethods are stubs.** The `CSSessionManager` layer's player-count tracker
+  (`0x140cb6150`) resolves the `NetworkSession` and calls its vtable slots **+0x78** and **+0x80** to
+  notify "player count changed" (`(net, count, add?)`). On **both** `SessionManager` and
+  `SessionManagerSteam` those slots are **no-op stubs**: `+0x78 = 0x1423f69a0` (`xor al,al; ret`),
+  `+0x80 = 0x1423f65b0` (`mov al,1; ret`). So changing the seat count does **not** size the slot array
+  through this path. Leg B (`+0x08` in the vtable) is shared across the sibling session-manager vtables
+  too (`0x1431f8fe8`, `0x1431f9140`, …), i.e. it's a base-class method, and none of them override the
+  slot-manager stubs.
+
+### Who sizes the array — and why nothing reachable does it solo
+
+Working backwards from the tail store, the writer of `+0x18`(base)/`+0x20`(capacity) is **not** on any
+path a solo create reaches:
+
+- **Not the SMS methods.** None of the 34 `SessionManagerSteam` vtable methods writes `+0x18/+0x20`, and
+  none calls a generic vector-reserve helper (checked every method + one level of callees).
+- **Not the `CSSessionManager` create/host path.** The create inner (`0x140cb1f70`) reaches the
+  `NetworkSession` via the accessor **`0x1423f1930`** (`rax = *(rcx); rax += 0x710; ret`) and immediately
+  dispatches leg B — nothing reserves in between (confirmed: the params builder `0x140cb20d0` only sets
+  `session_player_limit`, and leg B is the very next call). The accessor's 22 callers are all
+  `CSSessionManager` methods in `0x140cad000..0x140cb6000`; each only **queries** the roster or calls a
+  **stub** slot vmethod — none reserves.
+- **Not a constant, not `session_player_limit`.** Because the notify-count path (`+0x78`) is a stub, the
+  seat limit at `CSSessionManager+0x170` never reaches the slot array. The array stays `base=0, cap=0`
+  from construction until *something outside these paths* sizes it.
+
+That "something" is the **DLNR3D Steam-session layer when a real Steam P2P session actually forms** —
+the same gate as the reject-#1 readiness flag (`NetworkSession+0x10`, also 0 offline). Both fields go
+live together only with a real lobby/peer. This is the static confirmation of the doc's "a real
+match/lobby allocates it": there is **no callable/settable game-native `reserve(N)` reachable without a
+Steam session.** (Scans for the reserve — inlined `+0x18/+0x20/+0x24` writers, P-relative `+0x728/+0x730`
+writers, `+0x710` navigators that reserve, allocator-fed `+0x18` stores in the DLNR3D neighborhood — all
+came back either empty or as unrelated containers/ctors, e.g. the `CSSessionManager` ctor `0x140cabb60`
+sizing its *own* member vectors. The reserve genuinely isn't in reach of the create path.)
+
+### The solo path: fabricate the array (now principled, low-risk) — probe landed
+
+Since no native reserve is reachable, the realistic solo route is the doc's path-2 **fabrication** — but
+the correction above turns "blind fabrication" into a two-field write on a well-known object: point
+`NetworkSession+0x18` at a small pointer buffer and set `NetworkSession+0x20` to a capacity, leaving
+`+0x24 = 0`. Leg B's tail then stores the host's session object in slot 0 and create can walk
+`None → TryToCreateSession → Host` with **no peer** (join still needs a real peer).
+
+Implemented as `[debug.probes] fabricate_slot_array` (default off) in `coop/session_probe.rs`, riding
+the existing **leg-B entry tracer** (`drive_create`'s `legb-entry` hook at `0x1423f5c00`). Fabricating
+from *inside* that hook is deliberate: `rcx` there is the exact `NetworkSession` leg B will use (dodging
+the `*(this+0x60)` P-drift that dogged `force_netsession_ready`), and it runs **before** the tail
+`cmp count,capacity`. It only writes when the array is still empty (`cap==0 && base==0`), so it can't
+clobber a real one. The backing buffer is a leaked, zero-filled `Vec<usize>` (process-lifetime stable);
+the teardown tradeoff (the game may free a foreign pointer at disconnect) is acceptable for a one-shot
+*does-create-reach-`Host`?* proof and is documented on the flag.
+
+**Rig recipe (hand-off to the orchestrator).** On the local rig (solo, in-world), set all of:
+`[debug.probes] drive_create = true`, `fabricate_slot_array = true`, `force_netsession_ready = true`,
+`[gameplay] bypass_session_create_gate = true`, `enable_offline_multiplayer = true`. Watch the
+`session-probe:`/`gate-trace` lines:
+
+- `gate-trace legb-entry REACHED … cap=0 …` then `fabricate-slot-array — sized empty array … capacity(+0x20)=16 …` → the array was empty and we sized it.
+- `drive-create returned true — lobby_state now Host` ⇒ **fabrication is sufficient**: a sized slot array is the last thing solo create needs, and we can drive to `Host` with no second machine (huge — unblocks the create leg of rung 3 solo).
+- `drive-create returned false … FailedToCreateSession` (with the fabricate line present) ⇒ the slot array is necessary but not sufficient; the finished object needs more real-session context. That result argues for the 2-player drive (path 1) and against fabrication as a shortcut — either way the log says which.
+
 ### Tooling / re-derivation
 
 Found with `scripts/re/static.py` (the committed PE workhorse): `fn` to disassemble the inner/builder,
@@ -579,6 +683,20 @@ the create inner is the `mov [this+0xc],1` function in the `CSSessionManager` me
 guards and before the params builder `0x140cb20d0`** — re-take the `call + nop + lea rcx,[rsp+0x30] +
 test al,al + jne rel8` as the landmark (the concrete call rel32 keeps it create-specific) and flip the
 `75` to `EB`.
+
+**Slot-array pass (2026-07-02).** Leg B was disassembled with `static.py fn 0x1423f5c00` and
+decompiled via the persistent Ghidra cache (`GHX_PROJECT_DIR=/var/tmp/ghidra-projects`,
+`scripts/re/ghidra-decompile.sh`) to read the tail store's register semantics (rbx = entry rcx). The
+`NetworkSession` type + the sibling session-manager vtables came from an RTTI read off the vtable's
+`-8` COL/type-descriptor (`0x1431f9140 → .?AVSessionManagerSteam@DLNR3D@@`; base `0x1431f8fe8 →
+.?AVSessionManager@DLNR3D@@`). The stub slot-vmethods (`+0x78`/`+0x80`) were read from the vtable +
+`static.py fn`. The accessor `0x1423f1930` and its 22 `CSSessionManager` callers came from
+`static.py fn`/`calls`. The "no reachable reserve" conclusion is a set of throwaway capstone scans over
+`.pdata` (all committed-tool-shaped, kept in `/tmp`): functions writing the `+0x18/+0x20/+0x24` triple,
+those referencing `+0x710`, P-relative `+0x728/+0x730` writers, and allocator-fed `+0x18` stores — none
+landed on a path a solo create reaches. Re-derive after a game update: re-confirm leg B by the
+`mov [rbx+0x24]; cmp [rbx+0x20]; jae` tail (rbx = the vmethod's `this`), and re-read the three slot
+offsets `+0x18/+0x20/+0x24` off that object.
 
 ## Cross-references
 
