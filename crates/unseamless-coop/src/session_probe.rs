@@ -203,6 +203,27 @@ const SLOT_ARRAY_COUNT_OFF: usize = 0x24; // `u32 count`
 /// later peer inserts (each another leg-B push) have room without another fabrication.
 const FABRICATED_SLOT_CAPACITY: u32 = 16;
 
+/// Leg-B **cleanup target** (`0x1423f5cd2`) — the block reached when create fails, from *either* the
+/// finalize-handle test (`je` at `0x1423f5cb9`) or the slot-capacity check (`jae`). At this point `esi`
+/// still holds the finalize handle from `0x1423f5cb5` (`mov esi,eax`), `rdi` = the session object, and
+/// `rbx` = the `NetworkSession`. We hook here rather than the mid-branch `0x1423f5cb5` because the
+/// overwritten bytes are clean `mov`s (no rel8 branch for ilhook to relocate) and it fires exactly on
+/// the failure we're studying. `esi==0` ⇒ finalize (`0x1423fab40`) returned a zero registry-node id;
+/// `esi!=0` ⇒ the capacity branch failed instead. See docs/SESSION-DRIVE.md > "Leg B Post-Capacity
+/// Tail Charted".
+const LEGB_FINALIZE_OFFSET: usize = 0x1_423f_5cd2 - 0x1_4000_0000;
+/// Charted bytes at [`LEGB_FINALIZE_OFFSET`]: `48 8B 07` = `mov rax,[rdi]`, `48 8B CF` = `mov rcx,rdi`,
+/// `FF 50 10` = `call [rax+0x10]`, `48 8B 43 08` = `mov rax,[rbx+8]`. Verified before hooking — this is
+/// a mid-function hook, so a drifted offset must not relocate the wrong instructions; a mismatch skips.
+const LEGB_FINALIZE_PROLOGUE: [u8; 13] =
+    [0x48, 0x8B, 0x07, 0x48, 0x8B, 0xCF, 0xFF, 0x50, 0x10, 0x48, 0x8B, 0x43, 0x08];
+/// On the freshly-built session object, `+0x58` holds the pointer copied from `NetworkSession+0x08`;
+/// `+0x6b8` off *that* is the registry-node id counter that `0x1423fa100` consumes as a new node's id
+/// (then increments). Starting at 0 ⇒ the first node's id is 0 ⇒ finalize returns 0. Charted static in
+/// docs/SESSION-DRIVE.md > "Leg B Post-Capacity Tail Charted".
+const SESSION_OBJ_SUB_OFF: usize = 0x58;
+const REGISTRY_NEXT_ID_OFF: usize = 0x6b8;
+
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
 /// the resolved address before the fabrication lever is armed — the same anti-drift role
@@ -252,23 +273,34 @@ fn install_create_gate_trace(config: &Config) {
     }
     install_offset_hook("legb-entry", exe_base + LEGB_ENTRY_OFFSET, log_legb_entry);
     install_offset_hook("create-gate4", exe_base + CREATE_GATE4_OFFSET, log_create_gate4);
+    // legb-finalize (the post-capacity failure cause). Guarded on its charted bytes because it's a
+    // *mid-function* hook — a drifted offset there could relocate the wrong instructions — so unlike the
+    // two entry hooks above we skip it on a byte mismatch rather than log wrong data.
+    let fin = exe_base + LEGB_FINALIZE_OFFSET;
+    if prologue_ok("legb-finalize", fin, &LEGB_FINALIZE_PROLOGUE) {
+        install_offset_hook("legb-finalize", fin, log_legb_finalize);
+    }
 }
 
-/// True iff the charted [`LEGB_ENTRY_PROLOGUE`] bytes are present at `addr`. Read-only, byte-at-a-time.
-fn legb_prologue_ok(addr: usize) -> bool {
-    // SAFETY: `addr` = live exe base + the charted leg-B `.text` offset — inside the mapped, readable
-    // image (orders of magnitude larger than the offset). Read-only, no reference over foreign memory.
-    let seen: Vec<u8> = (0..LEGB_ENTRY_PROLOGUE.len())
+/// True iff the charted `expected` bytes are present at `addr`. Read-only, byte-at-a-time. The
+/// anti-drift guard both the fabrication write (leg-B entry) and the mid-function `legb-finalize` hook
+/// gate on — a game update that shifts an offset reads different bytes and withholds the risky action.
+fn prologue_ok(name: &str, addr: usize, expected: &[u8]) -> bool {
+    // SAFETY: `addr` = live exe base + a charted `.text` offset — inside the mapped, readable image
+    // (orders of magnitude larger than the offset). Read-only, no reference over foreign memory.
+    let seen: Vec<u8> = (0..expected.len())
         .map(|i| unsafe { ((addr + i) as *const u8).read_volatile() })
         .collect();
-    if seen != LEGB_ENTRY_PROLOGUE {
-        log::warn!(
-            "session-probe: leg-B entry at {addr:#x} reads {seen:02x?}, expected {:02x?}",
-            LEGB_ENTRY_PROLOGUE,
-        );
+    if seen != expected {
+        log::warn!("session-probe: {name} at {addr:#x} reads {seen:02x?}, expected {expected:02x?}");
         return false;
     }
     true
+}
+
+/// True iff the charted [`LEGB_ENTRY_PROLOGUE`] is present at `addr` (the fabrication-write guard).
+fn legb_prologue_ok(addr: usize) -> bool {
+    prologue_ok("leg-B entry", addr, &LEGB_ENTRY_PROLOGUE)
 }
 
 /// Place one read-only `jmp-back` hook at a resolved address for the gate tracers, logging the
@@ -422,6 +454,50 @@ fn log_create_gate4(_name: &'static str, regs: *mut Registers) {
             rd(0x70),
             rd(0x74),
             rd(0x78),
+        );
+    }));
+}
+
+/// legb-finalize tracer: fires at leg B's cleanup block (`0x1423f5cd2`, the create-failure path).
+/// Reports the finalize handle (`esi`), the registry-id counter *after* finalize, and the slot-array
+/// cap/count — the datum that distinguishes *why* the fabricate+peer drive still fails
+/// (docs/SESSION-DRIVE.md > "Leg B Post-Capacity Tail Charted"): `handle=0` means finalize
+/// (`0x1423fab40`) returned a zero registry-node id, and `post-next-id=1` with fabrication armed means
+/// id `0` was consumed pre-store — i.e. the counter at `[[NetworkSession+0x08]+0x6b8]` started at 0.
+/// `handle!=0` would instead point at the capacity branch (fabrication not landing on the object leg B
+/// used). Read-only; unwind-firewalled.
+fn log_legb_finalize(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: at this charted cleanup block `esi` = the finalize handle, `rdi` = the session object,
+        // `rbx` = the NetworkSession (all set upstream in leg B). The field reads below are in-bounds on
+        // those live objects; all read-only.
+        let r = unsafe { &*regs };
+        let handle = r.rsi as u32;
+        let session_obj = r.rdi as usize;
+        let ns = r.rbx as usize;
+        let (cap, count) = if ns != 0 {
+            unsafe {
+                (
+                    ((ns + SLOT_ARRAY_CAP_OFF) as *const u32).read_volatile(),
+                    ((ns + SLOT_ARRAY_COUNT_OFF) as *const u32).read_volatile(),
+                )
+            }
+        } else {
+            (0, 0)
+        };
+        // post-finalize registry-id counter: `*(*(session_obj+0x58)+0x6b8)`. If finalize consumed id 0
+        // (the zero-handle model), the post-increment read is 1. `None` if a pointer link is null.
+        let next_id = if session_obj != 0 {
+            let sub = unsafe { ((session_obj + SESSION_OBJ_SUB_OFF) as *const usize).read_volatile() };
+            (sub != 0).then(|| unsafe { ((sub + REGISTRY_NEXT_ID_OFF) as *const u32).read_volatile() })
+        } else {
+            None
+        };
+        log::info!(
+            "session-probe: gate-trace legb-finalize REACHED (create failed) — handle(esi)={handle} \
+             post-next-id={next_id:?} slot-array cap={cap} count={count} \
+             (handle 0 => finalize 0x1423fab40 returned a zero registry-node id; post-next-id 1 with \
+             fabricate armed => id 0 was consumed before the slot store)",
         );
     }));
 }
