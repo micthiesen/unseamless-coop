@@ -903,6 +903,22 @@ subsystem online/available" gate the boot online-flow sets), so flipping it runs
 allocation — vs. hand-seeding each null object (whack-a-mole, unbounded). Charting the writer of
 `[container+0x7c0]` bit 2 + the allocator of the `rdx` sub-object is the next step.
 
+**Sharpened (2026-07-03): the null `rdx` is `[container+0x708]` — a sibling field on the SAME
+container.** Tracing the ctor's args in helper `0x1423faf60`: `0x1423fb0a7: mov rdx,[rcx+0x708]` with
+`rcx = [session_obj+0x58]` = the container. (The `0x10c0`-byte alloc at `0x1423fb08a` is the *new*
+object `rcx`; `rdx` is read from `[container+0x708]`, and it's null offline — the ctor `0x1423f3230`
+then stores it at `new_obj+0x18` and refcounts it → the `[null+8]` fault.) So **both** the create veto
+(`[container+0x7c0]` bit 2, clear offline) **and** the null sub-object (`[container+0x708]`, null
+offline) are fields on the *one* container object (vtable `0x1431f8780`, live at ~`0x143dcdxxx` near
+`NetworkSession 0x143dcdb80`). That is strong evidence for a **single container session-init** that
+populates both — so the finish reduces to: **who initializes the container's `+0x708`/`+0x7c0`, and is
+that init reachable/flippable offline** (a `is_offline`/online-availability gate → flip it; or the
+game only runs it once a real Steam match forms → then the synthetic drive can't finish and the path
+is the game's own create via un-greyed items). This is the one question both "finish" paths reduce to;
+`worker/create-veto-writer` is charting it. `+0x708` pointer-writers found by the disp scan (candidates,
+none in the container's own `0x1423fxxxx` cluster, so an external session-setup writer):
+`0x1412799a0`, `0x141ab2560`, `0x141ab5f10` — to be resolved to the container type.
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real
