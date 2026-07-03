@@ -10,9 +10,12 @@ launches both sides, and reads the verdict out of the logs; nothing is left to d
 > post-link on both machines, and both still read `cap=0` / `returned false` /
 > `None->FailedToCreateSession` — a live lobby + linked peer does **not** size the slot array (it
 > also leaves reject #1's `NetworkSession+0x10` at 0). Full verdict + corollaries:
-> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Two-machine result". **Next variant: the fabricate+peer
-> combo** — same procedure, plus `fabricate_slot_array = true` with `drive_fire_solo = false` (the
-> 2026-07-03 decouple) on both machines, so the fabricated array meets a live peer context.
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Two-machine result". **Run 2, the fabricate+peer combo
+> (same day): also FAIL** — array fabricated to cap 16 with the peer linked, create still
+> `FailedToCreateSession`, symmetric. Every charted gate is clear at the failure point, so the live
+> reject is **past the tail's store-capacity check**; the next move is charting that post-store tail
+> ([SESSION-DRIVE.md](SESSION-DRIVE.md) > "Combo result"), not another config permutation of this
+> runbook.
 
 > **Scope & legitimacy.** Two machines the developer owns (or a friend who owns the game), running a
 > co-op mod over a private Steam side-channel, *outside* anti-cheat and never on the official servers.

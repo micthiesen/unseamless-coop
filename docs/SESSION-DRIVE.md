@@ -700,11 +700,20 @@ both read `legb-entry … slot-array [+0x20]cap=0 [+0x24]count=0`, `drive-create
 "real match/lobby allocates it" is narrower than 'any live rung-4 lobby + peer' — our private Steam
 lobby + an accepted P2P session with ~1400 messages flowing left `NetworkSession+0x10` at 0 *and* the
 array at cap 0, so the allocator is tied to the game's **own** matchmaking flow, not generic Steam
-session traffic; (b) with solo-fabricate also failing deeper, the one untested cheap combination is
-**fabricate + peer** (array sized while a real peer/lobby context exists) — staged next via
-`fabricate_slot_array = true` + `drive_fire_solo = false` on both machines. If that fails too, the
-remaining paths are charting the game's own match setup (waygate-server as protocol reference) or
-ERSC-style session neutralization.
+session traffic; (b) with solo-fabricate also failing deeper, the one untested cheap combination was
+**fabricate + peer** (array sized while a real peer/lobby context exists) — run the same day:
+
+**Combo result (2026-07-03, same rig↔Deck pair, fabricate + linked peer) — STILL FAILS; the blocker is
+a POST-STORE reject.** Same procedure with `fabricate_slot_array = true` + `drive_fire_solo = false` on
+both machines: linked, drive fired post-settle, `legb-entry … cap=0` then
+`fabricate-slot-array — sized empty array … capacity(+0x20)=16`, and create **still** `returned false →
+None->FailedToCreateSession`, symmetric on host and joiner. Every charted gate is now clear at the
+moment of failure (leg-A bypassed, reject #1 forced, rejects #2/#3 + gate 4 passed, slot array sized,
+real peer + live lobby present) — so the create dies **after** the tail's store-capacity check, in
+territory past everything charted. The cheap-combination space is exhausted: next is charting that
+post-store tail (hook/trace past the `cmp count,capacity` store in the leg-B vmethod `0x1423f5c00` to
+find the actual reject), with the game's own match setup as the model (protocol reference: vswarte's
+`waygate-server`), or ERSC-style session neutralization as the fallback.
 
 ### Tooling / re-derivation
 
