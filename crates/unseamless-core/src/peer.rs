@@ -26,6 +26,8 @@ use crate::crypto::{auth_proof, proofs_match};
 use crate::diagnostics::{LogBundle, LogLevel, LogRecord, peer_tag};
 use crate::notifications::{Notifications, Severity};
 use crate::protocol::{AuthNonce, ModMessage, SessionAction, SharedSettings};
+use crate::roster::{Roster, RosterEvent};
+use crate::session_state::SessionToggles;
 use crate::transport::{PeerId, Transport};
 use crate::util::{RateLimiter, Version};
 
@@ -205,12 +207,23 @@ pub struct Peer {
     /// Like `peers`/`peer_nonces`/`last_seen`, this is keyed by the transport [`PeerId`] (the stable
     /// Steam id in production) and is **never pruned by the frame/maintenance paths**: re-linking a
     /// peer after a transient liveness blip is a no-op, which is what makes the handshake self-heal.
-    /// The pruning mechanism for a real session-*leave* is [`Peer::evict`]; *deciding* when a peer
-    /// has left is deferred to the binding layer (Layer 2), which owns the game's session FSM.
+    /// The pruning mechanism for a real session-*leave* is [`Peer::evict`], driven in core by a
+    /// game-roster shrink ([`Peer::observe_roster`]); the binding layer (Layer 2) only feeds the
+    /// roster snapshots once rung 3 makes the game's session observable.
     linked: BTreeSet<PeerId>,
     notifications: Notifications,
     /// Host-side aggregation of forwarded debug logs.
     log_bundle: LogBundle,
+    /// The session toggle state (world lock / PvP / PvP teams / friendly fire) — host-authoritative.
+    /// On the host it moves only via our own [`Peer::session_action`]; on a joiner it's a replica
+    /// that follows only host-confirmed transitions (an accepted toggle action from the linked host
+    /// in [`Peer::handle`]). A fresh session gets a fresh `Peer`, so `Default` (all off) is the
+    /// session-start state. See [`crate::session_state`].
+    toggles: SessionToggles,
+    /// The in-world game-session roster + phantom→identity mapping (rung-3 presence), distinct from
+    /// `peers` (side-channel discovery). Fed by the binding layer via [`Peer::observe_roster`],
+    /// which ties a roster shrink to [`Peer::evict`] + the departure toast. See [`crate::roster`].
+    game_roster: Roster,
 
     // --- outbound identity (so receivers can dedup/order our frames) ---
     /// Host's authoritative config generation; bumped whenever the shared settings change.
@@ -298,6 +311,8 @@ impl Peer {
             linked: BTreeSet::new(),
             notifications: Notifications::new(),
             log_bundle: LogBundle::new(),
+            toggles: SessionToggles::default(),
+            game_roster: Roster::new(),
             config_generation: 1,
             config_epoch: 0,
             out_action_seq: 0,
@@ -451,6 +466,17 @@ impl Peer {
                     ));
                 } else {
                     self.last_action = Some((from, action));
+                    // The toggle replica follows only HOST-CONFIRMED transitions: an accepted
+                    // action from the linked host is that confirmation (a non-host's toggle verb
+                    // never reaches here — the sender check above rejected it — and the lobby
+                    // verbs return `None` from `apply`). The host itself never takes this path
+                    // for its own actions (self-frames are dropped at the top; it applies at send
+                    // time in `session_action`), so state authority stays single-writer per side.
+                    if from == self.host_id
+                        && let Some(change) = self.toggles.apply(action)
+                    {
+                        self.notifications.info(change.message());
+                    }
                 }
                 vec![]
             }
@@ -562,7 +588,17 @@ impl Peer {
     }
 
     /// Produce an outbound session action stamped with the next sequence (so receivers dedup it).
+    ///
+    /// The host also applies the action's toggle transition to its own authoritative state here (it
+    /// never receives its own broadcast, so send time is its apply point); the returned frame then
+    /// carries the confirmed transition to the joiners' replicas. A non-host emitting a host-only
+    /// verb gets no local apply — receivers reject it by sender role, so the state moves nowhere.
     pub fn session_action(&mut self, action: SessionAction) -> Vec<ModMessage> {
+        if self.is_host()
+            && let Some(change) = self.toggles.apply(action)
+        {
+            self.notifications.info(change.message());
+        }
         self.out_action_seq = self.out_action_seq.wrapping_add(1);
         vec![ModMessage::SessionAction { seq: self.out_action_seq, action }]
     }
@@ -655,11 +691,18 @@ impl Peer {
     /// actionable once the peer is gone. Returns whether the peer was known (present in any of
     /// those collections).
     ///
-    /// This is the core half of session-leave eviction; nothing calls it yet. The binding layer
-    /// owns the game's session FSM (the same Layer-2 boundary the `linked` note defers to), so it
-    /// decides *when* a peer has truly left.
-    // TODO(rung-3): call this from the binding layer's session-leave handler when the game's
-    // session roster shrinks (no live session exists yet).
+    /// The in-core caller is [`Peer::observe_roster`] (a confirmed game-session roster shrink);
+    /// what remains binding-owned is only *feeding* those roster snapshots once rung 3 makes a
+    /// live session observable (no live session exists yet). Beyond the side-channel collections
+    /// this also forgets the peer's game-roster presence + phantom bindings, clears a dangling
+    /// [`last_action`](Peer::last_action) it may hold, and — when the departed peer is the
+    /// **host** — resets the local toggle *replica* to the all-off default: the authority is
+    /// gone, and a rejoining host restarts from that same default (with its seq gate freshly
+    /// forgotten here), so both sides flip from a shared base instead of a stale one.
+    ///
+    /// Don't call this directly for a peer the game session still lists: the next
+    /// [`observe_roster`](Peer::observe_roster) snapshot would (correctly) re-report it as a
+    /// fresh `Joined` edge — it *is* present. Let the roster shrink drive eviction.
     pub fn evict(&mut self, peer: PeerId) -> bool {
         let mut known = false;
         known |= self.peers.remove(&peer).is_some();
@@ -669,6 +712,13 @@ impl Peer {
         known |= self.stale_peers.remove(&peer);
         known |= self.action_gate.forget(peer);
         known |= self.log_gate.forget(peer);
+        known |= self.game_roster.remove_peer(peer);
+        if self.last_action.map(|(p, _)| p) == Some(peer) {
+            self.last_action = None;
+        }
+        if peer == self.host_id && !self.is_host() {
+            self.toggles = SessionToggles::default();
+        }
         self.notifications.clear_banner(&auth_banner_key(peer));
         self.notifications.clear_banner(&version_banner_key(peer));
         self.notifications.clear_banner(&liveness_banner_key(peer));
@@ -678,6 +728,44 @@ impl Peer {
             self.notifications.clear_banner(ROSTER_FULL_BANNER_KEY);
         }
         known
+    }
+
+    /// Feed one frame's **game-session roster** snapshot (the peer SteamIDs in
+    /// `CSSessionManager.players`; our own id may be included — it's filtered here, since only the
+    /// `Peer` knows the local identity). Diffs against the retained presence ([`Roster::observe`]):
+    /// joins report immediately, while a leave must outlast the
+    /// [`crate::roster::LEAVE_CONFIRM_SNAPSHOTS`] absence debounce (a transient partial read
+    /// across a load transition must not mass-evict the party). A **confirmed** leave is then tied
+    /// to the side-channel: the peer is fully [`evict`](Peer::evict)ed (the transport for that
+    /// session has stopped carrying its frames, so a rejoin re-links from scratch), and the
+    /// lore-voiced [`PEER_DEPARTED_MESSAGE`] toast is raised for a peer that was **linked** and
+    /// not already flagged lost:
+    ///
+    /// - *Link-gated* because arrival is: the arrival toast rides the side-channel link edge (the
+    ///   binding's `coop: linked` path), so a participant that never authenticated was never
+    ///   announced present and must not be announced departed.
+    /// - *Deduped against the liveness surface* because the binding derives the same lore
+    ///   departure from the stale transition (`coop/coop.rs`): an ungraceful drop whose roster
+    ///   entry lingers past the liveness timeout toasts once, not twice. A graceful leave (never
+    ///   flagged) toasts here.
+    ///
+    /// Join edges are returned but deliberately not toasted here — when rung 3 lands the binding
+    /// picks which edge is the player-facing arrival; toasting both would double-announce.
+    // TODO(rung-3): feed this from the binding layer once a live session's roster is observable.
+    pub fn observe_roster(&mut self, snapshot: &[PeerId]) -> Vec<RosterEvent> {
+        let others: Vec<PeerId> = snapshot.iter().copied().filter(|&p| p != self.id).collect();
+        let events = self.game_roster.observe(&others);
+        for ev in &events {
+            if let RosterEvent::Left(peer) = *ev {
+                let was_linked = self.is_linked(peer);
+                let already_announced = self.stale_peers.contains(&peer);
+                self.evict(peer);
+                if was_linked && !already_announced {
+                    self.notifications.info(PEER_DEPARTED_MESSAGE);
+                }
+            }
+        }
+        events
     }
 
     pub fn config(&self) -> &Config {
@@ -703,6 +791,22 @@ impl Peer {
     }
     pub fn last_action(&self) -> Option<(PeerId, SessionAction)> {
         self.last_action
+    }
+    /// The current session toggle state (host: authoritative; joiner: the host-confirmed replica).
+    /// Project it onto the menu with [`SessionToggles::write_context`] — this is what replaces the
+    /// overlay's always-`false` `SessionContext` placeholders.
+    pub fn session_toggles(&self) -> SessionToggles {
+        self.toggles
+    }
+    /// The game-session roster + phantom→identity mapping (see [`Peer::observe_roster`]).
+    pub fn game_roster(&self) -> &Roster {
+        &self.game_roster
+    }
+    /// Mutable roster access for the phantom-binding surface ([`Roster::bind_phantom`] /
+    /// [`Roster::retain_phantoms`]) — the binding layer maintains the phantom↔identity bindings as
+    /// phantoms load/despawn; presence itself moves only through [`Peer::observe_roster`].
+    pub fn game_roster_mut(&mut self) -> &mut Roster {
+        &mut self.game_roster
     }
     /// Whether `peer` is currently flagged as lost (for an overlay roster).
     pub fn is_stale(&self, peer: PeerId) -> bool {
@@ -2339,5 +2443,343 @@ mod tests {
         );
         assert!(host.known_peers().contains_key(&9999), "admitted into the freed slot");
         assert!(!out.is_empty(), "and the handshake proceeds (proof reply sent)");
+    }
+
+    // --- session toggle state (host-authoritative; see crate::session_state) --------------------
+
+    #[test]
+    fn host_applies_its_own_toggle_at_send_time_and_toasts() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        assert_eq!(host.session_toggles(), SessionToggles::default(), "a fresh session starts all-off");
+        let out = host.session_action(SessionAction::LockWorld);
+        assert!(host.session_toggles().world_locked, "the host's own action moves its state");
+        assert!(
+            host.notifications().toasts().iter().any(|t| t.message.contains("sealed")),
+            "the transition is toasted on the host too"
+        );
+        assert!(
+            matches!(out.as_slice(), [ModMessage::SessionAction { action: SessionAction::LockWorld, .. }]),
+            "and the confirmed action still goes out to the replicas"
+        );
+    }
+
+    #[test]
+    fn non_host_emitting_a_host_only_verb_moves_no_local_state() {
+        // A joiner can *emit* anything (the harness relies on that to test rejection), but its own
+        // replica must not move — only host-confirmed transitions apply, and this one will be
+        // rejected at every receiver by sender role.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        client.session_action(SessionAction::TogglePvp);
+        assert_eq!(client.session_toggles(), SessionToggles::default(), "no self-apply on a non-host");
+    }
+
+    #[test]
+    fn joiner_replica_follows_the_hosts_confirmed_toggles_end_to_end() {
+        let v = Version::new(0, 1, 0);
+        let (mut host, mut client) = pair(v, v);
+        host.connect();
+        client.connect();
+        run(&mut [&mut host, &mut client]);
+
+        let out = host.peer_mut().session_action(SessionAction::LockWorld);
+        host.broadcast(out);
+        let out = host.peer_mut().session_action(SessionAction::TogglePvp);
+        host.broadcast(out);
+        run(&mut [&mut host, &mut client]);
+
+        for (name, p) in [("host", host.peer()), ("client", client.peer())] {
+            assert!(p.session_toggles().world_locked, "{name}: world locked");
+            assert!(p.session_toggles().pvp_on, "{name}: pvp on");
+            assert!(!p.session_toggles().pvp_teams_on && !p.session_toggles().friendly_fire_on);
+        }
+        assert!(
+            client.peer().notifications().toasts().iter().any(|t| t.message.contains("cross blades")),
+            "the joiner is toasted about the host-confirmed transition"
+        );
+    }
+
+    #[test]
+    fn toggle_from_a_non_host_peer_never_moves_the_replica() {
+        // On the host: a linked client's host-only verb is warn-rejected (existing behavior) and
+        // must not move the host's authoritative state either.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::LockWorld });
+        assert_eq!(host.session_toggles(), SessionToggles::default(), "host state is its own only");
+
+        // On a joiner: a toggle from a *fellow joiner* (linked, but not the host) is rejected by
+        // sender role and must not move the replica.
+        let mut client = linked_client(v);
+        client.handle(CLIENT2, ModMessage::Hello { mod_version: v.to_u32(), nonce: CLIENT2_NONCE });
+        let proof = crate::crypto::auth_proof(CLIENT, CLIENT2, &CLIENT_NONCE, &CLIENT2_NONCE, PW);
+        client.handle(CLIENT2, ModMessage::Auth { to: CLIENT, proof });
+        assert!(client.is_linked(CLIENT2), "test setup: the fellow joiner is linked");
+        client.handle(CLIENT2, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert_eq!(client.session_toggles(), SessionToggles::default(), "replica follows the host only");
+
+        // And from an *unlinked* sender claiming to be anyone: dropped before the state.
+        let mut fresh = Peer::new(CLIENT, HOST, v, config_with_pw(PW), CLIENT_NONCE);
+        fresh.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert_eq!(fresh.session_toggles(), SessionToggles::default(), "unlinked host frames don't apply");
+    }
+
+    #[test]
+    fn duplicated_and_reordered_toggle_frames_cannot_flip_the_replica_twice() {
+        // Toggle verbs are relative (each accepted one flips), so the seq gate is what makes the
+        // replica exactly-once-and-ordered: a duplicate or reordered-old frame must be inert.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        client.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert!(client.session_toggles().pvp_on, "first delivery flips on");
+        client.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert!(client.session_toggles().pvp_on, "a duplicate of the same frame is inert");
+        client.handle(HOST, ModMessage::SessionAction { seq: 2, action: SessionAction::TogglePvp });
+        assert!(!client.session_toggles().pvp_on, "the next real frame flips off");
+        client.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert!(!client.session_toggles().pvp_on, "a reordered-old frame is rejected as stale");
+    }
+
+    // --- game-session roster: shrink -> evict -> notification -----------------------------------
+
+    /// Drive [`Peer::observe_roster`] through the roster's absence debounce: the first call's
+    /// events (immediate joins) merged with the confirming call's (leave edges); interim calls
+    /// must be quiet.
+    fn roster_through_debounce(p: &mut Peer, snapshot: &[PeerId]) -> Vec<RosterEvent> {
+        let mut events = p.observe_roster(snapshot);
+        for _ in 1..(crate::roster::LEAVE_CONFIRM_SNAPSHOTS - 1) {
+            assert_eq!(p.observe_roster(snapshot), vec![], "sub-debounce absence must be quiet");
+        }
+        events.extend(p.observe_roster(snapshot));
+        events
+    }
+
+    /// Count of [`PEER_DEPARTED_MESSAGE`] toasts on `p`'s notification surface.
+    fn departed_toasts(p: &Peer) -> usize {
+        p.notifications().toasts().iter().filter(|t| t.message == PEER_DEPARTED_MESSAGE).count()
+    }
+
+    #[test]
+    fn roster_shrink_evicts_the_departed_peer_and_toasts_departure() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        assert_eq!(
+            host.observe_roster(&[CLIENT]),
+            vec![RosterEvent::Joined(CLIENT)],
+            "the linked peer appears in the game session"
+        );
+        assert!(host.game_roster().contains(CLIENT));
+        let before = departed_toasts(&host);
+
+        assert_eq!(
+            roster_through_debounce(&mut host, &[]),
+            vec![RosterEvent::Left(CLIENT)],
+            "then leaves (confirmed past the absence debounce)"
+        );
+
+        assert!(!host.is_linked(CLIENT), "a session-leave evicts the peer from the side-channel");
+        assert!(host.known_peers().is_empty(), "fully forgotten (a rejoin re-links from scratch)");
+        assert!(!host.game_roster().contains(CLIENT), "and dropped from the roster model");
+        assert_eq!(departed_toasts(&host) - before, 1, "exactly one lore-voiced departure toast");
+    }
+
+    #[test]
+    fn roster_departure_of_a_never_linked_peer_is_quiet() {
+        // A participant that sat in the game roster but never authenticated was never announced
+        // as arrived (the arrival toast rides the link edge), so its departure must not be
+        // announced either — the presence pair stays symmetric and link-gated.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        const STRANGER: PeerId = 77;
+        assert_eq!(host.observe_roster(&[STRANGER]), vec![RosterEvent::Joined(STRANGER)]);
+        assert_eq!(
+            roster_through_debounce(&mut host, &[]),
+            vec![RosterEvent::Left(STRANGER)],
+            "the leave edge still fires (the model tracks presence regardless of link)"
+        );
+        assert!(!host.game_roster().contains(STRANGER), "still evicted from the model");
+        assert_eq!(departed_toasts(&host), 0, "but an unlinked departure is never announced");
+    }
+
+    #[test]
+    fn stale_then_recovered_peer_still_toasts_departure_on_leave() {
+        // The dedup key must be the LIVE stale flag, not "was ever stale": a peer that went
+        // silent, recovered (stale flag cleared, binding's departed announcement long superseded
+        // by its return), and then gracefully leaves must be announced as departed again.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.observe_roster(&[CLIENT]);
+        for _ in 0..=LIVENESS_TIMEOUT_TICKS {
+            host.maintain();
+        }
+        assert!(host.is_stale(CLIENT), "test setup: went stale");
+        host.handle(CLIENT, ModMessage::Ping { frame: 1 });
+        host.maintain();
+        assert!(!host.is_stale(CLIENT), "test setup: recovered");
+
+        let before = departed_toasts(&host);
+        assert_eq!(roster_through_debounce(&mut host, &[]), vec![RosterEvent::Left(CLIENT)]);
+        assert_eq!(
+            departed_toasts(&host) - before,
+            1,
+            "a recovered peer's later graceful leave is announced (dedup keys on the live flag)"
+        );
+    }
+
+    #[test]
+    fn mixed_batch_leave_toasts_only_the_not_yet_announced_peer() {
+        // Two linked peers leave in one confirmed shrink: one was already flagged lost (its
+        // departure was announced on the liveness edge), the other was live. Both are evicted;
+        // exactly one departure toast fires — for the live one.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        link_client_into(&mut host, CLIENT2, CLIENT2_NONCE, v);
+        host.observe_roster(&[CLIENT, CLIENT2]);
+        for _ in 0..=LIVENESS_TIMEOUT_TICKS {
+            host.handle(CLIENT, ModMessage::Ping { frame: 1 }); // CLIENT stays chatty
+            host.maintain(); // CLIENT2 falls silent
+        }
+        assert!(!host.is_stale(CLIENT) && host.is_stale(CLIENT2), "test setup: only CLIENT2 lost");
+
+        let before = departed_toasts(&host);
+        let events = roster_through_debounce(&mut host, &[]);
+        assert!(events.contains(&RosterEvent::Left(CLIENT)) && events.contains(&RosterEvent::Left(CLIENT2)));
+        assert!(!host.is_linked(CLIENT) && !host.is_linked(CLIENT2), "both evicted");
+        assert_eq!(
+            departed_toasts(&host) - before,
+            1,
+            "one toast: CLIENT's (CLIENT2's loss was already announced on the liveness edge)"
+        );
+    }
+
+    #[test]
+    fn joiner_resets_its_toggle_replica_when_the_host_leaves() {
+        // The joiner-perspective leave: the HOST departs the game session. The replica's authority
+        // is gone, so eviction resets the toggles to the all-off default — the same base a
+        // rejoining host (fresh state, seq restarted at 1) flips from, keeping the pair consistent
+        // across a host restart.
+        let v = Version::new(0, 1, 0);
+        let mut client = linked_client(v);
+        client.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert!(client.session_toggles().pvp_on, "test setup: replica moved off default");
+        assert_eq!(client.observe_roster(&[HOST]), vec![RosterEvent::Joined(HOST)]);
+
+        assert_eq!(roster_through_debounce(&mut client, &[]), vec![RosterEvent::Left(HOST)]);
+        assert!(!client.is_linked(HOST), "the departed host is evicted");
+        assert_eq!(
+            client.session_toggles(),
+            SessionToggles::default(),
+            "the orphaned replica resets to the fresh-session default"
+        );
+        assert_eq!(departed_toasts(&client), 1, "the linked host's departure is announced");
+
+        // The host restarts and rejoins: fresh nonce, seq back at 1, its own toggles at default.
+        // Its first toggle must land on the shared default base, not the old stale replica.
+        let fresh_nonce: AuthNonce = [0x99; AUTH_NONCE_LEN];
+        client.handle(HOST, ModMessage::Hello { mod_version: v.to_u32(), nonce: fresh_nonce });
+        let proof = crate::crypto::auth_proof(CLIENT, HOST, &CLIENT_NONCE, &fresh_nonce, PW);
+        client.handle(HOST, ModMessage::Auth { to: CLIENT, proof });
+        assert!(client.is_linked(HOST), "the restarted host re-links from scratch");
+        client.handle(HOST, ModMessage::SessionAction { seq: 1, action: SessionAction::TogglePvp });
+        assert!(
+            client.session_toggles().pvp_on,
+            "the rejoined host's seq-1 toggle flips from the shared default base"
+        );
+    }
+
+    #[test]
+    fn evict_clears_a_last_action_left_by_the_departed_peer() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        assert_eq!(host.last_action(), Some((CLIENT, SessionAction::JoinWorld)));
+        host.evict(CLIENT);
+        assert_eq!(host.last_action(), None, "no dangling action from a fully-forgotten peer");
+    }
+
+    #[test]
+    fn roster_shrink_after_a_liveness_flag_does_not_double_toast_departure() {
+        // The ungraceful-drop ordering: the peer falls silent first (liveness flags it, and the
+        // binding announces the departure on that stale edge), THEN the game roster shrinks. The
+        // roster path must still evict but not toast a second departure for the same peer.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.observe_roster(&[CLIENT]);
+        for _ in 0..=LIVENESS_TIMEOUT_TICKS {
+            host.maintain();
+        }
+        assert!(host.is_stale(CLIENT), "test setup: flagged as lost first");
+        let departed_before = departed_toasts(&host);
+
+        assert_eq!(roster_through_debounce(&mut host, &[]), vec![RosterEvent::Left(CLIENT)]);
+
+        assert!(!host.is_linked(CLIENT), "still evicted");
+        assert_eq!(
+            departed_toasts(&host),
+            departed_before,
+            "an already-announced (stale) peer's roster shrink adds no second departure toast"
+        );
+    }
+
+    #[test]
+    fn roster_join_edges_are_reported_but_not_toasted() {
+        // The arrival toast rides the side-channel link edge (binding-owned); observe_roster must
+        // not double-announce a join.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        let toasts_before = host.notifications().toasts().len();
+        assert_eq!(host.observe_roster(&[CLIENT]), vec![RosterEvent::Joined(CLIENT)]);
+        assert_eq!(host.notifications().toasts().len(), toasts_before, "no toast on the join edge");
+    }
+
+    #[test]
+    fn observe_roster_filters_our_own_id_and_steady_state_is_quiet() {
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        // The game roster includes the local player; our own id must not become a peer.
+        assert_eq!(host.observe_roster(&[HOST, CLIENT]), vec![RosterEvent::Joined(CLIENT)]);
+        assert!(!host.game_roster().contains(HOST), "self is never in the peer roster");
+        // Same snapshot every frame: no edges, no eviction, no toasts.
+        let toasts_before = host.notifications().toasts().len();
+        for _ in 0..10 {
+            assert_eq!(host.observe_roster(&[HOST, CLIENT]), vec![]);
+        }
+        assert!(host.is_linked(CLIENT), "steady state never evicts");
+        assert_eq!(host.notifications().toasts().len(), toasts_before);
+    }
+
+    #[test]
+    fn a_peer_that_left_the_session_can_rejoin_and_relink_cleanly() {
+        // Leave (roster shrink -> evict) then rejoin: a fresh Hello + a proof bound to a fresh
+        // nonce re-links, and the roster reports a fresh Joined edge — the full leave/rejoin cycle.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.observe_roster(&[CLIENT]);
+        roster_through_debounce(&mut host, &[]); // leaves (confirmed): evicted
+        assert!(!host.is_linked(CLIENT));
+
+        let fresh_nonce: AuthNonce = [0x77; AUTH_NONCE_LEN];
+        host.handle(CLIENT, ModMessage::Hello { mod_version: v.to_u32(), nonce: fresh_nonce });
+        let proof = crate::crypto::auth_proof(HOST, CLIENT, &HOST_NONCE, &fresh_nonce, PW);
+        host.handle(CLIENT, ModMessage::Auth { to: HOST, proof });
+        assert!(host.is_linked(CLIENT), "the rejoiner re-links from scratch");
+        assert_eq!(host.observe_roster(&[CLIENT]), vec![RosterEvent::Joined(CLIENT)], "fresh join edge");
+    }
+
+    #[test]
+    fn evicting_a_peer_drops_its_phantom_bindings() {
+        // The nameplate path: a phantom bound to a peer's identity must stop resolving the moment
+        // the peer is evicted (whether by roster shrink or directly).
+        use crate::roster::PhantomHandle;
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        host.observe_roster(&[CLIENT]);
+        const H: PhantomHandle = PhantomHandle(0xC0FFEE);
+        assert!(host.game_roster_mut().bind_phantom(H, CLIENT));
+        assert_eq!(host.game_roster().phantom_identity(H), Some(CLIENT));
+
+        host.evict(CLIENT);
+        assert_eq!(host.game_roster().phantom_identity(H), None, "no stale identity after evict");
     }
 }

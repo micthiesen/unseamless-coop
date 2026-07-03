@@ -201,9 +201,10 @@ the one genuinely hard step — driving the game's own session so players see ea
   in one another's *world*; that is rung 3. The host-only toggle verbs (Lock/Unlock/PvP/PvP
   teams/Friendly fire) are surfaced but still **inert** ("not wired up yet"); rung 3 connects them to
   real game calls. And the menu's collapsed toggle rows read `SessionContext.{world_locked, pvp_on,
-  pvp_teams_on, friendly_fire_on}`, which are always-`false` placeholders today; rung 3 must **source
-  those bits from the session FSM** so the rows show real state. Pruning a departed peer from the
-  side-channel's linked set on a roster shrink belongs here too.
+  pvp_teams_on, friendly_fire_on}`, which the overlay still passes as always-`false`; the **state
+  model behind those bits is now pre-built and host-tested** (see "The pre-built session core"
+  below), so rung 3 only wires it: publish `Peer::session_toggles()` into the overlay's context and
+  feed `Peer::observe_roster` (which already handles the departed-peer pruning on a roster shrink).
 - Doable **without ERSC** via our own two instances + AOB-scan/hook of the `NetworkSession` vtable.
   ERSC observation stays an *optional accelerator* if blind RE stalls (restore the ERSC stack, watch
   one connect with external RE tooling — see [RUNTIME-RE.md](RUNTIME-RE.md)); the path does not
@@ -211,6 +212,71 @@ the one genuinely hard step — driving the game's own session so players see ea
 - Once `Host`/`Client` is reached, the observer logs live transitions (the
   [RIG-RUNBOOK.md](RIG-RUNBOOK.md) "observation run" becomes executable *with our mod*), and the
   side-channel can optionally migrate in-band to `broadcast_packet`.
+
+#### The pre-built session core (host-tested, ships ahead of the RE)
+
+So the rung-3 landing is a thin binding rather than a design project, the session-side *decision
+logic* is already built and unit-tested in `unseamless-core` (all of it exercised by
+`scripts/test-core.sh`; none of it wired to the game yet). Three pieces:
+
+- **Session toggle state** ([`session_state.rs`](../crates/unseamless-core/src/session_state.rs)) —
+  the model behind the menu's collapsed toggle rows (`world_locked` / `pvp_on` / `pvp_teams_on` /
+  `friendly_fire_on`). A `SessionToggles` state machine with explicit transitions
+  (`apply(SessionAction)`: Lock/Unlock are absolute and idempotent, the `Toggle*` verbs flip), owned
+  by `Peer` with **host authority**: the host's state moves only via its own
+  `Peer::session_action` (applied at send time), and a joiner's replica follows **only
+  host-confirmed transitions** — an inbound toggle mutates it only if it came from the *linked host*
+  and passed the per-sender seq gate, the same authorize-by-sender rule `is_host_only` already
+  enforces on actions. Each realized transition raises an ER-voiced, value-free toast
+  (`ToggleChange::message`). Project the state onto the menu with `SessionToggles::write_context` —
+  that call is what replaces the overlay's always-`false` `SessionContext` placeholders
+  (`coop/overlay.rs` `session_context`).
+- **Game-session roster + phantom→identity mapping**
+  ([`roster.rs`](../crates/unseamless-core/src/roster.rs)) — `Roster` diffs per-frame roster
+  snapshots (the SteamIDs in `CSSessionManager.players`) into join/leave **edges**, order- and
+  duplicate-insensitive, and maintains the `PhantomHandle` (a phantom's `ChrIns` pointer, opaque to
+  core) → SteamID map that color-by-SteamID nameplates and a future overhead display key on
+  (NAMEPLATES.md). Bindings die with their peer, and a `retain_phantoms` sweep guards against
+  pointer reuse.
+- **Leave/evict integration** (`Peer::observe_roster`) — the shrink → evict → notify tie lives in
+  core: a peer that disappears from the roster snapshot is fully `Peer::evict`ed from the
+  side-channel (nonce, link, seq gates — so a rejoin re-links from scratch) and the lore-voiced
+  departure toast is raised. Join edges are returned to the caller but deliberately not toasted
+  (the arrival toast rides the side-channel link edge; the binding picks the player-facing edge).
+
+**What the rung-3 binding wires** (and nothing more): feed `Peer::observe_roster` the roster
+SteamIDs each frame (leaves are debounced in core — `roster::LEAVE_CONFIRM_SNAPSHOTS` — so a
+transient partial read across a load transition can't mass-evict the party); discover the
+phantom↔SteamID correlation (the one RE-gated piece) and maintain it via
+`game_roster_mut().bind_phantom/retain_phantoms` (presence itself is `pub(crate)` — it moves only
+through `observe_roster`/`evict`); publish `Peer::session_toggles()` to the overlay's
+`SessionContext` (read on the Present thread, so mirror it through atomics like the existing
+`coop::session_flags`); and drive the real lock/PvP/friendly-fire game effects **level-triggered
+off `Peer::session_toggles()`** — the state is absolute, so absolute setters are the natural apply
+shape. (Don't reach for `Peer::last_action` here: the host's *own* toggles never pass through it —
+`session_action` applies state at send time without recording an inbound action.)
+
+Two binding-side seams to reconcile at wiring time, recorded so they aren't rediscovered on the
+rig: **(a)** `Peer`'s internal notification surface isn't the drawn one — the departure and toggle
+toasts land in `Peer::notifications()`, and the binding must mirror them onto the overlay's `notify`
+surface the way rung 2 already mirrors connect/version/liveness (reuse `ToggleChange::message` /
+`PEER_DEPARTED_MESSAGE`; don't re-word). **(b)** eviction clears the peer's stale flag, and
+`coop.rs`'s liveness tracking derives its "cooperator has returned" toast from exactly that
+`is_stale` true→false transition — naive wiring would announce a *return* right after a real
+departure, so the binding's lost-tracking must treat an evicted peer as gone, not recovered.
+
+**Known residual (deliberate, wire-stable):** toggle state is carried only by the action frames
+themselves — there is **no periodic state re-assert**. The exposure, precisely: the `Toggle*` verbs
+are **relative flips**, so a frame lost to a drop *or* to reordering (the per-sender seq gate keeps
+the stream ordered by discarding a late older frame) leaves a joiner's replica parity-inverted
+**permanently** — later toggles preserve the inversion rather than heal it. The absolute verbs
+(`Lock`/`Unlock`) self-heal on their next use, a joiner who links after the host already toggled
+simply starts from the all-off default, and a host leave/restart is handled (eviction resets the
+orphaned replica to the same default a rejoining host restarts from). Tolerable today: only the
+*host's* menu renders the toggle rows, its state is always locally correct, and the actual in-world
+effects are unwired. The fix, when it matters, is a ConfigSync-shaped
+`SessionStateSync { epoch, generation, toggles }` re-asserted in `maintain` — a wire `VERSION` bump
+(v9), which is why it's deferred rather than folded in here.
 
 ### Rung 4 — Discovery / lobby (the live connection path) — **SHIPPED + CONFIRMED (2026-06-27 friend test)**
 - Password-keyed **Steam lobby** discovery, the **only** way the side-channel finds its peer (there is

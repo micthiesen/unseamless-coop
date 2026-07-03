@@ -96,8 +96,13 @@ right tool for a dense custom menu.
 
 The **one** remaining nameplate follow-up. The dot color is keyed off the phantom pointer today; swap it
 for the peer's **SteamID** so a given player keeps their color for the whole session across reconnects.
-This needs the session core to map a phantom → identity, so it's **rung-3-gated** — the TODO is marked at
-the seam in `native_nameplates.rs` (`gather`). Do not implement before the session layer lands.
+The identity *model* for this is now pre-built and host-tested in core
+([`roster.rs`](../crates/unseamless-core/src/roster.rs): `PhantomHandle` — the `ChrIns` pointer, opaque
+to core — → SteamID, queried via `Peer::game_roster().phantom_identity(..)`, with bindings dropped on
+peer leave and a `retain_phantoms` sweep against pointer reuse). What remains **rung-3-gated** is the
+correlation itself — *which* SteamID a given phantom `ChrIns` belongs to needs a live session to RE —
+plus the wiring at the seam marked in `native_nameplates.rs` (`gather`). Do not implement the wiring
+before the session layer lands.
 
 ## Projection insights — preserved from the removed imgui pipeline
 
