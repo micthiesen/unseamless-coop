@@ -919,6 +919,44 @@ is the game's own create via un-greyed items). This is the one question both "fi
 none in the container's own `0x1423fxxxx` cluster, so an external session-setup writer):
 `0x1412799a0`, `0x141ab2560`, `0x141ab5f10` — to be resolved to the container type.
 
+### MILESTONE (2026-07-03): driven create now returns true → `TryToCreateSession` — the veto is fully clearable
+
+Seeding **both** container fields at the vmethod entry (`set_create_veto_bit`: set `[container+0x7c0]`
+bit 2, **and** fabricate `[container+0x708]` = a leaked 0x800-byte buffer with refcount=1) got the driven
+create to **succeed for the first time**:
+
+```
+LEVER set bit2 + fabricated [container+0x708]
+ → gate4-vmethod al=1                         (veto passed)
+ → legb-finhandle handle=1 post-next-id=2 cap=16 count=0   (leg B reaches its finalize tail, handle nonzero)
+ → drive-create returned TRUE — lobby_state None -> TryToCreateSession   (FSM ADVANCED — never before)
+```
+
+So the entire create-veto chain (leg A, rejects #1-3, gate 4, the `[container+0x7c0]` bit-2 vmethod,
+the finalize handle, the slot store) is **satisfiable**, and the FSM leaves `None`. This is the core of
+rung-3 create: **the create call is no longer vetoed.**
+
+**But a *functional* session (→ `Host`) needs the game's real session-object graph — fabrication can't
+supply it.** Immediately after `TryToCreateSession`, session establishment crashes at
+`0x14203f1f0` (`read [null+8]`), and the caller `0x1423f6c00` is a **vtable-dispatch loop over a
+collection** (`cmp ebp,[rsi+0x24]; jb …` calling `[elem]`/`[elem+0x10]`/`[elem+0x68]` per element): the
+session machinery iterates its members/sessions and calls their vmethods, and our hollow fabricated
+objects have null/garbage entries. Seeding one field just moves the crash one collection deeper — the
+running session expects a coherent graph of real objects, not stubs.
+
+**Verdict (definitive): the finish is NOT synthetic fabrication — it is making the game allocate its own
+real session state.** And that state is gated on a **dormant-subsystem "session available" signal that
+is NOT `is_offline`**: `enable_offline_multiplayer` already neutralizes `is_offline()` (it's on for every
+drive) yet the container stays uninitialized. So the container init is gated on the **same elusive,
+not-yet-found signal the item-grey hunt hit** (docs/OFFLINE-ITEMS-FINDINGS.md: three static candidate
+families rig-eliminated; "a signal none of the static passes found"). **This unifies the two open
+problems:** the multiplayer-item grey gate and the rung-3 container-init gate are almost certainly the
+same "is the session subsystem live offline?" signal. Cracking it (the runtime execution trace the
+item-grey doc calls for) both un-greys the items **and** lets the game set up the real session state so a
+driven-or-item-triggered create reaches `Host`. That trace is now the single highest-value RE task; the
+create side is otherwise fully charted and satisfiable. (`set_create_veto_bit` stays committed but off —
+it crashes past `TryToCreateSession`.)
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real

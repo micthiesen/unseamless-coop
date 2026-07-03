@@ -706,13 +706,31 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
         let field = unsafe { field_ptr.read_volatile() };
         // L3 lever: set bit 2 before the vmethod reads it (a few instructions ahead at 0x1423f434b),
         // so its `test bit2; je return-false` first predicate passes. Only writes when armed + clear.
-        if SET_CREATE_VETO_BIT.load(Ordering::Relaxed) && (field >> 2) & 1 == 0 {
-            unsafe { field_ptr.write_volatile(field | 0b100) };
-            log::info!(
-                "session-probe: veto-field — LEVER set bit2 on container={container:#x} \
-                 [+0x7c0] {field:#x} -> {:#x} (testing whether create now passes)",
-                field | 0b100,
-            );
+        if SET_CREATE_VETO_BIT.load(Ordering::Relaxed) {
+            if (field >> 2) & 1 == 0 {
+                unsafe { field_ptr.write_volatile(field | 0b100) };
+                log::info!(
+                    "session-probe: veto-field — LEVER set bit2 on container={container:#x} \
+                     [+0x7c0] {field:#x} -> {:#x} (testing whether create now passes)",
+                    field | 0b100,
+                );
+            }
+            // Also fabricate the null sibling sub-object at [container+0x708]: the helper reads it as
+            // ctor arg (rdx), which is stored at new_obj+0x18 and refcounted (lock xadd [rdx+8]). A
+            // leaked zeroed buffer with refcount=1 at +8 lets the ctor complete; further use of it will
+            // fault next (the backtrace then localizes the next missing field). Whack-a-mole toward a
+            // working create, one crash at a time.
+            let sub_ptr = (container + 0x708) as *mut usize;
+            if unsafe { sub_ptr.read_volatile() } == 0 {
+                let buf: &'static mut [usize] = vec![0usize; 0x100].leak(); // 0x800 bytes, generous
+                let obj = buf.as_mut_ptr() as usize;
+                unsafe { ((obj + 8) as *mut u32).write_volatile(1) }; // refcount = 1
+                unsafe { sub_ptr.write_volatile(obj) };
+                log::info!(
+                    "session-probe: veto-field — LEVER fabricated [container+0x708]={obj:#x} \
+                     (leaked 0x800B, refcount=1) to get past ctor 0x1423f3230",
+                );
+            }
         }
         if !VETO_FIELD_READ.swap(true, Ordering::Relaxed) {
             log::info!(
