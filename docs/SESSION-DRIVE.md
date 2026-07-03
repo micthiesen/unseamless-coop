@@ -1000,6 +1000,20 @@ network layer must. **Next: chart/drive the DLNR3D connection-established path**
 stays committed but off (crashes on the null connection). This is the closest rung-3 create has come: real
 session state up, one connection object short.
 
+**Sharpened final gate (2026-07-03): the `ConnectionRefInfo` crash is a LOOP over `max_players`.** In
+helper `0x1423faf60` the ctor call sits in a loop: `0x1423fb05a: cmp [rdi+0x68], r15d; jbe skip` (rdi =
+session_obj, r15 = counter), and `[session_obj+0x68]` = our **`max_players` (6)** (the field the gate-4
+tracer logged as `helper[+0x68]=6`). So create builds **6 connection slots**, each a `ConnectionRefInfo`
+wrapping `[container+0x708]`, and faults on the first because `+0x708` is null. Two levers this exposes
+for the next attempt: (a) `[session_obj+0x68]` (the connection count) — for a host with no peers this
+arguably should be 0/1, and `max_players=6` may be over-driving it; (b) `[container+0x708]` needs a real
+DLNR3D **connection** (`SessionSteam`) object, populated by the connection layer. **The genuine
+remaining work is the DLNR3D connection/transport layer** — a real game-network connection (the ERSC
+model routes DLNR3D over its own Steam P2P) or driving the connection-established handler with the loop
+count matched to reality. That's a networking-layer RE effort (next session), not one more field poke:
+create's *initiation* and *session state* are solved; the *transport* is the last subsystem — the same
+one ERSC had to reimplement.
+
 ### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
 
 **Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
