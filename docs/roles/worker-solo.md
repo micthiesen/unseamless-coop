@@ -50,10 +50,11 @@ Until then the **user is your sole point of contact.**
 
 When the user tells you you're done / to integrate / to hand off to the orchestrator:
 
-1. **Review your lane.** By default, spawn **one** fresh-context reviewer (a single `check` agent)
-   over your branch diff and fix what it finds — a light first-pass filter while you still have full
-   context. **But if the user (or your assignment) explicitly asked for a full `/ultracheck`, run that
-   instead**, apply the surviving findings, and say which you ran. An explicit ask overrides the default.
+1. **Review your lane — `/ultracheck` by default.** Run the full `/ultracheck` swarm over your branch
+   diff and apply the surviving findings — the deep per-lane review is yours to run while you still have
+   full context, so the orchestrator can save its heaviest pass for cross-lane integration. **Downgrade
+   to a single `check` only if the user said the lane is trivial / a light pass is enough.** Say which
+   review you ran when you hand off.
 2. **Consolidate your branch to one clean commit on your base** — e.g.
    `git reset --soft "$(git merge-base main HEAD)" && git commit`, or squash down to one. One clean
    commit on top keeps the orchestrator's squash-merge trivial and lets it tear you down without a

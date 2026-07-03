@@ -34,11 +34,13 @@ your workspace path, and your branch `worker/<name>`.
   reading a live game log, no in-game validation. There is one game install and one rig, serialized
   through the orchestrator.
 - **Never spawn or remove workers**, and never touch another worker's workspace.
-- **Review depth: a single `check` by default; a full `/ultracheck` only when your assignment
-  explicitly asks for one.** Default to the lighter self-check below. If the orchestrator's brief
-  explicitly requests a full `/ultracheck`, run that instead before handing off — an explicit ask
-  overrides the default. The orchestrator still reviews at integration, but its heaviest pass is best
-  spent on *cross-lane* merge issues; a single lane's deep review is yours to do when asked.
+- **Review depth: `/ultracheck` your own lane before handoff by default.** The deep, fresh-context
+  review of your lane is *yours* — you have full context on it, which is exactly when an `/ultracheck`
+  pays off. Run it before you report done and apply the surviving findings (details below). The
+  orchestrator relies on this and does **not** re-deep-review each lane; it saves its heaviest pass for
+  *cross-lane* integration issues. **Downgrade only if the brief says so:** if your assignment says a
+  single `check` is enough (typically a trivial one-file lane), run that instead. Either way, name the
+  review you ran in your done message.
 
 ## When You Need Something Serial
 
@@ -61,18 +63,18 @@ cleaner the recipe, the sooner your values come back.
 
 ## When You Finish Or Get Blocked
 
-**Before you report done, review your lane.** By default, spawn **one** fresh-context reviewer (a
-single `check` agent) over your branch diff and fix what it finds — a light, fast first-pass filter
-while you still have full context. **But if your assignment explicitly asked for a full
-`/ultracheck`, run that instead** (the heavier swarm), apply the surviving findings, and say so. State
-in your done message which one you ran.
+**Before you report done, `/ultracheck` your lane.** Run the full `/ultracheck` swarm over your branch
+diff and apply the surviving findings — this deep pass is yours to run, while you still have full
+context on the lane (the orchestrator won't repeat it per-lane; it saves its heaviest review for
+cross-lane integration). **Only downgrade to a single `check` if your assignment explicitly said one is
+enough** (a trivial lane). Either way, **state in your done message which review you ran** so the
+orchestrator knows the depth it's inheriting.
 
 Then **consolidate your branch to one clean commit on your base** (above) and message the
-orchestrator: done (with a one-line summary) or blocked (with why). Do **not** tear yourself down;
-the orchestrator manages your lifecycle and integrates your branch.
+orchestrator: done (with a one-line summary + which review you ran) or blocked (with why). Do **not**
+tear yourself down; the orchestrator manages your lifecycle and integrates your branch.
 
 Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
-hygiene, the build/test commands — **except** its "ultracheck after each holistic chunk" rule: in the
-fleet your default is the lighter `check`, and a full `/ultracheck` runs only when your assignment
-asks for it (otherwise the orchestrator covers the deeper review at integration — see above). Stay in
-your lane and preserve other sessions' work.
+hygiene, the build/test commands, **including** its "ultracheck after each holistic chunk" rule: your
+lane *is* that holistic chunk, so `/ultracheck` it before handoff (downgrade to `check` only when the
+brief says the lane is trivial). Stay in your lane and preserve other sessions' work.

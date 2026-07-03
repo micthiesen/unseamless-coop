@@ -151,7 +151,11 @@ worker, which overrides this). The full design and the `scripts/fleet/` tooling 
   workers is optional, not required.
 - **Worker:** one lane of feature work in its own rift workspace, WIP-committing to `worker/<name>`.
   Never drives the rig and never commits to `main`; anything serial it asks the orchestrator for by
-  message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`).
+  message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`). **Reviews its own lane:** a worker
+  `/ultracheck`s its own branch before handoff (its overlay makes that the default), so the deep
+  per-lane review is done by whoever has the most context. The orchestrator therefore doesn't
+  re-deep-review each lane — it offloads that to workers and spends its own heaviest pass *holistically*
+  on the integrated, cross-lane result. See the `fleet` skill > "Offload the review to workers".
 
 **Fan out chunks of work as fleet workers, never as `Agent`/`Task` subagents.** When you parallelize a
 *chunk of buildable work* — a feature lane, a substantial RE pass, a migration, anything whose result is
