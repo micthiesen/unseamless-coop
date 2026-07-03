@@ -249,6 +249,18 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 
 ## Why a direct create fails offline (the rung-3 create wall)
 
+> **LATEST (2026-07-03, static): see the VERDICT subsection below** ("the container-init gate is the
+> item-grey signal"). The rung-3 create veto is now root-caused: the veto is *satisfiable* (rig
+> milestone `df12f2d` reached `TryToCreateSession` by seeding bit 2 of `+0x7c0` **and** a fabricated
+> `+0x708`), but a functional Host needs the game's real session graph. Both fields are written by one
+> container vmethod (`0x1423f4870`, ManagerImplSteam vtable slot `+0x68`) gated on the live Steam
+> interface/service context, reached through the **same service-manager singleton `0x144842d40` the
+> item-grey hunt hit** — so rung-3 create and the greyed multiplayer items are almost certainly one
+> signal, and it is **not** `is_offline`. Static walls on that signal (obfuscated leaf) → **finish with
+> a runtime execution trace** of it, unified with the item-grey trace. The narrative below is the
+> chronological investigation; the finalize-handle / registry-id paths in this first blockquote are
+> **superseded** by the L3 + VERDICT sections.
+
 > **Current truth (updated 2026-07-03, in-world + rig↔Deck).** A **solo** direct-drive create
 > cannot succeed. The create wrapper fires and is rejected **synchronously** (`lobby_state None →
 > FailedToCreateSession`, returns `false` the same frame). With the leg-A gate bypassed and reject #1
@@ -987,6 +999,130 @@ network layer must. **Next: chart/drive the DLNR3D connection-established path**
 `+0x708`), which with the session state now warmable is the final gate to `Host`. `drive_session_established`
 stays committed but off (crashes on the null connection). This is the closest rung-3 create has come: real
 session state up, one connection object short.
+
+### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
+
+**Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
+**and** a fabricated `+0x708` drove create to `lobby_state None → TryToCreateSession` for the first
+time) — so the create gate is not the wall.** The wall is that the container's whole session graph is
+never built offline, and building it for real is gated on a signal static analysis cannot decode. I
+charted the exact writer of both fields and its condition branch: the branch tests the **live Steam
+interface/service context**, and the DLNR3D session code reaches this through the **same service-manager
+singleton `0x144842d40` the item-grey hunt hit** — so rung-3 create and the greyed multiplayer items
+are almost certainly one signal, the one "none of the static passes found" (OFFLINE-ITEMS-FINDINGS.md).
+It is **not** `is_offline`: `enable_offline_multiplayer` forces `is_offline()` false on every drive yet
+the container stays uninitialized. **Recommendation: finish with a *runtime execution trace* of that one
+signal** (hook the writer + read its condition, and/or Frida-trace the item-grey decision offline, which
+reads the same signal) — not another static pass, not hand-seeding stubs. Exact trace addresses below.
+All VAs static == live (base `0x140000000`, 2026-06-02 image); own words, no decompiler output
+reproduced.
+
+**1. Container identity (RTTI, re-derived).** The container is **`ManagerImplSteam@DLNR3D`** — read
+from the RTTI complete-object-locator behind the *live* vtable `0x1431f8780` (`[vtable-8]` → COL
+`0x1433e7230` → type-descriptor `0x143d50078` → name `.?AVManagerImplSteam@DLNR3D@@`). Its base is
+**`ManagerImpl@DLNR3D`** (vtable `0x1431f8360`, the "static vtable" earlier charts followed — the L3
+live/static mismatch was base-vs-derived). It's a **heap object, `0x908` bytes**, allocated in
+`0x1423f1e80` (`mov ecx,0x908; call allocator 0x141eb9ed0`; source string `NRManager_steam.cpp` at
+`0x1431f80c0`). So DLNR3D = FromSoft's Dantelion network runtime; `ManagerImplSteam` is its **Steam
+network-runtime manager**. Related types: session object = `SessionSteam@DLNR3D` (vtable `0x1431fa248`);
+the crash sub-object is a **`ConnectionRefInfo@DLNR3D`** (ctor `0x1423f3230`, vtable `0x1431f85d8`,
+derives `ReferenceCountObject@DLNR3D` `0x1431f85c0`).
+
+**2. `[container+0x7c0]` is a status bitfield; its writer is container vmethod `0x1423f4870`
+(vtable slot +0x68).** Found by a disp-`0x7c0` write scan filtered to the DLNR3D cluster
+(`/tmp/scan-disp.py 0x7c0`): the only real (non-zeroing) writers are `0x1423f4870` (sets bits) and
+`0x1423f46d0` (`and [rbx+0x7c0], 0xffffffe1`, clears bits 1-4). `0x1423f4870`'s stores, in order:
+`or [rbx+0x7c0],2` (`0x1423f48d2`, bit 1) → **`or [rbx+0x7c0],4`** (`0x1423f49b4`, **bit 2 = the create
+veto gate**) → `or [rbx+0x7c0],0x10` (`0x1423f49c4`, bit 4, only if `[rbx+0xa0]&0x10`) → `or
+[rbx+0x7c0],8` (`0x1423f4a4a`, bit 3). `0x1423f4870` is **vtable slot `+0x68`** of the `ManagerImplSteam`
+vtable (its address sits at `0x1431f87e8 = 0x1431f8780 + 0x68`; found by an absolute-pointer search — it
+has **0 `E8` callers**, so it is dispatched polymorphically, as a container virtual invoked by the
+session subsystem on a session/connection-established event). This is the "session established" handler.
+
+**3. The condition that sets bit 2: the live Steam interface context.** `0x1423f4870` opens with two
+`SteamInternal_ContextInit(&holder)` calls (the import at IAT `0x144c0d0a4`, name resolved from its
+hint/name RVA) on Steam interface-context holders `0x143b48fd0` and `0x143b48a00`, each followed by
+`cmp qword [rax],0; je 0x1423f4a5a` (return false). **Both Steam interfaces must be live** or the method
+bails at `0x1423f48b5`/`0x1423f48cc` — before it sets *any* bit, before it stores the identity, before
+it registers handlers. Past the gate it pulls a Steam identity/name via more interface vmethods
+(`call [rax+0x10]`, `call [rax]`) and stores it into the container at **`+0x7f8`** (helper `0x1423f31d0`,
+`mov [rcx+0x7f8],rdx`), *then* sets bit 1, *then* **bit 2**, *then* registers per-session handlers
+(`0x1423f8520/0x1423f85a0/0x1423f8860` keyed off singleton `0x1423f8410`) and allocates further
+sub-objects (tail calls `0x1423f2a70`/`0x1423f2b00`, both `→ allocator 0x141eb9ed0`; `0x1423f2b00`
+links a node into the collection at `+0x7e8`). Offline / outside a live Steam session these interfaces
+are null (or the vmethod is never dispatched), so the whole block is skipped: **bit 2 stays clear,
+`+0x7f8` stays null, `+0x708` stays null.** The same singleton family (`0x143b489e8 → 0x140e718b0`)
+is shared with the game's network-status module (`0x140e717c0`, `0x140e72bc0` — the `0x140e7xxxx`
+neighborhood of `is_offline` / the status getters in OFFLINE-ITEMS-FINDINGS.md), tying DLNR3D session
+state to the same Steam-online plumbing.
+
+**4. `[container+0x708]` is a refcounted connection sub-object, zeroed at ctor, populated only by the
+live-session flow.** The base ctor `0x1423f20b0` explicitly zeroes it (`mov [rbx+0x708],rsi` with
+`rsi=0`, `0x1423f2159`); the disp-`0x708` scan finds **no** DLNR3D-cluster store of a real value to it
+(only zeroing writes at `0x1423f2159/0x1423f2980/0x1423f2fcc`). The `ConnectionRefInfo` ctor
+`0x1423f3230` has a **single caller** — the gate4 helper `0x1423faf60` at `0x1423fb0b1` — which does
+`mov rdx,[container+0x708]` and passes it in; the ctor stores `rdx` at `new_obj+0x18` and refcounts
+`[rdx+8]` (`lea rcx,[rdi+8]; call 0x141eba1c0`, an interlocked increment). So `+0x708` is the *connection
+object a `ConnectionRefInfo` wraps*; null offline → `lock xadd [null+8]` → the rig-captured
+`ACCESS_VIOLATION write 0x8`.
+
+**5. What hand-seeding proved (the object-graph result).**
+- *Set bit 2 alone* (`set_create_veto_bit`): flips the veto vmethod to `al=1` but leaves `+0x708`
+  null → the gate4 helper constructs a `ConnectionRefInfo` over `[container+0x708]==null` → null-deref.
+  Rig-confirmed.
+- *Set bit 2 **and** fabricate `+0x708`* (milestone `df12f2d`): create **returns true** and reaches
+  `TryToCreateSession`, then crashes deeper in session establishment **iterating a collection of hollow
+  fabricated objects** — proving a *functional* Host needs the game's real session graph, not stubs.
+  So the veto is fully satisfiable; the remaining wall is the uninitialized graph, whose real
+  population is what we must trigger.
+
+**6. The container is born unconditionally; only its session-state population is gated.** Container-create
+`0x1423f1e80` has a single caller `0x140caa320` (in `CSSessionManager`, `0x140cxxxxx`) which is
+**unconditional** — it always allocates the container and sets `[obj+0x20]=1`, with no branch on any
+signal. That is why the rig sees a live container (`0x143dcd360`) offline. So the gate is not "is the
+container created" but "does its session state get populated" — i.e. does the setter vmethod
+`0x1423f4870` run and pass.
+
+**7. The condition branch, and why it is the item-grey signal (not `is_offline`).** The exact,
+runtime-readable branch inside the writer is the two `cmp qword [rax],0; je 0x1423f4a5a` at
+`0x1423f48b5` / `0x1423f48cc`, where `rax = SteamInternal_ContextInit(&holder)` for holders
+**`0x143b48fd0`** and **`0x143b48a00`** — read `[0x143b48fd0]`/`[0x143b48a00]` live to see the signal.
+Two facts tie this to the item-grey wall: (a) `enable_offline_multiplayer` forces `is_offline()` false
+on every drive yet the container stays uninitialized, so the gate is **not** `is_offline` / the mode
+enum (both already rig-eliminated on the item-grey side too); (b) the DLNR3D session cluster
+(`0x142403240`, `0x1424032e0`, `0x142403380`, `0x142403420`, `0x1424034d0`) reaches the **same
+service-manager singleton `0x144842d40`** the item-grey leaf reads a status through — here as a
+lazy-init factory (`mov rbx,[0x144842d40]; test rbx,rbx; jne .; call 0x141eceb10; mov [0x144842d40],rbx`).
+The real online/offline *status* is queried on an object that singleton vends, through the same
+control-flow-obfuscated leaf class (`0x144d985fd`) that beat three static passes — so static cannot
+decode the predicate. **Honest caveat:** I proved the two paths *share the singleton*, not that they
+read the identical bit; that identity is the thing to confirm at runtime. (This *refines*, does not
+contradict, the note below that the create-time helper `0x1423faf60`/gate4 read no offline global:
+correct — by create time the bit is already set-or-not; the signal enters upstream at the writer/init
+path `0x1423f4870`, not at the create-time veto read.)
+
+**8. VERDICT — finish with a runtime trace of the unified signal, not more static or hand-seeding.**
+The create veto is satisfiable, but a working Host needs the real session graph, built only when writer
+`0x1423f4870` runs and passes its Steam-context branch — a signal reached through the same obfuscated
+service-manager path as the greyed items, and *not* `is_offline`. Static hits the same wall the
+item-grey hunt hit three times. **Recommended finish (one unified runtime probe):**
+1. **Hook the writer entry** `0x1423f4870` (prologue `48 8B C4 55 57 41 56` = `mov rax,rsp; push rbp;
+   push rdi; push r14`) during a boot and a `drive_create`, and simultaneously read `[0x143b48fd0]` /
+   `[0x143b48a00]`. If it fires and bails at `0x1423f48b5/cc`, the signal **is** those Steam holders
+   (concrete, done). If it never fires, the gate is the upstream session-FSM dispatch of vtable slot
+   `+0x68` — trace that call site.
+2. **Frida / exec-trace the item-grey decision offline** (OFFLINE-ITEMS-FINDINGS.md's pending pass):
+   the branch it takes on the greyed item reads a status off the same singleton `0x144842d40`. Capture
+   the exact global/field it tests.
+3. **Unify:** if (1) and (2) land on the same status field, that one address is the rung-3-create +
+   item-grey master signal — seed/neutralize *it* (or let a real Steam lobby set it) and both unblock
+   together. That is the convergence to aim for.
+
+Do **not** keep hand-seeding container fields (`+0x7c0`/`+0x708`/`+0x7f8`/…): the milestone proved each
+stub only exposes the next null in a graph the real Steam session builds atomically. (Re-derivation
+after a game update: container = `.?AVManagerImplSteam@DLNR3D@@` via the live vtable's `[-8]` COL; its
+`+0x7c0` setter is the vtable-slot-`+0x68` method that opens with two `SteamInternal_ContextInit` calls
+each `cmp [rax],0; je`; bit 2 is its `or [this+0x7c0],4`; the shared service singleton is `0x144842d40`.)
 
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
