@@ -886,6 +886,23 @@ specific bit + object. (`set_create_veto_bit` stays committed but **off** — it
 trace the writer of `[container+0x7c0]` (a `[debug.probes]` write-watch on `container+0x7c0`, or find
 the store statically) and the allocation it gates.
 
+**Crash chain captured (2026-07-03, crashdump stack backtrace).** Enhanced `crashdump` to scan the
+stack for in-image return addresses; the lever crash's chain (add `0x140000000`) is
+`create wrapper 0x140cad4c0` → `leg B 0x1423f5c92` → `gate4 helper 0x1423fd7c8` → helper cont.
+`0x1423fb0b6` → **constructor `0x1423f3230`** → the refcount helper (`lock xadd [null+8]`). Disassembling
+`0x1423f3230`: it's a constructor `(rcx=new_obj, rdx=sub_obj, r8=…)` that vtables/zeroes a large object
+(vtables `0x1431f85c0`/`0x1431f85d8`; a 256-count init loop at `+0xc0`), then at `0x1423f3325`
+`lea rcx,[rdi+8]; call refcount; mov [rbx+0x18],rdi` — i.e. it **stores its 2nd arg `rdx` into
+`new_obj+0x18` and refcounts it**, and `rdx` is **null offline**. So bit 2 vouches for a session
+**sub-object** (passed as `rdx` to `0x1423f3230`, stored at `+0x18`) that create never allocated
+offline; forcing the bit reaches this ctor with a null sub-object and faults on its refcount. This is
+the concrete shape of "the game's own match setup allocates the state": there is an object graph, not a
+single flag. **Path to finish:** find the *one upstream condition* whose being-set makes the normal
+flow both set `[container+0x7c0]` bit 2 **and** allocate this sub-object graph (candidate: a "session
+subsystem online/available" gate the boot online-flow sets), so flipping it runs the game's own
+allocation — vs. hand-seeding each null object (whack-a-mole, unbounded). Charting the writer of
+`[container+0x7c0]` bit 2 + the allocator of the `rdx` sub-object is the next step.
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real

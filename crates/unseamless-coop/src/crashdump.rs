@@ -37,7 +37,7 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::Diagnostics::Debug::{EXCEPTION_POINTERS, SetUnhandledExceptionFilter};
 use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-    GetModuleFileNameW, GetModuleHandleExW,
+    GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW,
 };
 use windows::core::PCWSTR;
 
@@ -172,6 +172,44 @@ fn module_at(addr: usize) -> String {
     }
 }
 
+/// Scan the stack from `rsp` for values that fall inside the main `eldenring.exe` image and log them
+/// as `eldenring.exe+offset` — a best-effort backtrace (return addresses left on the stack) that
+/// recovers the call chain that reached the fault. Heuristic (no unwind info): it prints any stack
+/// slot pointing into the exe, so a reader disassembles each to confirm it's a real return site (the
+/// byte before a return address is a `call`). Bounded to a small window so it can't fault on unmapped
+/// stack. The decisive datum for chasing a null-deref: which create/session function called in.
+fn log_stack_backtrace(rsp: usize) {
+    let base = unsafe { GetModuleHandleW(None) }
+        .map(|h| h.0 as usize)
+        .unwrap_or(0);
+    if base == 0 {
+        return;
+    }
+    // The exe image spans a few tens of MB from its base; return addresses live in its two `.text`
+    // sections. Filter to [base+0x1000, base+0x7000000) — wide enough to cover both, tight enough to
+    // drop obvious non-image values. Read at most 256 qwords (2 KiB) above rsp: current frame + callers,
+    // safely within mapped stack.
+    let hi = base + 0x0700_0000;
+    let mut printed = 0u32;
+    for i in 0..256usize {
+        let v = unsafe { ((rsp + i * 8) as *const usize).read_volatile() };
+        if v >= base + 0x1000 && v < hi {
+            log::error!(
+                "crashdump:   bt[{printed}] eldenring.exe+{:#x}  (stack {:#018x})",
+                v - base,
+                rsp + i * 8,
+            );
+            printed += 1;
+            if printed >= 24 {
+                break;
+            }
+        }
+    }
+    if printed == 0 {
+        log::error!("crashdump:   bt: no in-image return addresses found in the scanned window");
+    }
+}
+
 /// Human label for the common SEH exception codes (so a log reader doesn't decode hex).
 fn code_name(code: u32) -> &'static str {
     match code {
@@ -229,6 +267,7 @@ unsafe extern "system" fn handler(info: *const EXCEPTION_POINTERS) -> i32 {
                 ctx.Rsp,
                 ctx.Rbp,
             );
+            log_stack_backtrace(ctx.Rsp as usize);
         }
         log::error!("crashdump: ==== end ==== (symbolicate our frames: addr2line on a --diag build at ImageBase+offset; see the /windows-test skill)");
         log::logger().flush();
