@@ -957,6 +957,37 @@ driven-or-item-triggered create reaches `Host`. That trace is now the single hig
 create side is otherwise fully charted and satisfiable. (`set_create_veto_bit` stays committed but off —
 it crashes past `TryToCreateSession`.)
 
+### REAL-INIT BREAKTHROUGH (2026-07-03): driving the session-established handler populates REAL session state
+
+Instead of fabricating stubs, `[debug.probes] drive_session_established` drives the container's real
+session-established handler **`ManagerImplSteam@DLNR3D::0x1423f4870`** (the one worker create-veto-writer
+charted, vtable slot +0x68) with the live container as `this`, at the veto-vmethod entry. **It works:**
+
+```
+DRIVING session-established handler 0x1423f4870(container=0x143dcd480) [before: bit2=0 +0x708=0x0]
+handler returned; container now [+0x7c0]=0xe bit2=1 +0x708=0x0 +0x7f8=0x110000102a760b8
+```
+
+The handler passed its live-Steam-interface gate (Steam is up in our process) and did the **real** init:
+`[container+0x7c0]` = `0xe` (bits 1/2/3 set — bit 2 = the create veto, now genuinely set, not forced),
+and `+0x7f8` = `0x110000102a760b8` = **our real SteamID64** (76561198004789432). So the "cold subsystem"
+is warmable: **driving the one real handler brings up the genuine session state** — this is the ERSC-model
+mechanism, reachable as a targeted drive. That materially **refines the worker's "unbounded graph, no
+lever" verdict:** it is *not* unbounded fabrication — a single real handler populates the session-level
+state coherently.
+
+**What remains: `[container+0x708]` (the DLNR3D connection object) is still null after the handler** — so
+create still crashes at the same `ConnectionRefInfo` ctor (`0x1423f3230`, `lock xadd [null+8]`). `+0x708`
+is a *per-connection* object, populated by the DLNR3D **network-connection** layer when a real connection
+forms — not by session-established setup (the handler sets identity + status but no connection). So the
+last piece of rung-3 create is the DLNR3D connection: either drive the connection-established handler too
+(the sibling of `0x1423f4870`), or have a real DLNR3D peer connection populate it. Our rung-2 side-channel
+(a *separate* Steam P2P channel) does **not** populate the game's DLNR3D `+0x708` — the game's own
+network layer must. **Next: chart/drive the DLNR3D connection-established path** (the handler that writes
+`+0x708`), which with the session state now warmable is the final gate to `Host`. `drive_session_established`
+stays committed but off (crashes on the null connection). This is the closest rung-3 create has come: real
+session state up, one connection object short.
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real

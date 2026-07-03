@@ -44,7 +44,7 @@
 //! by default): when armed it writes the `NetworkSession`'s empty slot-array fields so a solo create
 //! can reach `Host` — a deliberate experiment, gated and guarded (only writes an unallocated array).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
@@ -289,6 +289,13 @@ static VETO_FIELD_READ: AtomicBool = AtomicBool::new(false);
 /// Armed by `[debug.probes] set_create_veto_bit`: the veto-field hook writes bit 2 set on the live
 /// container before the vmethod reads it, to test whether create then passes (the L3 lever).
 static SET_CREATE_VETO_BIT: AtomicBool = AtomicBool::new(false);
+/// Armed by `[debug.probes] drive_session_established`: call the real container session-established
+/// handler (`0x1423f4870`) to populate the container for real, instead of fabricating stubs.
+static DRIVE_SESSION_ESTABLISHED: AtomicBool = AtomicBool::new(false);
+/// Resolved absolute address of the session-established handler `0x1423f4870` (set at install).
+static SESSION_ESTABLISHED_FN: AtomicUsize = AtomicUsize::new(0);
+/// `0x1423f4870` = `ManagerImplSteam@DLNR3D`'s session-established handler (vtable slot +0x68).
+const SESSION_ESTABLISHED_OFFSET: usize = 0x1_423f_4870 - 0x1_4000_0000;
 
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
@@ -369,6 +376,8 @@ fn install_create_gate_trace(config: &Config) {
     // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate),
     // and — when `set_create_veto_bit` is armed — write bit 2 set to test the L3 lever.
     SET_CREATE_VETO_BIT.store(config.debug.probes.set_create_veto_bit, Ordering::Relaxed);
+    DRIVE_SESSION_ESTABLISHED.store(config.debug.probes.drive_session_established, Ordering::Relaxed);
+    SESSION_ESTABLISHED_FN.store(exe_base + SESSION_ESTABLISHED_OFFSET, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
     if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
         install_offset_hook("veto-field", vv, log_veto_field);
@@ -704,6 +713,34 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
         }
         let field_ptr = (container + VETO_FIELD_OFF) as *mut u32;
         let field = unsafe { field_ptr.read_volatile() };
+        // Real-init lever: drive the container's session-established handler 0x1423f4870(this=container)
+        // so it populates +0x7c0 bit2, +0x7f8 identity, and the +0x708 connection FOR REAL (past its
+        // live-Steam-context gate), instead of fabricating stubs. One-shot (reuses VETO_FIELD_READ's
+        // latch below is separate — guard here so we only drive once).
+        if DRIVE_SESSION_ESTABLISHED.load(Ordering::Relaxed) && !VETO_FIELD_READ.load(Ordering::Relaxed) {
+            let fn_addr = SESSION_ESTABLISHED_FN.load(Ordering::Relaxed);
+            let before_bit2 = (field >> 2) & 1;
+            let before_708 = unsafe { ((container + 0x708) as *const usize).read_volatile() };
+            if fn_addr != 0 {
+                // SAFETY: 0x1423f4870 is ManagerImplSteam's session-established handler; win64 ABI, rcx =
+                // this = the live container. It self-inits its Steam contexts and returns; a fault inside
+                // is caught by the crashdump SEH handler (this catch_unwind can't catch a SIGSEGV).
+                let handler: extern "win64" fn(usize) = unsafe { std::mem::transmute(fn_addr) };
+                log::info!(
+                    "session-probe: veto-field — DRIVING session-established handler 0x1423f4870(container={container:#x}) \
+                     [before: bit2={before_bit2} +0x708={before_708:#x}]",
+                );
+                handler(container);
+                let after = unsafe { field_ptr.read_volatile() };
+                let after_708 = unsafe { ((container + 0x708) as *const usize).read_volatile() };
+                let after_7f8 = unsafe { ((container + 0x7f8) as *const usize).read_volatile() };
+                log::info!(
+                    "session-probe: veto-field — handler returned; container now [+0x7c0]={after:#x} \
+                     bit2={} +0x708={after_708:#x} +0x7f8={after_7f8:#x} (nonzero => REAL init worked)",
+                    (after >> 2) & 1,
+                );
+            }
+        }
         // L3 lever: set bit 2 before the vmethod reads it (a few instructions ahead at 0x1423f434b),
         // so its `test bit2; je return-false` first predicate passes. Only writes when armed + clear.
         if SET_CREATE_VETO_BIT.load(Ordering::Relaxed) {

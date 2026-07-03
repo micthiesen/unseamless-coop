@@ -276,6 +276,15 @@ pub struct DebugProbes {
     /// its read, to test whether create then passes toward `Host`. Off by default — a probe write on an
     /// unknown capability bit, so it may yield a malformed session; a rig experiment, not for shipping.
     pub set_create_veto_bit: bool,
+    /// **EXPERIMENTAL rung-3 real-init lever** (pairs with [`drive_create`]): instead of fabricating
+    /// container state (which crashes — the session graph must be real), **drive the container's real
+    /// session-established handler** `ManagerImplSteam@DLNR3D::0x1423f4870` (vtable slot +0x68) at the
+    /// veto vmethod entry, with the live container as `this`. That handler checks the live Steam
+    /// interface contexts (which are up in our process) and, past the gate, sets `[container+0x7c0]`
+    /// bit 2, stores the Steam identity at `+0x7f8`, and allocates the `+0x708` connection sub-object —
+    /// the real state create needs, not stubs. Off by default; a rig experiment (worker create-veto-writer
+    /// charted the handler; see docs/SESSION-DRIVE.md > VERDICT).
+    pub drive_session_established: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
