@@ -224,6 +224,22 @@ const LEGB_FINALIZE_PROLOGUE: [u8; 13] =
 const SESSION_OBJ_SUB_OFF: usize = 0x58;
 const REGISTRY_NEXT_ID_OFF: usize = 0x6b8;
 
+/// Leg-B **finalize-result site** (`0x1423f5cb5`) — the instruction right after `call 0x1423fab40`
+/// (`mov esi,eax`), so `eax` here IS the finalize handle. Unlike [`LEGB_FINALIZE_OFFSET`] (which fires
+/// only on the *failure* cleanup path) this fires on **every** leg-B finalize, so it settles whether
+/// leg B even reaches its tail and what the handle is — the datum the first cycle left open (the
+/// cleanup hook never fired, so create either bailed before the tail or *succeeded* past the store and
+/// failed later). Mid-function hook over a rel8 `je`, so a byte-guard gates it and a failed relocate is
+/// logged + skipped. See docs/SESSION-DRIVE.md > "Leg B post-capacity tail".
+const LEGB_FINHANDLE_OFFSET: usize = 0x1_423f_5cb5 - 0x1_4000_0000;
+/// Charted bytes at [`LEGB_FINHANDLE_OFFSET`]: `8B F0` = `mov esi,eax`, `85 C0` = `test eax,eax`,
+/// `74 17` = `je +0x17` (to the cleanup block), `8B 43 24` = `mov eax,[rbx+0x24]`, `3B 43 20` = `cmp
+/// eax,[rbx+0x20]`, `73 0F` = `jae +0xf`. Verified before hooking (mid-function, so drift must not
+/// relocate the wrong window); a mismatch skips.
+const LEGB_FINHANDLE_PROLOGUE: [u8; 14] = [
+    0x8B, 0xF0, 0x85, 0xC0, 0x74, 0x17, 0x8B, 0x43, 0x24, 0x3B, 0x43, 0x20, 0x73, 0x0F,
+];
+
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
 /// the resolved address before the fabrication lever is armed — the same anti-drift role
@@ -279,6 +295,11 @@ fn install_create_gate_trace(config: &Config) {
     let fin = exe_base + LEGB_FINALIZE_OFFSET;
     if prologue_ok("legb-finalize", fin, &LEGB_FINALIZE_PROLOGUE) {
         install_offset_hook("legb-finalize", fin, log_legb_finalize);
+    }
+    // legb-finhandle: the fires-always finalize-result read (does leg B reach its tail? what handle?).
+    let fh = exe_base + LEGB_FINHANDLE_OFFSET;
+    if prologue_ok("legb-finhandle", fh, &LEGB_FINHANDLE_PROLOGUE) {
+        install_offset_hook("legb-finhandle", fh, log_legb_finhandle);
     }
 }
 
@@ -498,6 +519,45 @@ fn log_legb_finalize(_name: &'static str, regs: *mut Registers) {
              post-next-id={next_id:?} slot-array cap={cap} count={count} \
              (handle 0 => finalize 0x1423fab40 returned a zero registry-node id; post-next-id 1 with \
              fabricate armed => id 0 was consumed before the slot store)",
+        );
+    }));
+}
+
+/// legb-finhandle tracer: fires at `0x1423f5cb5` on **every** leg-B finalize (the instruction after
+/// `call 0x1423fab40`, so `eax` = the finalize handle, before the `je` to cleanup). Reports the handle
+/// plus the registry-id counter and slot cap/count — read *before* the capacity check/store. Its value
+/// vs. [`log_legb_finalize`] (the failure-only cleanup hook): if this fires with `handle!=0` and
+/// `cap>0` but the cleanup hook does NOT and create still fails, leg B stored successfully and the
+/// veto is post-leg-B (create-gate4 or later); `handle=0` confirms the zero registry-node id model.
+/// Read-only; unwind-firewalled.
+fn log_legb_finhandle(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: at this charted post-finalize site `eax` = the finalize handle, `rbx` = the
+        // NetworkSession, `rdi` = the session object. In-bounds field reads on live objects; read-only.
+        let r = unsafe { &*regs };
+        let handle = r.rax as u32;
+        let session_obj = r.rdi as usize;
+        let ns = r.rbx as usize;
+        let (cap, count) = if ns != 0 {
+            unsafe {
+                (
+                    ((ns + SLOT_ARRAY_CAP_OFF) as *const u32).read_volatile(),
+                    ((ns + SLOT_ARRAY_COUNT_OFF) as *const u32).read_volatile(),
+                )
+            }
+        } else {
+            (0, 0)
+        };
+        let next_id = if session_obj != 0 {
+            let sub = unsafe { ((session_obj + SESSION_OBJ_SUB_OFF) as *const usize).read_volatile() };
+            (sub != 0).then(|| unsafe { ((sub + REGISTRY_NEXT_ID_OFF) as *const u32).read_volatile() })
+        } else {
+            None
+        };
+        log::info!(
+            "session-probe: gate-trace legb-finhandle REACHED (leg B reached its tail) — \
+             handle(eax)={handle} post-next-id={next_id:?} slot-array cap={cap} count={count} \
+             (fires pre-store; handle!=0 && cap>0 => store should succeed => any failure is post-leg-B)",
         );
     }));
 }

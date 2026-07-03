@@ -713,6 +713,22 @@ The next confirmation is the finalize-handle probe below, with the game's own ma
 
 ### Leg B Post-Capacity Tail Charted: Finalize Handle, Not a Later Store Reject
 
+> **RIG RESULT (2026-07-03) — the finalize-handle hypothesis below is DISPROVEN: leg B never reaches
+> its finalize tail.** Wired both the fires-always finalize-result hook (`0x1423f5cb5`, right after
+> `call 0x1423fab40`) and the failure-only cleanup hook (`0x1423f5cd2`), ran the drive (solo-fabricate
+> and fabricate+peer). **Neither hook ever fired**, though both installed (prologue-verified). The
+> observed sequence is `legb-entry REACHED (cap=0)` → `fabricate (cap=16)` → `create-gate4 REACHED` →
+> `drive-create returned false` — with **no** `legb-finhandle`/`legb-finalize`. So on the failure path
+> leg B exits **before** its finalize/store tail (`0x1423f5cb0..`), i.e. the whole tail chart below —
+> finalize handle, registry-id counter, slot store — is **off the executed path** and cannot be the
+> blocker. Meanwhile `create-gate4` (`0x1423fd7a0`) *is* reached and, by its logged fields
+> (`+0x3b0=35000`, `+0x3b4=5000`, helper `[6,30000,…]` all nonzero), should **pass** its charted veto.
+> **New model:** the real reject is a branch **between `create-gate4` and the finalize call** —
+> either `create-gate4` returns false for a reason beyond the two charted fields, or a separate check
+> right after it sends leg B to an early failure exit. Next probe: read `create-gate4`'s **return
+> value** (hook its exit) and chart the branch immediately after it. The static chart below is kept as
+> the (partial, now-superseded) tail anatomy, not the failure explanation.
+
 Static re-read of leg B (`0x1423f5c00`, same 2026-06-02 image) corrects the "post-store reject" wording
 above: there is **no reject after a successful slot-array store**. Once the tail executes
 `base[count] = session_obj; count++` at `0x1423f5cc9..0x1423f5ccd`, it jumps straight to unlock and
