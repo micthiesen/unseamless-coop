@@ -249,6 +249,11 @@ pub enum DecodeError {
     Truncated,
     /// A field held a value outside its valid set (e.g. an undefined `SessionAction`).
     BadValue,
+    /// A length-prefixed field declared more bytes than its cap allows (e.g. a `Log` message past
+    /// [`MAX_LOG_MSG`]). Our encoder never produces this — only a hostile/buggy peer does — and the
+    /// check runs **before** the allocation the length would size, so a forged prefix can't force
+    /// an oversized buffer.
+    TooLong,
     /// Extra trailing bytes after a complete message (likely corruption/desync).
     TrailingBytes,
 }
@@ -388,7 +393,10 @@ impl ModMessage {
             tag::LOG => {
                 let seq = r.u32()?;
                 let level = LogLevel::try_from(r.u8()?).map_err(|_| DecodeError::BadValue)?;
-                let message = r.string_u16()?;
+                // Our encoder truncates to MAX_LOG_MSG, but the u16 prefix could *claim* up to
+                // 64 KiB — hold an untrusted peer to the same cap the encoder obeys, so a hostile
+                // Log flood can't retain ~32× more memory per record in the host's LogBundle.
+                let message = r.string_u16(MAX_LOG_MSG)?;
                 ModMessage::Log(LogRecord { seq, level, message })
             }
             other => return Err(DecodeError::UnknownType(other)),
@@ -441,9 +449,14 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, DecodeError> {
         Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
     }
-    /// A `u16`-length-prefixed UTF-8 string.
-    fn string_u16(&mut self) -> Result<String, DecodeError> {
+    /// A `u16`-length-prefixed UTF-8 string, capped at `max_len` bytes. The cap is checked against
+    /// the *declared* length before any bytes are read or allocated, so a forged prefix can't size
+    /// a buffer past what a well-behaved encoder would ever produce.
+    fn string_u16(&mut self, max_len: usize) -> Result<String, DecodeError> {
         let len = u16::from_be_bytes(self.take(2)?.try_into().unwrap()) as usize;
+        if len > max_len {
+            return Err(DecodeError::TooLong);
+        }
         let bytes = self.take(len)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::BadValue)
     }
@@ -886,12 +899,52 @@ mod tests {
         }
     }
 
+    /// Hand-craft a `Log` frame whose u16 length prefix declares `declared` bytes and whose body
+    /// carries `actual` bytes of ASCII `'a'` — the shape only a hostile/buggy encoder produces.
+    fn forged_log_frame(declared: u16, actual: usize) -> Vec<u8> {
+        let mut bytes = vec![MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 1, 2]; // seq=1, Info
+        bytes.extend_from_slice(&declared.to_be_bytes());
+        bytes.extend(std::iter::repeat_n(b'a', actual));
+        bytes
+    }
+
+    #[test]
+    fn log_message_at_exactly_max_len_decodes() {
+        // The cap boundary itself is legal (our encoder produces it for a truncated message) —
+        // guards a regression to `>=` that would reject a max-size legitimate frame.
+        let bytes = forged_log_frame(MAX_LOG_MSG as u16, MAX_LOG_MSG);
+        match ModMessage::decode(&bytes) {
+            Ok(ModMessage::Log(rec)) => assert_eq!(rec.message.len(), MAX_LOG_MSG),
+            other => panic!("max-size log frame must decode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_message_over_max_len_is_rejected_even_when_bytes_are_present() {
+        // A hostile peer can send a frame our encoder never produces: a Log message longer than
+        // MAX_LOG_MSG, fully present on the wire (so it isn't Truncated). Decode must hold the
+        // untrusted length to the encoder's cap — otherwise a linked flooder retains ~64 KiB per
+        // record in the host's LogBundle instead of ~2 KiB.
+        for declared in [MAX_LOG_MSG as u16 + 1, u16::MAX] {
+            let bytes = forged_log_frame(declared, declared as usize);
+            assert_eq!(
+                ModMessage::decode(&bytes),
+                Err(DecodeError::TooLong),
+                "declared len {declared} must be rejected as TooLong",
+            );
+        }
+    }
+
     #[test]
     fn log_length_prefix_overrun_is_rejected() {
-        // A hostile Log frame claiming a 0xFFFF-byte string but carrying only a few bytes must
-        // be rejected as Truncated, never over-read or over-allocate.
+        // A hostile Log frame claiming a 0xFFFF-byte string but carrying only a few bytes must be
+        // rejected cleanly, never over-read or over-allocate. The declared length trips the
+        // MAX_LOG_MSG cap (checked before any read), so this is TooLong rather than Truncated; a
+        // shorter forged prefix that passes the cap but overruns the buffer stays Truncated.
         let bytes = [MAGIC[0], MAGIC[1], VERSION, tag::LOG, 0, 0, 0, 7, 2, 0xff, 0xff, b'h', b'i'];
-        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::Truncated));
+        assert_eq!(ModMessage::decode(&bytes), Err(DecodeError::TooLong));
+        let in_cap_overrun = forged_log_frame(64, 3); // declares 64 bytes, carries 3
+        assert_eq!(ModMessage::decode(&in_cap_overrun), Err(DecodeError::Truncated));
     }
 
     #[test]

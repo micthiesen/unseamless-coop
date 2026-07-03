@@ -41,6 +41,27 @@ use crate::util::{RateLimiter, Version};
 /// on the next received frame, so it's a soft signal; the final value is a tuning decision that
 /// wants the rig's measured Steam-P2P loss rate.
 const LIVENESS_TIMEOUT_TICKS: u64 = 30;
+/// Cap on distinct senders a [`Peer`] tracks state for. Every frame's sender lands in `last_seen`
+/// (and a `Hello`'s in `peers`/`peer_nonces`) *before* authentication — the handshake needs the
+/// nonce to verify the proof — so without a cap, a flood of distinct transport identities grows
+/// those maps without bound. A sender already tracked (which includes every linked peer) always
+/// passes; a new one is admitted only while there's room, and [`Peer::evict`] frees its slot on a
+/// real leave.
+///
+/// Sized far above any legitimate party ([`crate::config::MAX_SESSION_PLAYERS`] is 6) so the cap
+/// only bites under a flood of *distinct* sender ids — which, over Steam P2P, means distinct
+/// transport-authenticated Steam accounts (sender ids come from the transport, not the wire, so
+/// they can't be forged cheaply). Slot exhaustion by dozens of real accounts is accepted residual
+/// risk; today's production transports additionally filter to the one configured partner before a
+/// frame ever reaches `Peer`, so this is the core-level backstop for future multi-peer bindings.
+///
+/// Caveat: slot *reclamation* currently depends entirely on [`Peer::evict`], which the binding
+/// layer doesn't call yet (rung-3 TODO on that method) — a transient flood therefore pins the
+/// roster at the cap until eviction is wired. When multi-peer arrives, consider also reaping
+/// long-stale **unlinked** senders in `sweep_liveness` so the cap acts as a rate bound rather
+/// than a permanent high-water mark.
+const MAX_TRACKED_PEERS: usize = 64;
+
 /// Burst of forwarded log records a client may emit before the limiter throttles it.
 const LOG_FORWARD_BURST: u32 = 32;
 /// Forwarded-log tokens restored per [`Peer::maintain`] call (the steady-state forwarding rate).
@@ -82,6 +103,13 @@ fn version_banner_key(peer: PeerId) -> String {
 fn liveness_banner_key(peer: PeerId) -> String {
     format!("liveness:{peer}")
 }
+
+/// Banner id + plain-voice message for the roster cap ([`MAX_TRACKED_PEERS`]) turning new senders
+/// away. One global banner (not per-peer): the condition is "the roster is full", and a keyed
+/// banner can't be spammed by the strangers who trip it — re-raising the same key just replaces it.
+const ROSTER_FULL_BANNER_KEY: &str = "roster:full";
+const ROSTER_FULL_MESSAGE: &str =
+    "Too many peers this session; ignoring newcomers until one leaves";
 
 /// User-facing toast when a client adopts the host's pushed settings. Shared like
 /// [`version_mismatch_message`].
@@ -159,6 +187,12 @@ pub struct Peer {
     /// outbound [`ModMessage::Auth`] proofs non-replayable. See [`Peer::new`].
     auth_nonce: AuthNonce,
     /// Versions advertised by other peers (from their `Hello`).
+    ///
+    /// Bounding invariant: this map — like `peer_nonces`, `linked`, `stale_peers`, and both
+    /// `SeqGate`s — is inserted into only from [`Peer::handle`] arms that run *after* the roster
+    /// gate has admitted the sender into `last_seen`, so `last_seen`'s [`MAX_TRACKED_PEERS`] cap
+    /// transitively bounds them all. An insert reachable outside `handle` would silently break
+    /// that bound; route new per-sender state through `handle` (or gate it the same way).
     peers: BTreeMap<PeerId, Version>,
     /// Nonces advertised by other peers (from their `Hello`), needed to verify their `Auth` proof and
     /// to build our proof *to* them.
@@ -225,6 +259,11 @@ pub struct Peer {
     log_limiter: RateLimiter,
     dropped_logs: u64,
 
+    // --- roster bound ---
+    /// Frames dropped because their (new, untracked) sender arrived with the roster at
+    /// [`MAX_TRACKED_PEERS`] (for diagnostics, like `dropped_logs`).
+    roster_overflow_drops: u64,
+
     /// Last accepted session action (for harness/inspection).
     last_action: Option<(PeerId, SessionAction)>,
 }
@@ -273,6 +312,7 @@ impl Peer {
             stale_peers: BTreeSet::new(),
             log_limiter: RateLimiter::new(LOG_FORWARD_BURST),
             dropped_logs: 0,
+            roster_overflow_drops: 0,
             last_action: None,
         }
     }
@@ -317,9 +357,27 @@ impl Peer {
         if from == self.id {
             return vec![];
         }
+        // Bound the per-sender state an untrusted sender can create (see [`MAX_TRACKED_PEERS`]):
+        // a NEW sender is admitted only while there's room; anyone already tracked — every linked
+        // peer included — always passes. Dropped quietly per frame (a stranger flood must not spam
+        // toasts), with one keyed banner for the condition plus a counter for diagnostics.
+        if !self.last_seen.contains_key(&from) && self.last_seen.len() >= MAX_TRACKED_PEERS {
+            self.roster_overflow_drops = self.roster_overflow_drops.wrapping_add(1);
+            // Re-set idempotently on every drop (a same-id set_banner is an in-place update, so
+            // this can't churn or evict other banners) rather than caching "is it up" in a bool —
+            // the notifications model may itself evict a session banner under its own cap, and a
+            // cached flag would then never re-raise it.
+            self.notifications.set_banner(
+                ROSTER_FULL_BANNER_KEY,
+                Severity::Warning,
+                ROSTER_FULL_MESSAGE,
+            );
+            return vec![];
+        }
         // Any frame is evidence the sender is alive — even one the body then discards (a duplicate
-        // ConfigSync, a gate-rejected action). This write must stay UNCONDITIONAL: moving it inside
-        // the match to "skip rejected frames" would worsen liveness false-positives under loss.
+        // ConfigSync, a gate-rejected action). This write must stay UNCONDITIONAL past the roster
+        // gate: moving it inside the match to "skip rejected frames" would worsen liveness
+        // false-positives under loss.
         self.last_seen.insert(from, self.local_tick);
 
         match msg {
@@ -614,6 +672,11 @@ impl Peer {
         self.notifications.clear_banner(&auth_banner_key(peer));
         self.notifications.clear_banner(&version_banner_key(peer));
         self.notifications.clear_banner(&liveness_banner_key(peer));
+        // An eviction frees a roster slot, so the roster-full condition (if raised) has cleared and
+        // the next newcomer will be admitted again. clear_banner is a no-op if it wasn't up.
+        if self.last_seen.len() < MAX_TRACKED_PEERS {
+            self.notifications.clear_banner(ROSTER_FULL_BANNER_KEY);
+        }
         known
     }
 
@@ -648,6 +711,11 @@ impl Peer {
     /// Forwarded log records this peer has dropped to the rate limiter (for diagnostics).
     pub fn dropped_logs(&self) -> u64 {
         self.dropped_logs
+    }
+    /// Inbound frames dropped because their new sender arrived with the roster already at
+    /// [`MAX_TRACKED_PEERS`] (for diagnostics, like [`dropped_logs`](Peer::dropped_logs)).
+    pub fn roster_overflow_drops(&self) -> u64 {
+        self.roster_overflow_drops
     }
 }
 
@@ -2184,5 +2252,92 @@ mod tests {
         // ...and its next real seq still advances.
         host.handle(CLIENT2, ModMessage::SessionAction { seq: 4, action: SessionAction::OpenWorld });
         assert_eq!(host.last_action(), Some((CLIENT2, SessionAction::OpenWorld)));
+    }
+
+    // --- roster bound (MAX_TRACKED_PEERS) ---------------------------------------------------------
+
+    /// Stranger ids guaranteed disjoint from the fixture peers (HOST=1, CLIENT=2, CLIENT2=4).
+    fn stranger_id(i: usize) -> PeerId {
+        1000 + i as u64
+    }
+
+    #[test]
+    fn a_stranger_flood_cannot_grow_peer_state_past_the_roster_cap() {
+        // Feed frames from far more distinct sender ids than the cap. Tracked state (roster, nonce
+        // table, liveness) must stay bounded, the overflow must be counted, and exactly one
+        // roster-full banner raised — never one per dropped frame (a stranger flood must not be able
+        // to spam the overlay).
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v); // CLIENT occupies one slot and is linked
+        for i in 0..(MAX_TRACKED_PEERS * 3) {
+            let out = host.handle(
+                stranger_id(i),
+                ModMessage::Hello { mod_version: v.to_u32(), nonce: [0x66; AUTH_NONCE_LEN] },
+            );
+            if i >= MAX_TRACKED_PEERS - 1 {
+                // CLIENT holds a slot, so strangers fill the remaining cap-1; the rest are dropped
+                // before any state insert — including the Hello's proof reply.
+                assert!(out.is_empty(), "stranger {i} past the cap must get no reply");
+            }
+        }
+        assert_eq!(host.known_peers().len(), MAX_TRACKED_PEERS, "roster bounded at the cap");
+        assert_eq!(
+            host.roster_overflow_drops(),
+            (MAX_TRACKED_PEERS * 3 - (MAX_TRACKED_PEERS - 1)) as u64,
+            "every frame past the cap is counted"
+        );
+        let roster_banners = host
+            .notifications()
+            .banners()
+            .iter()
+            .filter(|b| b.message == ROSTER_FULL_MESSAGE)
+            .count();
+        assert_eq!(roster_banners, 1, "one banner for the condition, not one per frame");
+    }
+
+    #[test]
+    fn a_full_roster_still_serves_tracked_and_linked_peers() {
+        // The cap turns away only NEW senders. The already-linked CLIENT (and every tracked peer)
+        // must keep working exactly as before: liveness refresh, actions, config flow.
+        let v = Version::new(0, 1, 0);
+        let mut host = linked_host(v);
+        for i in 0..MAX_TRACKED_PEERS {
+            host.handle(stranger_id(i), ModMessage::Ping { frame: 1 });
+        }
+        assert!(host.roster_overflow_drops() > 0, "test premise: the cap is engaged");
+        host.handle(CLIENT, ModMessage::SessionAction { seq: 1, action: SessionAction::JoinWorld });
+        assert_eq!(
+            host.last_action(),
+            Some((CLIENT, SessionAction::JoinWorld)),
+            "a linked peer's frames pass the full roster"
+        );
+    }
+
+    #[test]
+    fn evicting_a_peer_reopens_a_roster_slot_and_clears_the_banner() {
+        // A real leave frees the slot: the roster-full banner comes down and the next newcomer is
+        // admitted (tracked + replied to) again.
+        let v = Version::new(0, 1, 0);
+        let mut host = Peer::new(HOST, HOST, v, config_with_pw(PW), HOST_NONCE);
+        for i in 0..MAX_TRACKED_PEERS {
+            host.handle(stranger_id(i), ModMessage::Ping { frame: 1 });
+        }
+        // Cap reached: one more distinct sender is turned away and banners.
+        host.handle(9999, ModMessage::Ping { frame: 1 });
+        assert_eq!(host.roster_overflow_drops(), 1);
+        assert!(host.notifications().banners().iter().any(|b| b.message == ROSTER_FULL_MESSAGE));
+
+        assert!(host.evict(stranger_id(0)), "a tracked stranger is known to evict");
+        assert!(
+            !host.notifications().banners().iter().any(|b| b.message == ROSTER_FULL_MESSAGE),
+            "freeing a slot clears the roster-full banner"
+        );
+        // The newcomer is admitted now: its Hello is tracked and answered with our Auth proof.
+        let out = host.handle(
+            9999,
+            ModMessage::Hello { mod_version: v.to_u32(), nonce: [0x55; AUTH_NONCE_LEN] },
+        );
+        assert!(host.known_peers().contains_key(&9999), "admitted into the freed slot");
+        assert!(!out.is_empty(), "and the handshake proceeds (proof reply sent)");
     }
 }

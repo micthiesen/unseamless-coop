@@ -361,6 +361,39 @@ Where the crate still earns its keep:
 A separate MSVC-built Steam helper process is theoretically possible but not worth the two-toolchain +
 IPC complexity.
 
+## Side-channel input hardening (audit, 2026-07-02)
+
+The full inbound path — `framing.rs` → `protocol.rs` decode, fed by `steam.rs`/`coop.rs`
+(`SteamP2PTransport`), `bridge.rs` (`BridgeTransport`), and consumed by `peer.rs` — was audited for
+panic paths and unbounded allocation on untrusted peer bytes. A panic in the recv/decode path would
+be caught by the per-feature `catch_unwind` firewall but would **disable co-op for the session**, so
+a malformed/hostile peer must never reach one. The defenses, and where each is enforced:
+
+- **Total decoders, no panic paths.** `protocol::Reader` bounds-checks every read (`Truncated`, never
+  a slice panic); `framing::FrameDecoder` checks each declared length **before** buffering/allocating.
+  Pinned by deterministic fuzz + exhaustive per-byte truncation tests in both modules, a bit-flip
+  sweep, and a composed framing→decode pipeline fuzz (`full_inbound_pipeline_never_panics_…`).
+- **Allocation bounds, checked before the allocation they size:** `framing::MAX_FRAME` (64 KiB) on
+  the stream framing; `steam.rs`'s own 8 KiB per-message ceiling before copying a Steam payload out;
+  `protocol::MAX_LOG_MSG` (2 KiB) enforced at **decode** too (`DecodeError::TooLong`), so a forged
+  u16 length can't make a linked flooder retain ~32× more per record in the host's `LogBundle`
+  (itself capped at 50k records, drop-oldest); `RECV_BATCH`×`RECV_MAX_CALLS` caps frames per poll.
+- **Untrusted values clamped at decode:** `ConfigSync` scaling / `max_players` / world-time are held
+  to the same ranges as a local config file; unknown versions, tags, actions, and levels reject.
+- **Per-sender state is bounded:** `peer::MAX_TRACKED_PEERS` (64) caps the roster/nonce/liveness maps
+  a stranger flood can grow (senders are transport-authenticated Steam ids, so distinct ids cost real
+  accounts); a full roster turns **new** senders away quietly (one keyed banner + a
+  `roster_overflow_drops` counter — no per-frame toasts a stranger could spam), and `Peer::evict`
+  frees slots. Caveat: `evict` isn't wired to the session FSM yet (rung 3), so until then a
+  transient flood pins the roster at the cap. Production transports additionally filter to the
+  configured partner before frames reach `Peer`, so the cap is a backstop, not the first line.
+- **Authorization before effect:** only a *linked* (password-proven) peer's `ConfigSync`/actions/logs
+  apply; host-only actions check the sender's role; dedup gates make actions exactly-once.
+
+Malformed frames are dropped and **counted** (`Session::decode_failures`), never fatal — per the
+degrade-don't-crash rule. The wire format itself needed no change (still VERSION 8): every fix is
+decode-side enforcement of bounds well-behaved encoders already obey.
+
 ## Log-forwarding status (answers a recurring question)
 
 `[debug] forward_to_host = true` (set in the friend seed config) was a no-op until rung 2: the

@@ -90,6 +90,19 @@ mod tests {
         dec.drain().unwrap()
     }
 
+    /// SplitMix64 — deterministic, dependency-free fuzz PRNG (mirrors protocol.rs's; shared by the
+    /// fuzz tests below so the mixer can't drift between them).
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
     #[test]
     fn round_trips_a_single_frame() {
         let mut dec = FrameDecoder::new();
@@ -199,17 +212,6 @@ mod tests {
 
     #[test]
     fn drain_never_panics_on_arbitrary_bytes() {
-        // SplitMix64 — deterministic, dependency-free (mirrors protocol.rs's fuzz PRNG).
-        struct Rng(u64);
-        impl Rng {
-            fn next_u64(&mut self) -> u64 {
-                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-                let mut z = self.0;
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                z ^ (z >> 31)
-            }
-        }
         // Feed pseudo-random bytes in pseudo-random chunk sizes. `drain` must always return a `Result`
         // (Ok frames or FrameTooLarge) and never panic on a malformed/partial header, an absurd length,
         // or a chunk split mid-header. A FrameTooLarge clears the buffer; we keep going to resync.
@@ -227,6 +229,68 @@ mod tests {
                 dec = FrameDecoder::new();
             }
         }
+    }
+
+    #[test]
+    fn every_prefix_of_a_valid_frame_yields_nothing_then_completes_cleanly() {
+        // Truncate a real frame at EVERY byte boundary: the partial must never panic and never
+        // yield a frame (it stays buffered), and pushing the remainder must then complete it
+        // exactly — the framing-layer analogue of protocol.rs's exhaustive prefix test.
+        let sender = 0x0102_0304_0506_0708u64;
+        let frame = encode_frame(sender, b"boundary sweep payload");
+        for cut in 0..frame.len() {
+            let mut dec = FrameDecoder::new();
+            dec.push(&frame[..cut]);
+            assert!(
+                dec.drain().unwrap().is_empty(),
+                "a {cut}-byte prefix must not yield a frame"
+            );
+            dec.push(&frame[cut..]);
+            assert_eq!(
+                dec.drain().unwrap(),
+                vec![(sender, b"boundary sweep payload".to_vec())],
+                "completing the split at byte {cut} must decode the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn full_inbound_pipeline_never_panics_on_arbitrary_bytes() {
+        // Compose the two untrusted-input layers exactly as the socket transports do (bridge,
+        // harness TCP): raw bytes -> FrameDecoder -> ModMessage::decode per payload. Both layers
+        // are fuzzed separately; this pins the *composition* — every drained payload, however
+        // mangled, must come out of the message decoder as a Result, never a panic.
+        use crate::protocol::ModMessage;
+        let mut rng = Rng(0xCAFE_D00D_5EED_0001);
+        let mut dec = FrameDecoder::new();
+        let mut decoded_ok = 0u32;
+        for round in 0..10_000 {
+            // Mostly garbage chunks; every 8th round a genuine frame carrying a real message, so
+            // the Ok path of both layers is exercised amid the noise (not just rejection paths).
+            // Injections land on round 7 (not 0), so EVERY injected frame follows garbage rounds —
+            // a frame decoded into a fresh empty buffer on round 0 would satisfy the healthy-path
+            // assertion below without exercising the desync/resync it exists to pin.
+            if round % 8 == 7 {
+                let msg = ModMessage::Ping { frame: rng.next_u64() };
+                dec.push(&encode_frame(rng.next_u64(), &msg.encode()));
+            } else {
+                let chunk = (rng.next_u64() % 40) as usize;
+                let buf: Vec<u8> = (0..chunk).map(|_| rng.next_u64() as u8).collect();
+                dec.push(&buf);
+            }
+            // On Err(FrameTooLarge) the buffer was cleared; the decoder stays usable, keep feeding.
+            if let Ok(frames) = dec.drain() {
+                for (_, payload) in frames {
+                    if ModMessage::decode(&payload).is_ok() {
+                        decoded_ok += 1;
+                    }
+                }
+            }
+        }
+        // Sanity that the healthy path actually ran: garbage between frames desyncs the stream (a
+        // cleared buffer resyncs it), so not every injected frame survives — but some must decode
+        // *after* garbage preceded them (every injection follows garbage rounds, per above).
+        assert!(decoded_ok > 0, "no injected frame ever decoded after garbage interleaving");
     }
 
     #[test]
