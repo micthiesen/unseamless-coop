@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# _codex -- codex-harness plumbing shared by the fleet launchers. Sourced (not
+# executed) by worker-new, worker-open, worker-rm, and orch-start.
+#
+# Workspace trust. Codex's "do you trust this folder?" onboarding gate reads
+# ONLY the persisted [projects."<path>"] tables in $CODEX_HOME/config.toml: a
+# session `-c projects."<ws>".trust_level="trusted"` override parses fine but
+# the gate ignores it (verified live on codex-cli 0.142.5 -- the -c-flagged TUI
+# still prompts; a file entry suppresses it, dotted path segments like `.rifts`
+# included). So the launchers write the exact entry codex itself persists when
+# a human answers "Yes, continue". That file is a stowed dotfiles symlink, but
+# "never mutate it" stopped being an invariant the moment codex started
+# persisting manual accepts into it -- the script write is the same mutation
+# minus the prompt, and worker-rm removes the entry on teardown so the tracked
+# file doesn't accumulate dead workspaces (manual accepts never got that).
+
+fleet_codex_config() {
+  echo "${CODEX_HOME:-$HOME/.codex}/config.toml"
+}
+
+# Idempotently trust <path> in codex's config. Best-effort: a spawn must not
+# die over a missing config -- codex just shows its one-time trust prompt.
+fleet_codex_trust_add() {  # <path>
+  local cfg hdr
+  cfg="$(fleet_codex_config)"; hdr="[projects.\"$1\"]"
+  if [ ! -f "$cfg" ]; then
+    echo "    WARNING: no $cfg; codex will show its trust prompt once." >&2
+    return 0
+  fi
+  grep -qxF "$hdr" "$cfg" && return 0
+  # Append at EOF: valid TOML for a not-yet-defined table (codex regroups it on
+  # its next own write). `>>` writes THROUGH the symlink, preserving the stow.
+  printf '\n%s\ntrust_level = "trusted"\n' "$hdr" >>"$cfg"
+}
+
+# Remove <path>'s trust table: the header plus its keys, up to the next [table]
+# header (or EOF). No-op if the entry isn't there.
+fleet_codex_trust_remove() {  # <path>
+  local cfg hdr tmp
+  cfg="$(fleet_codex_config)"; hdr="[projects.\"$1\"]"
+  [ -f "$cfg" ] || return 0
+  grep -qxF "$hdr" "$cfg" || return 0
+  tmp="$(mktemp)" || return 0
+  awk -v hdr="$hdr" '
+    $0 == hdr { skip = 1; next }
+    skip && /^\[/ { skip = 0 }
+    skip { next }
+    { print }
+  ' "$cfg" >"$tmp" || { rm -f "$tmp"; return 0; }
+  # cat-through, NOT mv: mv would replace the config symlink with a plain file.
+  cat "$tmp" >"$cfg"
+  rm -f "$tmp"
+}

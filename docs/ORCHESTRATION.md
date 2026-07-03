@@ -14,13 +14,7 @@ It exists because two things in this project are **inherently serial** and one t
 
 So: workers build in parallel; the orchestrator owns the serial parts (rig, integration, the
 commit to `main`) and helps the human decide what to build next. The orchestrator can also just
-do work itself; spawning workers is a tool, not a requirement. That said, **be proactive about
-spawning one the moment a well-scoped chunk falls off the critical path** — e.g. mid-rig-session,
-a tooling gap surfaces (a save needs re-signing to load on the Deck): hand the durable fix to a
-worker with the verified facts in the guidance and keep driving the rig yourself. Michael has
-explicitly endorsed this pattern (2026-07-03); the failure mode to avoid is the orchestrator
-serially context-switching into side-quests while the live session (the scarce, human-present
-resource) idles.
+do work itself; spawning workers is a tool, not a requirement.
 
 ## Roles
 
@@ -83,9 +77,9 @@ ping worker, both message directions):
 |---|---|---|
 | Role injection | `--append-system-prompt-file` overlay at launch | the role instruction is the **first thing in the seed prompt** (no system-prompt flag exists; being turn 1, it survives `resume` revives for free) |
 | Messaging (`msg`) | inspector-socket injection (`_inject`): instant, draft-preserving | tmux **bracketed paste + Enter** into the pane: lands as a user turn, queues mid-turn like typing, but a draft in the composer is **not** preserved and a still-booting TUI can drop the paste |
-| Workspace trust | `~/.claude.json` `hasTrustDialogAccepted` (jq edit) | session flag `-c projects."<ws>".trust_level="trusted"` (never mutates `~/.codex/config.toml` — it's a stowed dotfiles symlink) |
+| Workspace trust | `~/.claude.json` `hasTrustDialogAccepted` (jq edit) | `[projects."<ws>"] trust_level = "trusted"` **persisted into `$CODEX_HOME/config.toml`** by `fleet_codex_trust_add` (`scripts/fleet/_codex`), removed again by `worker-rm`. A session `-c projects...trust_level` flag parses but the "do you trust this folder?" gate ignores it (verified on codex-cli 0.142.5), so the file write — the same entry codex persists on a manual "Yes" — is the only way to skip the prompt. The config is a stowed dotfiles symlink; the helper writes *through* it (`>>`/`cat >`, never `mv`) |
 | Sandbox | `.claude/settings.json` allowlist | workspace-write **+ `-c sandbox_workspace_write.network_access=true`** — without it codex's seccomp blocks unix sockets, so the session's own `msg` (a tmux client) can't reach the tmux server (verified; the `network.*` keys do NOT lift it) |
-| Pre-approved work (no prompts) | `.claude/settings.json` `allow` rules + `additionalDirectories`, unlocked by the trust write | **`-c approval_policy="never"`** (a worker must never sit on an approval modal — nobody watches the pane, and a `msg` paste + Enter would answer it blind; out-of-sandbox commands fail back to the model, which surfaces the blocker) **+ `-c sandbox_workspace_write.writable_roots=["~/.cargo", FLEET_DIR]`** (workspace-write mounts `~/.cargo` read-only, so `cargo fetch/build` registry writes otherwise fail/escalate — verified with `codex sandbox`; the sandbox, not approvals, is the permission boundary, so widen `writable_roots` rather than loosening the policy) |
+| Pre-approved work (no prompts) | `.claude/settings.json` `allow` rules + `additionalDirectories`, unlocked by the trust write | **`-c approval_policy="never"`** (a worker must never sit on an approval modal — nobody watches the pane, and a `msg` paste + Enter would answer it blind; out-of-sandbox commands fail back to the model, which surfaces the blocker) **+ `-c sandbox_workspace_write.writable_roots=["<ws>/.git", "~/.cargo", FLEET_DIR]`** (all verified with `codex sandbox`: workspace-write **carves the workspace's own `.git` out of the writable cwd** — git config/hooks anti-tampering; there's no `allow_git_writes`-style key — so without the explicit `.git` root every `git add/commit` dies with `Unable to create .git/index.lock: Read-only file system` and the worker can't WIP-commit to its branch; `~/.cargo` is mounted read-only, so `cargo fetch/build` registry writes otherwise fail/escalate; the sandbox, not approvals, is the permission boundary, so widen `writable_roots` rather than loosening the policy) |
 | Revive (`worker-open`) | `claude -c` + re-overlay + re-`BUN_INSPECT` | `codex resume --last` (cwd-filters to the workspace, so it continues that worker's own conversation) |
 | `/color`, `/rc` remote control | yes | not available (Claude Code features; codex sessions go uncolored) |
 | Repo instructions & skills | `CLAUDE.md`, `.claude/skills/` | same content via tracked symlinks: `AGENTS.md -> CLAUDE.md`, `.codex/skills -> .claude/skills` (codex does **not** read `.claude/skills` at project level; it does pick up user-level `~/.claude/skills` natively, and it reads only `name`+`description` frontmatter, tolerating the extra claude fields) |
@@ -367,7 +361,12 @@ launch with no dialog, `worker-open` revive via `codex resume --last`, and `msg`
 directions (including the sandbox `network_access=true` fix that makes a worker's own `msg` work).
 Per-worker overrides (`worker-new --harness`/`--model`, the `.model` marker, per-target `msg`
 transport resolution via `fleet_worker_harness`, the `models` lister) landed 2026-07-03, turning
-the all-one-harness rule into a default-plus-opt-outs model.
+the all-one-harness rule into a default-plus-opt-outs model. Also 2026-07-03: codex workers got
+pre-approved lane work (`approval_policy="never"` + `writable_roots` for the workspace `.git`
+— workspace-write carves it out of the writable cwd, which broke `git commit` — plus `~/.cargo`
+and the fleet dir; the analog of the claude allowlist), and workspace trust moved from the
+launch-line `-c` flag (which codex 0.142.5's trust gate ignores, re-prompting on every spawn) to
+a persisted config entry via `scripts/fleet/_codex`, cleaned up by `worker-rm`.
 
 Exercised end to end: a live ping worker confirmed spawn, the seeded prompt auto-submitting, the
 worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown.

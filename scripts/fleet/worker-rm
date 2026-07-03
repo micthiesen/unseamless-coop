@@ -90,6 +90,15 @@ fi
 
 rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role" \
   "$FLEET_DIR/assignments/$name.harness" "$FLEET_DIR/assignments/$name.model"
+# Drop the workspace's codex trust entry (worker-new/worker-open persist it in
+# the dotfiles-tracked codex config; the workspace is gone, so it's drift now).
+# Unconditional: a no-op for claude workers / already-clean configs. Guarded
+# source so a merge that drops the helper can't break teardown.
+if [ -f "$SELF/_codex" ]; then
+  # shellcheck source=scripts/fleet/_codex
+  source "$SELF/_codex"
+  fleet_codex_trust_remove "$ws"
+fi
 # Drop the worker's inspector socket (its messaging-transport endpoint). Killing the
 # tmux session above already closed it; remove the file so a stale socket can't
 # linger into a future same-named worker.

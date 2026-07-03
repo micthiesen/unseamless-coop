@@ -54,6 +54,9 @@ fi
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
 harness="$(fleet_harness)"
+# Codex plumbing (workspace trust); see _codex.
+# shellcheck source=scripts/fleet/_codex
+source "$SELF/_codex"
 
 usage() {
   echo "usage: worker-new [--solo] [--harness claude|codex] [--model <id>] <name> [guidance... | -]" >&2
@@ -156,9 +159,9 @@ git -C "$ws" switch -c "$branch"
 # allow rules + additionalDirectories actually load. Claude Code drops a project's
 # permissions on an untrusted path, and each new rift workspace path is untrusted
 # by default. ~/.claude.json is live, not git-tracked; edit it atomically.
-# (codex: trust is instead a session config flag on the launch line below --
-# `-c projects."<ws>".trust_level="trusted"` -- so we never mutate
-# ~/.codex/config.toml, which is a stowed dotfiles symlink, per workspace.)
+# (codex: same idea, different file -- the trust entry must be PERSISTED in
+# $CODEX_HOME/config.toml or the TUI shows its "do you trust this folder?"
+# gate; a session `-c` trust flag is ignored by that gate. See _codex.)
 if [ "$harness" = "claude" ]; then
   echo "==> trust workspace in ~/.claude.json"
   trust_json="$HOME/.claude.json"
@@ -174,6 +177,9 @@ if [ "$harness" = "claude" ]; then
   else
     echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
   fi
+else
+  echo "==> trust workspace in codex config"
+  fleet_codex_trust_add "$ws"
 fi
 
 # Role marker (outside the workspace, so it survives the COW copy): lets worker-open
@@ -265,8 +271,9 @@ fi
 # layered on separately and is purely best-effort.
 if [ "$harness" = "codex" ]; then
   # codex: no inspector socket (msg delivers over tmux paste), the role rides in
-  # the seed (built above), and workspace trust is a session `-c` flag so the
-  # stowed ~/.codex/config.toml is never mutated. FLEET_DIR is propagated so the
+  # the seed (built above), and workspace trust was persisted into the codex
+  # config above (fleet_codex_trust_add -- a `-c` trust flag does NOT suppress
+  # the trust prompt; see _codex). FLEET_DIR is propagated so the
   # worker's own `msg` calls agree with the orchestrator on fleet state.
   # network_access=true: codex's workspace-write sandbox otherwise blocks unix
   # sockets (seccomp), which breaks the worker's own `msg` (the tmux client
@@ -287,12 +294,19 @@ if [ "$harness" = "codex" ]; then
   # ~/.cargo so `cargo fetch/build` can write the registry cache (verified
   # live: workspace-write mounts it read-only, so every fetch otherwise fails
   # or begs escalation), plus FLEET_DIR to match the claude worker's grant.
+  # $ws/.git: workspace-write deliberately carves the workspace's .git out of
+  # the writable cwd (anti-tampering for git config/hooks), so `git add/commit`
+  # dies with "Unable to create .git/index.lock: Read-only file system" -- but
+  # a worker that can't WIP-commit to its branch is invisible to
+  # worker-integrate. Naming the .git dir as its own writable root lifts the
+  # carve-out (verified live: add+commit succeed with it, index.lock error
+  # without; there is no allow_git_writes-style key).
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-    codex -c "projects.\"$ws\".trust_level=\"trusted\"" \
+    codex \
     -c "sandbox_mode=\"workspace-write\"" \
     -c "sandbox_workspace_write.network_access=true" \
-    -c "sandbox_workspace_write.writable_roots=[\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
+    -c "sandbox_workspace_write.writable_roots=[\"$ws/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
     -c "approval_policy=\"never\"" \
     "${codex_model_args[@]}" "${seed_args[@]}"
 else

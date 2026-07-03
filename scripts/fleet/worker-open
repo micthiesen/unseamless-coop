@@ -27,6 +27,9 @@ fi
 # codex session in the workspace, and vice versa). See _harness.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
+# Codex plumbing (workspace trust); see _codex.
+# shellcheck source=scripts/fleet/_codex
+source "$SELF/_codex"
 
 name="${1:-}"
 if [ -z "$name" ]; then
@@ -78,22 +81,28 @@ elif [ -d "$ws" ]; then
   fi
   if [ "$harness" = "codex" ]; then
     echo "$sess is dead; reviving the $role worker in $ws (codex resume --last)."
+    # Re-persist workspace trust first: the codex trust gate only believes the
+    # config FILE (a dotfiles restow/reset between spawn and revive would have
+    # dropped the entry, and a `-c` trust flag can't paper over it; see _codex).
+    fleet_codex_trust_add "$ws"
     # `codex resume` cwd-filters by default, so --last inside the workspace
     # continues THIS worker's own most recent conversation. No overlay re-injection
     # needed: worker-new delivered the role as the first user turn, which resume
     # keeps (it's conversation history, not a launch flag). The `-c` flags are
     # launch-time (not conversation state), so a revive must re-pass the SAME
-    # set worker-new uses -- trust, sandbox pin, network_access (lets the
+    # set worker-new uses -- sandbox pin, network_access (lets the
     # worker's own `msg`/tmux reach its unix socket from inside the sandbox),
-    # writable_roots (~/.cargo for the registry cache + FLEET_DIR), and
-    # approval_policy=never (a worker must never sit on an approval modal; see
-    # worker-new for the full rationale). No inspector socket under codex.
+    # writable_roots ($ws/.git so git add/commit work at all -- workspace-write
+    # carves .git out of the writable cwd -- plus ~/.cargo for the registry
+    # cache + FLEET_DIR), and approval_policy=never (a worker must never sit on
+    # an approval modal; see worker-new for the full rationale). No inspector
+    # socket under codex.
     tmux new-session -d -s "$sess" -c "$ws" \
       env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-      codex resume --last -c "projects.\"$ws\".trust_level=\"trusted\"" \
+      codex resume --last \
       -c "sandbox_mode=\"workspace-write\"" \
       -c "sandbox_workspace_write.network_access=true" \
-      -c "sandbox_workspace_write.writable_roots=[\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
+      -c "sandbox_workspace_write.writable_roots=[\"$ws/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
       -c "approval_policy=\"never\"" \
       "${codex_model_args[@]}"
     pop_window
