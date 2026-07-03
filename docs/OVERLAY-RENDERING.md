@@ -452,14 +452,20 @@ probed COM methods (different mechanism, no evidence of conflict) and can stay.
 
 **Next steps (in order):**
 
-1. ~~**Reimplement the XInput capture/blank as an IAT hook**~~ **DONE (2026-07-01):**
+1. ~~**Reimplement the XInput capture/blank as an IAT hook**~~ **DONE + RIG-VERIFIED (2026-07-03):**
    `input.rs::install_xinput` now swaps `eldenring.exe`'s IAT slot (imported **by ordinal 2** — the
    game's XINPUT1_4 imports carry no names) instead of inline-patching the function entry; the
    replacement is a typed `extern "system"` fn (no ilhook register glue), chains through any prior
-   IAT interposer, and the log line is now `input: hooked XInput GetState via the game's IAT (…)`.
-   Compiles clean + reviewed; **rig re-verify pending** (the game was in use when the fix landed —
-   next cycle, confirm the new install line + pad nav/blank still work), then **native validation =
-   the next friend run** (his machine is the only environment that reproduces the collision).
+   IAT interposer, and the log line is `input: hooked XInput GetState via the game's IAT (…)`.
+   **Bug caught on the rig re-verify:** the first IAT version never actually installed — the game's
+   XINPUT `FirstThunk` is 4-byte-aligned (`0x4c0cedc`) and pelite's `desc.iat()` demands 8-byte
+   alignment, so it returned `Err("address misaligned")` and the descriptor was silently skipped
+   (`XInput hook not installed` every run). Fixed by matching off the INT (`OriginalFirstThunk`,
+   8-byte aligned) alone and indexing the IAT manually with unaligned read/write (commit `0fde906`).
+   Now confirmed on the rig: `input: hooked XInput GetState via the game's IAT` + a successful slot
+   swap. Pad-nav *feel* still wants a human on the controller. **Native validation = the next friend
+   run** (his machine is the only environment that reproduces the collision) or the local VM repro
+   (#4 below).
 2. **Friend-side confirmation, optional:** the WER report folder
    (`C:\ProgramData\Microsoft\Windows\WER\ReportArchive\AppCrash_eldenring.exe_…`) — its
    `Report.wer` lists the **loaded modules**, confirming/denying `gameoverlayrenderer64.dll` (or
