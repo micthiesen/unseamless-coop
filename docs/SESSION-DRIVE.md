@@ -249,37 +249,31 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 
 ## Why a direct create fails offline (the rung-3 create wall)
 
-> **Current truth — root cause CONFIRMED (2026-06-29, in-world rig).** A **solo** direct-drive create
+> **Current truth (updated 2026-07-03, in-world + rig↔Deck).** A **solo** direct-drive create
 > cannot succeed. The create wrapper fires and is rejected **synchronously** (`lobby_state None →
 > FailedToCreateSession`, returns `false` the same frame). With the leg-A gate bypassed and reject #1
 > forced, create passes every static gate charted below — leg A, rejects #1/#2/#3, and the 4th gate —
-> then dies in **leg B's tail capacity check**: the session-slot array has **capacity 0** offline
-> (`cmp count,[rbx+0x20]; jae fail` with `rbx=[[NetworkSession+8]+0x48]` and `[rbx+0x20]==0` → `0>=0` →
-> fail), because no real match/lobby ever allocated it, so the finished session object has nowhere to be
-> stored. It is **not** OOM, the gate, the 4th gate, or the finalize registry. **The unblock is the
-> 2-player drive** (a live rung-4 lobby + a real peer is what sizes the slot array). The static anatomy
-> and how each candidate was ruled out follow; superseded conclusions are kept as one-line tombstones.
+> then first hits **leg B's tail capacity check** when the session-slot array has **capacity 0**. Slot
+> fabrication clears that capacity branch, including with a real linked peer, but create still fails.
+> Static re-read now narrows the remaining zero producer to **the finalize handle at `0x1423f5cb7`**:
+> `0x1423fab40` can return a zero registry-node id even after allocation succeeds. The next rig check is
+> the finalize-handle probe below. The static anatomy and how each candidate was ruled out follow;
+> superseded conclusions are kept as one-line tombstones.
 >
 > **Paths forward:**
-> 1. **2-player drive (highest-EV, the real fix):** drive create with a live rung-4 lobby + a real peer
->    so the game allocates the slot array (cap>0), then leg B's tail store succeeds. Set `[debug.probes]
->    drive_create` + `[gameplay] bypass_session_create_gate` + `[debug.probes] force_netsession_ready`
->    on both machines. Open question: *what* allocates the slot array (normal match setup vs. whether our
->    rung-4 lobby alone triggers it) — answerable only with a real peer. **Protocol reference for what the
->    peer-join exchanges (what likely sizes the array):** vswarte's `waygate-server`, cloned locally at
->    `../waygate-server` (`message/src/eldenring/{session,sign,matchingticket}.rs` + `wire/`); see the
->    "Protocol reference — `waygate-server`" note in [COOP-CONNECTION.md](COOP-CONNECTION.md) > Rung 3.
-> 2. **Fabricate the slot array (risky fallback):** allocate a backing array, write `[NetworkSession+0x18]`
->    = base and `[+0x20]` = capacity (≥ seat count), and let the tail store proceed. Heavy and likely
->    produces a malformed session the game can't run; only if (1) is impossible.
-> 3. **Static-decompile the allocator (alternative to needing a peer to *observe* it).** The open
->    question in (1) — *what allocates the slot array and sizes it* — is answerable statically: decompile
->    the `NetworkSession` init / match-setup path to find the site that allocates the array at
->    `[[NetworkSession+8]+0x48]` and writes its capacity at `+0x20` (leg B is clean, not Arxan). If that
->    size comes from a source we can set or a function we can call, it turns the risky blind fabrication
->    in (2) into a *principled* solo sizing — drive create to `Host` with no peer for the create leg
->    (join still needs a real peer). An **annotated** community / other-mod Ghidra DB of the
->    session/network subsystem would short-cut the identification. *Clean-room (CLAUDE.md):* read it for
+> 1. **Finalize-handle probe (next rig run):** wire the `legb-finalize` trace described below, run the
+>    existing fabricate+peer recipe once, and confirm whether `0x1423fab40` returns handle `0` before
+>    the slot store. This is the current highest-EV check.
+> 2. **Registry-id proof or seed:** if `handle=0`, confirm whether `[[NetworkSession+0x08]+0x6b8]`
+>    consumed id `0` (direct hook inside `0x1423fa100`, or infer `post-next-id=1`). If confirmed, test a
+>    tightly-scoped seed of that counter before finalize.
+> 3. **Game match-setup comparison:** chart how the game's own matchmaking path seeds the registry id
+>    space and slot array. Protocol reference for what the peer-join exchanges: vswarte's
+>    `waygate-server`, cloned locally at `../waygate-server`
+>    (`message/src/eldenring/{session,sign,matchingticket}.rs` + `wire/`); see the "Protocol reference:
+>    `waygate-server`" note in [COOP-CONNECTION.md](COOP-CONNECTION.md) > Rung 3. An **annotated**
+>    community / other-mod Ghidra DB of the session/network subsystem would short-cut identification.
+>    *Clean-room (CLAUDE.md):* read it for
 >    the **game's** behavior and reimplement from that — never transcribe pseudocode/annotations; if it's
 >    ERSC's own decompilation, study the game, not ERSC.
 >
@@ -293,8 +287,9 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 >   leg B ran. The earlier peek-only read of `[G]+0x24=0` / `[G]+0xc=2` wrongly concluded "gate rejected.")
 > - *"Reject #1 (`NetworkSession+0x10==0`) is the blocker."* Real (it is 0 offline) but **not sufficient**
 >   — forcing it nonzero did not unblock.
-> - *"Create dies in the session-object registry/init chain (`0x1423fa1b0`)."* Wrong — that chain is
->   OOM-only.
+> - *"Create dies because the session-object registry/init chain (`0x1423fa1b0`) returns null."* Wrong.
+>   The null paths are allocation-shaped, but a later pass found a separate zero-id return through
+>   `0x1423fab40`; see the finalize-handle chart below.
 > - *"The 4th gate `0x1423fd7a0` is the blocker."* Wrong — in-world its fields are populated and it
 >   returns true.
 > - *"The create blocker shares the item-grey service `0x144842d40`."* Wrong — the finalize uses numeric
@@ -485,18 +480,23 @@ can fire offline) — the rig confirmed it's real but **not sufficient**:
 > but the gates below mean reject #1 alone can't clear create regardless. `[debug.probes]
 > force_netsession_ready` stays a charted, default-off probe.
 
-**The finalize/registry chain is OOM-only — not an offline gate** (this corrects an earlier note that
-blamed it):
+**Finalize/registry correction (supersedes the old "OOM-only" conclusion):** the helper can allocate
+successfully and still return a create-failing zero handle. The null-return branches below are still
+OOM-shaped, but the final value returned to leg B is a registry-node id, and that id can be `0`:
 
-- **`0x1423fab40`** (finalize) → `0x1423fa1b0(new_obj, cmp=0x1423fc6a0, mode)`; returns 0 only if that
-  returns null.
+- **`0x1423fab40`** (finalize) calls `0x1423fa1b0(new_obj, cmp=0x1423fc6a0, mode)`. If that returns a
+  null registry entry, finalize returns `0`. Otherwise finalize reads the backing node pointer from
+  `entry+0x30` and returns the dword at `node+0x10`.
 - **`0x1423fa1b0`** is a registry / hashmap lookup-or-insert on the new session object: bucket count from
   the **numeric** global `0x144842d28` (used as a `div` modulus, **not** a pointer), comparator callback
   `0x1423fc6a0`, resolving via `[new_obj_vtable+0xd8]` (`0x1423fdfa0`) then a secondary lookup
   `0x1423fa100`. Both null-return points **only fail on allocation:** `0x1423fdfa0` allocates `0x60` via
-  `0x141eb9ed0` (null iff alloc fails, else constructs an entry); `0x1423fa100` is the same shape
-  (allocates `0x58`, null only on alloc/`0x1423f7290` failure). So `0x1423fa1b0` (hence finalize) **always
-  succeeds offline barring OOM** — it is not where create dies.
+  `0x141eb9ed0` (null iff alloc fails, else constructs an entry); `0x1423fa100` allocates the backing
+  node and returns null only on allocation / constructor failure.
+- **What the earlier pass missed:** a non-null entry is not enough. `0x1423fa100` stores a per-container
+  id into `node+0x10`, and `0x1423fab40` returns that id to leg B. If the first id consumed outside the
+  game's own match setup is `0`, finalize returns `0`, and leg B takes the cleanup branch even though the
+  registry allocations succeeded. The post-capacity tail chart below is the current model.
 - **Correction:** an earlier pass claimed `0x144842d28` was the **same** online-availability service as the
   item-grey hunt's `0x144842d40` ("merging the two hunts"). Wrong — `0x144842d28` is a numeric
   hash-modulus, merely a `.data` neighbor of `0x144842d40`; there is **no proven link** between the create
@@ -555,16 +555,14 @@ gate-trace create-gate4 REACHED — fields populated (35000/5000/[6,30000,30000,
 drive-create returned false — FailedToCreateSession
 ```
 
-**Root cause: the slot-array capacity is 0.** Leg B's tail store is `mov eax,[rbx+0x24]; cmp
+**First tail blocker in the non-fabricated run: the slot-array capacity is 0.** Leg B's tail store is `mov eax,[rbx+0x24]; cmp
 eax,[rbx+0x20]; jae fail` with `rbx = the NetworkSession` (the array is **embedded on it** at
 `+0x18/+0x20/+0x24`; the `[[NetworkSession+8]+0x48]` written here earlier is a mislabel — that's leg B's
 cleanup return-pool, corrected in "Slot-array allocator charted" below); `cap=0` → `0 >= 0` → fail, so the
 freshly-built (and likely finalized) session object **can't be stored** — the slot array was never
-allocated. It is not OOM, not the gate, not the 4th gate, not the finalize registry. It is precisely what
-a **real match/lobby allocates** (the slot array on the NetworkSession is sized when a multiplayer session
-is actually set up), which is why the unblock is the 2-player drive (see "Paths forward" at the top of
-this section). The considered alternative tail point — the finalize `0x1423fab40` returning 0 — is ruled
-out: that chain is OOM-only (above).
+allocated. Later fabricate and fabricate+peer runs clear this capacity branch but still return false, so
+capacity is necessary but not sufficient. The current next blocker is the finalize-handle gate charted
+below.
 
 **Rig tooling:** autonomous in-world is now solved — `scripts/rig.sh cycle --in-world` (the new
 `enter-world` step) selects "Continue", loads the save, and waits for `in_gameplay` (~33s), so the
@@ -701,19 +699,98 @@ both read `legb-entry … slot-array [+0x20]cap=0 [+0x24]count=0`, `drive-create
 lobby + an accepted P2P session with ~1400 messages flowing left `NetworkSession+0x10` at 0 *and* the
 array at cap 0, so the allocator is tied to the game's **own** matchmaking flow, not generic Steam
 session traffic; (b) with solo-fabricate also failing deeper, the one untested cheap combination was
-**fabricate + peer** (array sized while a real peer/lobby context exists) — run the same day:
+**fabricate + peer** (array sized while a real peer/lobby context exists), run the same day:
 
-**Combo result (2026-07-03, same rig↔Deck pair, fabricate + linked peer) — STILL FAILS; the blocker is
-a POST-STORE reject.** Same procedure with `fabricate_slot_array = true` + `drive_fire_solo = false` on
-both machines: linked, drive fired post-settle, `legb-entry … cap=0` then
-`fabricate-slot-array — sized empty array … capacity(+0x20)=16`, and create **still** `returned false →
-None->FailedToCreateSession`, symmetric on host and joiner. Every charted gate is now clear at the
-moment of failure (leg-A bypassed, reject #1 forced, rejects #2/#3 + gate 4 passed, slot array sized,
-real peer + live lobby present) — so the create dies **after** the tail's store-capacity check, in
-territory past everything charted. The cheap-combination space is exhausted: next is charting that
-post-store tail (hook/trace past the `cmp count,capacity` store in the leg-B vmethod `0x1423f5c00` to
-find the actual reject), with the game's own match setup as the model (protocol reference: vswarte's
-`waygate-server`), or ERSC-style session neutralization as the fallback.
+**Combo result (2026-07-03, same rig↔Deck pair, fabricate + linked peer) still fails; the static read
+below narrows the blocker to the finalize-handle gate.** Same procedure with `fabricate_slot_array =
+true` + `drive_fire_solo = false` on both machines: linked, drive fired post-settle, `legb-entry …
+cap=0`, then `fabricate-slot-array — sized empty array … capacity(+0x20)=16`, and create still
+`returned false → None->FailedToCreateSession`, symmetric on host and joiner. Every previously charted
+gate was clear at the moment of failure (leg-A bypassed, reject #1 forced, rejects #2/#3 and gate 4
+passed, slot array sized, real peer + live lobby present), so the cheap-combination space is exhausted.
+The next confirmation is the finalize-handle probe below, with the game's own match setup as the model
+(protocol reference: vswarte's `waygate-server`), or ERSC-style session neutralization as the fallback.
+
+### Leg B Post-Capacity Tail Charted: Finalize Handle, Not a Later Store Reject
+
+Static re-read of leg B (`0x1423f5c00`, same 2026-06-02 image) corrects the "post-store reject" wording
+above: there is **no reject after a successful slot-array store**. Once the tail executes
+`base[count] = session_obj; count++` at `0x1423f5cc9..0x1423f5ccd`, it jumps straight to unlock and
+returns the value already in `esi`. So if the rig logs `fabricate-slot-array` and the wrapper still gets
+`eax=0`, the decisive branch is one of the two checks that can reach the cleanup block at `0x1423f5cd2`
+**before** the store:
+
+- `0x1423f5cb0` calls finalize helper `0x1423fab40(session_obj, mode)`.
+- `0x1423f5cb5` copies the helper's return to `esi`; `0x1423f5cb7` tests it.
+- `0x1423f5cb9` branches to cleanup if the helper returned `0`.
+- Only if that value is nonzero does leg B run the already-charted capacity check
+  (`0x1423f5cbb..0x1423f5cc1`) and store.
+
+The capacity check is now instrumented and fabricated, so the remaining likely zero producer is
+`0x1423fab40`, not a later post-store call. The helper is not merely "allocation succeeded": it calls
+the generic session-object registry helper `0x1423fa1b0` and returns a dword from the backing node behind
+the registry entry (`entry+0x30 -> node+0x10`). If the registry entry is null, it returns `0`; if the
+entry exists but the node's `+0x10` id is `0`, it also returns `0`, and leg B treats that as create
+failure.
+
+The path that can manufacture a zero id is visible in the registry helper:
+
+- `0x1423fa1b0` creates a registry entry via the session object's `+0xd8` vmethod
+  (`0x1423fdfa0`), then creates/allocates the backing node with `0x1423fa100`.
+- `0x1423fa100` uses a counter at `container+0x48` as the new node id, then increments the counter.
+  Here `container = session_obj+0x58+0x670`; since `session_obj+0x58` is copied from
+  `NetworkSession+0x08` by the session-object constructor (`0x1423fd300`), this counter is
+  `[[NetworkSession+0x08]+0x6b8]`.
+- The node constructor `0x1423f7290` stores that id at `node+0x10`. If the counter starts at `0`, the
+  first node's id is `0`; `0x1423fab40` returns that `0`; leg B jumps to cleanup at `0x1423f5cd2`; the
+  slot-array store never happens even though capacity has been fabricated.
+- If the counter starts at `-1`, `0x1423fa100` first normalizes it to `1`, so the first node id is
+  nonzero. That makes `0x1423f5cb7` pass and the fabricated slot array should let the store succeed.
+
+So the concrete reject site to confirm live is **`0x1423f5cb7` in leg B**, testing the finalize handle
+returned by **`0x1423fab40`**. The likely field behind that zero handle is the registry-node id counter
+at **`[[NetworkSession+0x08]+0x6b8]`** being `0` when create is driven outside the game's own match setup.
+That is distinct from the slot array at `NetworkSession+0x18/+0x20/+0x24`: fabrication clears capacity,
+but it does not seed the registry id space.
+
+**Proposed runtime probe (do not need the rig worker to wire this):** add one more `gate-trace` hook next
+to `legb-entry`/`create-gate4`, then run one fabricate+peer rig cycle. Preferred hook:
+**`0x1423f5cb5`** (right after `call 0x1423fab40`, bytes
+`8B F0 85 C0 74 17 8B 43 24 3B 43 20 73 0F`). In the callback:
+
+- read `rbx` as `NetworkSession`, `rdi` as `session_obj`, and `eax` as the finalize handle before the
+  original `mov esi,eax`;
+- read slot `cap/count` from `NetworkSession+0x20/+0x24`;
+- read `sub = *(session_obj+0x58)` and, if non-null, `post_finalize_next_id = *(sub+0x6b8)` after the
+  helper returns;
+- log one line like
+  `session-probe: gate-trace legb-finalize handle=<eax> post-next-id=<post_finalize_next_id> cap=<cap> count=<count>`.
+
+That `post-next-id` value is post-consumption: if the failing id was created from a pre-increment counter
+of `0`, the post-finalize read is expected to show `1`. For direct proof of the consumed id, add a second
+temporary hook inside `0x1423fa100` around the node construction path and log the id passed into
+`0x1423f7290` / written to `node+0x10`.
+
+If the hook installer dislikes relocating that short in-function branch window, use the cleanup target
+**`0x1423f5cd2`** instead (bytes `48 8B 07 48 8B CF FF 50 10 48 8B 43 08`). That hook fires only on
+failure, but it still distinguishes the cause: `esi==0` means the finalize handle failed at
+`0x1423f5cb7`; `esi!=0` means finalize passed and the cleanup came from the capacity branch.
+
+Expected outcomes:
+
+- `handle=0`, `post-next-id=1`, `cap=16`, `count=0` with fabricate armed confirms the likely zero-id
+  model by inference: cleanup is entered from `0x1423f5cb7`, before the store, after consuming id `0`.
+- `handle!=0`, `count>=cap` would mean the capacity fabrication did not land on the exact object leg B
+  uses, or the count changed before the tail check.
+- `handle!=0`, `count<cap`, followed by wrapper `false` would contradict this static chart, because the
+  only path after the store returns that nonzero handle; in that case hook `0x140cb2083` (the caller's
+  `mov [CSSessionManager+0x24],eax`) and log the actual leg-B return in the wrapper.
+
+Re-derive after a game update: find leg B by the `NetworkSession` vtable slot `[+0x08]`, then locate the
+unique tail region around the finalize helper call, the finalize-result test, the
+`NetworkSession+0x24`/`+0x20` capacity check, and the slot-count increment. The cleanup target is the
+block that calls `session_obj->vtable[0x10]`, returns the session object to
+`[NetworkSession+0x08]+0x48`, then zeroes `esi`.
 
 ### Tooling / re-derivation
 
