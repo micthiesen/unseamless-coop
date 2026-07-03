@@ -725,9 +725,21 @@ The next confirmation is the finalize-handle probe below, with the game's own ma
 > (`+0x3b0=35000`, `+0x3b4=5000`, helper `[6,30000,…]` all nonzero), should **pass** its charted veto.
 > **New model:** the real reject is a branch **between `create-gate4` and the finalize call** —
 > either `create-gate4` returns false for a reason beyond the two charted fields, or a separate check
-> right after it sends leg B to an early failure exit. Next probe: read `create-gate4`'s **return
-> value** (hook its exit) and chart the branch immediately after it. The static chart below is kept as
-> the (partial, now-superseded) tail anatomy, not the failure explanation.
+> right after it sends leg B to an early failure exit. The static chart below is kept as the (partial,
+> now-superseded) tail anatomy, not the failure explanation.
+>
+> **Static follow-up (2026-07-03, same image) — the veto is create-gate4's HELPER `0x1423faf60`.**
+> Disassembling leg B: the branch that gates the finalize tail is `0x1423f5c8f: call [rdx+8]`
+> (= `create-gate4` `0x1423fd7a0`) → `0x1423f5c92: test al,al` → `0x1423f5c94: jne 0x1423f5cab`. The
+> finalize path (`0x1423f5cab`, incl. `0x1423f5cb5`/finhandle) is reached **only when gate4 returns
+> nonzero**. finhandle never fired ⇒ **gate4 returned 0**. Disassembling gate4 (`0x1423fd7a0`): it
+> early-returns false only when **both** `[rcx+0x3b0]==0 && [rcx+0x3b4]==0`; ours are `35000`/`5000`,
+> so it skips that and `call 0x1423faf60` (the helper) → `test al,al; je ret-false`. So the helper
+> `0x1423faf60` is returning 0 (or gate4's tail past `0x1423fd7cc` vetoes). The helper's `+0x68..0x78`
+> fields (`[6,30000,…]`, all nonzero) are **not** the whole story — it fails for a reason past them.
+> **Next: chart `0x1423faf60` (and gate4's tail after `0x1423fd7cc`) to the actual return-0 condition,
+> then a runtime probe reading gate4's + the helper's return.** This is the true rung-3 create blocker,
+> not the finalize handle.
 
 Static re-read of leg B (`0x1423f5c00`, same 2026-06-02 image) corrects the "post-store reject" wording
 above: there is **no reject after a successful slot-array store**. Once the tail executes
