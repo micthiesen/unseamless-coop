@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# worker-new [--solo] <name> [guidance... | -]
+# worker-new [--solo] [--harness claude|codex] [--model <id>] <name> [guidance... | -]
 #
 # Materialize a worker: a rift copy-on-write workspace on its own branch, with a
 # Claude Code session running in a detached tmux session (popped open in
@@ -19,6 +19,20 @@
 # overlay, and has no assignment file (guidance, if given, is its first prompt directly).
 #   worker-new --solo scratch
 #   worker-new --solo scratch "Start by refactoring the config loader."
+#
+# --harness: spawn THIS worker on a specific CLI harness instead of the fleet
+# default (scripts/fleet/harness). Opt-in only — with no flag, behavior is
+# exactly as before. The spawn harness is pinned in the worker's .harness
+# marker, so revive/msg/ls keep reaching it correctly in a mixed fleet.
+#   worker-new --harness codex port-scan "..."
+#
+# --model: launch the worker's session on a specific model instead of the
+# harness default. Passed through UNVALIDATED (claude: `--model`, still a normal
+# interactive session; codex: `-m`) — any alias/ID the CLI accepts works. List
+# known-good IDs with `scripts/fleet/models`. Pinned in a .model marker so a
+# worker-open revive keeps the same model.
+#   worker-new --model haiku boilerplate "..."
+#   worker-new --harness codex --model gpt-5.4-mini sweep "..."
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,23 +49,49 @@ else
   fleet_color_name() { :; }
 fi
 
-# Which CLI harness to spawn (claude, the default, or codex) -- one file governs
-# the whole fleet; see _harness and `scripts/fleet/harness`.
+# Which CLI harness to spawn: the fleet default (see _harness and
+# `scripts/fleet/harness`), unless --harness overrides it for this one worker.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
 harness="$(fleet_harness)"
 
-# --solo (user-driven) is an optional LEADING flag; everything after is the normal
-# <name> [guidance...].
+usage() {
+  echo "usage: worker-new [--solo] [--harness claude|codex] [--model <id>] <name> [guidance... | -]" >&2
+  echo "       ('-' reads guidance from stdin; model IDs: scripts/fleet/models)" >&2
+  exit 2
+}
+
+# Optional LEADING flags, any order; everything after is the normal <name> [guidance...].
+#   --solo               user-driven worker (see header)
+#   --harness <h>        per-worker harness override (claude|codex)
+#   --model <id>         model for the session, passed through to the harness CLI
 solo=0
-if [ "${1:-}" = "--solo" ]; then
-  solo=1; shift
-fi
+model=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --solo) solo=1; shift ;;
+    --harness)
+      case "${2:-}" in
+        claude|codex) harness="$2" ;;
+        *) echo "worker-new: --harness must be 'claude' or 'codex', got '${2:-}'" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
+    --model)
+      # Reject a flag-like value: `--model --solo x` would otherwise swallow the
+      # flag as the model ID and silently drop it (no model starts with '-').
+      case "${2:-}" in
+        ""|-*) echo "worker-new: --model needs a value (see scripts/fleet/models)" >&2; exit 2 ;;
+      esac
+      model="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    -*) echo "worker-new: unknown flag '$1'" >&2; usage ;;
+    *) break ;;
+  esac
+done
 
 name="${1:-}"; shift || true
 if [ -z "$name" ]; then
-  echo "usage: worker-new [--solo] <name> [guidance... | -]   ('-' reads guidance from stdin)" >&2
-  exit 2
+  usage
 fi
 
 # Role overlay (injected via --append-system-prompt-file) + the .role marker below:
@@ -140,11 +180,19 @@ fi
 # revive with the right overlay and worker-ls/worker-prune tell solo from orchestrator.
 mkdir -p "$FLEET_DIR/assignments"
 if [ "$solo" -eq 1 ]; then echo solo; else echo worker; fi >"$FLEET_DIR/assignments/$name.role"
-# Harness marker, same idea: pin the harness this worker was SPAWNED with, so a
-# global toggle between spawn and revive can't make worker-open revive a claude
-# worker with `codex resume` (which would find no codex session in the workspace)
-# or vice versa. worker-rm/worker-prune clean it with the .role marker.
+# Harness marker, same idea: pin the harness this worker was SPAWNED with (fleet
+# default or a --harness override), so a global toggle between spawn and revive
+# can't make worker-open revive a claude worker with `codex resume` (which would
+# find no codex session in the workspace) or vice versa — and so msg/worker-ls
+# pick the right transport for this worker in a mixed fleet.
+# worker-rm/worker-prune clean it with the .role marker.
 echo "$harness" >"$FLEET_DIR/assignments/$name.harness"
+# Model marker (only when --model was given): lets worker-open revive the session
+# on the same model instead of silently falling back to the harness default.
+rm -f "$FLEET_DIR/assignments/$name.model"
+if [ -n "$model" ]; then
+  printf '%s\n' "$model" >"$FLEET_DIR/assignments/$name.model"
+fi
 
 # The ROLE reaches the two harnesses differently. claude: the overlay file is a
 # launch flag (--append-system-prompt-file, below), so the seed only points at the
@@ -192,7 +240,7 @@ else
   fi
 fi
 
-echo "==> launching $harness in tmux session $sess"
+echo "==> launching $harness${model:+ (model $model)} in tmux session $sess"
 if [ ! -f "$ws/$overlay_rel" ]; then
   echo "worker-new: $ws/$overlay_rel missing -- the worker role overlay won't load." >&2
   echo "            Commit $overlay_rel so rift copies it into workspaces, then retry." >&2
@@ -203,6 +251,15 @@ fi
 # session launches waiting for the user's first turn.
 seed_args=()
 if [ -n "$seed" ]; then seed_args=("$seed"); fi
+# Optional model override (--model), passed through to the harness CLI verbatim:
+# `claude --model <id>` / `codex -m <id>`. Both are plain launch flags on a normal
+# INTERACTIVE session (not -p/exec), so the worker stays conversational.
+claude_model_args=()
+codex_model_args=()
+if [ -n "$model" ]; then
+  claude_model_args=(--model "$model")
+  codex_model_args=(-m "$model")
+fi
 # tmux runs the command directly (no shell), so no quoting hazard on the seed.
 # The seed stays a LAUNCH ARG so it can never be dropped; coloring (below) is
 # layered on separately and is purely best-effort.
@@ -222,7 +279,8 @@ if [ "$harness" = "codex" ]; then
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     codex -c "projects.\"$ws\".trust_level=\"trusted\"" \
     -c "sandbox_mode=\"workspace-write\"" \
-    -c "sandbox_workspace_write.network_access=true" "${seed_args[@]}"
+    -c "sandbox_workspace_write.network_access=true" \
+    "${codex_model_args[@]}" "${seed_args[@]}"
 else
   # claude:
   # `--name` is a display badge only (prompt box / window title / resume picker); it
@@ -238,7 +296,8 @@ else
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
     claude --name "usc-$name" \
-    --append-system-prompt-file "$ws/$overlay_rel" "${seed_args[@]}"
+    --append-system-prompt-file "$ws/$overlay_rel" \
+    "${claude_model_args[@]}" "${seed_args[@]}"
 fi
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then

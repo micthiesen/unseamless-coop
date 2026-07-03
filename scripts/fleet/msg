@@ -15,9 +15,13 @@
 #   msg usc-orch                 "[worker:auth] need a rig run for the save hook"
 #   msg usc-worker-auth          "[orchestrator] rig says the hook fired; proceed"
 #
-# Under the codex harness (scripts/fleet/harness) the transport is different: the
-# Codex TUI is a Rust binary with no inspector socket, so delivery is a tmux
-# bracketed paste into the target pane + Enter (see the codex branch below).
+# For a codex target the transport is different: the Codex TUI is a Rust binary
+# with no inspector socket, so delivery is a tmux bracketed paste into the target
+# pane + Enter (see the codex branch below). Which transport applies is resolved
+# PER TARGET (a mixed fleet can have codex workers under a claude default and
+# vice versa): a worker's own .harness marker decides for usc-worker-*, the
+# fleet default (scripts/fleet/harness) for usc-orch — the orchestrator always
+# runs the default.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +42,17 @@ fi
 if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 
-# Codex harness: deliver by tmux bracketed paste + Enter. Verified live: the
+# Resolve the TARGET's harness: a worker's .harness marker (spawn pin, global
+# fallback) so a per-worker --harness override or a mid-fleet default toggle
+# can't route the message over the wrong transport; usc-orch is always the
+# fleet default (the orchestrator has no override).
+if [[ "$sess" =~ ^usc-worker-(.+)$ ]]; then
+  target_harness="$(fleet_worker_harness "${BASH_REMATCH[1]}")"
+else
+  target_harness="$(fleet_harness)"
+fi
+
+# Codex target: deliver by tmux bracketed paste + Enter. Verified live: the
 # paste lands in the composer and Enter submits it as a normal user turn, and a
 # message sent while the target is mid-turn queues and runs when the turn ends
 # (same as typing). Two caveats vs the claude injector: a draft sitting in the
@@ -46,7 +60,7 @@ if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 # the combined text), and a TUI still booting can drop the paste -- if a worker
 # was spawned seconds ago, retry shortly. Multi-line text is fine: bracketed
 # paste (-p) keeps newlines literal in the composer.
-if [ "$(fleet_harness)" = "codex" ]; then
+if [ "$target_harness" = "codex" ]; then
   if ! tmux has-session -t "$sess" 2>/dev/null; then
     echo "msg: $sess is offline (no tmux session); cannot deliver" >&2
     exit 1

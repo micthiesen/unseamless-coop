@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# models [claude|codex]
+#
+# List known-good model IDs for `worker-new --model`, per harness (both with no
+# argument). LOCAL data only, no API calls, no hand-maintained master list:
+#
+#   claude: the alias names are the CLI's stable interface (hardcoded here, they
+#           change ~never); the full IDs are grepped out of the installed claude
+#           binary itself -- quoted "claude-<family>-<ver>" strings, newest
+#           version per family -- so they track whatever binary is installed.
+#   codex:  slugs from ~/.codex/models_cache.json, the same local cache the TUI's
+#           /model picker reads (visibility=="list" filters out internal models).
+#           Hardcoded fallback if the cache/jq is missing.
+#
+# The list is INFORMATIONAL: worker-new passes --model through unvalidated, so
+# any alias or full ID the harness CLI accepts works even if it isn't printed
+# here (e.g. a dated snapshot ID, or a model newer than the local binary/cache).
+set -euo pipefail
+
+want="${1:-all}"
+case "$want" in
+  all|claude|codex) ;;
+  *) echo "usage: models [claude|codex]   (no argument: both)" >&2; exit 2 ;;
+esac
+
+list_claude() {
+  echo "claude (aliases -- resolve to the latest model of each family):"
+  printf '  %s\n' fable opus sonnet haiku
+  # "unfiltered": unlike the codex cache (which has a visibility field), the
+  # binary embeds every model ID it knows about, selectable or not -- e.g.
+  # claude-mythos-5 appears here but is approved-orgs-only and rejected at launch.
+  echo "claude (full IDs, embedded in the installed binary -- unfiltered, some may be gated):"
+  # Re-derive: quoted model-ID strings embedded in the claude binary. The
+  # {1,2}-digit caps on both version parts drop dated snapshots
+  # (claude-opus-4-20250514, claude-code-20250219) so `sort -V` can't rank a
+  # date above a real version; awk keeps the last (= newest, post-sort) entry
+  # per family. Falls back to a static list (of 2026-07-03) if the binary moved
+  # or the strings change shape.
+  local bin ids=""
+  bin="$(command -v claude || true)"
+  if [ -n "$bin" ]; then
+    ids="$(grep -aoE '"claude-[a-z]+-[0-9]{1,2}(-[0-9]{1,2})?"' "$bin" 2>/dev/null \
+      | tr -d '"' | sort -uV \
+      | awk -F- '{latest[$2]=$0} END{for (f in latest) print latest[f]}' \
+      | sort || true)"
+  fi
+  if [ -z "$ids" ]; then
+    # Empty covers binary missing/moved AND embedded strings changing shape --
+    # either way there's no live list, so say that rather than guessing which.
+    ids="$(printf '%s\n' claude-fable-5 claude-haiku-4-5 claude-opus-4-8 claude-sonnet-5)"
+    echo "  (no IDs derivable from the claude binary; static fallback of 2026-07-03)"
+  fi
+  awk '{print "  " $0}' <<<"$ids"
+}
+
+list_codex() {
+  echo "codex (slugs, from ~/.codex/models_cache.json):"
+  local cache="$HOME/.codex/models_cache.json" ids=""
+  if command -v jq >/dev/null 2>&1 && [ -r "$cache" ]; then
+    ids="$(jq -r '.models[] | select(.visibility == "list") | .slug' "$cache" 2>/dev/null || true)"
+  fi
+  if [ -z "$ids" ]; then
+    # Empty covers cache/jq missing, JSON not parsing, and nothing being
+    # visibility=="list" -- all collapse to "no live list", so say that.
+    ids="$(printf '%s\n' gpt-5.5 gpt-5.4 gpt-5.4-mini)"
+    echo "  (no list from ~/.codex/models_cache.json; static fallback of 2026-07-03)"
+  fi
+  awk '{print "  " $0}' <<<"$ids"
+}
+
+case "$want" in
+  claude) list_claude ;;
+  codex) list_codex ;;
+  all) list_claude; echo; list_codex ;;
+esac

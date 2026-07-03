@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # harness [claude|codex|toggle]
 #
-# Print or switch the CLI harness the fleet runs on: Claude Code ("claude", the
-# default) or Codex ("codex"). With no argument, prints the current harness.
+# Print or switch the DEFAULT CLI harness fleet sessions launch with: Claude Code
+# ("claude", the default) or Codex ("codex"). With no argument, prints the
+# current default. Individual workers can override it at spawn
+# (`worker-new --harness <claude|codex>`); the orchestrator always runs this
+# default.
 #
 # This is the *fleet/agent* harness (which CLI worker-new/orch-start/msg drive),
 # not the co-op test harness (scripts/harness.sh) -- unrelated tools that share a
 # word. State lives at $UNSEAMLESS_FLEET_DIR/harness (see _harness for why it's
 # in the shared fleet dir and not the repo). Sessions already running keep the
-# harness they launched with; toggle between fleets, not mid-fleet.
+# harness they launched with (each worker's spawn harness is pinned in its
+# .harness marker, so msg/revive keep working across a toggle).
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

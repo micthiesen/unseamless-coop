@@ -35,16 +35,20 @@ the aggression goes to workers for chunks, subagents only for support.)
 
 All tooling is in `scripts/fleet/`. tmux sessions are `usc-orch` (you) and `usc-worker-<name>`.
 
-The fleet runs all-Claude-Code or all-Codex (Michael toggles which; the scripts handle every
-difference). Only two things change for you under codex: **`msg` is a tmux paste** — still a live
-user turn that queues if the target is mid-turn, but it does not preserve a draft in the target's
-composer, and a paste into a just-spawned (still booting) TUI can be dropped, so retry if a fresh
-worker doesn't react; and **`/color` and `/rc` don't exist** — skip them.
+The fleet has a **default harness** — Claude Code or Codex (Michael toggles it with
+`scripts/fleet/harness`; the scripts handle every difference). You always run the default and never
+change it; individual workers can be spawned off-default when Michael asks (see
+[Harness and model overrides](#harness-and-model-overrides-opt-in-only)), and everything downstream
+(`msg` transport, revive, `worker-ls`) follows each worker's own spawn harness automatically. Only
+two things change for you when a session is **codex**: **`msg` to it is a tmux paste** — still a
+live user turn that queues if the target is mid-turn, but it does not preserve a draft in the
+target's composer, and a paste into a just-spawned (still booting) TUI can be dropped, so retry if a
+fresh worker doesn't react; and **`/color` and `/rc` don't exist** — skip them for that worker.
 
 ## Spawn A Worker
 
 ```
-scripts/fleet/worker-new <name> "<guidance>"
+scripts/fleet/worker-new [--harness claude|codex] [--model <id>] <name> "<guidance>"
 ```
 
 `<name>` is kebab-case and becomes the workspace, the branch `worker/<name>`, and the tmux session
@@ -83,6 +87,25 @@ prompt tells it to read first.
 Keep workers in genuinely independent lanes when you can. They *may* touch the same files (that's
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
+
+### Harness And Model Overrides (Opt-In Only)
+
+By default a worker spawns on the fleet's default harness with that harness's default model.
+**Never deviate on your own initiative** — these flags exist for when Michael explicitly asks:
+
+- **"Do this one in codex / in claude code"** → `worker-new --harness codex <name> …` (or
+  `--harness claude`). The spawn harness is pinned per worker, so a mixed fleet just works: `msg`
+  picks the right transport, `worker-open` revives with the right CLI, and `worker-ls` shows a
+  HARNESS column.
+- **"Use haiku / gpt-5.4-mini for this"** → `worker-new --model <id> <name> …`. The value is passed
+  through unvalidated (`claude --model` / `codex -m` — still a normal interactive session, never
+  print/exec mode), and revives keep it. A model implies its harness: a claude alias or `claude-*`
+  ID (`haiku`, `claude-sonnet-5`) needs the claude harness, a `gpt-*` slug needs codex — add
+  `--harness` too when that isn't the fleet default.
+- **`scripts/fleet/models`** lists known-good IDs for both harnesses (from local data — the claude
+  binary and codex's model cache; anything the CLI accepts works even if unlisted).
+
+The orchestrator itself is not configurable: you run the fleet default, full stop.
 
 ### Solo Workers
 

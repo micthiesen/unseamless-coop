@@ -42,23 +42,33 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
 
 ## Harness (Claude Code Or Codex)
 
-The fleet runs on either **Claude Code** (`claude`, the default) or **Codex** (`codex`) — same
-scripts, same lifecycle, same roles. Which one is spawned is a single machine-global state file,
+The fleet runs on **Claude Code** (`claude`, the default) or **Codex** (`codex`) — same scripts,
+same lifecycle, same roles. The **default** is a single machine-global state file,
 `$UNSEAMLESS_FLEET_DIR/harness` (shared fleet dir, outside every workspace, for the same
 no-COW-divergence reason as the `.role` markers; missing file == claude):
 
 ```
-scripts/fleet/harness              # print current: claude | codex
+scripts/fleet/harness              # print current default: claude | codex
 scripts/fleet/harness codex        # set
 scripts/fleet/harness toggle       # flip (also the unseamless-toggle-harness .desktop item)
 ```
 
 Every set/toggle fires a desktop notification with the new value (the .desktop item runs with no
-terminal, so that's its feedback). **The fleet is all-one-harness**: never mix, and sessions
-already running keep the harness they launched with — toggle between fleets, not mid-fleet. As a
-backstop, `worker-new` pins each worker's spawn harness in `assignments/<name>.harness` and
-`worker-open` revives with *that* (a global toggle can't make it `codex resume` a claude worker's
-workspace, which would have no codex session to continue).
+terminal, so that's its feedback). The **orchestrator always runs the default** (it has no
+override), and sessions already running keep the harness they launched with.
+
+**Per-worker overrides (opt-in).** A single worker can be spawned off-default with
+`worker-new --harness <claude|codex>`, and/or on a specific model with `worker-new --model <id>`
+(passed through unvalidated — `claude --model` / `codex -m`, both plain flags on a normal
+interactive session; `scripts/fleet/models` lists known-good IDs from local data only). What makes
+the mixed fleet safe is that **everything downstream resolves per worker, not globally**:
+`worker-new` pins each worker's spawn harness in `assignments/<name>.harness` (and its model, if
+overridden, in `assignments/<name>.model`), and `msg` (transport choice), `worker-open` (revive
+CLI), and `worker-ls` (HARNESS column, SOCK logic) all read the harness marker via
+`fleet_worker_harness`, falling back to the global default only for markerless pre-marker spawns
+(`worker-open` additionally re-applies the separate `.model` pin on revive).
+The same pinning is why a global toggle can't strand running workers (it can't make `worker-open`
+`codex resume` a claude worker's workspace, which would have no codex session to continue).
 
 What differs per harness (all encapsulated in the scripts; verified end to end with a live codex
 ping worker, both message directions):
@@ -112,8 +122,9 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 ~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
   ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
   ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
-  ├─ assignments/<name>.harness             harness marker: what the worker was SPAWNED with (revive pin)
-  ├─ harness                                fleet-wide harness: "claude" (default) | "codex" (see Harness)
+  ├─ assignments/<name>.harness             harness marker: what the worker was SPAWNED with (msg/revive/ls pin)
+  ├─ assignments/<name>.model               model marker: --model override at spawn, if any (revive pin)
+  ├─ harness                                fleet DEFAULT harness: "claude" (default) | "codex" (see Harness)
   └─ insp/<session>.sock                    per-session inspector socket (messaging endpoint, 0700 dir)
 ```
 
@@ -124,9 +135,11 @@ access to every worker.
 
 ## Messaging
 
-*(This section describes the **claude** transport. Under the **codex** harness, `msg` instead does a
-tmux bracketed paste + Enter into the target pane — see Harness above for the differences. The
-conventions — source prefixes, `usc-*`-only targets, no interrupting a busy session — apply to both.)*
+*(This section describes the **claude** transport. For a **codex** target, `msg` instead does a
+tmux bracketed paste + Enter into the target pane — see Harness above for the differences. `msg`
+picks the transport per target: the worker's `.harness` marker for `usc-worker-*`, the fleet
+default for `usc-orch`. The conventions — source prefixes, `usc-*`-only targets, no interrupting a
+busy session — apply to both.)*
 
 The claude transport is **direct in-process injection through each session's inspector socket** — not
 typing into the target's TTY, and not a polled mailbox. Every fleet session launches under
@@ -272,17 +285,18 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 
 | Script | Does |
 |--------|------|
-| `worker-new [--solo] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write a `.role` marker, launch `claude` in `tmux usc-worker-<name>` under `BUN_INSPECT` with the worker overlay, then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file + seeds the session to read it. `--solo`: user-driven (`worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting. |
+| `worker-new [--solo] [--harness claude\|codex] [--model <id>] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write `.role`/`.harness` (and `.model`, if overridden) markers, launch the harness CLI in `tmux usc-worker-<name>` (claude: under `BUN_INSPECT` with the worker overlay), then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file + seeds the session to read it. `--solo`: user-driven (`worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting. `--harness`/`--model`: opt-in per-worker overrides of the fleet default (see Harness). |
 | `msg <session> "<text>"` | deliver the message as a live **user turn** in the target via its inspector socket (see Messaging): instant, queues if the target is mid-turn, preserves any draft in its box. Target restricted to `usc-*` sessions; fails loudly if the target has no live socket. |
 | `_inject` | internal: the one complex piece. Connects to a session's inspector socket, walks the live React tree to the prompt component, and calls `onSubmit` to submit a message (or a `/slash` command), saving+restoring the draft. `--selftest <session>` checks the structural anchors and exits nonzero if a Claude Code update moved them. |
 | `_color-inject <session> <color>` | internal, best-effort, detached: waits for the session's socket + prompt to be ready, then sends `/color <name>` through `_inject`. |
-| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. A **ROLE** column (`worker`/`solo`/`-`, from the `.role` marker) shows which are solo. |
-| `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path). |
-| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the registry (assignment + `.role` marker + inspector socket). Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
+| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. A **ROLE** column (`worker`/`solo`/`-`, from the `.role` marker) shows which are solo; a **HARNESS** column (from the `.harness` marker, default fallback) shows each worker's CLI in a mixed fleet. |
+| `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path) / `codex resume --last`, per the worker's `.harness` marker, re-applying its `.model` pin if one was set. |
+| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the registry (assignment + `.role`/`.harness`/`.model` markers + inspector socket). Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
 | `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
-| `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry (assignment + `.role` + inspector socket), for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
+| `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry (assignment + markers + inspector socket), for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
-| `harness [claude\|codex\|toggle]` | print or switch the CLI harness the fleet spawns (see Harness above). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
+| `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
+| `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
@@ -344,6 +358,9 @@ codex branches of spawn/revive/msg/ls, the `AGENTS.md` + `.codex/skills` symlink
 and was verified end to end with a live codex ping worker: spawn with role+assignment seed, trusted
 launch with no dialog, `worker-open` revive via `codex resume --last`, and `msg` delivery in both
 directions (including the sandbox `network_access=true` fix that makes a worker's own `msg` work).
+Per-worker overrides (`worker-new --harness`/`--model`, the `.model` marker, per-target `msg`
+transport resolution via `fleet_worker_harness`, the `models` lister) landed 2026-07-03, turning
+the all-one-harness rule into a default-plus-opt-outs model.
 
 Exercised end to end: a live ping worker confirmed spawn, the seeded prompt auto-submitting, the
 worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown.

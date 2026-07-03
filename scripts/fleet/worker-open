@@ -22,13 +22,11 @@ else
   fleet_color_name() { :; }
 fi
 
-# Which CLI harness to revive with: prefer the worker's own .harness marker (what
-# it was SPAWNED with -- reviving a claude worker with codex would find no codex
-# session in the workspace, and vice versa), falling back to the global setting
-# for markerless workers (pre-marker spawns). See _harness.
+# Which CLI harness to revive with: the worker's own spawn harness (its .harness
+# marker, global fallback -- reviving a claude worker with codex would find no
+# codex session in the workspace, and vice versa). See _harness.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
-harness="$(fleet_harness)"
 
 name="${1:-}"
 if [ -z "$name" ]; then
@@ -67,8 +65,17 @@ elif [ -d "$ws" ]; then
   if [ "$role" = "solo" ]; then overlay_rel="docs/roles/worker-solo.md"; fi
   # The worker's own spawn harness wins over the current global setting (see the
   # sourcing comment above); an absent/garbage marker keeps the global fallback.
-  h_marker="$(cat "$FLEET_DIR/assignments/$name.harness" 2>/dev/null || true)"
-  case "$h_marker" in claude|codex) harness="$h_marker" ;; esac
+  harness="$(fleet_worker_harness "$name")"
+  # Re-apply the worker's model pin (--model at spawn), if any: the model is a
+  # launch-time setting, not conversation state, so a bare revive would silently
+  # fall back to the harness default. Same pass-through flags worker-new used.
+  model="$(cat "$FLEET_DIR/assignments/$name.model" 2>/dev/null || true)"
+  claude_model_args=()
+  codex_model_args=()
+  if [ -n "$model" ]; then
+    claude_model_args=(--model "$model")
+    codex_model_args=(-m "$model")
+  fi
   if [ "$harness" = "codex" ]; then
     echo "$sess is dead; reviving the $role worker in $ws (codex resume --last)."
     # `codex resume` cwd-filters by default, so --last inside the workspace
@@ -82,7 +89,8 @@ elif [ -d "$ws" ]; then
       env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
       codex resume --last -c "projects.\"$ws\".trust_level=\"trusted\"" \
       -c "sandbox_mode=\"workspace-write\"" \
-      -c "sandbox_workspace_write.network_access=true"
+      -c "sandbox_workspace_write.network_access=true" \
+      "${codex_model_args[@]}"
     pop_window
     exit 0
   fi
@@ -108,7 +116,8 @@ elif [ -d "$ws" ]; then
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-    claude -c --append-system-prompt-file "$ws/$overlay_rel"
+    claude -c --append-system-prompt-file "$ws/$overlay_rel" \
+    "${claude_model_args[@]}"
   pop_window
   # The revived instance is a fresh client, so its prompt-bar color was lost
   # (/color is per-session, never persisted) -- re-apply the worker's stable

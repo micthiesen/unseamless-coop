@@ -1,19 +1,27 @@
-# _harness -- which CLI harness the fleet runs on: "claude" (default) or "codex".
-# Sourced (not executed) by every fleet script that spawns, revives, or messages
-# a session.
+# _harness -- which CLI harness fleet sessions run on: "claude" (default) or
+# "codex". Sourced (not executed) by every fleet script that spawns, revives, or
+# messages a session.
 #
-# The state is ONE file in the shared fleet dir ($UNSEAMLESS_FLEET_DIR/harness,
-# OUTSIDE every rift workspace, for the same reason as the .role markers: an
-# in-repo file would be COW-copied into workspaces and go stale on toggle).
-# Missing or invalid file == claude. Switch with `scripts/fleet/harness` (or the
-# unseamless-toggle-harness .desktop item). The fleet is all-one-harness: never
-# mix, and sessions already running keep the harness they launched with -- so
-# toggle between fleets, not mid-fleet.
+# Two layers:
+#   - The fleet DEFAULT is ONE file in the shared fleet dir
+#     ($UNSEAMLESS_FLEET_DIR/harness, OUTSIDE every rift workspace, for the same
+#     reason as the .role markers: an in-repo file would be COW-copied into
+#     workspaces and go stale on toggle). Missing or invalid file == claude.
+#     Switch with `scripts/fleet/harness` (or the unseamless-toggle-harness
+#     .desktop item). The orchestrator always runs the default.
+#   - A PER-WORKER override: `worker-new --harness <claude|codex>` spawns that
+#     one worker on the named harness. Every spawn (overridden or not) pins its
+#     harness in assignments/<name>.harness, and anything that later talks to a
+#     specific worker (worker-open revive, msg transport, worker-ls) resolves
+#     through that marker via fleet_worker_harness -- so a mixed fleet, or a
+#     default toggled mid-fleet, still reaches each worker the way it was
+#     actually launched.
 
 fleet_harness_file() {
   echo "${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}/harness"
 }
 
+# The fleet-wide default (what orch-start and a flagless worker-new launch).
 fleet_harness() {
   local f h=""
   f="$(fleet_harness_file)"
@@ -21,5 +29,16 @@ fleet_harness() {
   case "$h" in
     codex) echo codex ;;
     *) echo claude ;;
+  esac
+}
+
+# The harness a specific WORKER was spawned with: its .harness marker, falling
+# back to the fleet default for markerless workers (pre-marker spawns).
+fleet_worker_harness() {  # <name>
+  local m=""
+  m="$(cat "${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}/assignments/$1.harness" 2>/dev/null | tr -d '[:space:]')" || true
+  case "$m" in
+    claude|codex) echo "$m" ;;
+    *) fleet_harness ;;
   esac
 }

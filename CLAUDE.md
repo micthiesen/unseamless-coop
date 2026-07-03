@@ -174,10 +174,12 @@ The rig is single (one game install, one `unseamless-coop/` config+log dir, one 
 rig/RE/validation serializes through the orchestrator. This is the structured form of the
 concurrent-sessions guidance above.
 
-**The fleet runs on either Claude Code or Codex** (Michael toggles which; all sessions one
-harness). Codex reads the same repo config through tracked symlinks — `AGENTS.md -> CLAUDE.md` and
-`.codex/skills -> .claude/skills` — so edit `CLAUDE.md` and `.claude/skills/` once and both
-harnesses see it; never fork per-harness copies.
+**The fleet runs on either Claude Code or Codex** (Michael toggles the default; the orchestrator
+always runs it, and individual workers can be spawned on the other harness or a specific model via
+`worker-new --harness`/`--model` when he asks — see the `fleet` skill). Codex reads the same repo
+config through tracked symlinks — `AGENTS.md -> CLAUDE.md` and `.codex/skills -> .claude/skills` —
+so edit `CLAUDE.md` and `.claude/skills/` once and both harnesses see it; never fork per-harness
+copies.
 
 ## Docs & naming
 
