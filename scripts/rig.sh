@@ -75,7 +75,7 @@ RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.yd
 # the per-press desktop toasts (RIG_DISMISS_NOTIFY=1): watch when each press fires vs. when a popup
 # actually shows, then raise PRESSES/INTERVAL if popup #3 still slips through, or drop them to go
 # shorter. Set RIG_DISMISS_NOTIFY=0 to silence the toasts once dialed in.
-RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-30}"
+RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-22}"
 RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-0.4}"
 RIG_DISMISS_REFOCUS_EVERY="${RIG_DISMISS_REFOCUS_EVERY:-4}"   # re-focus the game window every Nth press (1 = every press, old behavior)
 RIG_DISMISS_FOCUS_SETTLE="${RIG_DISMISS_FOCUS_SETTLE:-0.25}"  # pause after activating the window before injecting (was a hardcoded 0.5)
@@ -1035,7 +1035,7 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          so only run this on initial apply or when you want to reset/refresh it.
                          Game must be closed.
   dismiss [N]            Click through the startup popups (offline-mode / connection-error) by
-                         injecting N confirm presses (default 30, RIG_DISMISS_PRESSES) into the focused game window via
+                         injecting N confirm presses (default 22, RIG_DISMISS_PRESSES) into the focused game window via
                          ydotool, re-focusing the window periodically. Run if a popup is still up.
   enter-world [secs]     From the main menu, select "Continue" and wait (default 150s) until the log
                          reports in_gameplay = true. Also 'cycle --in-world' does this after launch.
