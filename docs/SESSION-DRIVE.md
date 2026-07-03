@@ -673,6 +673,21 @@ the teardown tradeoff (the game may free a foreign pointer at disconnect) is acc
 - `drive-create returned true — lobby_state now Host` ⇒ **fabrication is sufficient**: a sized slot array is the last thing solo create needs, and we can drive to `Host` with no second machine (huge — unblocks the create leg of rung 3 solo).
 - `drive-create returned false … FailedToCreateSession` (with the fabricate line present) ⇒ the slot array is necessary but not sufficient; the finished object needs more real-session context. That result argues for the 2-player drive (path 1) and against fabrication as a shortcut — either way the log says which.
 
+**Rig result (2026-07-03, solo, in-world) — NECESSARY BUT NOT SUFFICIENT.** Ran the full recipe. The
+solo drive fired (`drive-create armed … — solo (fabricate_slot_array)`), reject #1 was forced
+(`NetworkSession+0x10` 0→1), and leg B was reached with `cap=0 count=0`; fabrication then sized the array
+in place (`fabricate-slot-array — sized empty array … base(+0x18)=… capacity(+0x20)=16 count(+0x24)=0`),
+so leg B's tail `cmp count,capacity` can now store the session. **But create still returned
+`FailedToCreateSession`** (`drive-create returned false — lobby_state now Some(FailedToCreateSession)`).
+So: the capacity-0 wall is real and fabrication clears *that* gate, but it is **not the last blocker** —
+create fails further in with the array sized, i.e. the finished session genuinely needs real-session
+context a fabricated array can't supply. **Conclusion: fabrication is not a solo shortcut; the 2-player
+drive (Steam Deck as player 2, or a friend) remains the path to rung-3 create.** The `fabricate_slot_array`
+probe stays as a charted lever (it *does* clear the slot-array gate, useful alongside the 2-player drive).
+Prereq found this run: the create-drive had been gated on a linked peer (commit `0a71d9b`), which never
+links solo — so `fabricate_slot_array` now also flags the driver to **fire solo** (skip the link wait),
+since the fabricated array stands in for the peer.
+
 ### Tooling / re-derivation
 
 Found with `scripts/re/static.py` (the committed PE workhorse): `fn` to disassemble the inner/builder,

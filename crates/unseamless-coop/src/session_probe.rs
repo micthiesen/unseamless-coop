@@ -599,11 +599,16 @@ pub struct SessionCreateDriver {
     /// When true, satisfy leg B's reject #1 by writing `NetworkSession+0x10` nonzero just before the
     /// create call (`force_netsession_ready` probe). The flag's pre-call value is logged either way.
     force_ready: bool,
+    /// When true (`fabricate_slot_array` on), this is a **solo** fabrication run: the fabricated slot
+    /// array stands in for the real peer, so the drive must NOT wait for a rung-2 link (there is no
+    /// peer to link). Fire once the in-game preconditions are met. Without it, the drive holds for a
+    /// linked peer (the two-machine run).
+    fire_solo: bool,
 }
 
 impl SessionCreateDriver {
-    fn new(force_ready: bool) -> Self {
-        Self { fired: false, linked_since: None, force_ready }
+    fn new(force_ready: bool, fire_solo: bool) -> Self {
+        Self { fired: false, linked_since: None, force_ready, fire_solo }
     }
 }
 
@@ -655,14 +660,19 @@ impl Feature for SessionCreateDriver {
         // frame would always beat them (docs/RUNG3-DRIVE-RUNBOOK.md > "Prerequisite"). The link is a
         // separate Steam lobby, not the game's session FSM, so `lobby_state` stays None here and the
         // None precondition below remains correct.
-        if !crate::coop::is_linked() {
+        //
+        // EXCEPT a solo `fabricate_slot_array` run: the fabricated array replaces the peer, so there's
+        // no link to wait for — fire once the in-game preconditions are met (settle anchored off the
+        // first eligible frame instead of a link edge).
+        if !self.fire_solo && !crate::coop::is_linked() {
             // Link dropped (or never came up): restart the settle from the next link edge.
             self.linked_since = None;
             return;
         }
         let linked_since = *self.linked_since.get_or_insert_with(|| {
+            let trigger = if self.fire_solo { "solo (fabricate_slot_array)" } else { "side-channel linked" };
             log::info!(
-                "session-probe: drive-create armed @frame {} — side-channel linked; firing after \
+                "session-probe: drive-create armed @frame {} — {trigger}; firing after \
                  {LINK_SETTLE_FRAMES}-frame settle",
                 tick.frame,
             );
@@ -753,7 +763,10 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
         features.push(Box::new(SessionFsmProbe::new()));
     }
     if config.debug.probes.drive_create {
-        features.push(Box::new(SessionCreateDriver::new(config.debug.probes.force_netsession_ready)));
+        features.push(Box::new(SessionCreateDriver::new(
+            config.debug.probes.force_netsession_ready,
+            config.debug.probes.fabricate_slot_array,
+        )));
     }
     features
 }

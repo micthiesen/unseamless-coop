@@ -175,16 +175,21 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   - **Steam Deck as player 2.** The "second machine" needn't be a friend — `scripts/deck.sh` drives the
     Deck as the joiner over SSH, satisfying the peer requirement on your own hardware. The
     [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) + the `rung3-create-drive` guide are staged for it.
-  - **Static-decompile the slot-array allocator (could lift the gate off *create*).** The 2-player
-    assumption rests on "a real peer sizes the slot array" — but that's a *static* question. Decompile
-    the `NetworkSession` init / match-setup path to find who **allocates the array at
-    `[[NetworkSession+8]+0x48]` and writes its capacity at `+0x20`** (leg B is clean, not Arxan, so it
-    should decompile). If that size has a settable/callable source, we could size it ourselves and drive
-    create to `Host` **solo** — no peer for the *create* leg (join still needs a real peer to connect).
-    An **annotated** community / other-mod Ghidra DB of the session/network subsystem would accelerate
-    this (and the identity-map + toggle-lever RE below). *Clean-room (CLAUDE.md):* read any such decompile
-    to understand the **game's** behavior and write our own from that — never transcribe its
-    pseudocode/annotations; if it's ERSC's own decompilation, study the game, not ERSC.
+  - **Static-decompile the slot-array allocator — CHARTED + fabrication rig-tested, NECESSARY BUT NOT
+    SUFFICIENT (2026-07-03).** Done: the checked array is three inline fields on the `NetworkSession`
+    (= `DLNR3D::SessionManagerSteam`) at `+0x18` base / `+0x20` cap / `+0x24` count (correcting the old
+    `[[NetworkSession+8]+0x48]` mislabel — that expr is only leg B's cleanup return-pool), and nothing
+    sizes it solo (the slot-notify vmethods and `session_player_limit` are stubs; only a real Steam
+    session populates it). So we tried **fabricating** the array (`[debug.probes] fabricate_slot_array`):
+    on the solo rig it sized the array in place (`capacity=16`), clearing leg B's tail `cmp
+    count,capacity`, **but create still returned `FailedToCreateSession`** — the sized array is not the
+    last blocker. So fabrication is *not* a solo shortcut; **the 2-player drive (Steam Deck / friend)
+    remains the path to rung-3 create.** Full result in [SESSION-DRIVE.md](SESSION-DRIVE.md) >
+    "Slot-array allocator charted". An **annotated** community / other-mod Ghidra DB of the
+    session/network subsystem would still accelerate the remaining RE (and the identity-map + toggle-lever
+    RE below). *Clean-room (CLAUDE.md):* read any such decompile to understand the **game's** behavior and
+    write our own from that — never transcribe its pseudocode/annotations; if it's ERSC's own
+    decompilation, study the game, not ERSC.
   - **Validating the overlay fix** has its own non-2-player alternative (the VM XInput-collision repro) —
     see the Wave-2 intro above.
 
