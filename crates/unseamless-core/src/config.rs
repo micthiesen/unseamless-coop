@@ -269,6 +269,13 @@ pub struct DebugProbes {
     /// previously implied by `fabricate_slot_array`, decoupled so the fabricate+peer combination can
     /// be tested (fabricated array AND a linked peer, 2026-07-03).
     pub drive_fire_solo: bool,
+    /// **EXPERIMENTAL rung-3 create-veto lever** (pairs with [`drive_create`]): the driven create is
+    /// vetoed by a vmethod (`0x1423f4330`) whose first predicate is `bit 2 of [container+0x7c0]`, which
+    /// reads 0 offline (rig-confirmed 2026-07-03, docs/SESSION-DRIVE.md > "L3 RESOLVED"). When set, the
+    /// `veto-field` gate-trace **writes bit 2 set** on the live container at the vmethod entry, before
+    /// its read, to test whether create then passes toward `Host`. Off by default — a probe write on an
+    /// unknown capability bit, so it may yield a malformed session; a rig experiment, not for shipping.
+    pub set_create_veto_bit: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every

@@ -870,6 +870,22 @@ match sets) — so a naive set may yield a malformed session. But it's a precise
 `0x7c0`/bit 2 is now the exact thing to chart upstream (who sets it, and to what) for a clean seed. The
 probes that found this (`vmethod-target`, `veto-field`) are committed gate-traces under `drive_create`.
 
+**Lever tested (2026-07-03, rig, `set_create_veto_bit`) — bit 2 IS the gate, but it's a consequence
+flag, not a switch.** Writing bit 2 set on the live container before the vmethod's read flipped it
+exactly as predicted: `gate4-vmethod … returned al=1` (was `al=0`) — so bit 2 of `[container+0x7c0]`
+is definitively the create gate. But create then **crashed**: `crashdump: ACCESS_VIOLATION … write
+0x8 at eldenring.exe+0x1eba1c5`, which disassembles to `lock xadd [rcx],eax` (an interlocked refcount
+increment) with `rcx=8` — i.e. `[null+8]`. So passing the vmethod made create skip the setup that
+**allocates** the object bit 2 vouches for, then it incremented that (null) object's refcount and
+faulted. **Conclusion: bit 2 is set as a *result* of real session/match setup allocating its state;
+forcing the bit without that state yields a null-deref, not a session.** The clean path is therefore
+*not* "set the bit" but **chart who sets `[container+0x7c0]` bit 2 and what allocation it accompanies**
+(the object whose refcount is bumped at `+0x1eba1c5`), then reproduce that setup — the same "the game's
+own match setup does the allocation" conclusion the slot-array capacity hunt reached, now pinned to a
+specific bit + object. (`set_create_veto_bit` stays committed but **off** — it crashes.) Next session:
+trace the writer of `[container+0x7c0]` (a `[debug.probes]` write-watch on `container+0x7c0`, or find
+the store statically) and the allocation it gates.
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real

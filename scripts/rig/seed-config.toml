@@ -121,6 +121,11 @@ fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_cr
                            # each alone insufficient). See docs/SESSION-DRIVE.md > "fabricate the array".
 drive_fire_solo = true     # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
                            # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
+set_create_veto_bit = false # rung-3 L3 lever: write bit 2 of [container+0x7c0] set before the veto vmethod
+                           # (0x1423f4330) reads it. RIG RESULT 2026-07-03: flips the vmethod to pass (al 0->1)
+                           # but create then null-derefs (crash at eldenring.exe+0x1eba1c5) — bit 2 is a
+                           # CONSEQUENCE of real session setup, not a standalone switch. OFF (it crashes). See
+                           # docs/SESSION-DRIVE.md > "L3 RESOLVED".
 force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
                            # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which

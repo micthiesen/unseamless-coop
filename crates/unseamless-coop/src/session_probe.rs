@@ -286,6 +286,9 @@ const VETO_VMETHOD_PROLOGUE: [u8; 8] = [0x40, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00
 const VETO_FIELD_OFF: usize = 0x7c0;
 /// Latched once the veto field is read + logged.
 static VETO_FIELD_READ: AtomicBool = AtomicBool::new(false);
+/// Armed by `[debug.probes] set_create_veto_bit`: the veto-field hook writes bit 2 set on the live
+/// container before the vmethod reads it, to test whether create then passes (the L3 lever).
+static SET_CREATE_VETO_BIT: AtomicBool = AtomicBool::new(false);
 
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
@@ -363,7 +366,9 @@ fn install_create_gate_trace(config: &Config) {
     if prologue_ok("vmethod-target", vt, &VMETHOD_TARGET_PROLOGUE) {
         install_offset_hook("vmethod-target", vt, log_vmethod_target);
     }
-    // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate).
+    // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate),
+    // and — when `set_create_veto_bit` is armed — write bit 2 set to test the L3 lever.
+    SET_CREATE_VETO_BIT.store(config.debug.probes.set_create_veto_bit, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
     if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
         install_offset_hook("veto-field", vv, log_veto_field);
@@ -697,13 +702,25 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
         if container == 0 {
             return;
         }
-        let field = unsafe { ((container + VETO_FIELD_OFF) as *const u32).read_volatile() };
-        VETO_FIELD_READ.store(true, Ordering::Relaxed);
-        log::info!(
-            "session-probe: veto-field — container={container:#x} [+0x7c0]={field:#x} bit2={} \
-             (vmethod returns false when bit2==0 => the create veto; lever: set bit2 before create)",
-            (field >> 2) & 1,
-        );
+        let field_ptr = (container + VETO_FIELD_OFF) as *mut u32;
+        let field = unsafe { field_ptr.read_volatile() };
+        // L3 lever: set bit 2 before the vmethod reads it (a few instructions ahead at 0x1423f434b),
+        // so its `test bit2; je return-false` first predicate passes. Only writes when armed + clear.
+        if SET_CREATE_VETO_BIT.load(Ordering::Relaxed) && (field >> 2) & 1 == 0 {
+            unsafe { field_ptr.write_volatile(field | 0b100) };
+            log::info!(
+                "session-probe: veto-field — LEVER set bit2 on container={container:#x} \
+                 [+0x7c0] {field:#x} -> {:#x} (testing whether create now passes)",
+                field | 0b100,
+            );
+        }
+        if !VETO_FIELD_READ.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "session-probe: veto-field — container={container:#x} [+0x7c0]={field:#x} bit2={} \
+                 (vmethod returns false when bit2==0 => the create veto; lever: set bit2 before create)",
+                (field >> 2) & 1,
+            );
+        }
     }));
 }
 
