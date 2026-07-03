@@ -113,8 +113,11 @@ Michael sometimes spins up his own **solo** (user-driven) workers alongside your
 these — they stay silent toward you and just show up in `worker-ls` with ROLE `solo`. Leave them be
 until one hands off (it'll `msg` you that its branch is ready, or Michael will point you at it); then
 integrate it **exactly like any other worker** (`worker-integrate <name>` → review → commit to `main`)
-and **`worker-rm` it once integrated** — a solo lane is done when its work lands, so tear it down
-automatically unless Michael says to keep it.
+and then **immediately `worker-rm` it in the same step** — a solo lane is done the moment its work
+lands. **Auto-teardown is the default for solo workers: do not leave an integrated solo worker
+standing or wait to be told to remove it.** The only exception is if Michael explicitly says to keep
+it alive (e.g. he's still iterating in that workspace). Integrate-then-`worker-rm` is one motion, not
+two decisions.
 
 ## See What's Running
 
@@ -240,7 +243,9 @@ commit is patch-equal to what's now on `main`, so the check sees it as landed. (
 when you abandon unintegrated work, or when a worker handed off several commits squashed into one —
 which is why the overlay tells workers to consolidate to a single clean commit before done.) It also
 warns on uncommitted/untracked working-tree changes, which are usually just the inherited
-orchestrator tree. Workers live until you remove them.
+orchestrator tree. Workers live until you remove them — so **make the removal part of integrating**,
+especially for **solo** workers, where teardown-after-integration is the default (see
+[Solo Workers](#solo-workers)), not a separate later chore.
 
 ## Start A Fresh Orchestrator Session
 
