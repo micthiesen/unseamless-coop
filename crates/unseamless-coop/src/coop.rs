@@ -33,11 +33,12 @@
 //! stable or those wall-clock meanings drift.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use unseamless_core::config::Config;
-use unseamless_core::diagnostics::{ConnectReport, LobbyProgress, LobbyRole, VersionCheck, peer_tag};
+use unseamless_core::diagnostics::{ConnectReport, ForwardedLogArtifact, LobbyProgress, LobbyRole, VersionCheck, peer_tag};
 use unseamless_core::notifications::Severity;
 use unseamless_core::peer::{
     CONFIG_SYNCED_MESSAGE, PEER_ARRIVED_MESSAGE, PEER_DEPARTED_MESSAGE, PEER_RETURNED_MESSAGE, Peer,
@@ -54,6 +55,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Run `Session::maintain` this often — the heartbeat + host config re-assert + liveness sweep. The
 /// `Peer`'s tick-denominated constants assume ~1 Hz here (see the module note).
 const MAINTAIN_INTERVAL: Duration = Duration::from_secs(1);
+/// Persist the host's staged forwarded-log artifacts at most this often. Staging happens when the
+/// in-memory bundle changes; this cadence is only disk IO, and it runs on the co-op driver thread.
+const FORWARDED_LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Banner ids for the persistent connection conditions, so each updates in place / clears cleanly.
 const BANNER_VERSION: &str = "coop-version";
@@ -240,6 +244,16 @@ static ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// of measuring against the first attempt's epoch.
 static EPOCH: Mutex<Option<Instant>> = Mutex::new(None);
 
+#[derive(Clone)]
+struct ForwardedLogSnapshot {
+    run_id: String,
+    revision: u64,
+    records: usize,
+    artifacts: Vec<ForwardedLogArtifact>,
+}
+
+static FORWARDED_LOGS: Mutex<Option<ForwardedLogSnapshot>> = Mutex::new(None);
+
 /// Mark the start of a connection attempt: arm [`connect_report`], **reset the report**, and (re-)pin the
 /// timing epoch. Connection is now repeatable per process (Leave → Open/Join), so each attempt starts
 /// from a clean report + a fresh epoch — otherwise a retry's stage stamps read against the first
@@ -249,6 +263,8 @@ fn begin_attempt() {
     ATTEMPTED.store(true, Ordering::Relaxed);
     with_report(|r| *r = ConnectReport::new());
     *EPOCH.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    *FORWARDED_LOGS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    clear_current_run_forwarded_logs();
 }
 
 /// Elapsed since [`begin_attempt`], for stamping a stage. `0` if somehow called before an attempt began
@@ -282,6 +298,106 @@ pub fn connect_report() -> Option<ConnectReport> {
 fn record_failure(why: impl Into<String>) {
     let why = why.into();
     with_report(|r| r.failure = Some(why));
+}
+
+fn stage_forwarded_logs(peer: &Peer, run_id: &str, last_staged_revision: &mut u64) {
+    let revision = peer.log_bundle().revision();
+    if revision == *last_staged_revision {
+        return;
+    }
+    *last_staged_revision = revision;
+    let records = peer.log_bundle().len();
+    let next = if records == 0 {
+        None
+    } else {
+        Some(ForwardedLogSnapshot {
+            run_id: run_id.to_string(),
+            revision,
+            records,
+            artifacts: peer.log_bundle().forwarded_artifacts(run_id),
+        })
+    };
+    *FORWARDED_LOGS.lock().unwrap_or_else(|e| e.into_inner()) = next;
+}
+
+fn forwarded_log_snapshot() -> Option<ForwardedLogSnapshot> {
+    FORWARDED_LOGS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn forwarded_log_summary(snapshot: &ForwardedLogSnapshot) -> String {
+    let mut out = format!(
+        "run_id = {}\nrecords = {}\nfiles = {}\n",
+        snapshot.run_id,
+        snapshot.records,
+        snapshot.artifacts.len()
+    );
+    for artifact in &snapshot.artifacts {
+        out.push_str(&format!(
+            "{} (peer {}, {} records)\n",
+            artifact.file_name, artifact.peer, artifact.records
+        ));
+    }
+    out
+}
+
+fn write_forwarded_log_snapshot(dir: &Path, snapshot: &ForwardedLogSnapshot) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for artifact in &snapshot.artifacts {
+        std::fs::write(dir.join(&artifact.file_name), &artifact.contents)?;
+    }
+    Ok(())
+}
+
+fn clear_current_run_forwarded_logs() {
+    let (Some(dir), Some(run_id)) = (crate::logger::active_log_dir(), crate::logger::active_run_id()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("unseamless_coop-forwarded-{run_id}-");
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+        if name.starts_with(&prefix) && name.ends_with(".log") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn persist_forwarded_logs(dir: Option<&Path>, last_written_revision: &mut u64, announced: &mut bool) {
+    let Some(dir) = dir else { return };
+    let Some(snapshot) = forwarded_log_snapshot() else { return };
+    if snapshot.records == 0 || snapshot.revision == *last_written_revision {
+        return;
+    }
+    match write_forwarded_log_snapshot(dir, &snapshot) {
+        Ok(()) => {
+            *last_written_revision = snapshot.revision;
+            if !*announced {
+                *announced = true;
+                log::info!("forwarded logs: writing client artifacts under {}", dir.display());
+            }
+        }
+        Err(e) => log::warn!("forwarded logs: couldn't write client artifacts under {}: {e}", dir.display()),
+    }
+}
+
+/// Force-write the latest host-published forwarded-log snapshot for Export diagnostics, returning a
+/// short index that the one-file export can include. This reads only process-local memory and writes
+/// to disk from the export worker thread, not from the Present hook itself.
+pub fn persist_forwarded_logs_for_export(module: usize) -> Option<String> {
+    let snapshot = forwarded_log_snapshot()?;
+    let dir = crate::logger::active_log_dir().unwrap_or_else(|| {
+        crate::mods::self_dir(module)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("unseamless-coop")
+            .join("logs")
+    });
+    match write_forwarded_log_snapshot(&dir, &snapshot) {
+        Ok(()) => Some(forwarded_log_summary(&snapshot)),
+        Err(e) => {
+            log::error!("forwarded logs: failed to write client artifacts for export under {}: {e}", dir.display());
+            Some(format!("{}\nwrite_failed = {e}", forwarded_log_summary(&snapshot).trim_end()))
+        }
+    }
 }
 
 // Rung-4 lobby-discovery stage notes — called from [`crate::steam`]'s poll-based discovery (on the co-op
@@ -606,6 +722,12 @@ fn run_session(
     // (which differs) drives a live-config write + "synced" toast — not the no-op initial seed.
     let mut mirrored = session.peer().config().clone();
     let mut last_maintain = Instant::now();
+    let run_id = crate::logger::active_run_id().unwrap_or_else(|| "unknown-run".to_string());
+    let log_dir = crate::logger::active_log_dir();
+    let mut last_forwarded_stage_revision = 0;
+    let mut last_forwarded_write_revision = 0;
+    let mut last_forwarded_flush = Instant::now();
+    let mut announced_forwarded_logs = false;
     // Bound the handshake: once the partner is resolved we expect its `Hello` promptly. If it never
     // arrives (one-way NAT, peer crashed, P2P never opened), don't sit "Linking…"/"waiting" forever —
     // give up with a plain-words toast so the user can retry instead of being stuck until they Leave.
@@ -630,10 +752,17 @@ fn run_session(
         }
 
         session.pump();
+        if is_host {
+            stage_forwarded_logs(session.peer(), &run_id, &mut last_forwarded_stage_revision);
+        }
 
         if last_maintain.elapsed() >= MAINTAIN_INTERVAL {
             session.maintain();
             last_maintain = Instant::now();
+        }
+        if is_host && last_forwarded_flush.elapsed() >= FORWARDED_LOG_FLUSH_INTERVAL {
+            persist_forwarded_logs(log_dir.as_deref(), &mut last_forwarded_write_revision, &mut announced_forwarded_logs);
+            last_forwarded_flush = Instant::now();
         }
 
         adopt_host_config(&session, is_host, &mut mirrored);

@@ -878,7 +878,8 @@ impl Overlay {
         }
 
         // "Export diagnostics": writes the one-file shareable bundle (report + log tail, SteamIDs
-        // scrubbed) next to the config/logs. The whole point is a single action a non-technical friend
+        // scrubbed) next to the config/logs, and indexes any host-side forwarded client log artifacts
+        // already published by the co-op driver. The whole point is a single action a non-technical friend
         // can do — and one that works with NO peer connected, so it captures the failed-to-link case that
         // log-forwarding (which needs the link up) never can. Always enabled (independent of the panel),
         // and controller-navigable, so a friend on a pad can export with no mouse.
@@ -905,7 +906,8 @@ impl Overlay {
     /// Write the one-file shareable diagnostics bundle to the install's `unseamless-coop/` folder
     /// (next to the config and `logs/`), then toast the path. Everything it reads is Present-thread
     /// safe — the live config snapshot, the last published debug-panel report ([`crate::debug_panel`]),
-    /// and the in-memory log tail ([`crate::logbuf`]) — so it deliberately does **not** read game
+    /// the in-memory log tail ([`crate::logbuf`]), and the last host-published forwarded-log snapshot —
+    /// so it deliberately does **not** read game
     /// singletons (that's the game thread's job) and does **not** depend on a live co-op transport.
     /// That's what makes it survive a non-link: the friend test most needs to capture the case where
     /// the side-channel never came up, which rung-2 log-forwarding (only live once linked) can't.
@@ -1550,7 +1552,7 @@ fn level_color(level: Level) -> [f32; 3] {
 /// passed in (`config`, `module`) or read from process-global statics, so this is freely callable from
 /// any thread.
 fn export_bundle_to_disk(config: &Config, module: usize) {
-    use unseamless_core::diagnostics::{RunInfo, export_bundle};
+    use unseamless_core::diagnostics::{RunInfo, export_bundle_with_forwarded_summary};
 
     // Build profile string mirrors logger.rs's PROFILE: keyed on debug-assertions (on for dev/diag,
     // off for release), so it names the symbol status it can actually detect.
@@ -1590,7 +1592,8 @@ fn export_bundle_to_disk(config: &Config, module: usize) {
     })
     .unwrap_or_default();
 
-    let bundle = export_bundle(&header, live.as_deref(), &tail);
+    let forwarded = crate::coop::persist_forwarded_logs_for_export(module);
+    let bundle = export_bundle_with_forwarded_summary(&header, live.as_deref(), &tail, forwarded.as_deref());
 
     // The install's unseamless-coop/ folder (config + logs live here too), mirroring app.rs's
     // self-dir-or-cwd fallback so the file always lands somewhere findable. Create the folder in case

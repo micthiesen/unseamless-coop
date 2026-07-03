@@ -468,11 +468,16 @@ host-tested forwarding logic in [`peer.rs`](../crates/unseamless-core/src/peer.r
 partner is linked (via rung-4 lobby discovery) and `forward_to_host` is on, a client's
 [`ForwardLogger`](../crates/unseamless-coop/src/forward.rs) tees its records into a bounded queue that
 the co-op driver drains through `Peer::forward_log` onto the Steam side-channel, where the host
-aggregates them into its `LogBundle`. Caveats: it's **client→host only**, gated on a configured peer,
-and bounded/rate-limited (a flood is dropped, not buffered without limit). Until a session is actually
-linked, the **manual "zip your `logs\` folder and send it" instruction in
-[README-FRIENDS.txt](../scripts/dist/README-FRIENDS.txt) is still the fallback** — but the automatic
-path now exists and lights up the moment two modded games link.
+aggregates them into its `LogBundle`. The host driver surfaces that bundle as per-peer files under the
+host's `unseamless-coop/logs/` folder, named like
+`unseamless_coop-forwarded-<run_id>-peer-XXXXXXXX.log`; Export diagnostics also force-writes the latest
+published snapshot and lists those files in `unseamless-coop-diagnostics.txt`. The artifacts use
+`peer_tag` labels and the same SteamID scrubber as Export because forwarded records are raw client log
+lines. Caveats: it's **client→host only**, gated on a configured peer, and bounded/rate-limited (a flood
+is dropped, not buffered without limit). Until a session is actually linked, the **manual "zip your
+`logs\` folder and send it" instruction in
+[README-FRIENDS.txt](../scripts/dist/README-FRIENDS.txt) is still the fallback** — but the automatic path
+now exists and lights up the moment two modded games link.
 
 ## Open questions / risks (confirm on the rig)
 

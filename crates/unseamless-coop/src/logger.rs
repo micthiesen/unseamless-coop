@@ -8,6 +8,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use simplelog::{CombinedLogger, ConfigBuilder, SharedLogger, WriteLogger};
@@ -18,6 +19,9 @@ use unseamless_core::diagnostics::RunInfo;
 const LOG_DIR: &str = "unseamless-coop/logs";
 /// How many past run logs to keep.
 const KEEP_LOGS: usize = 5;
+
+static ACTIVE_LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
+static ACTIVE_RUN_ID: OnceLock<String> = OnceLock::new();
 
 /// Build profile string — tells a log reader whether panic backtraces will have symbols. Keyed
 /// on `debug_assertions` (on for both the `dev` and `diag` profiles, off for `release`), so it
@@ -121,12 +125,28 @@ pub fn init(config: &Config, base: &Path) {
     // log output. Inert (drops every record) until a guide enables it; stripped from release entirely.
     #[cfg(debug_assertions)]
     loggers.push(crate::guide_log::guide_logger(level));
-    let _ = CombinedLogger::init(loggers);
+    if CombinedLogger::init(loggers).is_err() {
+        eprintln!("unseamless-coop: cannot initialize logger");
+        return;
+    }
+    let _ = ACTIVE_RUN_ID.set(run_id.clone());
+    let _ = ACTIVE_LOG_DIR.set(dir.clone());
 
     log::info!("logging at {level} -> {}", path.display());
     if !config.debug.enabled {
         log::info!("debug logging off; set [debug] enabled = true to capture verbose logs");
     }
+}
+
+/// Directory where this process writes its normal run log. Forwarded client-log artifacts use the
+/// same folder so collecting `unseamless-coop/logs/` gets every machine's visible logs from the host.
+pub fn active_log_dir() -> Option<PathBuf> {
+    ACTIVE_LOG_DIR.get().cloned()
+}
+
+/// The run id used by the normal run log header and filename.
+pub fn active_run_id() -> Option<String> {
+    ACTIVE_RUN_ID.get().cloned()
 }
 
 /// Emit an `error!` line from inside an FFI **recovery branch** with no chance of itself unwinding
@@ -185,7 +205,11 @@ fn prune_old_logs(dir: &PathBuf) {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("unseamless_coop-") && n.ends_with(".log"))
+                .is_some_and(|n| {
+                    n.starts_with("unseamless_coop-")
+                        && !n.starts_with("unseamless_coop-forwarded-")
+                        && n.ends_with(".log")
+                })
         })
         .collect();
     logs.sort();

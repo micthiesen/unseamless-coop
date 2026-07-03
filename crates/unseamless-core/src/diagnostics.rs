@@ -180,6 +180,16 @@ pub struct LogBundle {
     // VecDeque so drop-oldest is O(1) — the cap defends against a flood, so eviction must not
     // itself be O(n) per add (which `Vec::remove(0)` would be).
     entries: VecDeque<(String, LogRecord)>,
+    revision: u64,
+}
+
+/// One rendered forwarded-log file for a single peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForwardedLogArtifact {
+    pub peer: String,
+    pub file_name: String,
+    pub records: usize,
+    pub contents: String,
 }
 
 /// Cap on retained records, so a peer flooding forwarded `Log` frames can't grow the bundle
@@ -196,6 +206,7 @@ impl LogBundle {
             self.entries.pop_front(); // O(1) drop-oldest; bounds memory against a hostile flood
         }
         self.entries.push_back((peer.into(), record));
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Number of retained records (bounded by [`MAX_BUNDLE_ENTRIES`]).
@@ -205,6 +216,12 @@ impl LogBundle {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Monotonic content revision. Unlike [`len`](LogBundle::len), this changes when the capped
+    /// buffer evicts an old record and appends a new one, so a writer can detect rotation at capacity.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Render grouped by peer, each peer's lines ordered by `seq`. Stable and easy to scan.
@@ -236,6 +253,57 @@ impl LogBundle {
         }
         out
     }
+
+    /// Render one sanitized per-peer file per sender, suitable for writing under
+    /// `unseamless-coop/logs/`. The peer labels are expected to already be [`peer_tag`]s, but the
+    /// contents are scrubbed again because forwarded messages are raw client log lines.
+    pub fn forwarded_artifacts(&self, run_id: &str) -> Vec<ForwardedLogArtifact> {
+        let mut peers: Vec<&str> = Vec::new();
+        for (peer, _) in &self.entries {
+            if !peers.contains(&peer.as_str()) {
+                peers.push(peer);
+            }
+        }
+
+        let mut artifacts = Vec::new();
+        for peer in peers {
+            let mut records: Vec<&LogRecord> = self
+                .entries
+                .iter()
+                .filter(|(p, _)| p == peer)
+                .map(|(_, r)| r)
+                .collect();
+            records.sort_by_key(|r| r.seq);
+
+            let mut body = String::new();
+            for r in &records {
+                let message = r.message.replace('\n', "\n        ");
+                body.push_str(&format!("[{:>5}] {:<5} {}\n", r.seq, level_tag(r.level), message));
+            }
+
+            let contents = scrub_steam_ids(&format!(
+                "==== unseamless-coop forwarded log ====\n\
+                 run_id  = {run_id}\n\
+                 peer    = {peer}\n\
+                 records = {}\n\
+                 ==== begin forwarded log ====\n\
+                 {}",
+                records.len(),
+                body.trim_end()
+            ));
+            artifacts.push(ForwardedLogArtifact {
+                peer: peer.to_string(),
+                file_name: forwarded_log_file_name(run_id, peer),
+                records: records.len(),
+                contents,
+            });
+        }
+        artifacts
+    }
+}
+
+fn forwarded_log_file_name(run_id: &str, peer: &str) -> String {
+    format!("unseamless_coop-forwarded-{run_id}-{peer}.log")
 }
 
 /// A structured, self-describing **runtime snapshot**, rendered as a delimited, greppable block in
@@ -625,7 +693,7 @@ pub fn scrub_steam_ids(text: &str) -> String {
         }
     }
     flush(&mut out, &mut digits);
-    out
+    scrub_hex_steam_ids(&out)
 }
 
 /// If `run` (a maximal digit run) looks like an individual SteamID64, return its [`peer_tag`].
@@ -634,6 +702,44 @@ fn steam_id_tag(run: &str) -> Option<String> {
         return run.parse::<u64>().ok().map(peer_tag);
     }
     None
+}
+
+fn scrub_hex_steam_ids(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            let n = hex.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+            let token_len = 2 + n;
+            if n > 0 {
+                let token = &rest[..token_len];
+                if let Some(tag) = steam_hex_tag(token) {
+                    out.push_str(&tag);
+                } else {
+                    out.push_str(token);
+                }
+                i += token_len;
+                continue;
+            }
+        }
+        let ch = rest.chars().next().expect("non-empty rest");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn steam_hex_tag(token: &str) -> Option<String> {
+    let hex = token.strip_prefix("0x").or_else(|| token.strip_prefix("0X"))?;
+    if !(hex.len() == 15 || hex.len() == 16) {
+        return None;
+    }
+    let trimmed = hex.trim_start_matches('0');
+    if !trimmed.starts_with("1100001") {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok().map(peer_tag)
 }
 
 /// Assemble the **one-file shareable diagnostics bundle** the overlay's "Export diagnostics" button
@@ -648,6 +754,17 @@ fn steam_id_tag(run: &str) -> Option<String> {
 /// Designed to **survive a non-link**: every input is read locally, so the bundle captures exactly the
 /// failed-to-connect case that log-forwarding (which needs the link up) can't.
 pub fn export_bundle(header: &str, live_report: Option<&str>, log_tail: &str) -> String {
+    export_bundle_with_forwarded_summary(header, live_report, log_tail, None)
+}
+
+/// Like [`export_bundle`], plus an optional index of host-side forwarded client log files written
+/// beside the normal run log.
+pub fn export_bundle_with_forwarded_summary(
+    header: &str,
+    live_report: Option<&str>,
+    log_tail: &str,
+    forwarded_summary: Option<&str>,
+) -> String {
     let mut out = String::with_capacity(header.len() + log_tail.len() + 256);
     out.push_str(header.trim_end());
     out.push_str("\n\n==== live snapshot ====\n");
@@ -658,6 +775,11 @@ pub fn export_bundle(header: &str, live_report: Option<&str>, log_tail: &str) ->
     out.push_str("\n\n==== recent log tail (newest last) ====\n");
     out.push_str(log_tail.trim_end());
     out.push('\n');
+    if let Some(summary) = forwarded_summary {
+        out.push_str("\n==== forwarded client logs ====\n");
+        out.push_str(summary.trim_end());
+        out.push('\n');
+    }
     // One scrub over the whole assembled bundle so no raw SteamID survives in any section.
     scrub_steam_ids(&out)
 }
@@ -817,6 +939,19 @@ mod tests {
     }
 
     #[test]
+    fn bundle_revision_advances_even_when_capped_length_is_stable() {
+        let mut b = LogBundle::new();
+        for seq in 0..MAX_BUNDLE_ENTRIES as u32 {
+            b.add("p", LogRecord { seq, level: LogLevel::Info, message: String::new() });
+        }
+        let before = b.revision();
+        assert_eq!(b.len(), MAX_BUNDLE_ENTRIES);
+        b.add("p", LogRecord { seq: 99_999, level: LogLevel::Info, message: String::new() });
+        assert_eq!(b.len(), MAX_BUNDLE_ENTRIES, "cap keeps retained length stable");
+        assert_ne!(b.revision(), before, "revision still changes as the capped window rotates");
+    }
+
+    #[test]
     fn render_indents_multi_line_messages_under_their_peer() {
         let mut b = LogBundle::new();
         b.add("peer-0001", LogRecord { seq: 1, level: LogLevel::Error, message: "boom\nat foo".into() });
@@ -824,6 +959,32 @@ mod tests {
         // The second line must be indented (not flush-left, where it could look like a new header).
         assert!(out.contains("boom\n        at foo"), "continuation not indented:\n{out}");
         assert_eq!(out.matches("---- peer:").count(), 1);
+    }
+
+    #[test]
+    fn forwarded_artifacts_are_per_peer_ordered_and_scrubbed() {
+        let id = 76561197960287930u64;
+        let tag = peer_tag(id);
+        let mut b = LogBundle::new();
+        b.add(&tag, LogRecord { seq: 2, level: LogLevel::Warn, message: "second".into() });
+        b.add("peer-other", LogRecord { seq: 1, level: LogLevel::Info, message: "other".into() });
+        b.add(&tag, LogRecord { seq: 1, level: LogLevel::Info, message: format!("raw id {id}") });
+
+        let artifacts = b.forwarded_artifacts("123-456");
+        assert_eq!(artifacts.len(), 2, "one file per peer");
+        assert_eq!(artifacts[0].peer, tag);
+        assert_eq!(artifacts[0].file_name, format!("unseamless_coop-forwarded-123-456-{}.log", artifacts[0].peer));
+        assert_eq!(artifacts[0].records, 2);
+        assert!(
+            artifacts[0].contents.find("[    1] INFO").unwrap()
+                < artifacts[0].contents.find("[    2] WARN").unwrap(),
+            "records for a peer sort by seq:\n{}",
+            artifacts[0].contents
+        );
+        assert!(!artifacts[0].contents.contains(&id.to_string()), "raw SteamID leaked:\n{}", artifacts[0].contents);
+        assert!(artifacts[0].contents.contains(&artifacts[0].peer));
+        assert_eq!(artifacts[1].peer, "peer-other");
+        assert_eq!(artifacts[1].records, 1);
     }
 
     #[test]
@@ -853,6 +1014,16 @@ mod tests {
     }
 
     #[test]
+    fn scrub_replaces_steam_id_shaped_hex_registers() {
+        let id = 76561197960287930u64;
+        let raw = format!("session-probe: join initiated | rdx={id:#018x} r8=0x00007ff6abcd1234");
+        let scrubbed = scrub_steam_ids(&raw);
+        assert!(!scrubbed.contains(&format!("{id:#018x}")), "raw hex SteamID leaked:\n{scrubbed}");
+        assert!(scrubbed.contains(&peer_tag(id)));
+        assert!(scrubbed.contains("0x00007ff6abcd1234"), "ordinary pointer-shaped hex stays intact");
+    }
+
+    #[test]
     fn export_bundle_has_all_sections_and_scrubs_ids() {
         let id = 76561197960287930u64;
         let header = format!("==== unseamless-coop run ====\nown_id = {id}\n");
@@ -867,6 +1038,17 @@ mod tests {
         assert!(bundle.contains("connect failed"));
         // No raw SteamID anywhere in the assembled bundle — header, report, and tail are all scrubbed.
         assert!(!bundle.contains(&id.to_string()), "raw SteamID leaked into bundle:\n{bundle}");
+        assert!(bundle.contains(&peer_tag(id)));
+    }
+
+    #[test]
+    fn export_bundle_can_include_forwarded_log_summary() {
+        let id = 76561197960287930u64;
+        let summary = format!("unseamless_coop-forwarded-123-peer-a.log (peer {id}, 3 records)");
+        let bundle = export_bundle_with_forwarded_summary("header\n", None, "tail", Some(&summary));
+        assert!(bundle.contains("==== forwarded client logs ===="));
+        assert!(bundle.contains("3 records"));
+        assert!(!bundle.contains(&id.to_string()), "raw SteamID leaked into forwarded summary:\n{bundle}");
         assert!(bundle.contains(&peer_tag(id)));
     }
 

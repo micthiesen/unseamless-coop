@@ -213,11 +213,14 @@ hand-driven**:
 `[debug] guide`; each machine's role is derived from its Open/Join action, so leave `[debug] rig_role` at
 `solo` — it's just an override/solo fallback; see the "Ship a guide" box above and FRIEND-TEST-RUNBOOK).
 To make it useful to the assistant afterward: set `[debug] enabled = true` and (on clients)
-`forward_to_host = true`, so the host machine aggregates everyone's logs into one `LogBundle`, then hand
-over the host's `unseamless-coop/logs/` folder. (Note: the `coop: linked` / `coop: adopted host config`
+`forward_to_host = true`, so the host machine writes per-peer forwarded artifacts into its
+`unseamless-coop/logs/` folder (`unseamless_coop-forwarded-<run_id>-peer-XXXXXXXX.log`). Hand over those
+forwarded artifacts plus `unseamless-coop-diagnostics.txt`; full raw run logs in `logs/` are useful
+locally but are not scrubbed for public sharing. (Note: the `coop: linked` / `coop: adopted host config`
 guide milestones are NOT forwarded — `forward.rs` drops `unseamless_coop::coop`-target lines as
-side-channel noise — so they live in each machine's own log; collect both machines' logs, or have each
-hit Export, to capture them.) The self-describing `RunInfo` header (version,
+side-channel noise — so they live in each machine's own log; collect both machines' logs privately, or
+have each hit Export, to capture them.) The
+self-describing `RunInfo` header (version,
 role, session id, config) lets the assistant reconstruct the session without context. This is the
 acceptance loop and the only one that proves real co-op.
 

@@ -77,8 +77,9 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
 > longer a silent non-connect; it names itself.
 - `[debug] enabled = true`, `level = "debug"` — so the `session-probe:` / `coop` lines (and the
   rung-3 register dumps, which are `debug!`) are captured.
-- `[debug] forward_to_host = true` — once linked, the client tees its log to the host's `LogBundle`
-  (client→host only; the manual export is the fallback until the link is up).
+- `[debug] forward_to_host = true` — once linked, the client tees its log to the host. The host writes
+  per-peer forwarded artifacts under its `unseamless-coop/logs/` folder (client→host only; the manual
+  export is the fallback until the link is up).
 - `[debug.probes] session_probe = true` — turns on the rung-3 FSM rising-edge logger + the create/join
   entry hooks (`session-probe:` prefix). See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md).
 - **For Part B (the rung-3 create-drive test), also set on BOTH machines:** `[debug.probes] drive_create
@@ -145,7 +146,8 @@ reading the `coop_connect` section of a diag dump, or the live log):**
 
 A clean link shows `coop_connect` walking `linking → linked`, an overlay **"Co-op partner connected"**
 toast, the client **adopting the host's config**, and (with `forward_to_host`) the host's `LogBundle`
-picking up the client's lines.
+picking up the client's lines in a `unseamless_coop-forwarded-<run_id>-peer-XXXXXXXX.log` file under the
+host's `unseamless-coop/logs/` folder.
 
 **Watch the one open Steam question:** messaging two arbitrary SteamIDs over `ISteamNetworkingMessages`
 may require the accounts to be **Steam friends** for NAT-punch/auth. If `sent>0, recv=0` persists,
