@@ -36,6 +36,14 @@ to see what the grey decision actually branches on. Static guessing is exhausted
 landscape below makes that trace short and targeted. Two fail-safe patches are landed (one default-on
 but benign, one default-off; both now known insufficient) and a third is charted-but-unlanded.
 
+> **New condition eliminated (2026-07-03): a real peer linked over our side-channel does NOT ungrey
+> the items.** First test of the item under a live rung-2 link (rig host + Steam Deck joiner, both
+> in-world, `coop: linked`): Tarnished's Furled Finger **still greyed** on the rig. Confirms the grey
+> gate keys on FromSoft **matchmaking reachability**, not on our side-channel peer presence — so the
+> item-path can't be unblocked from the connection side; it needs the branch found and patched. (All
+> prior item tests were solo/friend; "peer linked over our own transport" was genuinely untested until
+> now.)
+
 ## The Charted Online/Offline Landscape
 
 All the online/offline state the game exposes, charted statically. The first three families are
