@@ -825,6 +825,17 @@ block that calls `session_obj->vtable[0x10]`, returns the session object to
 
 ### create-gate4 Helper `0x1423faf60` Charted: the Veto Is an Arxan-Encoded Vmethod
 
+> **RIG CONFIRMED (2026-07-03, solo-fabricate in-world) — the Arxan vmethod IS the veto.** Wired Hook A
+> (`0x1423fd7c8`, helper return read at gate4) and Hook B (`0x1423fafcc`, the encoded vmethod's `al`).
+> Both installed (prologue-verified). The drive logged, in order: `create-gate4 REACHED` (fields
+> 35000/5000/[6,30000,…] all pass) → **`gate4-vmethod … returned al=0`** → `gate4-helper-ret … al=0` →
+> `drive-create returned false`, with no `legb-finhandle`. So the sole in-world rung-3 create veto is
+> the Arxan cookie-encoded vmethod at `[[session_obj+0x58]+8]` returning 0; helper `0x1423faf60`, gate4
+> `0x1423fd7a0`, and leg B's whole finalize/slot tail are all just downstream of it. The blocker is now
+> localized to one encoded predicate. **Next: L3** — capture the vmethod's decoded target at runtime
+> (via the trampoline `0x14251c480` heal) and identify what it reads, so we can seed its input rather
+> than patch-bypass (L1/L2, which risk a malformed session).
+
 > **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
 > `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
 > first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real

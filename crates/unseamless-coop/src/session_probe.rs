@@ -240,6 +240,25 @@ const LEGB_FINHANDLE_PROLOGUE: [u8; 14] = [
     0x8B, 0xF0, 0x85, 0xC0, 0x74, 0x17, 0x8B, 0x43, 0x24, 0x3B, 0x43, 0x20, 0x73, 0x0F,
 ];
 
+/// **Hook A — create-gate4's read of its helper's return** (`0x1423fd7c8`, the `test al,al` right
+/// after `call 0x1423faf60` in gate4 `0x1423fd7a0`). `al` here is the helper's verdict; `al==0` ⇒ gate4
+/// returns false ⇒ leg B skips the finalize path ⇒ create fails. See docs/SESSION-DRIVE.md >
+/// "create-gate4 Helper 0x1423faf60 Charted".
+const GATE4_HELPER_RET_OFFSET: usize = 0x1_423f_d7c8 - 0x1_4000_0000;
+/// Charted bytes at [`GATE4_HELPER_RET_OFFSET`]: `84 C0` = `test al,al`, `74 EF` = `je 0x1423fd7bb`
+/// (the `xor al,al; ret` false-exit), `48 8B 43 58` = `mov rax,[rbx+0x58]`, `BA 28` = `mov edx,0x28…`.
+const GATE4_HELPER_RET_PROLOGUE: [u8; 10] =
+    [0x84, 0xC0, 0x74, 0xEF, 0x48, 0x8B, 0x43, 0x58, 0xBA, 0x28];
+/// **Hook B — the decisive Arxan-encoded vmethod's verdict, inside the helper** (`0x1423fafcc`, the
+/// `test al,al` right after `call [container_vtable+8]`). `al` = the encoded vmethod's result; `al==0`
+/// proves that vmethod is the in-world veto (the money datum — it's statically undecodable, so only a
+/// live read localizes it). `je 0x1423fb1cb` on false. See docs/SESSION-DRIVE.md.
+const GATE4_VMETHOD_OFFSET: usize = 0x1_423f_afcc - 0x1_4000_0000;
+/// Charted bytes at [`GATE4_VMETHOD_OFFSET`]: `84 C0` = `test al,al`, `0F 84 F7 01 00 00` = `je
+/// 0x1423fb1cb` (rel32), `48 8D` = the start of the `lea` on the pass path.
+const GATE4_VMETHOD_PROLOGUE: [u8; 10] =
+    [0x84, 0xC0, 0x0F, 0x84, 0xF7, 0x01, 0x00, 0x00, 0x48, 0x8D];
+
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
 /// the resolved address before the fabrication lever is armed — the same anti-drift role
@@ -300,6 +319,16 @@ fn install_create_gate_trace(config: &Config) {
     let fh = exe_base + LEGB_FINHANDLE_OFFSET;
     if prologue_ok("legb-finhandle", fh, &LEGB_FINHANDLE_PROLOGUE) {
         install_offset_hook("legb-finhandle", fh, log_legb_finhandle);
+    }
+    // gate4-helper-ret (Hook A): gate4's read of helper 0x1423faf60's return.
+    let ga = exe_base + GATE4_HELPER_RET_OFFSET;
+    if prologue_ok("gate4-helper-ret", ga, &GATE4_HELPER_RET_PROLOGUE) {
+        install_offset_hook("gate4-helper-ret", ga, log_gate4_helper_ret);
+    }
+    // gate4-vmethod (Hook B): the Arxan-encoded vmethod's verdict inside the helper — the money datum.
+    let gb = exe_base + GATE4_VMETHOD_OFFSET;
+    if prologue_ok("gate4-vmethod", gb, &GATE4_VMETHOD_PROLOGUE) {
+        install_offset_hook("gate4-vmethod", gb, log_gate4_vmethod);
     }
 }
 
@@ -558,6 +587,32 @@ fn log_legb_finhandle(_name: &'static str, regs: *mut Registers) {
             "session-probe: gate-trace legb-finhandle REACHED (leg B reached its tail) — \
              handle(eax)={handle} post-next-id={next_id:?} slot-array cap={cap} count={count} \
              (fires pre-store; handle!=0 && cap>0 => store should succeed => any failure is post-leg-B)",
+        );
+    }));
+}
+
+/// Hook A tracer: at gate4's `test al,al` after `call 0x1423faf60`, so `al` is the helper's return.
+/// `al==0` ⇒ gate4 returns false ⇒ the confirmed rung-3 create veto. Read-only; unwind-firewalled.
+fn log_gate4_helper_ret(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let al = unsafe { &*regs }.rax as u8;
+        log::info!(
+            "session-probe: gate-trace gate4-helper-ret — helper 0x1423faf60 returned al={al} \
+             (0 => create-gate4 returns false => leg B skips finalize => create fails)",
+        );
+    }));
+}
+
+/// Hook B tracer: at the helper's `test al,al` after `call [container_vtable+8]`, so `al` is the
+/// Arxan-encoded vmethod's verdict — the money datum. `al==0` proves that encoded vmethod is the sole
+/// in-world veto (it's statically undecodable). Read-only; unwind-firewalled.
+fn log_gate4_vmethod(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let al = unsafe { &*regs }.rax as u8;
+        log::info!(
+            "session-probe: gate-trace gate4-vmethod — Arxan-encoded vmethod [[session_obj+0x58]+8] \
+             returned al={al} (0 => THIS is the create veto; the decisive predicate is inside the \
+             encoded vmethod, so seed its input / capture its decoded target per L3)",
         );
     }));
 }
