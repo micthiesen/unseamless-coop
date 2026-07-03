@@ -737,9 +737,12 @@ The next confirmation is the finalize-handle probe below, with the game's own ma
 > so it skips that and `call 0x1423faf60` (the helper) → `test al,al; je ret-false`. So the helper
 > `0x1423faf60` is returning 0 (or gate4's tail past `0x1423fd7cc` vetoes). The helper's `+0x68..0x78`
 > fields (`[6,30000,…]`, all nonzero) are **not** the whole story — it fails for a reason past them.
-> **Next: chart `0x1423faf60` (and gate4's tail after `0x1423fd7cc`) to the actual return-0 condition,
-> then a runtime probe reading gate4's + the helper's return.** This is the true rung-3 create blocker,
-> not the finalize handle.
+> **DONE (2026-07-03): see "create-gate4 Helper `0x1423faf60` Charted" below.** The helper's return-0 is
+> its first predicate past the five `[6,30000,…]` config-field checks: an **Arxan cookie-encoded vmethod**
+> (`[[session_obj+0x58]+8]` = container-vtable `0x1431f8360` slot `+8` → trampoline `0x14251c480`) whose
+> real target is not statically decodable; every other return-0 in the helper is allocation-shaped. A
+> runtime probe reading that vmethod's `al` (Hook B) + the helper's return at gate4 (Hook A) is specced
+> there. This is the true rung-3 create blocker, not the finalize handle.
 
 Static re-read of leg B (`0x1423f5c00`, same 2026-06-02 image) corrects the "post-store reject" wording
 above: there is **no reject after a successful slot-array store**. Once the tail executes
@@ -819,6 +822,122 @@ unique tail region around the finalize helper call, the finalize-result test, th
 `NetworkSession+0x24`/`+0x20` capacity check, and the slot-count increment. The cleanup target is the
 block that calls `session_obj->vtable[0x10]`, returns the session object to
 `[NetworkSession+0x08]+0x48`, then zeroes `esi`.
+
+### create-gate4 Helper `0x1423faf60` Charted: the Veto Is an Arxan-Encoded Vmethod
+
+> **Static result (2026-07-03, same 2026-06-02 image).** Fully disassembled the helper
+> `0x1423faf60` and gate4's tail past `0x1423fd7cc`. **The in-world return-0 is the helper's very
+> first predicate past the five config-field checks: an Arxan cookie-encoded vmethod call whose real
+> target is not statically decodable.** Everything else in the helper that can return 0 is
+> allocation-shaped (OOM only), so with the config fields populated the vmethod is the sole plausible
+> in-world veto. gate4's own tail past the helper is charted below too, but it runs *only* if the
+> helper already returned nonzero, so it is off the failing path. **Neither the helper nor gate4 reads
+> any offline-landscape global** (`mode_enum 0x143d87220`, `is_offline 0x140e55180`, `net_status
+> 0x143b400bc`, `svc_singleton 0x144842d40`, `hash_mod 0x144842d28`) — verified by rip-ref scan — so
+> the create blocker is **independent** of the item-grey offline signal, confirming the earlier
+> correction that they are separate.
+
+**Object identities (re-derived, all facts).** gate4 (`0x1423fd7a0`) and the helper (`0x1423faf60`)
+both take `rcx` = the freshly-built `0x5f8`-byte **session object** (vtable `0x1431fa248`, slot `+8`
+of which *is* gate4 — confirmed by reading the vtable). Its `+0x58` holds a pointer copied by the
+session-object ctor (`0x1423fd300` → base ctor `0x1423fa320`, `mov [this+0x58], rdx`) from
+`[NetworkSession+0x08]`. Following that chain: the session object is allocated in `0x1423f7070`
+(`ecx=0x5f8`, a `SessionManagerSteam` vtable method) with `rdx=[this+0x08]` where `this` = the
+`SessionManagerSteam` (= `NetworkSession`) itself. That `NetworkSession` lives at `container+0x710`,
+built by the container ctor `0x1423f20b0`; its base ctor `0x1423f5b60` opens with `mov
+[NetworkSession+0x08], container`. **So `session_obj+0x58 = [NetworkSession+0x08] = the container`**
+(vtable `0x1431f8360`, set at `0x1423f20d7`). That is the object the helper's first vmethod dispatches
+on.
+
+**Helper `0x1423faf60` return-0 map** (every path that lands `al=0`; `rdi` = session object):
+
+1. **Five config-field checks** `cmp [rdi+0x68/0x6c/0x70/0x74/0x78],0; je 0x1423fb1cb` — in-world these
+   are `[6,30000,30000,30000,30000]`, all nonzero, so **all five are skipped**. (These are the
+   `[6,30000,…]` fields the prior note flagged as "not the blocker" — confirmed here as the *first*,
+   not the only, gate.)
+2. **The decisive vmethod** at `0x1423fafc9`: `mov rcx,[rdi+0x58]` (the container) → `mov rax,[rcx]`
+   (its vtable `0x1431f8360`) → `call [rax+8]` with `rdx = &local[rsp+0x40]` (a zeroed 16-byte
+   out-slot). `0x1423fafcc: test al,al; je 0x1423fb1cb` → **`al==0` returns 0.** The vtable slot
+   resolves to `0x14251c480`, which is **not a normal function**: it does `lock cmpxchg
+   [0x1448577d8], 0` to read an encoded pointer, `xor`/`ror`-decodes it against the security cookie
+   `0x143c5adb0`, and `call`s the decoded target (fail-fast `int3` via `0x142548670` if the decode is
+   0). That is Arxan's cookie-encoded-pointer call gate; the encoded pointer is healed at runtime by
+   `0x14251c4dc`/`0x14251f38e` (the only other refs to `0x1448577d8`). **The real predicate is
+   therefore virtualized/undecodable statically** — same class of protection as leg A's gate
+   `0x140cb4b50`, and the same reason we must chart it behaviorally and read its boolean at runtime.
+   Behaviorally it produces a 64-bit value in the out-slot that the helper immediately consumes as an
+   identity/key: `0x141ed60d0` returns the constant divisor `0x2710` (10000), `rax=[rsp+0x40]; div
+   rcx`, and the quotient is stored at `obj+0x548`. A "get verified host identity / session key"
+   call that has nothing to return offline fits this shape exactly.
+3. **Three vector-reserves** `0x1423fd110(&obj+0x4e8/+0x508/+0x528, count=[obj+0x68])` each `test al,al;
+   je 0x1423fb1c2` — `0x1423fd110` is a `std::vector` grow-to-capacity helper; it returns 0 only on
+   allocation failure. Not an offline signal.
+4. **Per-slot build loop** (`count`=6 iterations): two allocations (`0x141eb9ed0` sizes `0x10c0`,
+   `0x20`) each null-check to cleanup, then `call [obj_vtable+0xd0]` (= `0x1423fdf20`, itself just an
+   `alloc 0x170 + construct` returning null only on OOM) with `test rax,rax; je 0x1423fb166`. All
+   three exits are allocation-shaped. If the loop completes, `0x1423fb1b8: mov al,1` → **return 1**.
+
+So with the `[6,30000,…]` fields populated and memory available, **the only path to `al=0` is step 2's
+Arxan vmethod returning false.** That is the true rung-3 create veto.
+
+**gate4 `0x1423fd7a0` tail (past `0x1423fd7cc`), charted for completeness** — reached only if the
+helper already returned nonzero, so *not* on the failing path, but its own return-0 set is: (a) the
+0x528-object allocation `mov r14,[container+0x48]; call [[r14]+0x50]` (an allocator/manager sub-object's
+vmethod, not the container's own vtable) → `je 0x1423fd95a` (null alloc → false); then a 32-entry `lock
+cmpxchg` init loop; then four boolean setup/register calls
+keyed off the singleton accessor `0x1423f8410` (→ `0x1423f4fa0`): (b) `0x1423f84a0`, (c) `0x1423f8420`,
+(d) `0x1423f8620`, (e) `0x1424020a0(edx=[rbx+0x68], [rbx+0x258], [rbx+0x260])` — each `test al,al; je`
+to the cleanup at `0x1423fd951` (calls `[obj_vtable+0x10]`, returns false at `0x1423fd95a`). Only if
+all pass does `0x1423fd9c8: mov al,1` return true. These are map-insert/registration operations (lock +
+insert into the manager's internal collections at `+0x80/+0xa0`), i.e. dedup/allocation-shaped, not an
+obvious offline gate — and moot until the helper stops vetoing.
+
+**Runtime probe spec** (wire into `crates/unseamless-coop/src/session_probe.rs`, modeled on
+`log_create_gate4`/`log_legb_finhandle`; both are read-only mid-function hooks, so guard on the
+charted prologue bytes and skip on mismatch):
+
+- **Hook A — helper return, read at gate4** (`0x1423fd7c8`, the `test al,al` right after gate4's `call
+  0x1423faf60`). Prologue guard `84 C0 74 EF 48 8B 43 58 BA 28` (`test al,al` / `je 0x1423fd7bb` /
+  `mov rax,[rbx+0x58]` / `mov edx,0x28…`). In the detour read `al = rax as u8` = **the helper's
+  return**; `rbx` = the session object (log its `+0x548` id and the five `+0x68..0x78` fields for
+  context). `al==0` confirms the helper vetoed (expected); `al!=0` would move the veto into gate4's
+  tail (checks a–e above).
+- **Hook B — the decisive vmethod result, inside the helper** (`0x1423fafcc`, the `test al,al` right
+  after `call [container_vtable+8]`). Prologue guard `84 C0 0F 84 F7 01 00 00 48 8D` (`test al,al` /
+  `je 0x1423fb1cb` rel32 / `lea …`). Read `al = rax as u8` = **the Arxan vmethod's verdict**. This is
+  the money datum: `al==0` proves the encoded vmethod is the veto (and localizes it precisely,
+  distinguishing it from the reserves/loop). Optionally also read the out-slot the vmethod filled at
+  `rsp+0x40` (frame-relative; best-effort) to see whether it returned a zero identity.
+
+Run one solo-fabricate and one fabricate+peer cycle. Expected: `create-gate4 REACHED` → Hook B
+`vmethod al=0` → Hook A `helper ret=0` → `drive-create false`, with no `legb-finhandle` (already
+confirmed leg B never reaches finalize). That nails the veto to the encoded vmethod.
+
+**Candidate levers** (all flagged risky — this gate does *real* session setup, so bypassing it likely
+yields a **malformed** session, not a working one):
+
+- **L1 — force the helper past the vmethod** (patch `0x1423fafcd`: the `je 0x1423fb1cb` `0F 84 F7 01
+  00 00` → six `90` NOPs). The helper then ignores the vmethod verdict and proceeds to the div + slot
+  build. **High malformation risk:** the out-slot the vmethod was supposed to fill stays zero, so
+  `obj+0x548` (the session key/id) is 0; downstream code that keys on it may reject or corrupt the
+  session. Only worth trying to *observe* whether create then advances, not as a shipping fix.
+- **L2 — force gate4 true** (patch `0x1423fd7ca`: `je 0x1423fd7bb` `74 EF` → `90 90`, so gate4 falls
+  into its tail regardless of `al`; or short-circuit gate4 to `mov al,1; ret`). Analogous to leg A's
+  `bypass_session_create_gate`. **Same malformation risk, worse:** skipping the helper entirely means
+  none of the per-slot substructures at `obj+0x4e8/+0x508/+0x528` get built. Diagnostic only.
+- **L3 (preferred, non-destructive) — don't patch; identify what the vmethod reads and seed it.** The
+  vmethod is Arxan-encoded, so its predicate is only visible at runtime. Once Hook B confirms `al=0`,
+  the next step is an in-execution capture of the decoded target (single-step from the trampoline
+  `call [decoded]` at `0x14251c4b2`, or a Frida `Interceptor` on the resolved address) to learn which
+  global/service it queries — then seed *that* input (the way we seed the slot array / registry
+  counter) rather than defeating the check. This is the only path likely to yield a *working* session,
+  and it stays clean-room (study the game's own precondition, satisfy it).
+
+Re-derive after a game update: gate4 is session-object vtable slot `+8`; its helper is the `call`
+between gate4's `[+0x3b0]==0 && [+0x3b4]==0` early-out and its `test al,al; je`. Inside the helper,
+the decisive vmethod is the **first `call [ [rdi+0x58] +8 ]`** after the five `cmp [rdi+0x68..0x78],0`
+checks; if that slot points at a `lock cmpxchg` + cookie-decode + `call`, it is the Arxan gate — hook
+the `test al,al` right after it (`84 C0 0F 84`).
 
 ### Tooling / re-derivation
 
