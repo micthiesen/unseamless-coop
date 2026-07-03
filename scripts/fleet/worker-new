@@ -275,11 +275,25 @@ if [ "$harness" = "codex" ]; then
   # matching what claude workers already have.
   # sandbox_mode is pinned so the network_access override is load-bearing even if
   # the stowed ~/.codex/config.toml ever changes its default sandbox.
+  # approval_policy=never: the codex analog of the claude worker's pre-approved
+  # allow rules (.claude/settings.json, unlocked by the ~/.claude.json trust
+  # write). Without it codex prompts for approval/escalation, which a fleet
+  # worker must never do: nobody is watching the pane, and a `msg` delivery
+  # (tmux paste + Enter) landing on a pending approval modal would answer it
+  # blind. With `never`, out-of-sandbox commands just fail back to the model,
+  # which surfaces the blocker per its role -- the sandbox IS the permission
+  # boundary, so widen writable_roots below rather than loosening this.
+  # writable_roots: the codex analog of claude's additionalDirectories --
+  # ~/.cargo so `cargo fetch/build` can write the registry cache (verified
+  # live: workspace-write mounts it read-only, so every fetch otherwise fails
+  # or begs escalation), plus FLEET_DIR to match the claude worker's grant.
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     codex -c "projects.\"$ws\".trust_level=\"trusted\"" \
     -c "sandbox_mode=\"workspace-write\"" \
     -c "sandbox_workspace_write.network_access=true" \
+    -c "sandbox_workspace_write.writable_roots=[\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
+    -c "approval_policy=\"never\"" \
     "${codex_model_args[@]}" "${seed_args[@]}"
 else
   # claude:
