@@ -25,7 +25,7 @@ You build the DLL here and push it; the Deck stays stateless (only the helper + 
 |---|---|
 | `setup` | One-time per Deck: push the helper, mark the host a throwaway rig (required by `apply`), seed the `uinput-tap` tapper, report deps. |
 | `apply [--release] [--no-build] [--keep-config]` | Build the DLL (default `diag`) + rsync it, the launcher, and the seed config; install on the Deck (dll→`dinput8.dll`, launcher→`start_protected_game.exe`, config, marker; empties `mods/`). |
-| `seed-save [file]` | Push a save into the Deck's Proton prefix as `ER0000.<ext>` (default source: the local rig's seeded save). |
+| `seed-save [file]` | Fallback only: push a compatible save into the Deck's Proton prefix as `ER0000.<ext>`, re-signing its embedded SteamID64 for the Deck account when needed. |
 | `launch` | Start the game via the Deck's running Steam (outside EAC, via the applied launcher). |
 | `dismiss` | Tap Enter (`uinput-tap`) to clear the startup popups + select Continue → gameplay. |
 | `kill` | Stop the game + launcher. |
@@ -46,7 +46,9 @@ export DECK_HOST=deck@10.10.1.57 DECK_PORT=2222
 
 # once per Deck:
 scripts/deck.sh setup
-scripts/deck.sh seed-save                 # after the game has run once (creates the save profile)
+# recommended: launch ELDEN RING on the Deck and create a native throwaway character there
+# fallback only, for compatible non-DLC saves:
+# scripts/deck.sh seed-save               # after the game has run once (creates the save profile)
 
 # each test:
 scripts/rig.sh apply  && scripts/deck.sh apply
@@ -77,8 +79,17 @@ Run `scripts/deck.sh paths` on a new Deck to confirm everything resolves.
 - **`apply` requires `setup` first** (the throwaway-rig mark) and writes into `DECK_GAME_DIR` with no backup
   — confirm the host/path with `deck.sh paths` before applying to a new Deck.
 - **`seed-save` needs the save profile dir** (`…/EldenRing/<SteamID64>/`), which ELDEN RING only creates
-  after running once under the account. Launch once first, or pass `DECK_STEAM_ID64=<id>`. It backs up any
-  existing test save to `.deckbak` and never touches a `.sl2`.
+- **Recommended Deck save setup: create a native character on the Deck** under the throwaway account. That
+  avoids cross-account re-signing and also avoids DLC-content coupling between the main account and the
+  Deck account.
+- **`seed-save` is a fallback for compatible source saves.** It needs the save profile dir
+  (`…/EldenRing/<SteamID64>/`), which ELDEN RING only creates after running once under the account. Launch
+  once first, or pass `DECK_STEAM_ID64=<id>`. It backs up any existing test save to `.deckbak` and never
+  touches a `.sl2`. Cross-account seeding is supported: `deck.sh` reads the target SteamID64 from the
+  resolved Deck profile dir (or `DECK_STEAM_ID64`), and if the source save's embedded owner differs, it
+  stages a re-signed temp copy with refreshed save checksums. `seed-save` needs local `python3` for owner
+  verification and, when needed, re-signing. Re-signing only solves the owner-ID check; ELDEN RING can
+  still reject a save whose contents require DLC the Deck account does not own.
 - **`launch` needs Game Mode running** (it lifts the session env from the live Steam process and fires
   `steam://rungameid/<appid>`). It errors if no live session is found.
 - **`dismiss` needs an active session** (writes `/dev/uinput`; no sudo). If a `cycle`'s dismiss fires before

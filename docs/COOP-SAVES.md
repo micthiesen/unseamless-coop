@@ -50,6 +50,15 @@ What's confirmed about the format (relevant only so we understand what we must *
   a different account). **Inference:** the game derives the directory from the logged-in Steam account at
   runtime; the filename stem (`ER0000`) and extension (`.sl2`) are constants the engine appends. The
   extension being a constant string is the lever the whole feature turns on.
+- For Deck/player-2 seeding, [`scripts/deck.sh`](../scripts/deck.sh) uses
+  [`scripts/deck/save-resign.py`](../scripts/deck/save-resign.py) to re-sign a staged save when the source
+  save's embedded SteamID64 differs from the Deck profile directory / `DECK_STEAM_ID64`. The tool rewrites
+  the plaintext little-endian owner ID occurrences and refreshes the validated MD5 regions without
+  decrypting the save; see its comments for the re-derivation offsets. This is a fallback for compatible
+  source saves, not the preferred Deck setup: the recommended player-2 path is creating a native character
+  on the Deck under the throwaway account. Re-signing proves ownership compatibility, but it cannot remove
+  content dependencies. ELDEN RING can still reject a re-signed save that contains DLC data on an account
+  without that DLC.
 
 The crucial property for us: **the extension is the *only* thing that distinguishes a vanilla save from a
 co-op save**. Same folder, same `ER0000` stem, same internal format — only `.sl2` vs `.co2`. The game

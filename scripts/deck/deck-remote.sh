@@ -38,6 +38,14 @@ ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+is_steam_id64() { [[ "$1" =~ ^[0-9]{17}$ ]]; }
+
+validate_save_ext() {
+  local ext="$1"
+  [[ "$ext" =~ ^[[:alnum:]]{1,120}$ ]] || die "save extension must be 1..=120 alphanumerics (got '$ext')"
+  [[ "${ext,,}" != "sl2" ]] || die "refusing to seed a .sl2 save — that's the vanilla single-player save (use the co-op ext)"
+}
+
 # ---- popup-dismiss tuning (mirrors rig.sh; the popups are MODAL in-engine dialogs) --------------
 # 100 taps x 400ms = a ~40s window — deliberately longer than rig.sh's 30: the Deck runs UNATTENDED and
 # ELDEN RING's Proton cold-start can show the popups well after the mod's framework loads, so we spam
@@ -71,10 +79,14 @@ lift_session_env() {
 # account, so on a fresh throwaway account it may not exist yet (run the game once, or pass
 # DECK_STEAM_ID64 to create it). Prints the resolved dir, or empty + a reason on stderr.
 resolve_save_dir() {
-  if [[ -n "$STEAM_ID64" ]]; then echo "$SAVE_ROOT/$STEAM_ID64"; return 0; fi
+  if [[ -n "$STEAM_ID64" ]]; then
+    is_steam_id64 "$STEAM_ID64" || { warn "DECK_STEAM_ID64 must be a 17-digit SteamID64 (got '$STEAM_ID64')"; return 1; }
+    echo "$SAVE_ROOT/$STEAM_ID64"
+    return 0
+  fi
   [[ -d "$SAVE_ROOT" ]] || { warn "save root missing ($SAVE_ROOT) — has the game run once on the Deck?"; return 1; }
   local dirs=() d
-  for d in "$SAVE_ROOT"/*/; do [[ -d "$d" && "$(basename "$d")" =~ ^[0-9]+$ ]] && dirs+=("${d%/}"); done
+  for d in "$SAVE_ROOT"/*/; do [[ -d "$d" && "$(basename "$d")" =~ ^[0-9]{17}$ ]] && dirs+=("${d%/}"); done
   case ${#dirs[@]} in
     1) echo "${dirs[0]}" ;;
     0) warn "no EldenRing/<SteamID64>/ subdir yet — run the game once on the Deck, or set DECK_STEAM_ID64"; return 1 ;;
@@ -93,6 +105,11 @@ cmd_paths() {
   printf 'save_dir    %s\n' "$(resolve_save_dir 2>/dev/null || echo '<unresolved>')"
   printf 'helper_dir  %s\n' "$HELPER_DIR"
   printf 'marker      %s\n' "$MARKER"
+}
+
+cmd_save_id64() {
+  local dir; dir="$(resolve_save_dir)" || die "could not resolve the save dir (see warning above)"
+  basename "$dir"
 }
 
 cmd_check() {
@@ -155,16 +172,19 @@ cmd_apply_staged() {
 # existing test save ONCE (so a re-seed never overwrites the original backup). Never touches a vanilla .sl2.
 cmd_seed_save_staged() {
   local ext="${1:?usage: seed-save-staged <ext>}"
-  [[ "$ext" == "sl2" ]] && die "refusing to seed a .sl2 save — that's the vanilla single-player save (use the co-op ext)"
+  validate_save_ext "$ext"
   pgrep -f '[e]ldenring.exe' >/dev/null 2>&1 && die "the game is running — close it first (a live game overwrites the seeded save)"
   local src="$STAGING/save/ER0000.$ext"
   [[ -f "$src" ]] || die "staged save missing ($src)"
   local dir; dir="$(resolve_save_dir)" || die "could not resolve the save dir (see warning above)"
   mkdir -p "$dir"
-  local dst="$dir/ER0000.$ext"
+  local dst="$dir/ER0000.$ext" tmp="$dir/.ER0000.$ext.decktmp"
   # Only back up if we haven't already — else a second seed clobbers the original backup with the test save.
   [[ -f "$dst" && ! -f "$dst.deckbak" ]] && { cp -f "$dst" "$dst.deckbak"; ok "backed up existing $dst -> $dst.deckbak"; }
-  install -m644 "$src" "$dst"
+  rm -f "$tmp"
+  install -m644 "$src" "$tmp"
+  [[ "$(stat -c '%s' "$tmp")" == "$(stat -c '%s' "$src")" ]] || { rm -f "$tmp"; die "staged save copy size mismatch; left existing save untouched"; }
+  mv -f "$tmp" "$dst"
   ok "seeded save -> $dst"
 }
 
@@ -249,6 +269,7 @@ main() {
   local verb="${1:-}"; shift || true
   case "$verb" in
     paths)             cmd_paths "$@" ;;
+    save-id64)         cmd_save_id64 "$@" ;;
     check)             cmd_check "$@" ;;
     mark-throwaway)    cmd_mark_throwaway "$@" ;;
     apply-staged)      cmd_apply_staged "$@" ;;
@@ -260,7 +281,7 @@ main() {
     wait-framework)    cmd_wait_framework "$@" ;;
     log)               cmd_log "$@" ;;
     status)            cmd_status "$@" ;;
-    *) die "unknown verb '$verb' (paths|check|mark-throwaway|apply-staged|seed-save-staged|launch|dismiss|kill|latest-log|wait-framework|log|status)" ;;
+    *) die "unknown verb '$verb' (paths|save-id64|check|mark-throwaway|apply-staged|seed-save-staged|launch|dismiss|kill|latest-log|wait-framework|log|status)" ;;
   esac
 }
 

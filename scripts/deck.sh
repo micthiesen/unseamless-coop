@@ -26,6 +26,7 @@ TRIPLE="x86_64-pc-windows-gnu"
 SEED_CONFIG="${SEED_CONFIG:-$ROOT/scripts/rig/seed-config.toml}"
 REMOTE_HELPER_SRC="$ROOT/scripts/deck/deck-remote.sh"
 TAP_SRC="$ROOT/scripts/deck/uinput-tap.c"  # the dismiss key-tapper; built static here, pushed to the Deck
+SAVE_RESIGN="$ROOT/scripts/deck/save-resign.py"
 # Remote paths (defaults derive off the resolved remote $HOME in resolve_paths — see below — so they're
 # correct for any Deck user, not just `deck`; override for an SD-card install or non-standard layout).
 DECK_HELPER_DIR="${DECK_HELPER_DIR:-}"     # default: <remote-home>/.local/share/unseamless-deck
@@ -143,7 +144,21 @@ artifact_dir() { echo "$ROOT/target/$TRIPLE/$1"; }
 
 configured_save_ext() {  # read [save] file_extension from the seed config (fallback matches rig.sh)
   local ext; ext="$(sed -nE 's/^[[:space:]]*file_extension[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$SEED_CONFIG" | head -n1)"
-  printf '%s' "${ext:-uco}"
+  ext="${ext:-uco}"
+  [[ "$ext" =~ ^[[:alnum:]]{1,120}$ ]] || die "save.file_extension must be 1..=120 alphanumerics for deck seed-save (got '$ext')"
+  [[ "${ext,,}" != "sl2" ]] || die "refusing to seed a .sl2 save — that's the vanilla single-player save (use the co-op ext)"
+  printf '%s' "$ext"
+}
+
+is_steam_id64() { [[ "$1" =~ ^[0-9]{17}$ ]]; }
+
+embedded_save_id64() {
+  local file="$1" id
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 is needed to verify/re-sign this save before pushing; without it, seed-save might push a save that the Deck account cannot load"
+  [[ -x "$SAVE_RESIGN" || -f "$SAVE_RESIGN" ]] || die "missing save re-sign tool: $SAVE_RESIGN"
+  id="$(python3 "$SAVE_RESIGN" --read-id "$file")" || die "could not read embedded SteamID64 from $file"
+  printf '%s\n' "$id"
 }
 
 # ---- verbs --------------------------------------------------------------------------------------
@@ -206,9 +221,25 @@ cmd_seed_save() {
     [[ -n "$cand" ]] && src="$cand"
   fi
   [[ -n "$src" && -f "$src" ]] || die "no save source. Pass a file: scripts/deck.sh seed-save /path/ER0000.$ext  (or set DECK_SAVE_SRC / LOCAL_SAVE_ROOT)"
-  say "Pushing save $src -> Deck (as ER0000.$ext)"
+
+  local target_id source_id push_src tmp=""
+  target_id="$(deck_remote save-id64)" || die "could not resolve the Deck save account id"
+  is_steam_id64 "$target_id" || die "Deck save account id is not a 17-digit SteamID64: $target_id"
+  source_id="$(embedded_save_id64 "$src")"
+  push_src="$src"
+  if [[ "$source_id" != "$target_id" ]]; then
+    tmp="$(mktemp "${TMPDIR:-/tmp}/unseamless-deck-save-resign.XXXXXX.ER0000.$ext")"
+    trap '[[ -n "${tmp:-}" ]] && rm -f "$tmp"' RETURN
+    say "Re-signing save for Deck account ($source_id -> $target_id)"
+    python3 "$SAVE_RESIGN" "$src" "$tmp" "$target_id"
+    push_src="$tmp"
+  else
+    ok "save already signed for Deck account $target_id"
+  fi
+
+  say "Pushing save $push_src -> Deck (as ER0000.$ext)"
   ssh_base "mkdir -p $(qsh "$DECK_STAGING/save")"
-  rsync_to "$src" "$DECK_STAGING/save/ER0000.$ext"
+  rsync_to "$push_src" "$DECK_STAGING/save/ER0000.$ext"
   deck_remote seed-save-staged "$ext"
 }
 
@@ -259,7 +290,7 @@ deck.sh — remote rig over SSH (player 2). Set DECK_HOST=user@host first.
   setup                 push the on-Deck helper, mark the host a throwaway rig, report deps (run once per Deck)
   apply [--release] [--no-build] [--keep-config]
                         build the DLL here, rsync it + the launcher + seed config, install on the Deck
-  seed-save [file]      push a save (default: the local rig's seeded ER0000.<ext>) into the Deck's prefix
+  seed-save [file]      push a save into the Deck's prefix; re-signs for the Deck account when needed (needs local python3)
   seed-input            (re)build + push the static uinput-tap key-tapper that dismiss uses (setup does this too)
   launch                start the game on the Deck via the running Steam
   dismiss               tap Enter via the bundled uinput-tap to clear popups + select Continue (no daemon)
