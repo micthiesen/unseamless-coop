@@ -1,0 +1,72 @@
+{
+  "project": "unseamless-coop",
+  "peers": {
+    "er-crit-coop": {
+      "path": "../er-crit-coop",
+      "tokens": {
+        "unseamless-coop": "er-crit-coop",
+        "unseamless_coop": "er_crit_coop"
+      },
+      "notes": "Sibling Elden Ring DLL mod on the same fromsoftware-rs SDK. Shares the platform (toolchain, release shape, DLL entry/task-hook pattern); never the mod behavior, package identity (Cargo name/version/description), or README prose. er-crit-coop is frozen, so most flow is from here -> there, and only for fixes worth having."
+    },
+    "dotfiles": {
+      "path": "~/.dotfiles",
+      "layout": "rulesync",
+      "notes": "Shares only the sync skill itself."
+    }
+  },
+  "resources": [
+    { "path": "rust-toolchain.toml", "peers": ["er-crit-coop"] },
+    { "path": "LICENSE", "peers": ["er-crit-coop"] },
+    {
+      "path": ".gitignore",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Shared platform ignores (target/, reference/, deploy artifacts); each repo adds its own entries."
+    },
+    {
+      "path": "Cargo.toml",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Shared: release-profile ideas and the fromsoftware-rs pin discipline (both SDK crates at one git commit; verify layouts before bumping either repo's pin). Owned: name/version/description and each mod's own deps. This repo is a workspace: profile in the root manifest, deps in crates/unseamless-coop/Cargo.toml; er-crit-coop is a single crate. Release profiles intentionally differ on panic: unwind here (the catch_unwind firewall), abort there."
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Same shape: tag push -> mingw cross-compile -> GitHub release. Artifacts differ (DLL + launcher + dist bundle here; single DLL there). Port CI improvements, keep artifact lists per repo."
+    },
+    {
+      "path": "scripts/deploy.sh",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Same job (install the built DLL into the game), different install model: dinput8 proxy + launcher here (wrapped by rig.sh), Elden Mod Loader mods/ there. Port safety improvements only."
+    },
+    {
+      "path": "crates/unseamless-coop/src/logger.rs",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "peerPath": { "er-crit-coop": "src/logger.rs" },
+      "notes": "Common origin, intentionally diverged: this logger is diagnostics-integrated (RunInfo header, rotated logs); er-crit-coop's stays minimal. Port bugfixes, not features."
+    },
+    {
+      "path": "crates/unseamless-coop/src/lib.rs",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "peerPath": { "er-crit-coop": "src/lib.rs" },
+      "notes": "Shared: the DllMain pattern and its hard safety invariants (ATTACH-only, init thread off the loader lock, wait_for_instance -> run_recurring -> mem::forget). Owned: everything the mod actually does."
+    },
+    {
+      "path": "docs/DEVELOPMENT.md",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Shared toolchain/build story (cross-compile from Linux, mingw, .text-size equivalence check); workflow and repo specifics are owned."
+    },
+    {
+      "path": ".claude/skills/release/",
+      "peers": ["er-crit-coop"],
+      "mode": "judgment",
+      "notes": "Same tag-driven release procedure; this repo adds its own rules (pre-1.0 versioning, canonical notes format) that don't apply there. Port procedural improvements both ways."
+    }
+  ]
+}
