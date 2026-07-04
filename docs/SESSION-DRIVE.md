@@ -1133,18 +1133,33 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    (changing per run). **Fix: resolve via `SteamInternal_ContextInit` (the IAT import `[0x144c0d0a4]`), the same
 >    idempotent path the game uses** — it leaves `[holder+0]=pFn` intact and lands the iface at `*[holder+0x10]`.
 >    With this, host-setup runs to completion, no crash.
-> 5. **NEW MILESTONE — the host session FORMS, then is torn down after ~2s.** After the fix, driving create (either
->    `force_host_transition` or the natural session-update task) advances: `TryToCreateSession` → **`protocol_state=Ingame`,
->    `players=1` with `player[0] host=true local=true`, and a warp into the co-op map begins** (`start_area_id=1800001`,
->    `warp_delay` counting down from ~10s). So host-setup genuinely creates the session and starts warping us into the
->    shared world. But `lobby_state` doesn't stick at `Host` and at ~frame +120 the roster drops `1 -> 0` (`TEARDOWN`
->    log line) and everything resets to `None`/`None`, the warp cancelled. **► NEXT: suppress/understand the teardown.**
->    All game-driven disconnects funnel through `leave_session 0x140cae730` (the `OnLeaveSession` writer) — the
->    seamlessness gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)) is exactly the lever to arm
->    here. Test whether arming it holds the host in `Host`/`Ingame`, then bring in the Deck as a real joiner. Open
->    question: is the teardown a validation timeout (no real peer/session backing) that a real peer join would
->    satisfy, or an unconditional watchdog we must suppress? The `game-p2p` sends keep flowing across the teardown,
->    so our transport stays up — the teardown is session-layer, not transport.
+> 5. **NEW MILESTONE — the host session FORMS, then a session-layer online-availability gate resets it.** After the
+>    fix, driving create (either `force_host_transition` or the natural session-update task) advances:
+>    `TryToCreateSession` → **`protocol_state=Ingame`, `players=1` with `player[0] host=true local=true`, and a warp
+>    into the co-op map begins** (`start_area_id=1800001`, `warp_delay` from ~10s). So host-setup genuinely creates
+>    the session and starts warping us into the shared world — the furthest the project has reached. But `lobby_state`
+>    goes to `None` at create-completion (not `Host`), and ~2s later the roster drops `1 -> 0` and protocol resets to
+>    `None`.
+> 6. **The teardown is NOT `leave_session` and NOT the async handler — it's host-setup's own final validity gate.**
+>    Read-only hooks on `leave_session 0x140cae730` AND the async teardown handler `0x1423f46d0` **neither fired** at
+>    the reset. The reset is inside `0x140cb2ae0`'s own tail: it ends with `call 0x140ddfb20` (→ `0x140de2620`), a
+>    validity check that reads `rcx=[0x143d855c8]; if [rcx+0x10]==0 return false` and otherwise touches the
+>    **online-session-manager singleton `0x144842d40`** (creating it via `0x141eceb10` if null) — **the same
+>    online-availability signal that gates the greyed multiplayer items** ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)).
+>    On `false`, `0x140cb2ae0` calls `0x140cb3b80(this, dl=1)` — the degraded/reset path. So the final wall for a
+>    *sticking* solo `Host` is that one online-flow-availability signal: the transport builds, the standup works, the
+>    session forms and starts warping — then the session layer's "are we really in an online session?" gate says no
+>    and unwinds it. This is the docs' long-standing "path 1 / elusive online-flow signal."
+>    **► NEXT (two independent tracks):**
+>    - **(a) Satisfy the online-availability gate** — chart `[0x143d855c8]+0x10` and the `0x144842d40` singleton
+>      state a real online session leaves them in, and whether it's seedable offline (ties into OFFLINE-ITEMS). If
+>      solved, the solo host should stick and the warp complete.
+>    - **(b) Two-machine with a real peer** — the reset may relax once a real joiner's connection backs the session.
+>      Needs a **joiner driver** (drive the join wrapper → `Client`), which doesn't exist yet — the create driver is
+>      host-only. Build that, then rig-hosts / Deck-joins within the window.
+>    Diagnostics added this session (`session_probe.rs`): read-only `leave-session` + `teardown-handler` hooks, and a
+>    `[debug.probes] suppress_leave` patch lever (now known ineffective — `leave_session` isn't on this teardown path;
+>    kept for the general seamless-teardown work).
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes

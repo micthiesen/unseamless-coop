@@ -315,6 +315,14 @@ pub struct DebugProbes {
     /// instead. Off by default. See the "SEAM CHARTED" section of docs/SESSION-DRIVE.md.
     pub force_host_transition: bool,
 
+    /// **EXPERIMENTAL rung-3 teardown gate.** Our driven host session forms (`protocol=Ingame`, host player
+    /// added, warp starts) then the game tears it down ~2s later. When on, raw-patch `leave_session`
+    /// (`0x140cae730`, the sole out-of-line `lobby_state=OnLeaveSession` writer) to `ret` — the doc's
+    /// "early-return before the lobby_state=7 write" gate — to test whether the driven host then sticks in
+    /// `Host`/`Ingame`. When off, a read-only hook logs when/who calls it instead. Off by default. See
+    /// docs/SESSION-LIFECYCLE-FINDINGS.md + docs/SESSION-DRIVE.md > "HOST-SETUP DRIVE".
+    pub suppress_leave: bool,
+
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
     /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
     /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is

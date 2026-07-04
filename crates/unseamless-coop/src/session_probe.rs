@@ -333,6 +333,15 @@ static SESSION_ESTABLISHED_FN: AtomicUsize = AtomicUsize::new(0);
 /// `0x1423f4870` = `ManagerImplSteam@DLNR3D`'s session-established handler (vtable slot +0x68).
 const SESSION_ESTABLISHED_OFFSET: usize = 0x1_423f_4870 - 0x1_4000_0000;
 
+/// `leave_session 0x140cae730` — the sole out-of-line writer of `lobby_state=OnLeaveSession(7)` and the
+/// game-driven-disconnect chokepoint (see docs/SESSION-LIFECYCLE-FINDINGS.md). We hook it read-only to chart
+/// what tears down the driven host, or patch its entry to `ret` (`suppress_leave`) to hold the session.
+const LEAVE_SESSION_OFFSET: usize = 0x1_40ca_e730 - 0x1_4000_0000;
+/// `0x1423f46d0` = the DLNW3D async session teardown handler (`ManagerImplSteam@DLNR3D` vtable slot; 0
+/// direct callers, dispatched on a transport connection-down). Hooked read-only to confirm it's what
+/// tears down the driven host ~2s after it forms (no real peer → connection-down). See SESSION-LIFECYCLE.
+const TEARDOWN_HANDLER_OFFSET: usize = 0x1_423f_46d0 - 0x1_4000_0000;
+
 /// Armed by `[debug.probes] drive_establish_handler`: at the veto hook, drive the game's own
 /// connection-establish handler `0x1423f2820(container, descriptor)` (which calls the Arxan native builder
 /// `container->vtable[0x80]`) to build + wrap + store a connection at `[container+0x708]` natively.
@@ -454,6 +463,31 @@ fn install_create_gate_trace(config: &Config) {
     if prologue_ok("builder-entry", be, &BUILDER_ENTRY_PROLOGUE) {
         install_offset_hook("builder-entry", be, log_builder_entry);
     }
+    // leave-session (0x140cae730): the sole out-of-line writer of lobby_state=OnLeaveSession. Our driven
+    // host session forms (protocol=Ingame, player added, warp starts) then is torn down ~2s later. With
+    // `suppress_leave` off we install a READ-ONLY hook logging when it fires + its caller (does the teardown
+    // route through here, or the inlined twin 0x140cb08bc in the update task?). With `suppress_leave` on we
+    // raw-patch its entry to `ret` — the doc's "early-return before the lobby_state=7 write" gate — to see
+    // if the host then sticks in Host/Ingame. (A jmp-back hook can't early-return, so suppression is a patch.)
+    let leave = exe_base + LEAVE_SESSION_OFFSET;
+    if config.debug.probes.suppress_leave {
+        match patch_entry_ret(leave) {
+            Ok(()) => log::info!(
+                "session-probe: leave-session SUPPRESSED — patched 0x140cae730 entry to `ret` \
+                 (all game-driven FSM leaves suppressed; testing whether the driven host sticks)"
+            ),
+            Err(e) => log::error!("session-probe: leave-session suppress patch failed: {e}"),
+        }
+    } else {
+        install_offset_hook("leave-session", leave, log_leave_session);
+    }
+    // teardown-handler (0x1423f46d0): the DLNW3D async connection-down reaction (unregisters handlers,
+    // destroys the node list, clears container status bits). leave_session did NOT fire at our host's ~2s
+    // teardown, so this async path — triggered because the solo host has no real peer connection — is the
+    // suspect. Read-only hook to confirm it fires at the teardown frame. (NOT patched even under
+    // suppress_leave: the doc warns its cleanup is load-bearing — gating it is a UAF. The real fix is a
+    // real peer, i.e. the two-machine join.)
+    install_offset_hook("teardown-handler", exe_base + TEARDOWN_HANDLER_OFFSET, log_teardown_handler);
     // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate),
     // and — when `set_create_veto_bit` is armed — write bit 2 set to test the L3 lever.
     SET_CREATE_VETO_BIT.store(config.debug.probes.set_create_veto_bit, Ordering::Relaxed);
@@ -531,6 +565,70 @@ fn place_jmp_back_hook(
         }
         Err(e) => Err(format!("{e:?}")),
     }
+}
+
+/// leave-session tracer: fires when `leave_session 0x140cae730` runs (the game deciding to end the
+/// session). Logs the `CSSessionManager*` (rcx), the current `lobby_state`, and the caller's return
+/// address (`[rsp]` at a function-entry hook) so we can chart WHO tears down the driven host. Read-only.
+fn log_leave_session(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook hands us the saved registers at the entry; rcx = the CSSessionManager, and [rsp]
+        // is the return address the `call` pushed (the caller). All reads are bounded and null-guarded.
+        let r = unsafe { &*regs };
+        let this = r.rcx as usize;
+        let caller = if r.rsp != 0 { unsafe { (r.rsp as *const usize).read_volatile() } } else { 0 };
+        let lobby = if this != 0 { unsafe { ((this + 0xc) as *const u32).read_volatile() } } else { 0xffff_ffff };
+        log::info!(
+            "session-probe: leave-session — 0x140cae730(this={this:#x}) lobby_state={lobby} caller={caller:#x} \
+             (the game is ending the session; caller-ImageBase offset = caller-0x140000000)",
+        );
+    }));
+}
+
+/// teardown-handler tracer: fires when the DLNW3D async teardown handler `0x1423f46d0` runs (the transport
+/// reacting to a connection-down). Logs rcx (the container) + `lobby_state`/`[container+0x7c0]` status, so
+/// we can confirm this is what tears the driven host down. Read-only.
+fn log_teardown_handler(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook hands us the entry registers; rcx = the container (`ManagerImplSteam@DLNR3D`),
+        // and `+0x7c0` is its in-bounds status bitfield. Both reads are null-guarded.
+        let r = unsafe { &*regs };
+        let container = r.rcx as usize;
+        let status = if container != 0 {
+            unsafe { ((container + 0x7c0) as *const u32).read_volatile() }
+        } else {
+            0
+        };
+        log::info!(
+            "session-probe: teardown-handler — 0x1423f46d0(container={container:#x}) [+0x7c0]={status:#x} \
+             (async connection-down teardown; if this fires at the ~2s teardown, the solo host has no real peer)",
+        );
+    }));
+}
+
+/// Raw-patch a function entry to a single `ret` (0xC3), suppressing it. Used by `suppress_leave` to gate
+/// `leave_session` (the doc's "early-return before the lobby_state=7 write"). Flips the page to RWX, writes
+/// the byte, restores protection, flushes the icache. Returns the ilhook-style error string on failure.
+fn patch_entry_ret(addr: usize) -> Result<(), String> {
+    use windows::Win32::System::Memory::{
+        VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
+    };
+    // SAFETY: `addr` is a charted, resident function entry in our own process image. We flip its page to
+    // RWX, overwrite the first byte with `ret`, restore the old protection, and flush the icache — the
+    // standard in-process code patch. A `ret` at entry is a valid void return before any state change.
+    unsafe {
+        let mut old = PAGE_PROTECTION_FLAGS(0);
+        VirtualProtect(addr as *const _, 1, PAGE_EXECUTE_READWRITE, &mut old)
+            .map_err(|e| format!("VirtualProtect(RWX) failed: {e}"))?;
+        (addr as *mut u8).write_volatile(0xC3);
+        let _ = VirtualProtect(addr as *const _, 1, old, &mut old);
+        let _ = windows::Win32::System::Diagnostics::Debug::FlushInstructionCache(
+            windows::Win32::System::Threading::GetCurrentProcess(),
+            Some(addr as *const _),
+            1,
+        );
+    }
+    Ok(())
 }
 
 /// Leg-B entry tracer: confirms we reach leg B and reads reject #1's readiness flag (`[NetworkSession
