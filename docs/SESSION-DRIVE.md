@@ -249,7 +249,19 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 
 ## Why a direct create fails offline (the rung-3 create wall)
 
-> **LATEST (2026-07-03, static): see the VERDICT subsection below** ("the container-init gate is the
+> **LATEST (2026-07-03): the transport layer is charted + runtime-proved — see "TRANSPORT CHARTED" and
+> "RIG-PROVEN: the DLNW3D transport is DORMANT offline" below.** The `[container+0x708]` connection is a
+> `SteamConnection@DLNW3D`, part of a separate lower transport namespace (DLNW3D) that rides
+> **ISteamNetworking006** (legacy Steam P2P). A live-memory scan in-world offline found **0** DLNW3D
+> objects (service/manager/connection) vs 3 live containers — the whole transport is never stood up
+> offline, so `+0x708` is null because the layer below it is dormant (the gate is flow-entry, above the
+> connection layer). The finish is now two sharp paths: **(1)** crack the flow-entry signal (unifies with
+> item-grey), or **(2, recommended, bounded)** stand up the DLNW3D transport ourselves (ERSC-model) —
+> service factory `0x142638b40`, connection-creator `0x142640560`, connect/register `0x14263b720`/`0x14263b7c0`,
+> all charted. Both terminate at a two-machine (rig + Deck) validation. The VERDICT subsection below is the
+> prior (static-inference) framing; the transport sections supersede it with the runtime-proven layer map.
+>
+> **PRIOR (2026-07-03, static): see the VERDICT subsection below** ("the container-init gate is the
 > item-grey signal"). The rung-3 create veto is now root-caused: the veto is *satisfiable* (rig
 > milestone `df12f2d` reached `TryToCreateSession` by seeding bit 2 of `+0x7c0` **and** a fabricated
 > `+0x708`), but a functional Host needs the game's real session graph. Both fields are written by one
