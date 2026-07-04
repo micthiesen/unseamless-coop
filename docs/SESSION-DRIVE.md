@@ -1160,6 +1160,30 @@ buffers, ctors, runs Accept setup) instead of the bare ctor — or run `0x14263f
 the standup connection came up with vtable `0x143278358` (the base), peer `+0x128` bound to the override
 SteamID — both as expected.)
 
+**RIG RESULT 2 (2026-07-04) — connection-creator wired; crash is now the DLNW3D SERVICE under-init.** Next
+increment: replaced the bare standalone connection ctor with the **connection-creator `0x142640560`**(manager,
+params) — the method the connect thunk `0x14263b720` runs. It allocs the manager's ring buffers
+(`[manager+0x88/0xb0/0xd0/0xf8/0x198]`) + a `SteamConnection` array at `[manager+0x78]` (params `count=1`,
+0x140-byte slots) + registers the P2P callbacks. We wrap array slot 0. **Result:** `connection-creator … =
+true`, create still returns `TryToCreateSession`, and now runs **~25 s** before crashing (was immediate) — a
+ring-buffered connection lets the session-update task advance further. **Same `0xc0000008` (INVALID_HANDLE)**
+crash: decoded to a **`DLLightMutex` acquire** (`0x141ed6210`, string `DLLightMutex.cpp`) on an
+**uninitialized lock** deep in the DLNW3D **service** (fn `0x142638410`, reached from the session-setup code
+`0x1423fb…`). The naive-scan backtrace's `0x143dd…`/`0x143dcd…` frames are just the connection/container
+`this` pointers spilled on the stack, not code.
+
+**Root cause + the fix (scoped).** Our service is built with only the **base ctor `0x14263b6b0`** (installs
+the vtable) — **not** the factory `0x142638b40`, which additionally runs the service **init vmethod**
+`[svc_vtable+8](svc, owner)`, builds an adapter (`0x14263b5a0`, vtable `0x143276d88`), runs the **start
+vmethods** `[svc_vtable+0x10]`/`[svc_vtable+0]`, and registers via `[owner_vtable+0x68]`. **Those init/start
+vmethods set up the locks + worker threads** the base ctor skips — hence the uninitialized `DLLightMutex`.
+**Next build:** stand the service up via **`factory 0x142638b40(owner)`** instead of the base ctor. The live
+**container** (`ManagerImpl@DLNR3D`) is a **valid `owner`** — its vtable `+0x50` = allocate (`0x1423f2cd0`,
+the factory allocs the service off the owner) and `+0x68` = register-service (`0x1423f3130` = `mov al,1; ret`,
+a no-op that accepts). So drive the factory **at the veto-vmethod hook** (where `rcx` = the create's own live
+container), then build the manager off `[service+8]` + run the connection-creator + wrap slot 0 in the holder,
+all with a fully-initialized service. That closes the service-init gap that the base-ctor standup leaves.
+
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
 `ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =
