@@ -120,6 +120,12 @@ static IS_HOST: AtomicBool = AtomicBool::new(false);
 /// session at a time, so a single counter is the whole stop mechanism.
 static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// The rung-4-resolved partner SteamID64 of the current session (0 = none). Set at [`run_session`]
+/// entry; read via [`linked_peer`] (gated on [`is_linked`], so a stale value is never returned live).
+/// Consumers that need the peer identity to drive the *game's* own transport (the rung-3
+/// transport-standup probe) read it here rather than threading it through.
+static LINKED_PEER: AtomicU64 = AtomicU64::new(0);
+
 /// Has the session that captured `generation` been ended or superseded? The driver checks this each tick.
 fn stale(generation: u64) -> bool {
     SESSION_GEN.load(Ordering::Relaxed) != generation
@@ -223,6 +229,18 @@ pub fn status_line() -> &'static str {
 /// hold fire until the link recovers.
 pub fn is_linked() -> bool {
     Phase::from_u8(PHASE.load(Ordering::Relaxed)) == Phase::Linked
+}
+
+/// The rung-4-resolved partner SteamID64, or `None` when not currently linked. For consumers that need
+/// the peer identity to drive the *game's* own transport at it (the rung-3 transport-standup probe).
+pub fn linked_peer() -> Option<u64> {
+    if !is_linked() {
+        return None;
+    }
+    match LINKED_PEER.load(Ordering::Relaxed) {
+        0 => None,
+        id => Some(id),
+    }
 }
 
 // ---- Connect report (the per-stage "why did this attempt fail" telemetry) -------------------------
@@ -673,6 +691,9 @@ fn run_session(
         fail_session(generation, "Resolved partner is our own SteamID, nothing to connect to.");
         return;
     }
+    // Publish the peer for consumers that drive the game's own transport at it (the rung-3
+    // transport-standup probe). Gated by `is_linked()` in [`linked_peer`], so this is safe to leave set.
+    LINKED_PEER.store(peer_id, Ordering::Relaxed);
     // The host (the lobby creator) is authoritative for the shared settings; the client adopts them.
     let host_id = if is_host { self_id } else { peer_id };
 

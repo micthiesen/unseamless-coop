@@ -1162,14 +1162,34 @@ const CONN_RING_SIZE: usize = 0x4b0;
 /// (active main player present, same world gate as the create driver). Gated on
 /// `[debug.probes] stand_up_transport`.
 pub struct TransportStandupDriver {
-    fired: bool,
+    /// Phase 1 done: the transport (service/manager/connection) has been constructed.
+    built: bool,
+    /// The resolved `ISteamNetworking006` interface pointer (0 until phase 1 resolves it).
+    iface: usize,
+    /// Phase 2: have we called `AcceptP2PSessionWithUser(peer)` yet (once per link).
+    accepted: bool,
+    /// Throttle the outbound game-P2P ping (~2s at 60fps) so the log stays legible.
+    ping_throttle: FrameThrottle,
+    /// Outbound ping sequence number (so a received ping shows which send it answers).
+    ping_seq: u32,
 }
 
 impl TransportStandupDriver {
     fn new() -> Self {
-        Self { fired: false }
+        Self { built: false, iface: 0, accepted: false, ping_throttle: FrameThrottle::every(120), ping_seq: 0 }
     }
 }
+
+/// ISteamNetworking006 flat-vtable slots (the legacy P2P API): `SendP2PPacket` (+0),
+/// `IsP2PPacketAvailable` (+8), `ReadP2PPacket` (+0x10), `AcceptP2PSessionWithUser` (+0x18).
+const ISTEAM_SEND_SLOT: usize = 0x0;
+const ISTEAM_ISAVAIL_SLOT: usize = 0x8;
+const ISTEAM_READ_SLOT: usize = 0x10;
+const ISTEAM_ACCEPT_SLOT: usize = 0x18;
+/// `k_EP2PSendReliable`.
+const P2P_SEND_RELIABLE: u32 = 2;
+/// P2P channel for our game-transport probe pings (0; the game's own transport is dormant offline).
+const P2P_PROBE_CHANNEL: i32 = 0;
 
 impl Feature for TransportStandupDriver {
     fn name(&self) -> &'static str {
@@ -1182,7 +1202,8 @@ impl Feature for TransportStandupDriver {
     }
 
     fn on_frame(&mut self, _tick: Tick) {
-        if self.fired {
+        if self.built {
+            self.drive_p2p();
             return;
         }
         // Same world gate as the create driver: a loaded world with the active main player present,
@@ -1193,7 +1214,7 @@ impl Feature for TransportStandupDriver {
         if crate::sdk::with_active_main_player(|_| ()).is_none() {
             return;
         }
-        self.fired = true;
+        self.built = true;
         let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
             Ok(h) => h.0 as usize,
             Err(e) => {
@@ -1201,6 +1222,8 @@ impl Feature for TransportStandupDriver {
                 return;
             }
         };
+        // Captured out of the build closure so phase 2 (drive_p2p) can drive the resolved interface.
+        let mut resolved_iface = 0usize;
         // SAFETY: each address is exe base + a charted `.text`/`.data` offset (win64 ABI). A Rust panic
         // is caught here; a hard fault inside a game call surfaces via the crashdump SEH handler
         // (catch_unwind can't catch SIGSEGV). Each step logs before/after so a crash localizes to the
@@ -1216,6 +1239,7 @@ impl Feature for TransportStandupDriver {
                 std::mem::transmute(exe_base + ISTEAM_RESOLVER_OFFSET);
             resolver(holder);
             let iface = (holder as *const usize).read_volatile();
+            resolved_iface = iface; // hand to phase 2 (drive_p2p) even if a later build step bails
             log::info!(
                 "session-probe: transport-standup — ISteamNetworking006 = {iface:#x} ({})",
                 if iface == 0 { "NULL — P2P interface unavailable offline!" } else { "resolved OK" },
@@ -1297,6 +1321,98 @@ impl Feature for TransportStandupDriver {
                  [+0x8 iface={iface_field:#x} +0x128 peer={peer_field:#x}] (static vtable = 0x143278370; scan-vtable.py to confirm)",
             );
         }));
+        self.iface = resolved_iface;
+        if self.iface != 0 {
+            log::info!(
+                "session-probe: transport-standup — phase 2 armed: will drive game ISteamNetworking006 P2P \
+                 at the rung-2-linked peer (Accept + reliable ping on channel {P2P_PROBE_CHANNEL}) once linked",
+            );
+        }
+    }
+}
+
+impl TransportStandupDriver {
+    /// Phase 2: drive the game's own **legacy `ISteamNetworking006`** P2P at the rung-2-resolved peer —
+    /// the transport the DLNW3D layer uses (distinct from our rung-2 side-channel, which rides
+    /// `ISteamNetworkingMessages`). Answers the open question: does the game's legacy P2P work offline,
+    /// peer-to-peer, addressed by SteamID alone? Accepts the peer's session once, sends a reliable ping
+    /// on a throttle, and drains any inbound packet — so a two-machine run shows whether pings cross.
+    fn drive_p2p(&mut self) {
+        if self.iface == 0 {
+            return;
+        }
+        let Some(peer) = crate::coop::linked_peer() else {
+            return; // wait for the rung-2 link to resolve the partner SteamID
+        };
+        let iface = self.iface;
+        let do_accept = !self.accepted;
+        let do_ping = self.ping_throttle.tick();
+        let seq = self.ping_seq.wrapping_add(1);
+        let mut accepted_ok = false;
+        // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
+        // each slot below is a documented method with the win64 signature transmuted here. Buffers are
+        // stack-local and outlive each call. Firewalled: a Rust panic is caught; a hard fault surfaces
+        // via crashdump. Read-only w.r.t. game state (P2P send/recv only).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            let vtable = (iface as *const usize).read_volatile();
+            let slot = |off: usize| ((vtable + off) as *const usize).read_volatile();
+            let accept: extern "win64" fn(usize, u64) -> bool = std::mem::transmute(slot(ISTEAM_ACCEPT_SLOT));
+            let send: extern "win64" fn(usize, u64, *const u8, u32, u32, i32) -> bool =
+                std::mem::transmute(slot(ISTEAM_SEND_SLOT));
+            let is_avail: extern "win64" fn(usize, *mut u32, i32) -> bool =
+                std::mem::transmute(slot(ISTEAM_ISAVAIL_SLOT));
+            let read: extern "win64" fn(usize, *mut u8, u32, *mut u32, *mut u64, i32) -> bool =
+                std::mem::transmute(slot(ISTEAM_READ_SLOT));
+
+            if do_accept {
+                let ok = accept(iface, peer);
+                accepted_ok = true;
+                log::info!(
+                    "session-probe: game-p2p — AcceptP2PSessionWithUser(peer {}) = {ok}",
+                    unseamless_core::diagnostics::peer_tag(peer),
+                );
+            }
+            // Drain inbound packets on our probe channel (bounded so a flood can't stall the frame).
+            let mut buf = [0u8; 256];
+            let mut size: u32 = 0;
+            for _ in 0..16 {
+                if !is_avail(iface, &mut size, P2P_PROBE_CHANNEL) {
+                    break;
+                }
+                let mut remote: u64 = 0;
+                let mut got: u32 = 0;
+                if read(iface, buf.as_mut_ptr(), buf.len() as u32, &mut got, &mut remote, P2P_PROBE_CHANNEL) {
+                    let n = (got as usize).min(buf.len());
+                    log::info!(
+                        "session-probe: game-p2p — RECV {n}B from peer {}: {:?} <<< GAME LEGACY P2P WORKS OFFLINE",
+                        unseamless_core::diagnostics::peer_tag(remote),
+                        String::from_utf8_lossy(&buf[..n]),
+                    );
+                }
+            }
+            // Throttled outbound reliable ping.
+            if do_ping {
+                let payload = format!("USC-GAMEP2P#{seq}");
+                let ok = send(
+                    iface,
+                    peer,
+                    payload.as_ptr(),
+                    payload.len() as u32,
+                    P2P_SEND_RELIABLE,
+                    P2P_PROBE_CHANNEL,
+                );
+                log::info!(
+                    "session-probe: game-p2p — SendP2PPacket #{seq} to peer {} = {ok}",
+                    unseamless_core::diagnostics::peer_tag(peer),
+                );
+            }
+        }));
+        if accepted_ok {
+            self.accepted = true;
+        }
+        if do_ping {
+            self.ping_seq = seq;
+        }
     }
 }
 
