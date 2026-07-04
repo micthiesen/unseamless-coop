@@ -475,11 +475,14 @@ mod tests {
     fn rows_cover_actions_and_settings() {
         let menu = Menu::new();
         let rows = menu.rows(&Config::default(), &SessionContext::default());
-        // 8 actions + 23 settings.
-        assert_eq!(rows.len(), 31);
+        // 8 session actions + one row per registry setting. Derive the setting count from the
+        // registry so adding a setting doesn't require touching a magic number here (the registry's
+        // own size is pinned by a loud tripwire in settings.rs).
+        let settings = registry().len();
+        assert_eq!(rows.len(), 8 + settings);
         // Action rows have no value; setting rows do.
         assert!(rows[0].value.is_none());
-        assert!(rows.iter().filter(|r| r.value.is_some()).count() == 23);
+        assert_eq!(rows.iter().filter(|r| r.value.is_some()).count(), settings);
     }
 
     #[test]

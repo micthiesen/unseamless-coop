@@ -40,6 +40,7 @@ entry points.
 | DirectInput / XInput / cursor detours | `input.rs` | ilhook trampoline (`extern "win64"`) | **added** (in `install_hook`) |
 | `CreateFileW` save-redirect detour | `saves.rs` | ilhook trampoline (`extern "win64"`) | **added** |
 | session create/join probe detours | `session_probe.rs` | ilhook trampoline (`extern "win64"`) | **yes** (in `log_initiation`) — gated (`[debug.probes] session_probe`), off by default |
+| stay-connected leave gates | `stay_connected.rs` | ilhook trampoline (`extern "win64"`) | **yes** — each callback's whole decision body (`gate_leave_session` / `gate_leave_inline`) is wrapped in `catch_unwind`, defaulting to vanilla (forward / jump-to-`ori`) on a panic; only the foreign forward-call to the game trampoline sits outside the firewall (as it must). Gated (`gameplay.stay_connected`), off by default |
 | code patch (`apply`) | `patch.rs` | — (not an entry point) | n/a |
 | Steam networking send/receive/methods | `steam.rs` | — (us → Steam) | n/a |
 | Steam lobby discovery (rung 4) | `steam.rs` | — (us → Steam; poll via `ISteamUtils`) | n/a (poll-based — no foreign→us boundary; see note) |

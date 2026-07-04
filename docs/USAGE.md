@@ -63,7 +63,9 @@ to apply changes.
     time-of-day.
 - **Per-player** — each person sets their own; not shared:
   - the rest of `[gameplay]` — overhead display, skip splash screens, append steam id,
-    spectate-on-death, the set-volume-on-boot toggle and its level.
+    spectate-on-death, the set-volume-on-boot toggle and its level, and the experimental
+    `stay_connected` disconnect-suppression gate (machine-local until rig-validated; each
+    machine suppresses its own game-driven leaves, so the party should set it the same).
   - `[loader]` (your own `mods/`), `[debug]` (your logging), `[save]` (save-file extension),
     `[language]` (locale).
 

@@ -23,12 +23,13 @@ pub mod summons;
 pub mod world_time;
 
 /// Announce a config value just applied to a game field, with the shared policy of the
-/// "hold a config value into an SDK field" features ([`session_limit`], [`seamless`], [`world_time`]):
-/// classify the apply ([`Latch::classify`]) and **info-log on First/Changed, toast only on Changed**
-/// (never the startup baseline), silent on a re-assert. The `info`/`toast` messages are built lazily,
-/// so the steady-state (Reasserted) path allocates nothing. Returns the [`Applied`] classification so
-/// a caller can add its own feature-specific debug re-assert line. Centralizing the "never toast the
-/// baseline" decision keeps it from drifting across the (now three) call sites.
+/// "hold a config value into an SDK field" features (`session_limit`, `seamless`, `world_time`,
+/// `scaling`, and `stay_connected`'s arm/disarm): classify the apply ([`Latch::classify`]) and
+/// **info-log on First/Changed, toast only on Changed** (never the startup baseline), silent on a
+/// re-assert. The `info`/`toast` messages are built lazily, so the steady-state (Reasserted) path
+/// allocates nothing. Returns the [`Applied`] classification so a caller can add its own
+/// feature-specific debug re-assert line. Centralizing the "never toast the baseline" decision keeps
+/// it from drifting across its several call sites.
 pub fn announce_held<T: Clone + PartialEq>(
     latch: &mut Latch<T>,
     value: T,

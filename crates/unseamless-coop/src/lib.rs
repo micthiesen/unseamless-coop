@@ -56,6 +56,7 @@ mod sdk;
 mod session;
 mod session_probe;
 mod state;
+mod stay_connected;
 mod steam;
 mod steam_ready;
 

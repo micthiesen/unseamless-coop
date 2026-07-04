@@ -34,6 +34,12 @@ force_online_menu_mode = false
 bypass_session_create_gate = true
 append_steam_id = false
 always_spectate_on_death = false
+# Stay-connected disconnect-suppression gate (coop/stay_connected.rs; the SESSION-LIFECYCLE-FINDINGS
+# chokepoint). OFF for RE/charting runs on purpose: session_probe's read-only leave tracer and this
+# gate contend for the same leave_session entry (whichever installs first wins the site; the other
+# degrades with a logged byte-check refusal), and teardown charting wants leaves observable. Flip
+# true (with session_probe = false) for the dedicated rig-validation pass — findings-doc risks #1-#3.
+stay_connected = false
 # On (vs the shipped default of off) so a rig run actually exercises the boot-volume write path — it's
 # the only verification surface for coop/features/boot_volume (the cdylib logic can't be host-tested).
 boot_master_volume_enabled = true

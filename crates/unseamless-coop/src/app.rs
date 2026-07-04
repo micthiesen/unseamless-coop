@@ -231,6 +231,14 @@ fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::
     // and never aborts.
     crate::session_probe::install_hooks(config);
 
+    // Stay-connected leave gate (gated by `gameplay.stay_connected`, off by default): hook the two
+    // charted game-driven-disconnect sites so the `stay-connected` feature can suppress session
+    // leaves while armed. Deliberately AFTER the session-probe hooks — on an RE run the probe's
+    // read-only leave tracer owns the leave_session entry and this install then refuses cleanly
+    // (byte-verified), keeping teardown charting observable. Degrades (logs) on any miss; never
+    // aborts. See `coop/stay_connected` + docs/SESSION-LIFECYCLE-FINDINGS.md.
+    crate::stay_connected::install(config);
+
     // Parent-loader: bring up other DLL mods from `mods/` before we block on the task system, so
     // they can hook game init as early as possible. We're our own `dinput8.dll`, so this is on us.
     crate::mods::load_mods(config, base);
@@ -250,6 +258,9 @@ fn build_features(config: &unseamless_core::config::Config) -> Vec<Box<dyn Featu
         Box::new(SessionLimit::new()),
         // Hold the area-restriction lever so the party can roam the whole map (reads live config).
         Box::new(SeamlessRoam::new()),
+        // Arms/disarms the game-driven-disconnect suppression gate from live config and announces
+        // suppressed leaves (reads live config; inert until its boot-time hooks installed).
+        Box::new(crate::stay_connected::StayConnectedTick::new()),
         Box::new(SessionObserver::new()),
         // Drains overlay-requested session actions (a producer; after the ager above).
         Box::new(SessionActionsTick::new()),

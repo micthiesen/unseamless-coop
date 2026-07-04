@@ -38,5 +38,6 @@ pub mod scaling;
 pub mod session_state;
 pub mod settings;
 pub mod spectate;
+pub mod stay_connected;
 pub mod transport;
 pub mod util;

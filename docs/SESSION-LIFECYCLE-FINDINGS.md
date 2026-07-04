@@ -14,6 +14,26 @@ re-derivation recipe at the bottom so a game update can be re-charted fast.
 > reimplement a co-op mod that loads *outside* anti-cheat. We study *what* the game does at session
 > teardown, then reimplement around it. See CLAUDE.md > Safety / legitimacy.
 
+> **Implemented (2026-07-04):** this gate shipped as `gameplay.stay_connected` (default off until
+> the rig pass below) — `crates/unseamless-coop/src/stay_connected.rs` hooks both charted sites
+> (A = `leave_session` entry, B = the inline twin's entry, jumping to the `0x140cb08f7` join)
+> behind a runtime-armed flag, byte-verified at install. The "Risks / what to verify on the rig"
+> list below is that feature's validation recipe.
+>
+> **Refinement of site B (charted while wiring the gate).** Task 4 below calls the inline at
+> `0x140cb0840` "an inlined copy of A's exact body" and lists the net-status-low / received-leave /
+> host-grace leaves against it. On closer read the shipped gate needs the finer picture: those three
+> self-initiated leaves are **out-of-line `call leave_session`** sites in `update_step`
+> (`0x140cb0980` / `0x140cb09b5` / `0x140cb0a24`) — i.e. site A. The inline body at `0x140cb0840` is
+> specifically the **deferred-leave executor**: it is reached only via the `cmp byte [r14+0x20],0;
+> je 0x140cb08f7` gate at `0x140cb0835` (so it runs only when `leave_session`'s mid-handshake path
+> earlier latched `[this+0x20]=1`), it clears that byte at `0x140cb0856`, then falls through the same
+> three guards to the `lobby_state=7` write at `0x140cb08bc`. The gate hooks its entry and, when
+> armed, clears `[r14+0x20]` and jumps to the `0x140cb08f7` join — dropping the deferred leave rather
+> than re-polling it every frame. Both facts are byte-verified: the entry's `je` rel32 targets
+> `0x140cb08f7` exactly, and the join opens with a `call` that clobbers rax/rflags (so the jump's
+> register state is immaterial).
+
 ## TL;DR — the verdict
 
 **Yes (pending one rig confirmation — see Risk #1), a single armed-flag gate is viable, and the

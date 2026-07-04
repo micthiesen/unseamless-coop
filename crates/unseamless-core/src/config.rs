@@ -376,6 +376,21 @@ pub struct Gameplay {
     /// area (the defining "seamless" behavior). Host-enforced across the session. The mod holds the
     /// game's `disable_multiplay_restriction` to this. Default on.
     pub roam_anywhere: bool,
+    /// **EXPERIMENTAL / RIG-UNVERIFIED.** Keep the co-op session alive through the events the vanilla
+    /// game ends it on — boss defeat, area transition, player death, host-with-no-peers timeout,
+    /// remote leave/disband packets (the other core "seamless" behavior, alongside
+    /// [`roam_anywhere`](Self::roam_anywhere)). When on at boot, the cdylib gates the game's one
+    /// whole-session leave primitive (`leave_session`, plus its inlined twin in the session update
+    /// task) behind an armed flag, so every *game-driven* `OnLeaveSession` transition is suppressed
+    /// while armed; a genuine peer drop / network loss still tears down (that path never runs the
+    /// gated primitive — see `docs/SESSION-LIFECYCLE-FINDINGS.md`). Machine-local for now (each peer
+    /// suppresses its own leaves; both run the mod). Arming is live (menu-togglable mid-session), but
+    /// the hooks install only when this is on at boot — enabling later needs a relaunch. Default
+    /// **off** until rig-validated: the suppression also covers quit-to-menu-style leaves, and the
+    /// sibling effects of a suppressed leave (a queued map reload, a death fade) are exactly what the
+    /// rig pass must confirm playable (risks #1–#3 in the findings doc). Fail-safe on a game update:
+    /// the hook sites are byte-verified before install and degrade to vanilla (logged) on drift.
+    pub stay_connected: bool,
     pub skip_splash_screens: bool,
     /// Re-enable Elden Ring's online **multiplayer items** (Tarnished's Furled Finger, Furlcalling
     /// Finger Remedy, Small Golden Effigy, the duelist/invader fingers, Taunter's Tongue, …) when the
@@ -501,6 +516,7 @@ impl Default for Gameplay {
             death_debuffs: true,
             allow_summons: true,
             roam_anywhere: true,
+            stay_connected: false,
             skip_splash_screens: true,
             enable_offline_multiplayer: true,
             force_online_menu_mode: false,

@@ -48,6 +48,7 @@ pub enum SettingId {
     EnableOfflineMultiplayer = 23,
     ForceOnlineMenuMode = 24,
     BypassSessionCreateGate = 25,
+    StayConnected = 26,
 }
 
 impl SettingId {
@@ -203,6 +204,18 @@ pub fn registry() -> Vec<Setting> {
             kind: Toggle {
                 get: |c| c.gameplay.roam_anywhere,
                 set: |c, v| c.gameplay.roam_anywhere = v,
+            },
+        },
+        Setting {
+            // Arms the game-driven-disconnect suppression gate (`coop/stay_connected`). The toggle
+            // is live both ways *once the hooks are installed*, but the hooks install only when the
+            // flag is on at boot — the cdylib warns (toast) when it's flipped on with no hooks live.
+            // Machine-local until rig-validated, then a candidate for the shared subset.
+            id: StayConnected,
+            label: "Stay connected (experimental)",
+            kind: Toggle {
+                get: |c| c.gameplay.stay_connected,
+                set: |c, v| c.gameplay.stay_connected = v,
             },
         },
         Setting {
@@ -423,7 +436,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), n, "duplicate SettingId in registry");
-        assert_eq!(n, 23, "registry size changed — update this if you added a setting");
+        assert_eq!(n, 24, "registry size changed — update this if you added a setting");
     }
 
     #[test]
@@ -490,6 +503,22 @@ mod tests {
         assert!(!cfg.gameplay.roam_anywhere, "must write gameplay.roam_anywhere");
         assert!(!cfg.gameplay.allow_summons, "must not touch a neighbouring field");
         assert_eq!(s.display_value(&cfg), "Off");
+    }
+
+    #[test]
+    fn stay_connected_toggle_binds_to_its_own_config_field() {
+        // Guards the StayConnected get/set against a copy-paste pointing at a sibling field (it sits
+        // between the roam_anywhere and skip_splash_screens entries it was modeled on).
+        let reg = registry();
+        let s = reg.iter().find(|s| s.id == SettingId::StayConnected).unwrap();
+        let mut cfg = Config::default();
+        assert!(!cfg.gameplay.stay_connected, "ships default-off until rig-validated");
+        cfg.gameplay.roam_anywhere = true; // a neighbour, set opposite to catch a mis-wired closure
+        s.adjust(&mut cfg, true);
+        assert!(cfg.gameplay.stay_connected, "must write gameplay.stay_connected");
+        assert!(cfg.gameplay.roam_anywhere, "must not touch a neighbouring field");
+        assert_eq!(s.display_value(&cfg), "On");
+        assert!(!s.id.is_shared(), "machine-local until rig-validated (not in SharedSettings)");
     }
 
     #[test]
