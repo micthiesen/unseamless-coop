@@ -146,12 +146,13 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-07-04 pm) — ★ SOLO HOST STICKS + JOINER REACHES TryToJoinSession two-machine; final gap = the
-  > session handshake.** Two-machine (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the co-op world),
-  > Deck = holds at `TryToJoinSession`, legacy P2P transport live both ways. The Deck doesn't reach `Client` /
-  > roster stays 1 because bypassing the blob-parse left the joiner with no host connection endpoint. NEXT: wire
-  > that endpoint (real SteamID-only blob, or drive the joiner's socket-manager to connect to the host SteamID) so
-  > the establish handshake completes. Details: SESSION-DRIVE.md > "HOST-SETUP DRIVE" milestone #9. (Host path below:)
+  > **State (2026-07-04 night) — ★ SOLO HOST STICKS + JOINER SYN REACHES HOST ADMIT two-machine; gap = the
+  > host context member-lookup stub.** Two-machine (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the
+  > co-op world), Deck reaches `Client`; the joiner's synthetic 14-byte DLNW3D SYN on channel 30 reaches the
+  > host's admit path `0x142640e30` and is rejected only at gate c (the context member-lookup `[context+0x168]`
+  > is a stub `0x1423fdf00`), so no host-side connection is created and roster stays 1. NEXT: make the host
+  > context recognize the joiner as a member so admit succeeds → roster grows to 2 (see the ► callout below).
+  > Details: SESSION-DRIVE.md > "STATUS (2026-07-04 night)". (Host path below:)
   >
   > **★ SOLO HOST REACHED AND STICKS.** The full offline host path works:
   > the `SteamServiceImpl` standup works offline (the "native-builder dead end" was a misdiagnosis); we land the
@@ -207,14 +208,18 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   > resolved** (`stand_up_transport` on). The game's standup only works inside its own online-session flow,
   > which we bypass by construction. Dead end.
   >
-  > **► NEXT (the finish) — the SEAM, not the transport.** We already build a working DLNW3D connection
-  > (`stand_up_transport`: service + connection, P2P proven two-machine) and land it at `+0x708`
-  > (`land_socket_holder`) → `TryToCreateSession`. The one remaining gap is **activation**: the session
-  > host-setup faults on sub-objects of our connection it expects a full session-establish to have wired.
-  > Finish = **chart exactly what the host-setup path (`0x140cb2ae0` + the session-update task) touches/derefs
-  > on the `SteamConnection`, and wire those on our stood-up connection** so the FSM drives it to `Host`.
-  > Scoped in [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md); step-by-step: SESSION-DRIVE.md >
-  > "► NEXT STEP".
+  > **► HOST-SIDE ADMIT REACHED (2026-07-04 night); NEXT = the context member-lookup STUB.** The solo host
+  > now reaches + sticks at `Host`/`Ingame` (warped into the co-op world). The joiner→host transport connect
+  > is charted end-to-end two-machine: the host's socket-manager **worker thread runs offline** (`0x142640bc0`,
+  > reads P2P **channel 30**), and a joiner **14-byte DLNW3D SYN** on channel 30 **reaches the host admit
+  > helper `0x142640e30`** (passes size + SYN-shape gates). It's rejected at **gate c** (`0x142640ecd`): the
+  > context member-lookup `[socketmgr+0x40]`→`0x142639d00`→`[context+0x168]` is a **stub `0x1423fdf00` (`mov
+  > eax,1; ret`)** — our synthesized context has no member registry, so no host-side connection is created and
+  > **roster stays 1**. Finish = **make the host context recognize the joiner as a member** (install a real
+  > `[context+0x168]` lookup via a fuller service/context init, or register the joiner's SteamID64 in the
+  > member collection `[context+0x170]` via register thunk `0x14263b7c0`) so admit succeeds (`0x142640ee4`) →
+  > roster-add `0x140cb31b0` (charted: **no offline gate**) grows `players` to 2. Step-by-step: SESSION-DRIVE.md
+  > > "STATUS (2026-07-04 night)".
 
   **Seamlessness (independent, additive) — one armed gate, charted.** All game-driven co-op disconnects
   (boss defeat, area transition, death, host migration, remote-leave) funnel through **one primitive:
