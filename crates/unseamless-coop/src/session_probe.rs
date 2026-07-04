@@ -341,6 +341,10 @@ const LEAVE_SESSION_OFFSET: usize = 0x1_40ca_e730 - 0x1_4000_0000;
 /// direct callers, dispatched on a transport connection-down). Hooked read-only to confirm it's what
 /// tears down the driven host ~2s after it forms (no real peer → connection-down). See SESSION-LIFECYCLE.
 const TEARDOWN_HANDLER_OFFSET: usize = 0x1_423f_46d0 - 0x1_4000_0000;
+/// `0x140de2620` — host-setup's final validity gate (reached from `0x140cb2ae0` via the `0x140ddfb20` thunk).
+/// Reads the online-session availability signal (`[0x143d855c8]+0x10` / singleton `0x144842d40`); returns
+/// false offline, driving `0x140cb2ae0`'s degraded/reset path. `suppress_leave` force-patches it to `ret true`.
+const HOST_VALIDITY_GATE_OFFSET: usize = 0x1_40de_2620 - 0x1_4000_0000;
 
 /// Armed by `[debug.probes] drive_establish_handler`: at the veto hook, drive the game's own
 /// connection-establish handler `0x1423f2820(container, descriptor)` (which calls the Arxan native builder
@@ -469,25 +473,27 @@ fn install_create_gate_trace(config: &Config) {
     // route through here, or the inlined twin 0x140cb08bc in the update task?). With `suppress_leave` on we
     // raw-patch its entry to `ret` — the doc's "early-return before the lobby_state=7 write" gate — to see
     // if the host then sticks in Host/Ingame. (A jmp-back hook can't early-return, so suppression is a patch.)
-    let leave = exe_base + LEAVE_SESSION_OFFSET;
-    if config.debug.probes.suppress_leave {
-        match patch_entry_ret(leave) {
-            Ok(()) => log::info!(
-                "session-probe: leave-session SUPPRESSED — patched 0x140cae730 entry to `ret` \
-                 (all game-driven FSM leaves suppressed; testing whether the driven host sticks)"
-            ),
-            Err(e) => log::error!("session-probe: leave-session suppress patch failed: {e}"),
-        }
-    } else {
-        install_offset_hook("leave-session", leave, log_leave_session);
-    }
-    // teardown-handler (0x1423f46d0): the DLNW3D async connection-down reaction (unregisters handlers,
-    // destroys the node list, clears container status bits). leave_session did NOT fire at our host's ~2s
-    // teardown, so this async path — triggered because the solo host has no real peer connection — is the
-    // suspect. Read-only hook to confirm it fires at the teardown frame. (NOT patched even under
-    // suppress_leave: the doc warns its cleanup is load-bearing — gating it is a UAF. The real fix is a
-    // real peer, i.e. the two-machine join.)
+    // Read-only diagnostics: leave-session + teardown-handler both proved NOT on the driven-host reset path
+    // (neither fires). Kept as harmless charting for the general seamless-teardown work.
+    install_offset_hook("leave-session", exe_base + LEAVE_SESSION_OFFSET, log_leave_session);
     install_offset_hook("teardown-handler", exe_base + TEARDOWN_HANDLER_OFFSET, log_teardown_handler);
+    // `suppress_leave` (repurposed): the driven host actually resets via host-setup's OWN final validity
+    // gate `0x140de2620` (reached from `0x140cb2ae0` via `0x140ddfb20`), which reads the online-session
+    // availability signal (`[0x143d855c8]+0x10`, the item-grey singleton `0x144842d40`) and returns false
+    // offline → `0x140cb2ae0` takes its degraded/reset path `0x140cb3b80`. Bypassing that gate is legitimate
+    // for our offline co-op by construction. When armed, patch `0x140de2620` to `mov al,1; ret` (always
+    // "online available") to test whether the host then STICKS in Host/Ingame and the warp into the co-op
+    // map completes. Bounded rig experiment.
+    if config.debug.probes.suppress_leave {
+        let gate = exe_base + HOST_VALIDITY_GATE_OFFSET;
+        match patch_bytes(gate, &[0xB0, 0x01, 0xC3]) {
+            Ok(()) => log::info!(
+                "session-probe: host-validity gate 0x140de2620 FORCED true (mov al,1; ret) — bypassing the \
+                 online-availability signal; testing whether the driven host sticks + warps in"
+            ),
+            Err(e) => log::error!("session-probe: host-validity gate force-patch failed: {e}"),
+        }
+    }
     // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate),
     // and — when `set_create_veto_bit` is armed — write bit 2 set to test the L3 lever.
     SET_CREATE_VETO_BIT.store(config.debug.probes.set_create_veto_bit, Ordering::Relaxed);
@@ -606,26 +612,27 @@ fn log_teardown_handler(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
-/// Raw-patch a function entry to a single `ret` (0xC3), suppressing it. Used by `suppress_leave` to gate
-/// `leave_session` (the doc's "early-return before the lobby_state=7 write"). Flips the page to RWX, writes
-/// the byte, restores protection, flushes the icache. Returns the ilhook-style error string on failure.
-fn patch_entry_ret(addr: usize) -> Result<(), String> {
+/// Raw-patch `bytes` over a charted function entry (e.g. `[0xC3]` = `ret`, or `[0xB0,0x01,0xC3]` =
+/// `mov al,1; ret`). Flips the page to RWX, writes, restores protection, flushes the icache. Returns the
+/// error string on failure. Used by `suppress_leave` to force host-setup's online-availability gate true.
+fn patch_bytes(addr: usize, bytes: &[u8]) -> Result<(), String> {
     use windows::Win32::System::Memory::{
         VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
     };
-    // SAFETY: `addr` is a charted, resident function entry in our own process image. We flip its page to
-    // RWX, overwrite the first byte with `ret`, restore the old protection, and flush the icache — the
-    // standard in-process code patch. A `ret` at entry is a valid void return before any state change.
+    // SAFETY: `addr` is a charted, resident function entry in our own process image. We flip its page(s) to
+    // RWX, overwrite the leading bytes, restore the old protection, and flush the icache — the standard
+    // in-process code patch. The caller supplies a self-contained instruction sequence ending in `ret`.
     unsafe {
+        let n = bytes.len();
         let mut old = PAGE_PROTECTION_FLAGS(0);
-        VirtualProtect(addr as *const _, 1, PAGE_EXECUTE_READWRITE, &mut old)
+        VirtualProtect(addr as *const _, n, PAGE_EXECUTE_READWRITE, &mut old)
             .map_err(|e| format!("VirtualProtect(RWX) failed: {e}"))?;
-        (addr as *mut u8).write_volatile(0xC3);
-        let _ = VirtualProtect(addr as *const _, 1, old, &mut old);
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, n);
+        let _ = VirtualProtect(addr as *const _, n, old, &mut old);
         let _ = windows::Win32::System::Diagnostics::Debug::FlushInstructionCache(
             windows::Win32::System::Threading::GetCurrentProcess(),
             Some(addr as *const _),
-            1,
+            n,
         );
     }
     Ok(())
