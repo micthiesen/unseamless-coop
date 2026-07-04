@@ -2,26 +2,27 @@
 
 > ## STATUS (2026-07-04, updated) — read this first
 >
-> **The driven establish handler now REACHES the game's own connection builder; the offline wall is the
-> `SteamServiceImpl` service standup returning null. The path to `Host` is a two-machine run.** The current,
+> **The driven establish handler now REACHES the game's own connection builder, but the build fails at the
+> `SteamServiceImpl` standup — offline AND two-machine. Driving the game's native builder is a DEAD END for
+> reaching `Host`; pivot to standing up our own Steam P2P transport (the ERSC model).** The current,
 > load-bearing section is **"NATIVE-BUILD TRACE (2026-07-04)"** below (read it for thread 2). In short:
 > - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; the session-established handler
 >   (`0x1423f4870`) populates real container state (veto bit `[+0x7c0]` bit 2, identity `+0x7f8`).
-> - **The connection must be built by the game** (hand-building is whack-a-mole; forcing the FSM to `Host`
->   doesn't stick). So we drive the game's own establish handler `0x1423f2820(container, descriptor)`.
-> - **The build is now REACHED** (this session): the establish handler runs gate1 (readiness, passes) → gate2
->   (the session-established handler as `[vtable+0x68]`) → the builder `[vtable+0x80]`. Two corrections
->   unblocked it: the live derived vtable is **`0x1431f8780`** (not the static `0x1431f8360`, so the real
->   builder is `0x1423f46b0` — a plain fn, **no Arxan**), and `drive_session_established` must be **off** (it
->   double-drove `0x1423f4870`, making the handler's own gate2 call return "already established" and bail).
-> - **The offline wall (precise):** the builder constructs an `MTInternalThreadSteamSocketManager@DLNW3D` and
->   its init calls the **`SteamServiceImpl` standup `0x142638b40`, which returns null offline** → clean build
->   failure → `+0x708` stays null. The descriptor was never the blocker; the transport can't stand up without
->   a peer's Steam P2P context.
-> - **► NEXT:** two-machine (rig host + Steam Deck joiner) — with a real peer linked, drive the establish
->   handler and watch whether the service standup succeeds → `+0x708` populates → `lobby_state` reaches
->   `Host`. Then the seamless teardown gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
->   Full plan: "NATIVE-BUILD TRACE" > "► NEXT STEP" below.
+> - **The build is now REACHED** (this session): the establish handler `0x1423f2820` runs gate1 (readiness) →
+>   gate2 (session-established as `[vtable+0x68]`) → the builder `[vtable+0x80]`. Two corrections unblocked it:
+>   the live derived vtable is **`0x1431f8780`** (not the static `0x1431f8360`, so the real builder is
+>   `0x1423f46b0` — a plain fn, **no Arxan**), and `drive_session_established` must be **off** (it double-drove
+>   `0x1423f4870`, making the handler's own gate2 call return "already established" and bail).
+> - **The wall (precise):** the builder constructs an `MTInternalThreadSteamSocketManager@DLNW3D` whose init
+>   calls the **`SteamServiceImpl` standup `0x142638b40`, which returns null** → `+0x708` stays null. The
+>   descriptor was never the blocker.
+> - **TWO-MACHINE RESULT (rig + Deck):** with a real peer **linked** over the rung-2 side-channel, the driven
+>   build fails **identically** (standup null, `lobby_state → FailedToCreateSession`). A private-side-channel
+>   peer does NOT put the game into its online-session flow, so its DLNW3D transport stays dormant.
+> - **⇒ ► NEXT: pivot to path 2 (own-transport standup, the ERSC model)** — resolve `ISteamNetworking006`
+>   (`0x142640b90`), instantiate the `SteamServiceImpl`/`SteamConnectionManager` ourselves, register the P2P
+>   callbacks, drive connect/accept with the rung-4 peer SteamID64s so a real `SteamConnection` lands at
+>   `[container+0x708]`. See "NATIVE-BUILD TRACE" > "► NEXT STEP" and "Standup chain charted (for path 2)".
 >
 > **Reading guide for the rest of this doc:** the top half (SDK survey, drive requirements, AES key,
 > ordering) is the still-useful call spec. The long **"Why a direct create fails offline"** investigation
@@ -1148,13 +1149,31 @@ misfired into its teardown path and **faulted** (write to `0x0` at `0x14263cea7`
 drive returns 0 cleanly. To read a deep fn's return, hook it at a **function boundary** (entry + a return
 trampoline), never mid-caller.
 
-**► NEXT STEP — two-machine (rig host + Steam Deck joiner).** The offline wall is the service standup, which
-needs a real peer's Steam P2P context. Run the `rung3-create-drive` guide on both machines (Deck = player 2
-via the `/steam-deck` skill). With the rung-2 link up, drive the establish handler (`drive_session_established`
-still **off**) and watch whether `0x142638b40` returns a real service → the socket manager inits → `+0x708`
-populates → `lobby_state` advances `TryToCreateSession → Host`. If the standup still fails even with a peer,
-the next descriptor/owner field (`local[0x00]=[container+0x48]`, the factory's `rcx=[obj+0x40]` owner) is the
-lever to chart. Everything below this line is the older (partly-superseded) narrative.
+**TWO-MACHINE RESULT (2026-07-04, rig host + Steam Deck joiner) — a real peer does NOT unblock the standup.**
+Ran it: the rung-2 side-channel **linked** (`coop: linked with partner peer-cf17b9f9 … versions match`), the
+create driver fired **with the peer present** (`drive-create armed … side-channel linked`), the establish
+handler passed gate1+gate2 and **reached the builder** (`builder-entry REACHED`) — and then failed
+**identically to offline**: `0x1423f2820 returned 0`, `[container+0x708]=0x0`, the DLNW3D singleton still the
+empty sentinel `0x144852dd0` with readiness `0`, `lobby_state → FailedToCreateSession`. So the
+**`SteamServiceImpl` standup `0x142638b40` returns null even with a real linked peer.** The block is **not**
+"no peer" — it's that the game's DLNW3D transport is gated on the game's **own online-session flow** (the
+EAC/matchmaker path we bypass by construction). A peer reachable over our *private* rung-2 side-channel does
+not put the game into that flow, so its transport stays dormant. (The joiner Deck, meanwhile, drove create
+too and crashed at `0x141eba203` — the refcount addref near `0x141eba1c0`, the classic `+0x708`-null path;
+the host's clean result is the load-bearing datum.)
+
+**⇒ The "drive the game's native builder" path is a DEAD END for reaching `Host`** — offline *and*
+two-machine. The game will not build the connection for us while we run outside its online flow. **Pivot to
+path 2 (the ERSC model): stand up our OWN Steam P2P transport** — resolve `ISteamNetworking006` via
+`0x142640b90`, instantiate the `SteamServiceImpl`/`SteamConnectionManager` ourselves, register the
+`P2PSessionRequest_t`/`…ConnectFail_t` callbacks, drive connect/accept with the rung-4 peer SteamID64s so a
+real `SteamConnection` lands at `[container+0x708]` — bypassing the game's flow-entry entirely, exactly how
+ERSC runs co-op outside the matchmaker. The standup chain is charted in the "RIG-PROVEN (2026-07-03)" section
+below (the `0x142638b40` factory + the connect/accept path). That is the recommended next build.
+
+**► NEXT STEP.** Path 2 (own-transport standup) — see "Standup chain charted (for path 2)" below; the one
+runtime-captured piece is the `owner`/config the factory needs, best grabbed when the transport is live.
+Everything below this line is older (partly-superseded) narrative.
 
 ---
 

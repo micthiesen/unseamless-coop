@@ -132,8 +132,10 @@ fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_cr
                            # live NetworkSession from inside the leg-B entry hook, only if still empty). ON for
                            # the 2026-07-03 combo run: fabricated array + a real linked peer (solo runs proved
                            # each alone insufficient). See docs/SESSION-DRIVE.md > "fabricate the array".
-drive_fire_solo = true     # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
-                           # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
+drive_fire_solo = true     # drive timing: true = fire solo once in-game; false = hold until the rung-2 link
+                           # (+settle) for a two-machine run. NB (2026-07-04): the two-machine run proved a
+                           # linked peer does NOT unblock the native build — it fails at the SteamServiceImpl
+                           # standup identically to solo — so this native-builder path is a dead end either way.
 set_create_veto_bit = false # rung-3 L3 lever: write bit 2 of [container+0x7c0] set before the veto vmethod
 drive_session_established = false # DISABLED (2026-07-04 test): the establish handler 0x1423f2820 calls
                            # 0x1423f4870 ITSELF as gate2 (vtable[0x68]); pre-driving it made that internal

@@ -24,20 +24,21 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **connection stack shipped; rung-3 create reaches `TryToCreateSession`, and the driven establish
-> handler now REACHES the game's own connection builder — the offline wall is the `SteamServiceImpl` service
-> standup returning null, so the finish is a two-machine run.** Rungs 1/2/4 (identity, the password-authed
-> Steam side-channel, lobby discovery) ship and are confirmed two-machine. Rung 3 (drive the game's own
-> session so players share a world): we drive the game's own connection-establish handler `0x1423f2820`
-> (hand-building is whack-a-mole; forcing the FSM to `Host` doesn't stick — the connection must be built by
-> the game). This session unblocked the build: the **live derived vtable is `0x1431f8780`** (so the real
-> builder is `0x1423f46b0`, a plain fn — the earlier "Arxan builder `0x14251c480`" was a wrong-vtable
-> artifact), and **`drive_session_established` must be OFF** (it double-drove `0x1423f4870`, making the
-> handler's own gate2 call bail "already established"). The build now runs down to the **`SteamServiceImpl`
-> standup `0x142638b40`, which returns null offline** → `+0x708` stays null. The descriptor was never the
-> blocker. **► Next:** two-machine (rig + Steam Deck) — with a real peer's Steam P2P context, drive the
-> establish handler and watch the standup succeed → `+0x708` populates → `lobby_state` reaches `Host`, then
-> the seamless teardown gate. Current plan: [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "NATIVE-BUILD
+> Status: **connection stack shipped; the driven establish handler now REACHES the game's own connection
+> builder, but the build fails at the `SteamServiceImpl` standup offline AND two-machine — driving the game's
+> native builder is a DEAD END for `Host`. Next: stand up our own Steam P2P transport (the ERSC model).**
+> Rungs 1/2/4 (identity, the password-authed Steam side-channel, lobby discovery) ship and are confirmed
+> two-machine. Rung 3: we drive the game's own connection-establish handler `0x1423f2820`; this session
+> unblocked the *build path* (the **live derived vtable is `0x1431f8780`** so the real builder is
+> `0x1423f46b0`, a plain fn — the earlier "Arxan builder `0x14251c480`" was a wrong-vtable artifact; and
+> **`drive_session_established` must be OFF** — it double-drove `0x1423f4870`, bailing gate2 "already
+> established"). The build now runs down to the **`SteamServiceImpl` standup `0x142638b40`, which returns
+> null**, so `+0x708` stays null. **Two-machine (rig + Deck) proved a real linked peer does NOT unblock it**
+> — the game's DLNW3D transport is gated on its own online-session flow (EAC/matchmaker), which our private
+> rung-2 side-channel doesn't trigger. **► Next: pivot to path 2 (own-transport standup)** — resolve
+> `ISteamNetworking006` (`0x142640b90`), instantiate `SteamServiceImpl`/`SteamConnectionManager`, register
+> the P2P callbacks, drive connect/accept with the rung-4 peer SteamID64s so a real `SteamConnection` lands
+> at `[container+0x708]`. Current plan: [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "NATIVE-BUILD
 > TRACE (2026-07-04)" / "► NEXT STEP"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
