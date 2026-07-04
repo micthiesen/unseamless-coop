@@ -1184,6 +1184,33 @@ a no-op that accepts). So drive the factory **at the veto-vmethod hook** (where 
 container), then build the manager off `[service+8]` + run the connection-creator + wrap slot 0 in the holder,
 all with a fully-initialized service. That closes the service-init gap that the base-ctor standup leaves.
 
+**RIG RESULT 3 (2026-07-04) — descended 3 more connection-init layers; the hand-build is whack-a-mole.**
+After the wired-connection crash, iterated on the connection setup the creator leaves incomplete. Each fix
+cleared one crash and revealed the next, one layer deeper into the real connection standup — create keeps
+returning `true → TryToCreateSession`:
+1. **Don't clobber `[conn+0x8]`.** On a *creator-built* connection `+0x8` is a **lock-bearing DLNW3D
+   sub-object** (the session locks `[[conn+8]+0x10]`); we'd overwritten it with the raw iface (FROMNET's
+   "`+0x8`=iface" is only for a *bare* connection). That was the INVALID_HANDLE. Cleared.
+2. **Run Accept setup `0x14263ffe0`** (the register-path step the creator skips): registers the callbacks,
+   inits active-state fields (`+0x70/+0xa8/+0xf0/+0x118`), copies peer `+0x128→+0x130`, AcceptP2PSessionWithUser.
+   Cleared the null `[[conn+8].vtable+0x18]` dispatch (fn `0x14203f1f0`).
+3. **Bind the iface at `+0x120`** (the connection's real iface holder). Cleared the null-read at `0x142640062`.
+   **Now:** `0x142640075` inside Accept — `[conn+0x120]` wants an iface-**holder** object (its `vtable[0x18]`
+   returns a context ptr), not the raw iface; our creator-built connection lacks that embedded sub-object.
+
+**Diagnosis + STRATEGIC PIVOT.** Hand-building the `SteamConnection` and wiring each sub-object by hand is
+whack-a-mole: the creator + Accept still leave embedded sub-objects (`+0x8` lock, `+0x120` iface-holder, …)
+that a *fully game-built* connection has. The better path is to **let the game build the connection
+natively**: the **connection-establish handler `0x1423f2820`** (`rcx`=container) calls
+`container->vtable[0x80]` (`0x14251c480`) to build a fully-correct raw connection, wraps it in the
+`SocketManagerHolder`, stores it at `[container+0x708]`, and addrefs — i.e. **driving `0x1423f2820(container,
+descriptor)` does the entire seam natively**. The residual unknown becomes the **`descriptor`** (`rdx`, ~0x120
+bytes of connection params: peer + buffer config) and the preconditions (`[container+0x40]` true,
+`[container+0x41]` false) — a bounded RE, and far fewer unknowns than replicating every connection sub-object.
+Open question it also answers: whether `container->vtable[0x80]` stands the DLNW3D service up **offline** (if
+it does, the whole transport comes up the game's own way). **Next task: RE the `0x1423f2820` descriptor +
+drive it at the veto hook** (where the container is `rcx`), instead of the hand-built connection.
+
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
 `ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =
