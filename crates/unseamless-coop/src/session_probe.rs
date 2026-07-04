@@ -338,7 +338,9 @@ const SESSION_ESTABLISHED_OFFSET: usize = 0x1_423f_4870 - 0x1_4000_0000;
 /// `leave_session 0x140cae730` — the sole out-of-line writer of `lobby_state=OnLeaveSession(7)` and the
 /// game-driven-disconnect chokepoint (see docs/SESSION-LIFECYCLE-FINDINGS.md). We hook it read-only to chart
 /// what tears down the driven host, or patch its entry to `ret` (`suppress_leave`) to hold the session.
-const LEAVE_SESSION_OFFSET: usize = 0x1_40ca_e730 - 0x1_4000_0000;
+/// The offset is single-sourced from [`crate::stay_connected::LEAVE_SESSION_OFFSET`] (which also carries the
+/// byte-verified prologue drift guard) so a game update re-derives this address in exactly one place.
+use crate::stay_connected::LEAVE_SESSION_OFFSET;
 /// `0x1423f46d0` = the DLNW3D async session teardown handler (`ManagerImplSteam@DLNR3D` vtable slot; 0
 /// direct callers, dispatched on a transport connection-down). Hooked read-only to confirm it's what
 /// tears down the driven host ~2s after it forms (no real peer → connection-down). See SESSION-LIFECYCLE.

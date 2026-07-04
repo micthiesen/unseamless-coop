@@ -65,7 +65,11 @@ const PREFERRED_BASE: usize = 0x1_4000_0000;
 /// method block for the `mov dword [reg+0xc], 7` immediate stores; A is the writer whose function
 /// opens with the `[G]`-null log guard then the states-{0,2,5} skip mask and a `[this+0x2c]`
 /// idempotency check.
-const LEAVE_SESSION_OFFSET: usize = 0x1_40ca_e730 - PREFERRED_BASE;
+///
+/// **Single source of truth for this address** — `session_probe`'s read-only leave-session tracer
+/// references this rather than re-declaring the offset, so a game update only re-derives it here
+/// (alongside its byte-verified [`LEAVE_SESSION_PROLOGUE`] drift guard).
+pub(crate) const LEAVE_SESSION_OFFSET: usize = 0x1_40ca_e730 - PREFERRED_BASE;
 /// The inline twin's entry inside `update_step` (site B): first instruction after the
 /// `cmp byte [r14+0x20], 0; je <join>` deferred-leave gate at `0x140cb0835`. The *other* `imm=7`
 /// store (`0x140cb08bc`) lives in this inline body. Re-derive: the second `mov [reg+0xc], 7` site,

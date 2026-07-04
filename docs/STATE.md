@@ -75,11 +75,11 @@ a real ERSC host+join (Deck as peer 2), the two things that actually build the s
 - **stay-connected behavioral validation** (risks #1–#3: boss/area/death route through the gate +
   stay playable) — needs a live 2-player session; install+arm is already rig-validated. Fold into the
   next live co-op run, or just notice it in play.
-- **Single-source the duplicated `leave_session` offset/prologue** (task #13) — fold into the next
-  `session_probe.rs`/`stay_connected.rs` churn, not standalone. (This session already re-derived the
-  correct site-A prologue — the leading REX `0x40` — so the two copies should share one constant.)
 - **Static-prep of the live-trace targets** — *chosen as the delegable companion to Next* (see the
   worker note under Next); not a runner-up, listed here so it isn't re-proposed.
+
+(Done since this decision: task #13 — the duplicated `leave_session` offset is now single-sourced
+from `stay_connected::LEAVE_SESSION_OFFSET`, referenced by `session_probe`.)
 
 ## Learned Recently (Pointers Only)
 
