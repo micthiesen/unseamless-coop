@@ -1124,22 +1124,27 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    - **#3 empty listen slot-pool** `0x14263aff0` (free-list `[socketmgr+0xd0]`=0xffffffff → no free slot → the
 >      failed listen releases the sub-object → cleanup faults on its null vtable): fixed by the init sizing the
 >      pool at `socketmgr+0xc0` from `[socketmgr+0x60]` = `descriptor[0x20]` (the connection count).
-> 4. **CURRENT WALL — fault #4: the socket-manager's WORKER THREAD.** `MTInternalThreadSteamSocketManager` spawns
->    an OS worker thread (stack `~0x5eaffxxx`) that runs `0x142640bc0` — per-connection ISteamNetworking006
->    context setup (`lea rcx,[0x143c602b0]` the iface holder; `call [0x144c0d0a4]` = the `SteamInternal_ContextInit`
->    import) — and **jumps to a garbage target that changes every run** (`0x3b14e4c0`, `0x2146e800`, `0x2e06e440`,
->    …) → execute-DEP fault, stable return addr `0x142640c48`. **Ruled out:** the import is NOT bad — reading the
->    three Steam IAT slots live shows all valid (`[0x144c0d09c]`, `[0x144c0d0a4]`=`SteamInternal_ContextInit`,
->    `[0x144c0d0ac]` all point into loaded `steam_api64.dll` at `0x6ffffc37xxxx`). So `SteamInternal_ContextInit`
->    runs and the crash is INSIDE it (or just after) — it invokes an **uninitialized callback** in the per-connection
->    context the worker built (changing garbage = uninitialized stack/heap). **Also ruled out:** not a
->    `force_host_transition` race — with it OFF the natural session-update task reaches `TryToCreateSession` and the
->    worker crashes identically. **► NEXT: live worker-thread debug** (Frida/ptrace on the spawned thread) to catch
->    the exact instruction + the context struct it derefs, and find which socketmgr/connection field leaves the
->    context callback uninitialized. Candidate lead: our standup's resolver `0x142640b90` overwrites `[holder 0x143c602b0]`
->    with the raw iface (the original value was the resolver fn `0x142640b90`) — check whether that mutation breaks
->    the worker's `SteamInternal_ContextInit(holder)`. The connection we hand the socketmgr also skips Accept-setup
->    `0x14263ffe0` (the "+0x120 iface-holder" / incompatible-heap path), a likely source of the uninitialized context.
+> 4. **FIXED — fault #4 was OUR bug corrupting the SteamInternal context.** The socketmgr worker thread
+>    (`MTInternalThreadSteamSocketManager`, `0x142640bc0`) calls `SteamInternal_ContextInit(holder 0x143c602b0)`,
+>    which invokes the context's `pFn` (at `[holder+0]`) once to resolve the iface. Our standup used to call the
+>    raw resolver `0x142640b90(holder)` **directly** — but that resolver IS the `pFn`, and it does `mov [rbx],rax`
+>    (`rbx`=arg), so calling it with the holder BASE stored the iface at `[holder+0]`, **overwriting `pFn`**. The
+>    worker then read the corrupted `pFn` (now the iface) and called the iface as a function → execute-garbage
+>    (changing per run). **Fix: resolve via `SteamInternal_ContextInit` (the IAT import `[0x144c0d0a4]`), the same
+>    idempotent path the game uses** — it leaves `[holder+0]=pFn` intact and lands the iface at `*[holder+0x10]`.
+>    With this, host-setup runs to completion, no crash.
+> 5. **NEW MILESTONE — the host session FORMS, then is torn down after ~2s.** After the fix, driving create (either
+>    `force_host_transition` or the natural session-update task) advances: `TryToCreateSession` → **`protocol_state=Ingame`,
+>    `players=1` with `player[0] host=true local=true`, and a warp into the co-op map begins** (`start_area_id=1800001`,
+>    `warp_delay` counting down from ~10s). So host-setup genuinely creates the session and starts warping us into the
+>    shared world. But `lobby_state` doesn't stick at `Host` and at ~frame +120 the roster drops `1 -> 0` (`TEARDOWN`
+>    log line) and everything resets to `None`/`None`, the warp cancelled. **► NEXT: suppress/understand the teardown.**
+>    All game-driven disconnects funnel through `leave_session 0x140cae730` (the `OnLeaveSession` writer) — the
+>    seamlessness gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)) is exactly the lever to arm
+>    here. Test whether arming it holds the host in `Host`/`Ingame`, then bring in the Deck as a real joiner. Open
+>    question: is the teardown a validation timeout (no real peer/session backing) that a real peer join would
+>    satisfy, or an unconditional watchdog we must suppress? The `game-p2p` sends keep flowing across the teardown,
+>    so our transport stays up — the teardown is session-layer, not transport.
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes

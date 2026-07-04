@@ -1541,8 +1541,9 @@ impl Feature for SessionCreateDriver {
 // align); SteamServiceImpl base ctor 0x14263b6b0(this)->this installs vtable 0x143277270 (sub-ctor
 // 0x14263f1e0). Re-derive after a game update via the RTTI/vtable walk in SESSION-DRIVE.md.
 
-/// Offset (from exe base) of the ISteamNetworking006 resolver `0x142640b90`.
-const ISTEAM_RESOLVER_OFFSET: usize = 0x2640b90;
+// NB: the raw resolver `0x142640b90` is NO LONGER called directly — doing so with the holder base stored
+// the iface over the SteamInternal `pFn` slot and crashed the socketmgr worker (fault #4). We now resolve
+// via `SteamInternal_ContextInit` (the IAT import at `0x144c0d0a4`), the same idempotent path the game uses.
 /// Offset of the ISteamNetworking006 interface-context holder `0x143c602b0` (resolver stores the
 /// interface pointer at `[holder]`).
 const ISTEAM_HOLDER_OFFSET: usize = 0x3c602b0;
@@ -1704,19 +1705,32 @@ impl Feature for TransportStandupDriver {
         // (catch_unwind can't catch SIGSEGV). Each step logs before/after so a crash localizes to the
         // last line printed. The constructed object is intentionally leaked (process-lifetime probe).
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            // 1. Resolve ISteamNetworking006 into its holder (the legacy P2P interface the transport uses).
+            // 1. Resolve ISteamNetworking006 into its holder — the CORRECT way, via SteamInternal_ContextInit.
+            // The holder 0x143c602b0 is a SteamInternal context-init struct `{ pFn@+0, resolved-iface@+8 }`
+            // where pFn = the resolver 0x142640b90. Calling that resolver DIRECTLY with the holder base (what
+            // we used to do) stores the iface at [holder+0], OVERWRITING pFn — and the socket-manager's worker
+            // thread later calls SteamInternal_ContextInit(holder), reads the corrupted pFn (now the iface),
+            // and calls the iface as a function → crash (host-setup fault #4, 2026-07-04 pm). ContextInit is
+            // the idempotent API the game itself uses: it invokes pFn(ctx-slot) once (guarded) so the iface
+            // lands in the ctx slot without clobbering pFn. Call it through its IAT import [0x144c0d0a4].
             let holder = exe_base + ISTEAM_HOLDER_OFFSET;
             let before = (holder as *const usize).read_volatile();
+            let ctxinit_ptr = ((exe_base + 0x4c0d0a4) as *const usize).read_unaligned();
             log::info!(
-                "session-probe: transport-standup — resolving ISteamNetworking006 (holder {holder:#x}, before={before:#x})",
+                "session-probe: transport-standup — resolving ISteamNetworking006 via SteamInternal_ContextInit \
+                 {ctxinit_ptr:#x} (holder {holder:#x}, before[+0]={before:#x})",
             );
-            let resolver: extern "win64" fn(usize) =
-                std::mem::transmute(exe_base + ISTEAM_RESOLVER_OFFSET);
-            resolver(holder);
-            let iface = (holder as *const usize).read_volatile();
+            let ctxinit: extern "win64" fn(usize) -> usize = std::mem::transmute(ctxinit_ptr);
+            let ret = ctxinit(holder);
+            let h0 = (holder as *const usize).read_volatile();
+            let h8 = ((holder + 8) as *const usize).read_volatile();
+            // Layout confirmed live: [holder+0]=pFn (stays 0x142640b90), [holder+8]=counter, and pFn stores
+            // the iface at pCtx = ret = holder+0x10, so the resolved iface is *[holder+0x10] (= *ret).
+            let iface = if ret != 0 { (ret as *const usize).read_volatile() } else { 0 };
             resolved_iface = iface; // hand to phase 2 (drive_p2p) even if a later build step bails
             log::info!(
-                "session-probe: transport-standup — ISteamNetworking006 = {iface:#x} ({})",
+                "session-probe: transport-standup — ContextInit ret={ret:#x} holder[+0]={h0:#x} (should stay \
+                 pFn 0x142640b90) holder[+8]={h8:#x} => ISteamNetworking006 = {iface:#x} ({})",
                 if iface == 0 { "NULL — P2P interface unavailable offline!" } else { "resolved OK" },
             );
 

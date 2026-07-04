@@ -162,7 +162,7 @@ land_socket_holder = true  # SEAM WORK (next session): pairs with stand_up_trans
                            # veto-vmethod hook, so the driven create's ConnectionRefInfo loop reads a valid
                            # object instead of null-derefing. Needs stand_up_transport + drive_create on. The
                            # charted finish of rung-3 create — see docs/SESSION-DRIVE.md > "SEAM CHARTED".
-force_host_transition = true # SEAM CHART (2026-07-04 pm): drive 0x140cb2ae0 after TryToCreateSession to reach host-setup; the conn-graph dump (land_socket_holder) logs the walked sub-object chain BEFORE the fault. # off: proven not to stick (host setup faults on a dead connection). Left as a
+force_host_transition = false # SEAM CHART (2026-07-04 pm): drive 0x140cb2ae0 after TryToCreateSession to reach host-setup; the conn-graph dump (land_socket_holder) logs the walked sub-object chain BEFORE the fault. # off: proven not to stick (host setup faults on a dead connection). Left as a
                            # charted lever. SEAM TEST: after create reaches TryToCreateSession, call the game's
                            # Host writer 0x140cb2ae0 directly (sets lobby_state=Host + protocol=Ingame + host
                            # setup), so the update task takes the host-maintenance branch instead of the
