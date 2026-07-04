@@ -1171,9 +1171,12 @@ real `SteamConnection` lands at `[container+0x708]` — bypassing the game's flo
 ERSC runs co-op outside the matchmaker. The standup chain is charted in the "RIG-PROVEN (2026-07-03)" section
 below (the `0x142638b40` factory + the connect/accept path). That is the recommended next build.
 
-**► NEXT STEP.** Path 2 (own-transport standup) — see "Standup chain charted (for path 2)" below; the one
-runtime-captured piece is the `owner`/config the factory needs, best grabbed when the transport is live.
-Everything below this line is older (partly-superseded) narrative.
+**► NEXT STEP.** Path 2 (own-transport standup) — **scoped in
+[PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md)** (start there). The make-or-break first milestone:
+resolve `ISteamNetworking006` ourselves (`0x142640b90`, holder `0x143c602b0`) and see if the
+`SteamServiceImpl` standup `0x142638b40` then returns non-null outside the online flow. If yes, the rest is
+assembly off the charted chain ("Standup chain charted (for path 2)" below). Everything below this line is
+older (partly-superseded) narrative.
 
 ---
 
