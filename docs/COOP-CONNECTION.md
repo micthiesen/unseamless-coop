@@ -144,31 +144,52 @@ the one genuinely hard step — driving the game's own session so players see ea
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
 
-> **STATE — the create/join initiation is CHARTED; the offline blocker is leg B's tail (session-slot
-> array capacity 0), and the next real move needs two players.** The create wrapper (`0x140cad4c0`) is
-> charted and **direct-drive is rig-proven to fire** (drives `lobby_state` off `None`); the Arxan
-> availability gate (`0x140cb4b50`) is **bypassed** (`bypass_session_create_gate`, branch flip —
-> rig-confirmed via a hardware write-watch to reach leg B); and **leg B (the network-create vmethod
-> `0x1423f5c00`) is charted** — three early rejects (two eliminated statically), a 4th session-config gate
-> (`0x1423fd7a0`), then a finalize/registry tail. In-world (main player present) create sails through
-> reject #1, the 4th gate (fields populated), and the registry chain — and dies in leg B's **tail capacity
-> check**: the session-slot array is **capacity 0** offline (`[NetworkSession+0x20]cap=0`), so the tail
-> store has nowhere to land. A real **rung-4 lobby + peer** is what sizes the slot array. Rig-disproven
-> tombstones: reject #1 (`*(NetworkSession+0x10)==0`) is real but **insufficient** (forcing it via
-> `force_netsession_ready` didn't unblock); the registry/init chain (`0x1423fab40 → 0x1423fa1b0`) was
-> suspected as the deeper blocker but is **OOM-only, not an offline gate**. Full trace + re-derivation:
-> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
+> **STATE (2026-07-03) — create initiation + real session state are SOLVED; the wall is the game's
+> TRANSPORT layer, which is dormant offline. The finish reduces to a clear architectural choice.** Full
+> trace: [SESSION-DRIVE.md](SESSION-DRIVE.md); the load-bearing picture:
 >
-> **NEXT REAL MOVE — a 2-player create test (needs a friend / second machine):** a live peer/match is what
-> populates the capacity-0 slot array. On **both** machines set `[debug.probes] drive_create = true` +
-> `[debug.probes] force_netsession_ready = true` + `[gameplay] bypass_session_create_gate = true` (+
-> `enable_offline_multiplayer = true`), open a rung-4 lobby + join (one Open World, one Join world), then
-> let `drive_create` fire with the peer present and read the `session-probe: drive-create returned …` / FSM
-> lines — does `lobby_state` now reach `TryToCreateSession`/`Host` instead of `FailedToCreateSession`?
-> Procedure in [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md) > "Rung-3 create-drive test". If a real
-> peer still doesn't size the slot array, the fallback is to fabricate the backing array (write
-> `[NetworkSession+0x18]`) or the heavier ERSC-style session neutralization. **`create` is solo-confirmable
-> up to this point; past it needs the peer.**
+> - **Solved:** driving create moves `lobby_state None → TryToCreateSession`, and driving the container's
+>   real session-established handler (`ManagerImplSteam@DLNR3D::0x1423f4870`) populates genuine session
+>   state (the create-veto bit + our real SteamID). Every create gate (leg A, rejects, gate-4, the veto
+>   vmethod) is charted and satisfiable.
+> - **The wall — the connection/transport layer.** After `TryToCreateSession`, the session machinery
+>   dispatches vmethods on the connection object at `[container+0x708]`, which is null offline.
+>   Fabrication is a **proven dead end** (hollow objects crash the collection-dispatch). That connection
+>   is a **`SteamConnection@DLNW3D`** — part of a lower transport namespace (**DLNW3D**) that rides
+>   **`ISteamNetworking006`** (legacy Steam P2P). A live-memory scan in-world offline found **zero**
+>   DLNW3D objects (service/manager/connection) vs 3 live session containers: **the whole transport is
+>   never stood up offline.** So `+0x708` is null because the layer below it is dormant — the gate is
+>   *flow-entry* (whether the game enters its online session flow), above the connection layer.
+>
+> **The finish — two paths (see SESSION-DRIVE.md > "RIG-PROVEN … DORMANT offline"):**
+> 1. **Ride the game's own transport (ERSC-faithful).** Get the game to enter its online flow so it
+>    stands up its *own* DLNW3D transport + session graph, then intercept the **matchmaking handoff** to
+>    substitute our rung-4 password-peer (ERSC reuses the game's netcode; it replaces the peer-brokering,
+>    **not** the transport). Blocked on the flow-entry / online-availability signal — the **same** signal
+>    greying the multiplayer items ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), which has
+>    beaten three static passes and needs a runtime trace.
+> 2. **Stand up the DLNW3D transport ourselves.** Charted entry points (factory `0x142638b40`,
+>    connection-creator `0x142640560`, connect/register `0x14263b720`/`0x14263b7c0`). Bounded, bypasses
+>    the elusive signal, but out-of-flow (needs the live `owner`/config captured at runtime). More than
+>    ERSC does.
+>
+> Both terminate at a **two-machine** validation (rig + Steam Deck). **Correction to the old framing
+> below:** the prior "leg B tail slot-array capacity-0 → a real peer sizes it" model is *superseded* —
+> the slot array being empty is downstream of the same dormant transport; sizing it (fabrication or a
+> peer) never reached `Host` because the connection object it needs doesn't exist offline.
+>
+> **Seamlessness is a separate, additive layer (matters regardless of path 1/2).** ERSC's bulk is
+> *suppressing the game's own disconnect events* (send-phantom-home after a boss, area-scoping, return-on-
+> death). Reasoned architecture: gate the **teardown chokepoint** (the orderly "begin leaving the session"
+> transition — `lobby_state → OnLeaveSession` / `request_leave`) behind an *armed* flag we set only for
+> intentional disconnects, so all the logic-driven leave triggers no-op — rather than hooking every event.
+> Both peers run our mod, so the suppression is symmetric. Necessary but not sufficient: seamless also
+> needs the *active* re-sync across area transitions. (Under RE now — worker `teardown-chokepoint`.)
+>
+> **In flight (parallel workers, 2026-07-03):** `teardown-chokepoint` (is the leave path one gateable
+> chokepoint? → docs/SESSION-LIFECYCLE-FINDINGS.md) and `coop-flow` (the item-use → session/transport
+> standup → matchmaking-handoff path, and whether a direct trigger dodges the menu grey →
+> docs/COOP-FLOW-FINDINGS.md).
 
 > **Protocol reference — `waygate-server` (cloned locally at `../waygate-server`).** vswarte's
 > [Elden Ring matchmaking-server reimplementation](https://github.com/vswarte/waygate-server) (Rust, MIT —
