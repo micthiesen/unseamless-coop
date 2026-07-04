@@ -1011,6 +1011,14 @@ const DRIVE_FLAG: u8 = 0;
 /// `mode` arg (`r8d`) — the constant the sign/host create path passes.
 const DRIVE_MODE: u32 = 4;
 
+/// Offset of the Host-transition fn `0x140cb2ae0` — the **sole** writer of `lobby_state=Host(3)` (it also
+/// sets `protocol_state=Ingame(6)` and runs the host setup). Normally reached by the session-update task
+/// `0x140cafd10` after the create-connection setup completes; that setup is what crashes on our incomplete
+/// connection, so `force_host_transition` calls this directly to jump the update task past it.
+const HOST_TRANSITION_OFFSET: usize = 0x140c_b2ae0 - 0x1_4000_0000;
+/// The Host-transition fn's signature: `fn(this /*rcx = CSSessionManager*/)`.
+type HostTransitionFn = unsafe extern "system" fn(*mut CSSessionManager);
+
 /// The 8-byte `settings` blob the create path points `r9` at: `{ u16@+0 = 0; u32@+4 = 2 }`. `repr(C)`
 /// gives `u16` at 0 (pad 2..4) and `u32` at 4, matching the charted layout. Consumed synchronously by
 /// the param builder, so a stack local outlives the call.
@@ -1051,11 +1059,15 @@ pub struct SessionCreateDriver {
     /// has no peer to link). Without it, the drive holds for a linked peer (the two-machine run).
     /// Decoupled from `fabricate_slot_array` itself so fabricate+peer can be tested together.
     fire_solo: bool,
+    /// When true (`[debug.probes] force_host_transition`), after the driven create reaches
+    /// `TryToCreateSession`, call the game's Host-transition fn `0x140cb2ae0` directly to jump the
+    /// session-update task past its crashing connection-activation path straight to `Host`.
+    force_host: bool,
 }
 
 impl SessionCreateDriver {
-    fn new(force_ready: bool, fire_solo: bool) -> Self {
-        Self { fired: false, linked_since: None, force_ready, fire_solo }
+    fn new(force_ready: bool, fire_solo: bool, force_host: bool) -> Self {
+        Self { fired: false, linked_since: None, force_ready, fire_solo, force_host }
     }
 }
 
@@ -1197,6 +1209,28 @@ impl Feature for SessionCreateDriver {
             ret,
             after,
         );
+
+        // Force the Host transition: the session-update task (0x140cafd10) reaches Host only after the
+        // create-connection setup completes, and that setup crashes on our incomplete connection. Calling
+        // the game's own Host writer 0x140cb2ae0 directly sets lobby_state=Host(3) + protocol=Ingame(6) +
+        // runs the host setup, so the update task then takes the host-maintenance branch instead of the
+        // crashing connection-activation branch. Only meaningful once create built the session object.
+        if self.force_host && after == Some(LobbyState::TryToCreateSession) {
+            let host_fn = exe_base + HOST_TRANSITION_OFFSET;
+            // SAFETY: `host_fn` is the charted Host-transition entry resolved from the live exe base; called
+            // with this=[G] (the live singleton) on the main thread, right after create set TryToCreateSession.
+            let host: HostTransitionFn = unsafe { std::mem::transmute::<usize, HostTransitionFn>(host_fn) };
+            log::info!(
+                "session-probe: drive-create — forcing Host transition via {host_fn:#x}(this={base:#x})",
+            );
+            unsafe { host(base as *mut CSSessionManager) };
+            let after_host =
+                crate::sdk::with_instance::<CSSessionManager, _>(|s| crate::session::read(s).lobby_state);
+            log::info!(
+                "session-probe: drive-create — after Host transition, lobby_state now {after_host:?} \
+                 (Host => rung-3 create reached Host!)",
+            );
+        }
     }
 }
 
@@ -1252,12 +1286,6 @@ const MANAGER_SIZE: usize = 0x1b8;
 const CONN_CREATOR_OFFSET: usize = 0x2640560;
 /// Offset on the manager of the pointer to its `SteamConnection` array (`slot i = [manager+0x78] + i*0x140`).
 const CONN_ARRAY_PTR_OFF: usize = 0x78;
-/// Offset of the per-connection Accept setup `0x14263ffe0` (`fn(connection)`; the register-path step the
-/// connection-creator skips). Registers the connection callbacks (`0x1426440b0`), inits the active-state
-/// fields (`+0x70/+0xa8/+0xf0/+0x118`), copies peer `+0x128 -> +0x130`, and calls AcceptP2PSessionWithUser
-/// — installing the connection's active vtable state so the session's dispatch `[[conn+8].vtable+0x18]`
-/// isn't null (rig null-call crash 2026-07-04). Needs the peer bound at `+0x128` first.
-const CONN_ACCEPT_OFFSET: usize = 0x263ffe0;
 /// Params bytes copied to `[manager+0x40..0x70]`: only `[params]!=0` and `[params+0x18]=count!=0` are
 /// guarded; `[params+0x1c]=ring size` (0 → default `0x4b0`). We pass `{ [0]=1, count=1 }`, rest 0.
 const CONN_PARAMS_WORDS: usize = 0x30 / 4;
@@ -1466,21 +1494,12 @@ impl Feature for TransportStandupDriver {
             if peer_for_conn != 0 {
                 ((conn + CONN_PEER_OFF) as *mut u64).write_volatile(peer_for_conn);
             }
-            // Bind the ISteamNetworking006 iface at +0x120 — the connection's REAL iface holder (NOT +0x8,
-            // which is a lock sub-object). Accept setup derefs it (`[[conn+0x120]]` = the iface vtable) to
-            // reach AcceptP2PSessionWithUser via `[iface_vtable+0x18]`; the creator leaves it null, so bind
-            // our resolved iface here (rig null-read crash at 0x142640062, 2026-07-04).
-            ((conn + 0x120) as *mut usize).write_volatile(iface);
-            // Run the per-connection Accept setup (0x14263ffe0) — the register-path step the creator skips.
-            // It installs the connection's active-state vtable/fields + copies the peer +0x128 -> +0x130 +
-            // AcceptP2PSessionWithUser, so the session's [[conn+8].vtable+0x18] dispatch resolves instead of
-            // hitting a null slot. Must run AFTER the peer (+0x128) and iface (+0x120) are bound.
-            let accept: extern "win64" fn(usize) = std::mem::transmute(exe_base + CONN_ACCEPT_OFFSET);
-            accept(conn);
-            log::info!(
-                "session-probe: transport-standup — ran Accept setup 0x14263ffe0 on connection {conn:#x} \
-                 (active-state init + AcceptP2PSessionWithUser)",
-            );
+            // NB: we deliberately do NOT run the per-connection Accept setup (0x14263ffe0) here. It needs a
+            // fully game-built connection (the +0x120 iface-holder sub-object our creator-built connection
+            // lacks) and crashed at 0x142640075. The force_host_transition lever makes this connection's
+            // *activation* unnecessary: it jumps straight to lobby_state=Host, so the session-update task
+            // never runs the connection-activation path. The holder at +0x708 only needs to be a valid
+            // refcountable object for create's ConnectionRefInfo loop, which it is.
             conn_out = conn;
             let conn_vtable = (conn as *const usize).read_volatile();
             let iface_field = ((conn + 0x8) as *const usize).read_volatile();
@@ -1614,6 +1633,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
         features.push(Box::new(SessionCreateDriver::new(
             config.debug.probes.force_netsession_ready,
             config.debug.probes.drive_fire_solo,
+            config.debug.probes.force_host_transition,
         )));
     }
     features

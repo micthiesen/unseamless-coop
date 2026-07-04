@@ -140,6 +140,10 @@ land_socket_holder = true  # SEAM TEST (2026-07-04): build a real SocketManagerH
                            # veto-vmethod hook, so the driven create's ConnectionRefInfo loop reads a valid
                            # object instead of null-derefing. Needs stand_up_transport + drive_create on. The
                            # charted finish of rung-3 create — see docs/SESSION-DRIVE.md > "SEAM CHARTED".
+force_host_transition = true # SEAM TEST (2026-07-04): after create reaches TryToCreateSession, call the game's
+                           # Host writer 0x140cb2ae0 directly (sets lobby_state=Host + protocol=Ingame + host
+                           # setup), so the update task takes the host-maintenance branch instead of the
+                           # connection-activation branch that crashes on our incomplete connection.
 force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
                            # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which

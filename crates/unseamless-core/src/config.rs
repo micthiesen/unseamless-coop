@@ -297,6 +297,14 @@ pub struct DebugProbes {
     /// > "SEAM CHARTED".
     pub land_socket_holder: bool,
 
+    /// **EXPERIMENTAL rung-3 HOST-transition lever** (pairs with `drive_create`). After the driven create
+    /// reaches `TryToCreateSession`, call the game's own Host-transition function `0x140cb2ae0`, the sole
+    /// writer of `lobby_state=Host(3)` (it also sets `protocol_state=Ingame(6)` and runs the host setup).
+    /// The session-update task's `TryToCreateSession` to `Host` path is what crashes on the incomplete
+    /// connection; jumping straight to `Host` makes the update task take the host-maintenance branch
+    /// instead. Off by default. See the "SEAM CHARTED" section of docs/SESSION-DRIVE.md.
+    pub force_host_transition: bool,
+
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
     /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
     /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is
