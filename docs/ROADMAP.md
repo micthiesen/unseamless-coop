@@ -137,9 +137,11 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-07-04) — the transport is SOLVED; only the "seam" to the session FSM remains. PICK UP
-  > at thread 2 below. Full detail in [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN" +
-  > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md).**
+  > **State (2026-07-04) — create reaches `TryToCreateSession`; the finish is ONE bounded RE (the descriptor
+  > for the game's native connection builder). PICK UP at "► NEXT STEP". Full current plan in
+  > [SESSION-DRIVE.md](SESSION-DRIVE.md) > "SEAM + the native-builder finish" (the load-bearing section);
+  > [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 + [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md)
+  > for background.**
   >
   > **SOLVED — create initiation + real session state.** Driving create (`0x140cad4c0`) moves
   > `lobby_state None→TryToCreateSession`; driving the container's real session-established handler
@@ -166,12 +168,21 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   >   ERSC's premise — skip the matchmaker, feed the peer SteamID64 — is validated end-to-end.
   >   (`[debug.probes] p2p_test_peer_a/_b` feed both SteamIDs so no manual Open/Join link is needed.)
   >
-  > **REMAINING — thread 2, the "seam" (the last piece to `Host`):** wire the proven transport into the
-  > game's session. `[container+0x708]` wants a **refcounted DLNR3D-level connection** (create refcounts
-  > `[+0x708+8]`, so it's *not* a raw `SteamConnection` — it's a wrapper on the DLNW3D transport). Chart
-  > that object's type + how it's populated (the container's connection-event callbacks
-  > `0x1423f44d0`/`0x1423f4560` alloc per-connection objects on events), build/wire it like the DLNW3D
-  > objects with `+0x8`=iface / `+0x128`=peer, land it at `+0x708`, then drive create → `Host`.
+  > **SEAM CHARTED + reached `TryToCreateSession` (2026-07-04).** `[container+0x708]` = a
+  > **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted wrapper `{vtable 0x1431f9280, refcount@+8,
+  > SteamConnection*@+0x10}`, ctor `0x1423f7180`), *not* a raw connection. Landing a real holder cleared the
+  > original create crash and drove create to `TryToCreateSession`. **But** the connection **must be built by
+  > the game** — hand-building it is whack-a-mole (sub-objects are construction-time-wired from a full
+  > service), and forcing the FSM to `Host` (`0x140cb2ae0`) doesn't stick (host setup faults on a dead
+  > connection). Both ruled out on the rig.
+  >
+  > **► NEXT (the finish) — drive the game's own connection builder.** Rig-proven viable offline: driving the
+  > connection-establish handler `0x1423f2820(container, descriptor)` runs **without crashing**, its
+  > **readiness gate passes** (`0x1423f5190`=1, so DLNW3D isn't online-gated here), and the *only* bail is the
+  > **Arxan builder `container->vtable[0x80]` rejecting our guessed descriptor**. So the finish = **RE the
+  > descriptor**: capture `vtable[0x80]`'s runtime-decoded target (technique in the `reverse-engineer` skill),
+  > disassemble it, read off its param layout, fill it, re-drive → `Host`. Step-by-step: SESSION-DRIVE.md >
+  > "► NEXT STEP".
 
   **Seamlessness (independent, additive) — one armed gate, charted.** All game-driven co-op disconnects
   (boss defeat, area transition, death, host migration, remote-leave) funnel through **one primitive:

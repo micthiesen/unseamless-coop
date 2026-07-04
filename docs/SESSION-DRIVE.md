@@ -2,21 +2,24 @@
 
 > ## STATUS (2026-07-04) — read this first
 >
-> **The rung-3 transport is SOLVED; only the "seam" to the session FSM remains.** The definitive plan +
-> current state lives in **[COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN"**. In short:
-> - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; driving the container's
->   session-established handler (`0x1423f4870`) populates real session state.
-> - **The real wall was the TRANSPORT** (`[container+0x708]` = a `SteamConnection@DLNW3D` on legacy
->   `ISteamNetworking006`, dormant offline). **Cracked:** we now **build the whole DLNW3D transport
->   ourselves offline** and rig-proved its **legacy P2P works two-machine** (rig + Deck exchange packets,
->   no matchmaker). See "TRANSPORT CHARTED" + "RIG-PROVEN … DORMANT offline" below (the current sections).
-> - **SEAM CHARTED (2026-07-04):** `[container+0x708]` is a **`SocketManagerHolder@DLNR3D`** — a 0x18-byte
->   refcounted wrapper `{ vtable 0x1431f9280, refcount@+8, SteamConnection*@+0x10 }` (ctor `0x1423f7180`),
->   *not* a raw `SteamConnection`. Build it around our standup connection, land it at `[container+0x708]`
->   (surgically, at the veto-vmethod hook `0x1423f4330` where `rcx`=container), drive create → `Host`. Full
->   chart + build in **"SEAM CHARTED"** below.
-> - **REMAINING (thread 2):** *implement* that seam probe + rig-verify create reaches `Host`; then the
->   seamless teardown gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
+> **Driven create reaches `TryToCreateSession`; the finish is ONE bounded RE — the descriptor for the game's
+> own connection builder.** The current, load-bearing section is **"SEAM + the native-builder finish"** below
+> (read it for thread 2). In short:
+> - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; the session-established handler
+>   (`0x1423f4870`) populates real container state (veto bit `[+0x7c0]` bit 2, identity `+0x7f8`).
+> - **The seam is charted:** `[container+0x708]` = a **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted
+>   wrapper `{ vtable 0x1431f9280, refcount@+8, SteamConnection*@+0x10 }`, ctor `0x1423f7180`) — *not* a raw
+>   `SteamConnection`. Landing a real holder cleared the original create crash.
+> - **Proven this session:** the connection **must be real** (hand-building it is whack-a-mole — sub-objects
+>   are construction-time-wired from a full service), and **forcing the FSM to `Host` doesn't stick** (the
+>   host setup faults on a dead connection and the game resets to `None`). So the connection has to be built
+>   by the game.
+> - **The viable path (rig-proven):** drive the game's own connection-establish handler
+>   `0x1423f2820(container, descriptor)` — it runs **without crashing offline**, its **readiness gate passes**,
+>   and the *only* bail is the Arxan builder `container->vtable[0x80]` rejecting our guessed descriptor.
+> - **► NEXT:** capture the runtime-decoded `vtable[0x80]` target, disassemble it, read off the descriptor
+>   layout, fill it, re-drive → `Host`. Then the seamless teardown gate
+>   ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)). Full plan: "► NEXT STEP" below.
 >
 > **Reading guide for the rest of this doc:** the top half (SDK survey, drive requirements, AES key,
 > ordering) is the still-useful call spec. The long **"Why a direct create fails offline"** investigation
@@ -1078,11 +1081,17 @@ listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest
 `call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
 a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 
-### SEAM CHARTED (2026-07-04, static) — `[container+0x708]` is a `SocketManagerHolder@DLNR3D`; the build is small and known
+### SEAM + the native-builder finish (2026-07-04) — CURRENT STATE, read this for thread 2
 
-The thread-2 "seam" (transport → session FSM → `Host`) is now fully charted. Static RE on the pinned
-2026-06-02 image (own words; addresses are facts; no decompiler output). This supersedes the guess in
-"TRANSPORT CHARTED §2" that `+0x708` holds a raw `SteamConnection`.
+> **STATUS.** The driven create reaches `TryToCreateSession`. The finish is now **one bounded RE**: the
+> **descriptor** for the game's own connection builder. The native path is **rig-proven viable offline** —
+> the establish handler `0x1423f2820` runs without crashing, its readiness gate passes, and the *only* bail
+> is the Arxan builder rejecting our guessed descriptor. See "► NEXT STEP" below. (The chronological
+> rig-by-rig narrative this section used to be is compacted into "The path we took / ruled out" at the end.)
+
+The thread-2 "seam" (transport → session FSM → `Host`) is fully charted. Static + live RE on the pinned
+2026-06-02 image (own words; addresses are facts; no decompiler output). Supersedes the earlier guess
+("TRANSPORT CHARTED §2") that `+0x708` holds a raw `SteamConnection`.
 
 **What `[container+0x708]` actually is.** A **`SocketManagerHolder@DLNR3D`** (RTTI off vtable
 `0x1431f9280`) — a tiny **0x18-byte** object, subclass of `ReferenceCountObject@DLNR3D` (base vtable
@@ -1118,144 +1127,73 @@ also runs the container's Arxan-encoded **veto vmethod** `[container_vtable+8]` 
 gates on `[container+0x7c0]` bit 2 — set by the session-established handler — *before* it reaches the
 `+0x708` read.)
 
-**The build (path β — wrap our own standup connection).** We already stand up a real
-`SteamConnection@DLNW3D` (with peer at `+0x128`), rig-proven. So the seam needs only:
-1. `holder_buf = game_alloc(0x18, 8, heap)`; `0x1423f7180(holder_buf, our_steam_connection)` → holder.
-2. `holder->refcount (+8) = 1`.
-3. Find the **live container** (`ManagerImpl@DLNR3D`, vtable `0x1431f8360`; `scan-vtable.py 0x1431f8360`)
-   and write `holder → [container+0x708]` — **on the same container create uses** (`[SessionSteam+0x58]`).
-   The surgical injection point: the existing **veto-vmethod entry hook** (`0x1423f4330`, `rcx` =
-   container) fires during create right before the `+0x708` read, so populate `+0x708` there if null
-   (exactly how `fabricate_slot_array` lazily sizes the slot array at leg-B entry) — guaranteeing we hit
-   the create's own container. This replaces the old `set_create_veto_bit` hollow-fab with a real holder.
-4. Also needs `[container+0x7c0]` bit 2 (the veto bit) — set by driving the session-established handler
-   `0x1423f4870` (`drive_session_established`) or the `set_create_veto_bit` lever.
+**Two facts that decided the approach (both rig-proven this session).**
+1. **The connection must be REAL — hand-building it is whack-a-mole.** Its sub-objects are *construction-time
+   wired* from a fully-built service, not settable fields: `[conn+0x8]` is a lock-bearing DLNW3D sub-object
+   (not the iface — FROMNET's "`+0x8`=iface" holds only for a *bare* connection), `[conn+0x120]` is an
+   iface-**holder** object (its `vtable[0x18]` returns a context), plus ring buffers + worker-thread locks.
+   We descended layer by layer (land a real holder → build via the connection-creator `0x142640560` → don't
+   clobber `+0x8` → run Accept setup `0x14263ffe0` → bind `+0x120`), each fix clearing one crash and exposing
+   a deeper uninitialized sub-object. There is no bottom reachable by hand — the whole graph comes from the
+   service, which itself needs the factory (`0x142638b40`, and its container-owner register is a no-op so the
+   service isn't retrievable). **Dead end for hand-building.**
+2. **Forcing the FSM does NOT reach a real Host.** The sole `lobby_state=Host(3)` writer is `0x140cb2ae0`
+   (also sets `protocol_state=Ingame(6)` + runs the host setup), called by the session-update task
+   `0x140cafd10`. Driving it directly writes `Host(3)` at entry, but its host-setup body faults on the
+   incomplete connection and the game resets `lobby_state` to `None`. **Host genuinely requires a working
+   connection.**
 
-**Alternative (path α — drive the establish handler `0x1423f2820(container, descriptor)`):** does the
-whole thing natively (builds raw conn via vtable+0x80, wraps, stores, addrefs), but needs a valid ~0x120
-byte `descriptor` (connection params) and the container preconditions (`[container+0x40]` true,
-`[container+0x41]` false). Path β sidesteps the descriptor by reusing our already-built connection, so
-it's the first pick; α is the fallback if the wrapped standup connection isn't sufficient downstream.
+**THE VIABLE PATH — drive the game's own native builder (rig-proven offline).** Drive the connection-establish
+handler **`0x1423f2820(container, descriptor)`** at the veto hook: it calls `container->vtable[0x80]`
+(`0x14251c480`, the game's own builder) to construct a fully-wired connection, wraps it in the
+`SocketManagerHolder` (`0x1423f7180`), stores it at `[container+0x708]`, and addrefs — **the entire seam, the
+game's way, so all the sub-object wiring is done for us.** Proven with the `drive_establish_handler` lever:
+- **No crash offline** — unlike every hand-build attempt, the game's own path runs clean (create just returns
+  `FailedToCreateSession`).
+- **The readiness gate passes offline.** `0x1423f5190(container)` — a get-or-create + lock + readiness check
+  on the DLNW3D singleton `0x144852dc0` — **returns 1**, so the DLNW3D layer is **not** hard-gated on being
+  online here.
+- **The only bail is the Arxan builder `vtable[0x80]` returning null** on our guessed zeroed descriptor — a
+  *clean* reject (`[container+0x8ac]=1` confirms the body ran; `+0x708` stays null), not a fault.
 
-**✅ RIG RESULT (2026-07-04) — the seam clears the create crash; create reaches `TryToCreateSession`.**
-Ran `stand_up_transport` + `drive_create` + `drive_session_established` + `land_socket_holder`, solo drive.
-The log proves the seam works end to end:
-- `land-socket-holder — built SocketManagerHolder @ 0x7ffe… (wraps SteamConnection 0x143dd5a60,
-  refcount=1) and wrote [container+0x708]` — the holder landed on the create's own container `0x143dcd440`.
-- `gate4-helper-ret — helper 0x1423faf60 returned al=1` — **the `ConnectionRefInfo` loop that used to
-  null-deref now succeeds** (it wrapped `[container+0x708]` + addref'd its refcount). This was the wall.
-- `legb-finhandle REACHED — handle(eax)=1 … slot-array cap=16` — leg B finalize succeeded (with the
-  fabricated slot array), and `drive-create returned true — lobby_state now TryToCreateSession`.
+So the finish reduces to **one bounded problem: the descriptor** — what `~0x120-byte` config makes
+`vtable[0x80]` actually build the connection. `vtable[0x80]` is Arxan-obfuscated (a trampoline: `lock cmpxchg`
+on `0x1448577d8`, decode via cookie `0x143c5adb0`, `call rbx`), so its consumer can't be read statically —
+but it *runs* correctly when invoked through the vtable, and we can read the descriptor it needs by capturing
+its **runtime-decoded** target.
 
-The previous crash (`eldenring.exe+0x1eba1c5`, the `lock xadd` on null `+0x708`) is **gone**. A **new,
-downstream crash** now follows: `0xc0000008` (STATUS_INVALID_HANDLE), backtrace through **our connection**
-(`0x143dd5a60`, twice) and the **DLNW3D service factory region** (`+0x263845a`, `+0x263742a`), plus the
-container/NetworkSession. Reading: after create returns `TryToCreateSession`, the session machinery tries
-to **activate/use** the connection through the service, and our connection — built with the bare ctor
-`0x142643b50` only — is **missing the full wire-up** (ring buffers + Accept setup `0x14263ffe0` + service
-registration via thunk `0x14263b7c0`). This is the expected next layer: whack-a-mole, one crash deeper.
-**Next increment:** build the standup connection via the connection-creator `0x142640560` (allocs the ring
-buffers, ctors, runs Accept setup) instead of the bare ctor — or run `0x14263ffe0` on it + register it with
-`0x14263b7c0` — then re-drive and watch whether `lobby_state` advances `TryToCreateSession → Host`. (Note:
-the standup connection came up with vtable `0x143278358` (the base), peer `+0x128` bound to the override
-SteamID — both as expected.)
+**► NEXT STEP (do this next — closes rung-3 create).**
+1. **Capture the Arxan-decoded builder.** Hook the establish handler's call site `0x1423f2939` (`call
+   [rax+0x80]`, where `rax` = the live container vtable, so `[rax+0x80]` is the decoded builder pointer at
+   call time) — or the trampoline's `test rbx,rbx` at `0x14251c4a5` (`rbx` = decoded target) — read + latch +
+   log the address. Same technique as the veto `vmethod-target` probe (`log_vmethod_target`); see
+   [the `reverse-engineer` skill > "Capturing Arxan-decoded call targets at runtime"](../.claude/skills/reverse-engineer/SKILL.md).
+2. **Disassemble the decoded builder** offline (`python3 scripts/re/static.py fn <decoded-addr>` — it lands in
+   clean, readable `.text`, not the trampoline) and read off which descriptor dwords/bytes it consumes, the
+   buffer/count config it needs, and where the peer SteamID64 goes.
+3. **Fill the descriptor** in `drive_establish_handler` (`session_probe.rs`) and re-drive. `+0x708` populated
+   → create's `ConnectionRefInfo` loop wraps a real connection → the session-update task activates it →
+   watch `lobby_state` advance `TryToCreateSession → Host`.
+4. **Two-machine (rig + Steam Deck)** once `Host` holds: prove a real peer join over the connection (the
+   Deck's SteamID as the peer), then move to the teardown gate (task: seamlessness).
 
-**RIG RESULT 2 (2026-07-04) — connection-creator wired; crash is now the DLNW3D SERVICE under-init.** Next
-increment: replaced the bare standalone connection ctor with the **connection-creator `0x142640560`**(manager,
-params) — the method the connect thunk `0x14263b720` runs. It allocs the manager's ring buffers
-(`[manager+0x88/0xb0/0xd0/0xf8/0x198]`) + a `SteamConnection` array at `[manager+0x78]` (params `count=1`,
-0x140-byte slots) + registers the P2P callbacks. We wrap array slot 0. **Result:** `connection-creator … =
-true`, create still returns `TryToCreateSession`, and now runs **~25 s** before crashing (was immediate) — a
-ring-buffered connection lets the session-update task advance further. **Same `0xc0000008` (INVALID_HANDLE)**
-crash: decoded to a **`DLLightMutex` acquire** (`0x141ed6210`, string `DLLightMutex.cpp`) on an
-**uninitialized lock** deep in the DLNW3D **service** (fn `0x142638410`, reached from the session-setup code
-`0x1423fb…`). The naive-scan backtrace's `0x143dd…`/`0x143dcd…` frames are just the connection/container
-`this` pointers spilled on the stack, not code.
+Preconditions the establish handler needs (already handled by the lever): `[container+0x40]=1`,
+`[container+0x41]=0`, and the veto bit `[container+0x7c0]` bit 2 (set by `drive_session_established` →
+`0x1423f4870`). The live container is `[SessionSteam+0x58]` during create, and the veto-vmethod hook
+(`0x1423f4330`, `rcx`=container) is the injection point that guarantees we hit the create's own container.
 
-**Root cause + the fix (scoped).** Our service is built with only the **base ctor `0x14263b6b0`** (installs
-the vtable) — **not** the factory `0x142638b40`, which additionally runs the service **init vmethod**
-`[svc_vtable+8](svc, owner)`, builds an adapter (`0x14263b5a0`, vtable `0x143276d88`), runs the **start
-vmethods** `[svc_vtable+0x10]`/`[svc_vtable+0]`, and registers via `[owner_vtable+0x68]`. **Those init/start
-vmethods set up the locks + worker threads** the base ctor skips — hence the uninitialized `DLLightMutex`.
-**Next build:** stand the service up via **`factory 0x142638b40(owner)`** instead of the base ctor. The live
-**container** (`ManagerImpl@DLNR3D`) is a **valid `owner`** — its vtable `+0x50` = allocate (`0x1423f2cd0`,
-the factory allocs the service off the owner) and `+0x68` = register-service (`0x1423f3130` = `mov al,1; ret`,
-a no-op that accepts). So drive the factory **at the veto-vmethod hook** (where `rcx` = the create's own live
-container), then build the manager off `[service+8]` + run the connection-creator + wrap slot 0 in the holder,
-all with a fully-initialized service. That closes the service-init gap that the base-ctor standup leaves.
-
-**RIG RESULT 3 (2026-07-04) — descended 3 more connection-init layers; the hand-build is whack-a-mole.**
-After the wired-connection crash, iterated on the connection setup the creator leaves incomplete. Each fix
-cleared one crash and revealed the next, one layer deeper into the real connection standup — create keeps
-returning `true → TryToCreateSession`:
-1. **Don't clobber `[conn+0x8]`.** On a *creator-built* connection `+0x8` is a **lock-bearing DLNW3D
-   sub-object** (the session locks `[[conn+8]+0x10]`); we'd overwritten it with the raw iface (FROMNET's
-   "`+0x8`=iface" is only for a *bare* connection). That was the INVALID_HANDLE. Cleared.
-2. **Run Accept setup `0x14263ffe0`** (the register-path step the creator skips): registers the callbacks,
-   inits active-state fields (`+0x70/+0xa8/+0xf0/+0x118`), copies peer `+0x128→+0x130`, AcceptP2PSessionWithUser.
-   Cleared the null `[[conn+8].vtable+0x18]` dispatch (fn `0x14203f1f0`).
-3. **Bind the iface at `+0x120`** (the connection's real iface holder). Cleared the null-read at `0x142640062`.
-   **Now:** `0x142640075` inside Accept — `[conn+0x120]` wants an iface-**holder** object (its `vtable[0x18]`
-   returns a context ptr), not the raw iface; our creator-built connection lacks that embedded sub-object.
-
-**Diagnosis + STRATEGIC PIVOT.** Hand-building the `SteamConnection` and wiring each sub-object by hand is
-whack-a-mole: the creator + Accept still leave embedded sub-objects (`+0x8` lock, `+0x120` iface-holder, …)
-that a *fully game-built* connection has. The better path is to **let the game build the connection
-natively**: the **connection-establish handler `0x1423f2820`** (`rcx`=container) calls
-`container->vtable[0x80]` (`0x14251c480`) to build a fully-correct raw connection, wraps it in the
-`SocketManagerHolder`, stores it at `[container+0x708]`, and addrefs — i.e. **driving `0x1423f2820(container,
-descriptor)` does the entire seam natively**. The residual unknown becomes the **`descriptor`** (`rdx`, ~0x120
-bytes of connection params: peer + buffer config) and the preconditions (`[container+0x40]` true,
-`[container+0x41]` false) — a bounded RE, and far fewer unknowns than replicating every connection sub-object.
-Open question it also answers: whether `container->vtable[0x80]` stands the DLNW3D service up **offline** (if
-it does, the whole transport comes up the game's own way). **Next task: RE the `0x1423f2820` descriptor +
-drive it at the veto hook** (where the container is `rcx`), instead of the hand-built connection.
-
-**RIG RESULT 4 (2026-07-04) — FSM shortcut disproven; native builder is Arxan-fronted.** Two decisive
-findings closing out the shortcut space:
-- **`force_host_transition` does NOT stick.** The sole `lobby_state=Host(3)` writer is `0x140cb2ae0` (it also
-  sets `protocol_state=Ingame(6)` + runs the host setup), called by the session-update task `0x140cafd10`.
-  Driving it directly after create: it writes Host(3) at entry, but its **host-setup body touches the
-  incomplete connection, faults, and the game resets the session** — the read right after returns
-  `lobby_state=None`. So forcing the FSM past the connection does not hold: **a real Host session genuinely
-  requires a working DLNW3D connection.** Every fabrication/FSM shortcut is now exhausted.
-- **The native connection builder is Arxan-obfuscated.** `container->vtable[0x80]` = `0x14251c480` is an
-  **Arxan trampoline** (`lock cmpxchg` on `0x1448577d8`, decode via cookie `0x143c5adb0`, `call rbx`) — the
-  real builder is runtime-decoded, unreadable statically. Driving the establish handler `0x1423f2820` invokes
-  it *naturally* (the trampoline decodes when called through the vtable), so that path is mechanically open —
-  **but the `~0x120-byte descriptor` it needs would be reverse-engineered by guessing**, since the consumer
-  (`vtable[0x80]`) is opaque. That's the crux of task #13, and it carries real uncertainty (Arxan consumer +
-  possible online-gating in `0x1423f5190`).
-
-**Bottom line for the finish.** Reaching `Host` requires a *working* DLNW3D connection (proven: shortcuts
-don't hold). The two ways to get one: **(a)** finish the hand-build — chart + init each remaining connection
-sub-object (`+0x120` iface-holder, then whatever's next); or **(b)** drive `0x1423f2820(container,
-descriptor)` and RE the descriptor against the Arxan builder. Both are deep; (b) is fewer unknowns *if* the
-descriptor yields. The transport itself (service/manager/connection ctors, legacy P2P) is proven; the gap is
-the connection's full **activation** wiring, which is a genuinely hard sub-problem, not a one-line lever.
-
-**✅ RIG RESULT 5 (2026-07-04) — the native-builder path is VIABLE offline (the key experiment).** Drove
-the game's own connection-establish handler `0x1423f2820(container, descriptor)` at the veto hook
-(`drive_establish_handler` lever; preconditions `[container+0x40]=1`/`[container+0x41]=0` set, a zeroed
-0x140-byte descriptor with a guessed count field). Findings, all decisive:
-- **NO CRASH.** The handler runs cleanly offline — driving the game's own native path does not fault (unlike
-  every hand-build attempt). The game stays alive; create just returns `FailedToCreateSession`.
-- **The readiness gate PASSES offline.** `0x1423f5190(container)` — the get-or-create + lock + readiness
-  check on the DLNW3D singleton `0x144852dc0` that the handler tests first — **returns 1**. So the DLNW3D
-  layer is **not hard-gated on being online** at this level; the handler proceeds past it.
-- **The sole remaining bail is the Arxan builder `container->vtable[0x80]` (`0x14251c480`) returning null**
-  on our guessed descriptor (`+0x8ac=1` confirms the handler entered the body; `+0x708` stayed null, i.e.
-  no connection was built/stored). It returns null *cleanly* — it's rejecting our params, not crashing.
-
-**This reframes the whole finish.** The problem is no longer "stand up an entire dormant transport by hand"
-(whack-a-mole through uninit sub-objects) — it's the **single contained problem of the descriptor**: what
-`~0x120-byte` config makes `vtable[0x80]` actually build the connection. The builder does all the sub-object
-wiring itself once it succeeds, so getting the descriptor right yields a *fully-wired* connection at
-`+0x708` → the driven create's `ConnectionRefInfo` loop → `Host`. **Next: capture the Arxan-decoded target
-of `vtable[0x80]` at runtime** (the same trampoline-decode probe used for the veto vmethod: hook the call
-site, read the decoded `rbx`, log it), disassemble the real builder offline, and read off the descriptor
-layout it requires — then fill the descriptor and re-drive. The descriptor is the last unknown, and it's now
-a bounded RE with a clear method, not open-ended.
+**The path we took / ruled out (compacted — full rig-by-rig history is in git log 2026-07-04).**
+- **Land a real holder around a hand-built connection** (`land_socket_holder` lever) — cleared the original
+  `+0x708` null-deref crash, got create to `TryToCreateSession`. Kept as a lever, but the wrapped connection
+  isn't activatable (see fact 1) → superseded by the native-builder path.
+- **Hand-build the connection field-by-field** (creator `0x142640560` + Accept `0x14263ffe0` + bind `+0x8`/
+  `+0x120`) — whack-a-mole; no settable fields left, sub-objects are construction-time-wired. **Ruled out.**
+- **`force_host_transition` (`0x140cb2ae0`)** — writes `Host` but doesn't stick (fact 2). **Ruled out**; kept
+  as a charted lever.
+- **Service factory `0x142638b40(container)`** — returns the *adapter* not the service, and the container's
+  register vmethod is a no-op, so the service isn't retrievable to build a manager off. **Dropped.**
+- **Raw `SteamConnection` at `+0x708`** (old "TRANSPORT CHARTED §2" guess) — wrong shape (`+0x8` is the
+  holder's refcount, not the connection's iface). **Superseded** by the `SocketManagerHolder` chart above.
 
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =

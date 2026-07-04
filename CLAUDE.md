@@ -24,14 +24,18 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **connection stack shipped; rung-3 transport SOLVED, session-seam next.** Rungs 1/2/4 (identity,
-> the password-authed Steam side-channel, lobby discovery) ship and are confirmed two-machine. Rung 3
-> (drive the game's own session so players share a world) had one hard unknown — the transport — which is
-> now **solved (2026-07-04):** we stand up the game's own DLNW3D transport ourselves offline and
-> rig-proved its legacy Steam P2P works two-machine (rig + Deck). What remains is the **seam**: wire that
-> transport into a connection object at `[container+0x708]` → drive create → `Host`, then the seamless
-> teardown gate. Current plan: [`docs/COOP-CONNECTION.md`](docs/COOP-CONNECTION.md) > rung 3 "THE PLAN";
-> map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Status: **connection stack shipped; rung-3 create reaches `TryToCreateSession` — the finish is one bounded
+> RE (the descriptor for the game's native connection builder).** Rungs 1/2/4 (identity, the password-authed
+> Steam side-channel, lobby discovery) ship and are confirmed two-machine. Rung 3 (drive the game's own
+> session so players share a world): the seam is charted (`[container+0x708]` = a `SocketManagerHolder@DLNR3D`
+> wrapping a `SteamConnection`), landing a real holder cleared the create crash, and legacy P2P is rig-proven
+> two-machine (rig + Deck). Proven this session: the connection **must be built by the game** (hand-building
+> is whack-a-mole; forcing the FSM to `Host` doesn't stick). **Viable path (rig-proven):** drive the game's
+> own connection-establish handler `0x1423f2820` — it runs without crashing offline, its readiness gate
+> passes, and the only bail is the **Arxan builder rejecting our guessed descriptor**. **► Next:** capture
+> the runtime-decoded `vtable[0x80]` target, RE the descriptor, re-drive → `Host`, then the seamless teardown
+> gate. Current plan: [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "SEAM + the native-builder finish" /
+> "► NEXT STEP"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
 

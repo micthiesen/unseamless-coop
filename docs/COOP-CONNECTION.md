@@ -219,33 +219,33 @@ the one genuinely hard step — driving the game's own session so players see ea
 > (thread 2): wire the peer into the `SteamConnection` object (`+0x8` iface, `+0x128` peer) and land it at
 > `[container+0x708]` so the game's *session* rides this proven transport → drive create → Host.
 >
-> **Build order (next) — inject at the transport leg (C):**
-> 1. **Stand up the DLNW3D transport ourselves, offline (the crux).** ✅ **First increment RIG-PROVEN
->    (2026-07-03, `stand_up_transport` probe):** `ISteamNetworking006` resolves offline (non-null), and a
->    `SteamServiceImpl@DLNW3D` **constructs cleanly** via base ctor `0x14263b6b0` (vtable `0x143277270`,
->    sub-ctor set `+0x10=0x2710`; game stayed alive; `scan-vtable.py` = 1 live object). So the DLNW3D
->    ctors are **not** online-gated — the transport is stand-up-able by us. **Next:** the game allocator
->    `0x141eb9ed0(size, align, heap)` needs a **DLNew heap in r8** (the factory sources it from its
->    `owner`, dormant offline) — find the game's default heap, then build the `SteamConnectionManager`
->    (connect thunk `0x14263b720` / connection-creator `0x142640560`) + `SteamConnection` (ctor
->    `0x142643b50`) on it.
-> 2. **Bind the peer + connect.** Create a `SteamConnection` (ctor `0x142643b50`), write our rung-4 peer
->    SteamID64 → `SteamConnection+0x128`, run Accept setup `0x14263ffe0` (`AcceptP2PSessionWithUser`) +
->    register thunk `0x14263b7c0`. Two-machine (rig host + Deck): each side connects to the other's
->    SteamID; confirm P2P packets flow (`SendP2PPacket 0x142640b20` / `ReadP2PPacket 0x142640bc0`).
-> 3. **Land it at `[container+0x708]`** — **SEAM CHARTED (2026-07-04):** `+0x708` is a
->    **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted wrapper `{vtable 0x1431f9280, refcount@+8,
->    SteamConnection*@+0x10}`, ctor `0x1423f7180`), *not* a raw `SteamConnection`. Wrap our standup
->    connection in a holder (refcount=1) and write it to `[container+0x708]` at the veto-vmethod hook
->    (`0x1423f4330`, `rcx`=container) so create's `ConnectionRefInfo` loop has a real refcountable object →
->    drive create → `Host`. Full chart: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "SEAM CHARTED". (Closes the
->    original rung-3 create goal.)
-> 4. **Arm the teardown gate** (`leave_session 0x140cae730` + twin) once a session forms, to keep it
->    alive across boss/area/death events → seamless. Then the additive re-sync layer.
+> **Build order (updated 2026-07-04 — drive the game's OWN connection builder, don't hand-build).** The
+> full current plan + the rig-by-rig findings that got us here live in
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > **"SEAM + the native-builder finish"** (read that for thread 2);
+> the shape:
+> 1. **The transport premise is proven.** ✅ The DLNW3D ctors are **not** online-gated: we stood up
+>    `SteamServiceImpl`/`SteamConnectionManager`/`SteamConnection` offline by hand, and rig-proved the
+>    game's **legacy `ISteamNetworking006` P2P works two-machine** (rig + Deck exchange packets, no
+>    matchmaker). So skipping the FromSoft broker and feeding the rung-4 peer SteamID64 is sufficient
+>    *for the socket*.
+> 2. **But the connection must be built by the GAME, not by hand.** ✅/❌ Landing a hand-built connection
+>    (wrapped in the charted `SocketManagerHolder@DLNR3D` at `[container+0x708]`) cleared the original
+>    create crash and reached `TryToCreateSession` — but a hand-built connection's sub-objects are
+>    **construction-time-wired from a full service** (`+0x8` lock, `+0x120` iface-holder, ring buffers,
+>    worker locks), so activating it is whack-a-mole with no settable bottom. And forcing the FSM to `Host`
+>    (`0x140cb2ae0`) doesn't stick (the host setup faults on a dead connection). **Both ruled out on the rig.**
+> 3. **The viable path (rig-proven viable offline):** drive the game's own connection-establish handler
+>    **`0x1423f2820(container, descriptor)`** — it builds a fully-wired connection via
+>    `container->vtable[0x80]`, wraps it, stores at `[container+0x708]`, addrefs. Offline it runs **without
+>    crashing**, its **readiness gate passes**, and the only bail is the **Arxan builder rejecting our
+>    guessed descriptor**. So the finish = **RE the descriptor** by capturing `vtable[0x80]`'s runtime-decoded
+>    target, disassembling it, and reading off its param layout → fill + re-drive → `Host`. Full step-by-step:
+>    SESSION-DRIVE.md > "► NEXT STEP".
+> 4. **Then arm the teardown gate** (`leave_session 0x140cae730` + twin) so the session survives
+>    boss/area/death events → seamless; plus the additive re-sync layer.
 >
-> **Correction to the old framing below:** the prior "leg B tail slot-array capacity-0 → a real peer
-> sizes it" model is *superseded* — that's downstream of the dormant transport; the real move is to
-> stand up the DLNW3D transport ourselves and bind the rung-4 peer SteamID64 at `SteamConnection+0x128`.
+> **Superseded framings** (kept only as tombstones): the "leg B slot-array capacity-0 → a real peer sizes
+> it" model, and "`[container+0x708]` holds a raw `SteamConnection`" — both wrong; see SESSION-DRIVE.md.
 
 > **Protocol reference — `waygate-server` (cloned locally at `../waygate-server`).** vswarte's
 > [Elden Ring matchmaking-server reimplementation](https://github.com/vswarte/waygate-server) (Rust, MIT —

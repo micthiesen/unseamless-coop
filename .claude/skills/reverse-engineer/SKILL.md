@@ -135,6 +135,33 @@ network capture — is in [`docs/RUNTIME-RE.md`](../../../docs/RUNTIME-RE.md). T
 target (observing the session FSM to unblock the co-op core) is the
 [`/test-loop`](../test-loop/SKILL.md) skill's layer 4 + [`docs/RIG-RUNBOOK.md`](../../../docs/RIG-RUNBOOK.md).
 
+## Capturing Arxan-decoded call targets at runtime
+
+Elden Ring's `eldenring.exe` is partly **Arxan-obfuscated**: some indirect calls go through a
+**trampoline** that decodes the real target at runtime and can't be read statically. The tell (from
+`static.py fn`): a function that does `lock cmpxchg [rip+…]` + reads an obfuscation cookie (e.g.
+`0x143c5adb0`) + `xor`/`ror` to decode a register + `call rbx`, with garbage-decoding filler after it. A
+vtable slot pointing at such a stub (e.g. the container's connection builder `vtable[0x80]` = `0x14251c480`)
+is opaque on disk — but it **runs correctly when invoked through the vtable**, and you can read the decoded
+target live:
+
+- **Hook the call site, not the stub.** Place a read-only `jmp-back` hook (ilhook, the `session_probe.rs`
+  pattern) just before the indirect call, where the target pointer is already in a register. Two shapes:
+  - **At the caller:** hook the instruction after `mov rax,[obj]` (the vtable load), where `rax` = the live
+    vtable, so `[rax+slot]` is the decoded target — read it and log. (This is what `log_vmethod_target`
+    does for the create-veto vmethod: hook `0x1423fafc4`, read `[rax+8]`.)
+  - **At the trampoline:** hook its `test rbx,rbx` (post-decode), where `rbx` = the decoded target; gate on
+    the return address (`[rsp+N]`) so you only capture *your* call site (the trampoline is shared), and
+    **latch once** (`AtomicBool`) so it logs a single clean address.
+- **Then disassemble the decoded address offline.** The decoded target lands in **clean, readable `.text`**
+  (`python3 scripts/re/static.py fn <decoded-addr>`) — the obfuscation is only the dispatch, not the body.
+  Read off what it does / what args it consumes, and implement from that.
+
+This turns "the function is Arxan, we can't know what it needs" into a two-step: capture the address live,
+read the body statically. We will use it repeatedly for the session/transport internals (the connection
+builder descriptor is the current case — see [`docs/SESSION-DRIVE.md`](../../../docs/SESSION-DRIVE.md) >
+"► NEXT STEP"). Keep the capture probe **read-only + latched + panic-firewalled**, like every other probe.
+
 ## Recording findings
 
 Write observations **in your own words** ("on event X the mod does Y", "field at `ChrIns+0x…`
