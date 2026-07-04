@@ -1014,6 +1014,20 @@ count matched to reality. That's a networking-layer RE effort (next session), no
 create's *initiation* and *session state* are solved; the *transport* is the last subsystem — the same
 one ERSC had to reimplement.
 
+**Conclusive (2026-07-03): the connection object cannot be faked — it must be a real DLNR3D
+connection.** Ran the strongest combination — drive the real session-established handler (real session
+state: bit 2, real SteamID) **plus** fabricate `[container+0x708]`. Result: `drive-create returned true
+→ TryToCreateSession` (again), then the **same** crash as fabricate-alone at `0x14203f1f0` (read
+`[null+8]`), whose caller `0x1423f6c00` is a vtable-dispatch loop that calls `[elem]`/`[elem+0x10]`/
+`[elem+0x68]` on each session member. A hollow `+0x708` has no valid vtable, so the session machinery
+faults calling into it. So across all three fabrication attempts (hollow-only, real-state+hollow,
+force-bit) the wall is identical: **the running session dispatches vmethods on the connection object, so
+it must be a real, coherent DLNR3D `SessionSteam` connection — fabrication is definitively a dead end.**
+The finish is unavoidably the DLNR3D connection/transport layer: two real ELDEN RING instances forming
+a game-native connection over Steam P2P (ERSC's networking model), driven with `[session_obj+0x68]`
+(the connection count) matched to the real roster. That is the scoped next effort — a networking
+subsystem, empirically proven un-shortcuttable, not another field poke.
+
 ### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
 
 **Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
