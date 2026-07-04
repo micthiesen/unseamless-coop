@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# orch-stop
+#
+# Fully tear down the orchestrator session: kill the `usc-orch` tmux session
+# (which takes the Claude/Codex process inside it down with it) and remove the
+# stale inspector socket orch-start would clear on the next launch anyway.
+# Workers are untouched -- this is the counterpart to orch-start, not a fleet
+# teardown (remove workers individually with worker-rm).
+#
+# Designed to run without a terminal (a .desktop item / OliveTin button), so
+# the desktop notification is the primary feedback; stdout mirrors it.
+set -euo pipefail
+
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+sess="usc-orch"
+
+notify() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -a unseamless-coop -i steam_icon_1245620 "unseamless fleet" "$1" 2>/dev/null || true
+}
+
+if ! tmux has-session -t "$sess" 2>/dev/null; then
+  echo "orchestrator session '$sess' is not running; nothing to tear down."
+  notify "Orchestrator: not running"
+  exit 0
+fi
+
+tmux kill-session -t "$sess"
+rm -f "$FLEET_DIR/insp/$sess.sock"
+
+echo "orchestrator session '$sess' torn down."
+notify "Orchestrator: torn down"
+
+live="$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^usc-worker-' || true)"
+[ "${live:-0}" -gt 0 ] && echo "note: $live worker session(s) still running (worker-ls / worker-rm)."
+exit 0

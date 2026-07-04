@@ -299,6 +299,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
 | `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
+| `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
 it" true: closing the Alacritty window detaches but does not kill the session, and the CC session
