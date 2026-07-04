@@ -526,6 +526,40 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
             0x75,
             &[0xEB],
         );
+        // The JOIN inner (0x140cb2470) calls the SAME availability gate 0x140cb4b50 at 0x140cb2570, with an
+        // identical `nop; lea rcx,[rsp+0x30]; test al,al; jne 07` sequence — but a join-specific call rel32
+        // (E8 DB 25 00 00 = call 0x140cb4b50 from 0x140cb2570), keeping this landmark unique to join. Flip
+        // its `jne` (75) at offset 13 to `jmp` (EB) so the join gate's `false` no longer fails the join (the
+        // joiner counterpart to the create bypass). Without this the driven join returns FailedToJoinSession
+        // (rig-confirmed 2026-07-04). Re-derive: the join inner is the `mov [this+0xc], 4` function; the gate
+        // is the bool call right after the lobby_state guards, before the params builder 0x140cb20d0.
+        const JOIN_GATE_CALLSITE: &[pelite::pattern::Atom] =
+            pelite::pattern!("E8 DB 25 00 00 90 48 8D 4C 24 30 84 C0 75 07");
+        crate::patch::overwrite_landmark(
+            "bypass_session_join_gate",
+            JOIN_GATE_CALLSITE,
+            13,
+            0x75,
+            &[0xEB],
+        );
+        // Join blob-parse result gate. Past the availability gate, the join inner deserializes the host
+        // blob and gates on the result: `call [r10+0x10]; mov [this+0x28], eax; test eax,eax; jne success`
+        // (`41 FF 52 10 89 43 28 85 C0 75 04` at 0x140cb25e1). Our synthesized host produces no real
+        // matchmaker blob, so the parse returns 0 and the join bails to FailedToJoinSession even with the
+        // availability gate bypassed (rig-confirmed 2026-07-04). Flip the `jne` (75) at offset 9 to `jmp`
+        // (EB) so the join advances to TryToJoinSession regardless — the joiner reaches the connection-setup
+        // path where the real peer transport (rung-4 SteamID) carries it to Client. Join-specific bytes, so
+        // inert on the host. (EXPERIMENTAL: leaves [this+0x28]=0, a null session handle — expect a downstream
+        // fault-chain to chart, like the host side.)
+        const JOIN_BLOB_RESULT_GATE: &[pelite::pattern::Atom] =
+            pelite::pattern!("41 FF 52 10 89 43 28 85 C0 75 04");
+        crate::patch::overwrite_landmark(
+            "bypass_session_join_blob_gate",
+            JOIN_BLOB_RESULT_GATE,
+            9,
+            0x75,
+            &[0xEB],
+        );
     }
 }
 

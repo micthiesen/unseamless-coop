@@ -400,7 +400,9 @@ static FABRICATE_SLOT_ARRAY: AtomicBool = AtomicBool::new(false);
 /// Place read-only `jmp-back` tracers on leg-B entry and the 4th create gate when `drive_create` is on.
 /// No-op otherwise. Best-effort: a failed hook logs and is skipped, never aborts (it's a diagnostic).
 fn install_create_gate_trace(config: &Config) {
-    if !config.debug.probes.drive_create {
+    // Installs for the joiner too: the join driver needs the same veto-vmethod hook (land_socket_holder,
+    // session-established, the online-availability gate patch) the host does.
+    if !config.debug.probes.drive_create && !config.debug.probes.drive_join {
         return;
     }
     let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
@@ -1626,6 +1628,138 @@ impl Feature for SessionCreateDriver {
     }
 }
 
+// --- Rung-3 JOIN driver (the joiner counterpart to SessionCreateDriver) -------------------------
+//
+// Drives the join wrapper 0x140cae640(this, flag, a, b, c) so a second machine goes
+// None -> TryToJoinSession -> Client and joins the driven host. Charted (docs/SESSION-DRIVE.md):
+//   wrapper 0x140cae640 -> inner 0x140cb2470: past the availability gate 0x140cb4b50 (bypassed by
+//   bypass_session_create_gate), the inner reads the payload `a` as {begin=[a+0], end=[a+8]} (a byte
+//   range), passes [begin,end) to a deserializer vmethod whose result lands at [this+0x28]; nonzero =>
+//   lobby_state=4 (TryToJoinSession). Our synthesized host produces no real matchmaker blob, so we feed a
+//   minimal blob (the host SteamID64) and — since the parse likely rejects it — the JOIN_FORCE_RESULT
+//   hook forces [this+0x28] nonzero at the inner's result check so the FSM still advances (the same
+//   "bypass the gate" approach that made the host stick). Fires like the create driver (in-world; holds
+//   for the rung-2 link unless drive_fire_solo). Reuses stand_up_transport + land_socket_holder +
+//   suppress_leave (the online-availability gate) exactly as the host does.
+
+/// The join wrapper's win64 signature: `this`(rcx), `flag`(dl), `a`(r8), `b`(r9d), `c`(5th, stack).
+/// (`JOIN_WRAPPER_OFFSET` is defined near the create-initiation hook — reused here.)
+type JoinFn = unsafe extern "system" fn(*mut CSSessionManager, u8, *const JoinBlobDesc, u32, usize) -> bool;
+
+/// The payload descriptor the join inner reads: `{ begin, end }` — a byte range `[begin, end)` (the host
+/// join blob). The inner computes `len = end - begin` and hands `[begin, end)` to the deserializer.
+#[repr(C)]
+struct JoinBlobDesc {
+    begin: usize,
+    end: usize,
+}
+
+/// One-shot join driver. Mirrors [`SessionCreateDriver`]'s fire gating; builds a minimal blob from the
+/// host SteamID64 and calls the join wrapper. See the module comment above.
+pub struct SessionJoinDriver {
+    fired: bool,
+    linked_since: Option<u64>,
+    fire_solo: bool,
+    /// Two-machine host-id override (both machines' SteamID64s; the joiner picks whichever isn't its own).
+    peer_override: [u64; 2],
+}
+
+impl SessionJoinDriver {
+    fn new(fire_solo: bool, peer_a: u64, peer_b: u64) -> Self {
+        Self { fired: false, linked_since: None, fire_solo, peer_override: [peer_a, peer_b] }
+    }
+
+    /// The host SteamID64 to join: the rung-2-linked partner if present, else the config peer override
+    /// that isn't our own (the autonomous two-machine path — the joiner picks the host's id).
+    fn host_steam_id(&self) -> Option<u64> {
+        if let Some(p) = crate::coop::linked_peer() {
+            return Some(p);
+        }
+        let self_id = crate::steam::self_steam_id();
+        self.peer_override.into_iter().find(|&id| id != 0 && Some(id) != self_id)
+    }
+}
+
+impl Feature for SessionJoinDriver {
+    fn name(&self) -> &'static str {
+        "session-join-driver"
+    }
+
+    fn phase(&self) -> CSTaskGroupIndex {
+        CSTaskGroupIndex::FrameBegin
+    }
+
+    fn on_frame(&mut self, tick: Tick) {
+        if self.fired {
+            return;
+        }
+        if !crate::playstate::current().in_game() {
+            return;
+        }
+        if crate::sdk::with_active_main_player(|_| ()).is_none() {
+            return;
+        }
+        if !self.fire_solo && !crate::coop::is_linked() {
+            self.linked_since = None;
+            return;
+        }
+        let linked_since = *self.linked_since.get_or_insert_with(|| {
+            let trigger = if self.fire_solo { "solo (drive_fire_solo)" } else { "side-channel linked" };
+            log::info!(
+                "session-probe: drive-join armed @frame {} — {trigger}; firing after {LINK_SETTLE_FRAMES}-frame settle",
+                tick.frame,
+            );
+            tick.frame
+        });
+        if tick.frame.saturating_sub(linked_since) < LINK_SETTLE_FRAMES {
+            return;
+        }
+        let Some((base, lobby)) = crate::sdk::with_instance::<CSSessionManager, _>(|s| {
+            (s as *const CSSessionManager as usize, crate::session::read(s).lobby_state)
+        }) else {
+            return;
+        };
+        if lobby != LobbyState::None {
+            log::info!("session-probe: drive-join skipped — lobby_state is {lobby:?}, need None");
+            self.fired = true;
+            return;
+        }
+        self.fired = true;
+
+        let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+            Ok(h) => h.0 as usize,
+            Err(e) => {
+                log::error!("session-probe: drive-join — GetModuleHandle(NULL) failed: {e}");
+                return;
+            }
+        };
+        // Build a minimal blob = the host SteamID64 (8 bytes). The parse likely needs more, but the
+        // JOIN_FORCE_RESULT hook forces the result gate so the FSM advances regardless (see module comment).
+        let host_id = self.host_steam_id().unwrap_or(0);
+        let blob: &'static mut [u8] = vec![0u8; 8].leak();
+        blob.copy_from_slice(&host_id.to_le_bytes());
+        let bp = blob.as_ptr() as usize;
+        let desc = JoinBlobDesc { begin: bp, end: bp + 8 };
+        let fn_addr = exe_base + JOIN_WRAPPER_OFFSET;
+        // SAFETY: `fn_addr` is the join wrapper at the live exe base; called with this=[G] (live singleton),
+        // a minimal {begin,end} blob descriptor that outlives the call, and guessed scalar args, on the main
+        // thread with lobby_state==None. A fault surfaces via the crashdump SEH handler.
+        let join: JoinFn = unsafe { std::mem::transmute::<usize, JoinFn>(fn_addr) };
+        log::info!(
+            "session-probe: drive-join @frame {} — calling join wrapper {fn_addr:#x}(this={base:#x}, flag=0, \
+             blob={{{bp:#x}..+8 = host {}}}, b=0, c=0); lobby was None",
+            tick.frame,
+            unseamless_core::diagnostics::peer_tag(host_id),
+        );
+        let ret = unsafe { join(base as *mut CSSessionManager, 0, &desc, 0, 0) };
+        let after = crate::sdk::with_instance::<CSSessionManager, _>(|s| crate::session::read(s).lobby_state);
+        log::info!(
+            "session-probe: drive-join returned {ret} — lobby_state now {after:?} \
+             (TryToJoinSession/Client=driven OK; FailedToJoinSession=internal gate rejected)",
+        );
+    }
+}
+
 // --- Rung-3 TRANSPORT-STANDUP driver (ERSC path C, experimental) --------------------------------
 //
 // The transport leg of the ERSC-faithful connection (docs/COOP-CONNECTION.md > "THE PLAN" +
@@ -2119,6 +2253,13 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.force_netsession_ready,
             config.debug.probes.drive_fire_solo,
             config.debug.probes.force_host_transition,
+        )));
+    }
+    if config.debug.probes.drive_join {
+        features.push(Box::new(SessionJoinDriver::new(
+            config.debug.probes.drive_fire_solo,
+            config.debug.probes.p2p_test_peer_a,
+            config.debug.probes.p2p_test_peer_b,
         )));
     }
     features

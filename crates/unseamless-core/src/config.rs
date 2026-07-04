@@ -323,6 +323,15 @@ pub struct DebugProbes {
     /// docs/SESSION-LIFECYCLE-FINDINGS.md + docs/SESSION-DRIVE.md > "HOST-SETUP DRIVE".
     pub suppress_leave: bool,
 
+    /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
+    /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
+    /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so
+    /// the driver bypasses the blob-parse result gate and feeds the rung-4 host SteamID64. Pairs with the
+    /// same infra the host uses (`stand_up_transport` + `land_socket_holder` + `suppress_leave`). Off by
+    /// default; set on the JOINER machine (the Deck) for a two-machine run. See docs/SESSION-DRIVE.md >
+    /// "HOST-SETUP DRIVE" > "JOIN DRIVER".
+    pub drive_join: bool,
+
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
     /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
     /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is
