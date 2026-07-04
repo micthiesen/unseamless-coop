@@ -1171,8 +1171,21 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >      Needs a **joiner driver** (drive the join wrapper → `Client`), which doesn't exist yet — the create driver is
 >      host-only. Build that, then rig-hosts / Deck-joins within the window.
 >    Diagnostics added this session (`session_probe.rs`): read-only `leave-session` + `teardown-handler` hooks, and a
->    `[debug.probes] suppress_leave` patch lever (now known ineffective — `leave_session` isn't on this teardown path;
->    kept for the general seamless-teardown work).
+>    `[debug.probes] suppress_leave` patch lever (repurposed to force the host-validity gate true — this is what
+>    made the host stick).
+> 7. **★ HOST STICKS (rig-confirmed).** With the gate forced: `None → TryToCreateSession → Host`, `protocol=Ingame`,
+>    `players=1` (`player[0] host=true local=true`), warp into map `1800001` completes (`warp_pending` clears,
+>    `in_gameplay=true`), session HOLDS (no teardown, game running). The solo host is DONE.
+> 8. **► JOIN DRIVER — the remaining goal (two sessions).** Entry charted this session: join wrapper
+>    `0x140cae640(this, dl=flag, r8=a, r9d=b, stack=c)` → inner `0x140cb2470` (stores `lobby_state=TryToJoinSession(4)`;
+>    wrapper sets `FailedToJoinSession(5)` on failure). The payload `a`(r8)/`b`(r9d)/`c` is peer-directed and its
+>    exact layout is still uncharted (SESSION-RE-FINDINGS.md > "JOIN" defers it to a two-player run). Join hits the
+>    same shared availability gate `0x140cb4b50` create does (handled by `bypass_session_create_gate`) and will need
+>    its own socket-manager standup + the same online-availability bypass. **Plan:** build a `SessionJoinDriver`
+>    mirroring `SessionCreateDriver` (stand up transport, land the wrapper, force the validity gate, drive
+>    `0x140cae640` with a payload built from the rung-4 host SteamID64 — legacy P2P is SteamID-addressed, so the
+>    server broker blob should be unneeded), then run rig-hosts / Deck-joins and chart `a`'s minimal fields from the
+>    inner's reads (`0x140cb2470` consumes `rdi=r8` past the gate). Expect a fault-chain like the host side.
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
