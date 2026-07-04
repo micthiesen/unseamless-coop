@@ -1172,11 +1172,33 @@ pub struct TransportStandupDriver {
     ping_throttle: FrameThrottle,
     /// Outbound ping sequence number (so a received ping shows which send it answers).
     ping_seq: u32,
+    /// Two-machine test peer override (both machines' SteamID64s; `0` = unset). Used when no rung-2
+    /// link is present — each machine picks whichever isn't its own. See `p2p_test_peer_a` in config.
+    peer_override: [u64; 2],
 }
 
 impl TransportStandupDriver {
-    fn new() -> Self {
-        Self { built: false, iface: 0, accepted: false, ping_throttle: FrameThrottle::every(120), ping_seq: 0 }
+    fn new(peer_a: u64, peer_b: u64) -> Self {
+        Self {
+            built: false,
+            iface: 0,
+            accepted: false,
+            ping_throttle: FrameThrottle::every(120),
+            ping_seq: 0,
+            peer_override: [peer_a, peer_b],
+        }
+    }
+
+    /// The peer SteamID64 to drive game-P2P at: the rung-2-linked partner if present, else the config
+    /// override that isn't our own SteamID (the autonomous two-machine path — the link needs a menu action).
+    fn target_peer(&self) -> Option<u64> {
+        if let Some(p) = crate::coop::linked_peer() {
+            return Some(p);
+        }
+        let self_id = crate::steam::self_steam_id();
+        self.peer_override
+            .into_iter()
+            .find(|&id| id != 0 && Some(id) != self_id)
     }
 }
 
@@ -1341,8 +1363,8 @@ impl TransportStandupDriver {
         if self.iface == 0 {
             return;
         }
-        let Some(peer) = crate::coop::linked_peer() else {
-            return; // wait for the rung-2 link to resolve the partner SteamID
+        let Some(peer) = self.target_peer() else {
+            return; // no linked peer and no usable override yet
         };
         let iface = self.iface;
         let do_accept = !self.accepted;
@@ -1424,7 +1446,10 @@ impl TransportStandupDriver {
 pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
     let mut features: Vec<Box<dyn Feature>> = Vec::new();
     if config.debug.probes.stand_up_transport {
-        features.push(Box::new(TransportStandupDriver::new()));
+        features.push(Box::new(TransportStandupDriver::new(
+            config.debug.probes.p2p_test_peer_a,
+            config.debug.probes.p2p_test_peer_b,
+        )));
     }
     if config.debug.probes.session_probe {
         features.push(Box::new(SessionFsmProbe::new()));

@@ -120,6 +120,11 @@ stand_up_transport = true  # rung-3 transport-leg standup (ERSC path C): one-sho
                            # ISteamNetworking006 + construct a DLNW3D SteamServiceImpl offline. Confirm with
                            # scripts/re/scan-vtable.py 0x143277270 (expect a live SteamServiceImpl after). First
                            # increment of the DLNW3D standup — see docs/COOP-CONNECTION.md > "THE PLAN".
+# Two-machine game-P2P test (phase 2 of stand_up_transport): both machines' SteamID64s. Each machine
+# drives the game's legacy ISteamNetworking006 P2P at whichever of these isn't its own — no manual
+# Open/Join link needed. rig=76561198004789432, deck=76561198681631498.
+p2p_test_peer_a = 76561198004789432
+p2p_test_peer_b = 76561198681631498
 fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_create; writes base/cap onto the
                            # live NetworkSession from inside the leg-B entry hook, only if still empty). ON for
                            # the 2026-07-03 combo run: fabricated array + a real linked peer (solo runs proved

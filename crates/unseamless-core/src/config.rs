@@ -292,6 +292,15 @@ pub struct DebugProbes {
     /// stand-up-able by us (it's dormant offline — the whole DLNW3D layer reads 0 objects). Off by
     /// default; the first, lowest-risk increment of the transport-standup build (the crux of path C).
     pub stand_up_transport: bool,
+
+    /// Two-machine game-P2P test peer override (SteamID64s; `0` = unset). The `stand_up_transport`
+    /// probe's phase-2 game-P2P driver normally targets the rung-2-linked peer, but the link needs a
+    /// manual Open/Join menu action. For an autonomous two-machine run, put **both** machines' SteamID64s
+    /// here (the seed config is shared, so each machine picks whichever of the two is not its own). Only
+    /// used as a fallback when no rung-2 link is present.
+    pub p2p_test_peer_a: u64,
+    /// Second peer for [`Self::p2p_test_peer_a`] (see there).
+    pub p2p_test_peer_b: u64,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
