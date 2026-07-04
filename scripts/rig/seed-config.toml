@@ -135,7 +135,10 @@ fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_cr
 drive_fire_solo = true     # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
                            # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
 set_create_veto_bit = false # rung-3 L3 lever: write bit 2 of [container+0x7c0] set before the veto vmethod
-drive_session_established = true # SEAM TEST: drive 0x1423f4870 for real init (sets [container+0x7c0] bit 2,
+drive_session_established = false # DISABLED (2026-07-04 test): the establish handler 0x1423f2820 calls
+                           # 0x1423f4870 ITSELF as gate2 (vtable[0x68]); pre-driving it made that internal
+                           # call return al=0 (idempotent "already established"), bailing before the builder.
+                           # Let the establish handler own the first call. (Was: drive 0x1423f4870 for real init (sets [container+0x7c0] bit 2,
                            # identity at +0x7f8). Prior runs crashed at eldenring.exe+0x1eba1c5 because +0x708
                            # was still null (the create ConnectionRefInfo addref on null); land_socket_holder
                            # below now fills +0x708 with a real refcountable object first. See SESSION-DRIVE.md

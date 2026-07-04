@@ -158,9 +158,22 @@ target live:
   Read off what it does / what args it consumes, and implement from that.
 
 This turns "the function is Arxan, we can't know what it needs" into a two-step: capture the address live,
-read the body statically. We will use it repeatedly for the session/transport internals (the connection
-builder descriptor is the current case — see [`docs/SESSION-DRIVE.md`](../../../docs/SESSION-DRIVE.md) >
-"► NEXT STEP"). Keep the capture probe **read-only + latched + panic-firewalled**, like every other probe.
+read the body statically. Keep the capture probe **read-only + latched + panic-firewalled**, like every other
+probe.
+
+> **Before assuming a vtable slot is Arxan, confirm you have the LIVE vtable.** A 2026-07-04 rig session
+> burned real effort chasing an "Arxan builder `vtable[0x80] = 0x14251c480`" that was actually read from the
+> **static base-class** vtable (`0x1431f8360`). The live object was a *derived* class with vtable
+> `0x1431f8780`, whose `[+0x80]` is a **plain function** (`0x1423f46b0`), no obfuscation at all. Read
+> `[live_vtable+slot]` from `/proc/<pid>/mem` (the live vtable is `[object]`, or captured off a call-site
+> hook like `vmethod-target`) and disassemble *that* before concluding a slot is Arxan-dispatched. See
+> [`docs/SESSION-DRIVE.md`](../../../docs/SESSION-DRIVE.md) > "NATIVE-BUILD TRACE (2026-07-04)".
+
+> **Don't jmp-back-hook mid-way through a deep/obfuscated function.** Same session: a localizer hooked
+> `0x14263ce9c` (`mov rcx,rax` mid-caller) to read a return value; the hook perturbed `rax`/flags so a
+> downstream `jne` misfired into a teardown path and the game **faulted** (write to `0x0`). Without the hook
+> the same code ran clean. To read a deep function's return, hook it at a **function boundary** (entry + a
+> return trampoline), not in the middle of its caller.
 
 ## Recording findings
 

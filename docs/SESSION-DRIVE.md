@@ -1,25 +1,27 @@
 # Driving a Session Directly (rung-3 call spec)
 
-> ## STATUS (2026-07-04) — read this first
+> ## STATUS (2026-07-04, updated) — read this first
 >
-> **Driven create reaches `TryToCreateSession`; the finish is ONE bounded RE — the descriptor for the game's
-> own connection builder.** The current, load-bearing section is **"SEAM + the native-builder finish"** below
-> (read it for thread 2). In short:
+> **The driven establish handler now REACHES the game's own connection builder; the offline wall is the
+> `SteamServiceImpl` service standup returning null. The path to `Host` is a two-machine run.** The current,
+> load-bearing section is **"NATIVE-BUILD TRACE (2026-07-04)"** below (read it for thread 2). In short:
 > - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; the session-established handler
 >   (`0x1423f4870`) populates real container state (veto bit `[+0x7c0]` bit 2, identity `+0x7f8`).
-> - **The seam is charted:** `[container+0x708]` = a **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted
->   wrapper `{ vtable 0x1431f9280, refcount@+8, SteamConnection*@+0x10 }`, ctor `0x1423f7180`) — *not* a raw
->   `SteamConnection`. Landing a real holder cleared the original create crash.
-> - **Proven this session:** the connection **must be real** (hand-building it is whack-a-mole — sub-objects
->   are construction-time-wired from a full service), and **forcing the FSM to `Host` doesn't stick** (the
->   host setup faults on a dead connection and the game resets to `None`). So the connection has to be built
->   by the game.
-> - **The viable path (rig-proven):** drive the game's own connection-establish handler
->   `0x1423f2820(container, descriptor)` — it runs **without crashing offline**, its **readiness gate passes**,
->   and the *only* bail is the Arxan builder `container->vtable[0x80]` rejecting our guessed descriptor.
-> - **► NEXT:** capture the runtime-decoded `vtable[0x80]` target, disassemble it, read off the descriptor
->   layout, fill it, re-drive → `Host`. Then the seamless teardown gate
->   ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)). Full plan: "► NEXT STEP" below.
+> - **The connection must be built by the game** (hand-building is whack-a-mole; forcing the FSM to `Host`
+>   doesn't stick). So we drive the game's own establish handler `0x1423f2820(container, descriptor)`.
+> - **The build is now REACHED** (this session): the establish handler runs gate1 (readiness, passes) → gate2
+>   (the session-established handler as `[vtable+0x68]`) → the builder `[vtable+0x80]`. Two corrections
+>   unblocked it: the live derived vtable is **`0x1431f8780`** (not the static `0x1431f8360`, so the real
+>   builder is `0x1423f46b0` — a plain fn, **no Arxan**), and `drive_session_established` must be **off** (it
+>   double-drove `0x1423f4870`, making the handler's own gate2 call return "already established" and bail).
+> - **The offline wall (precise):** the builder constructs an `MTInternalThreadSteamSocketManager@DLNW3D` and
+>   its init calls the **`SteamServiceImpl` standup `0x142638b40`, which returns null offline** → clean build
+>   failure → `+0x708` stays null. The descriptor was never the blocker; the transport can't stand up without
+>   a peer's Steam P2P context.
+> - **► NEXT:** two-machine (rig host + Steam Deck joiner) — with a real peer linked, drive the establish
+>   handler and watch whether the service standup succeeds → `+0x708` populates → `lobby_state` reaches
+>   `Host`. Then the seamless teardown gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
+>   Full plan: "NATIVE-BUILD TRACE" > "► NEXT STEP" below.
 >
 > **Reading guide for the rest of this doc:** the top half (SDK survey, drive requirements, AES key,
 > ordering) is the still-useful call spec. The long **"Why a direct create fails offline"** investigation
@@ -1081,13 +1083,92 @@ listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest
 `call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
 a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 
-### SEAM + the native-builder finish (2026-07-04) — CURRENT STATE, read this for thread 2
+### NATIVE-BUILD TRACE (2026-07-04, rig) — the build is REACHED; the offline wall is the SteamServiceImpl standup
+
+> **STATUS (supersedes "RESULT 5 / viable offline" below — that reading was wrong).** The driven establish
+> handler now **reaches the game's own connection builder** and runs it to the point where it tries to stand
+> up the DLNW3D transport. The offline wall is precise and deep: the **`SteamServiceImpl` service-standup
+> factory `0x142638b40` returns null offline**, so the socket-manager build fails cleanly and `+0x708` stays
+> null. This is the transport-dormant fact pinned to one function. **The descriptor was never the blocker.**
+> The path to `Host` is now a **two-machine** run (a real peer's Steam P2P context is what lets the service
+> stand up). Reproducible baseline: `drive_create` + `drive_establish_handler` on, `drive_session_established`
+> **off** (see the gate2 fix below).
+
+**Four corrections to the prior "RESULT 5" writeup (all rig-verified 2026-07-04):**
+
+1. **The "Arxan builder `vtable[0x80]` = `0x14251c480`" was a WRONG-VTABLE artifact.** That trampoline was
+   read from the *static base* vtable `0x1431f8360`. The **live** container is `ManagerImplSteam` with derived
+   vtable **`0x1431f8780`** (the `vmethod-target` probe already flagged this). The real slots are
+   `[0x1431f8780+0x80] = 0x1423f46b0` (the builder — a **plain thunk**, not Arxan) and `[+0x68] = 0x1423f4870`
+   (the session-established handler). So no runtime Arxan capture is needed; the builder is statically
+   readable. (Re-derive: read `[live_vtable+slot]` from `/proc/<pid>/mem`; the live vtable is off the
+   `vmethod-target` capture or `[container]`.)
+2. **`+0x42` is NOT a bail localizer.** The handler's cleanup `0x1423f2f30` **resets `+0x41` and `+0x42` to 0**
+   on every bail (`0x1423f2fa5`/`0x1423f2fd7`), so `+0x42=0` can't distinguish "failed the readiness gate"
+   from "passed it and failed later." RESULT 5's "bail was `vtable[0x80]`" inference rested on this and is
+   void. Use the `gate2-ret` (`0x1423f289c`) + `builder-entry` (`0x1423f46b0`) hook localizers instead.
+3. **The real bail *was* the session-established gate — because we drove it TWICE.** The handler calls
+   `[vtable+0x68] = 0x1423f4870` itself as its second gate (`0x1423f2899`). Pre-driving it via
+   `drive_session_established` made that internal call return `al=0` (idempotent "already established"), so the
+   handler bailed before the builder. **Fix: `drive_session_established = false`** — let the establish handler
+   own the first call. Then `gate2-ret` reads `al=1` and `builder-entry` fires.
+4. **`+0x708` null offline is the service standup, not a descriptor gap.** With gate2 passing, the handler runs
+   the builder `0x142637440`, which constructs an **`MTInternalThreadSteamSocketManager@DLNW3D`** (ctor
+   `0x142638140`, vtable `0x143276cb8`) and inits it (`0x14263a9d0` → sub-init `0x14263ce40`). The sub-init's
+   first real step is `call [obj_vtable+0x50]` (`0x142638590` = `mov rcx,[rcx+0x40]; jmp 0x142638b40`) — the
+   **`SteamServiceImpl` standup `0x142638b40`**, which returns **null offline**. Sub-init takes its clean
+   failure path → builder returns null → handler returns 0, no crash. (The descriptor's non-null fields
+   `local[0x00]=[container+0x48]`, `local[0x08]=0x1423f2d70` already satisfy the sub-init's null-checks; the
+   wall is below them, at the service standup.)
+
+**The full native-build path, end to end (own words; addresses are facts):**
+
+```
+establish handler 0x1423f2820(container, descriptor)      driven at the veto hook
+  gate1 0x1423f5190 (readiness)                            standalone returns 1
+  gate2 call [vtable+0x68] = 0x1423f4870 (session-established)   al=1  ← only after NOT pre-driving it
+  test [container+0xa0] & 0x40                              set → build path (clear → copy-only, returns 1)
+  build local_struct at [rbp-0x49]: local[0]=[container+0x48], local[8]=0x1423f2d70, local[0x10]=container,
+     local[0x18..]=descriptor dwords [desc+0..0x38] + byte [desc+0x3c]
+  builder call [vtable+0x80] = 0x1423f46b0(container, &local, [desc+0x3d])   thunk: [desc+0x3d]?0x1426372e0:0x142637440
+    0x142637440: construct MTInternalThreadSteamSocketManager (0x142638140, vt 0x143276cb8, 0x150 bytes)
+      init [obj_vt+8] = 0x14263a9d0(obj, &local)
+        sub-init 0x14263ce40(obj, &local): null-checks local[0]/local[8] (pass), copies local[0..0x60]→obj[0x40..0xa0]
+          call [obj_vt+0x50] = 0x142638590 → SteamServiceImpl standup 0x142638b40   ← RETURNS NULL OFFLINE
+        → sub-init clean-fails → init fails → builder returns null → +0x708 stays null
+```
+
+**Rig-guide/config for this run:** `[debug] guide="rung3-create-drive"`, `[debug.probes] drive_create=true
+drive_establish_handler=true drive_fire_solo=true drive_session_established=false`. The localizer log lines:
+`gate2-ret … al=1`, `builder-entry REACHED …`, `0x1423f2820 returned 0; [container+0x708]=0x0`.
+
+**⚠ Do NOT hook mid-way through the deep transport fns with a jmp-back.** A `svc-standup` probe at
+`0x14263ce9c` (`mov rcx,rax` after the standup call) perturbed rax/flags so the sub-init's `jne 0x14263ceb4`
+misfired into its teardown path and **faulted** (write to `0x0` at `0x14263cea7`). Without the hook the same
+drive returns 0 cleanly. To read a deep fn's return, hook it at a **function boundary** (entry + a return
+trampoline), never mid-caller.
+
+**► NEXT STEP — two-machine (rig host + Steam Deck joiner).** The offline wall is the service standup, which
+needs a real peer's Steam P2P context. Run the `rung3-create-drive` guide on both machines (Deck = player 2
+via the `/steam-deck` skill). With the rung-2 link up, drive the establish handler (`drive_session_established`
+still **off**) and watch whether `0x142638b40` returns a real service → the socket manager inits → `+0x708`
+populates → `lobby_state` advances `TryToCreateSession → Host`. If the standup still fails even with a peer,
+the next descriptor/owner field (`local[0x00]=[container+0x48]`, the factory's `rcx=[obj+0x40]` owner) is the
+lever to chart. Everything below this line is the older (partly-superseded) narrative.
+
+---
+
+### SEAM + the native-builder finish (2026-07-04) — SUPERSEDED by the NATIVE-BUILD TRACE above
 
 > **STATUS.** The driven create reaches `TryToCreateSession`. The finish is now **one bounded RE**: the
 > **descriptor** for the game's own connection builder. The native path is **rig-proven viable offline** —
 > the establish handler `0x1423f2820` runs without crashing, its readiness gate passes, and the *only* bail
 > is the Arxan builder rejecting our guessed descriptor. See "► NEXT STEP" below. (The chronological
 > rig-by-rig narrative this section used to be is compacted into "The path we took / ruled out" at the end.)
+>
+> **⚠ This section's key claims are CORRECTED by the NATIVE-BUILD TRACE above** — the "Arxan builder
+> `vtable[0x80]`" is a wrong-vtable artifact, `+0x42` is cleanup-reset (not a localizer), and the real
+> offline wall is the `SteamServiceImpl` standup, not the descriptor. Read the trace section first.
 
 The thread-2 "seam" (transport → session FSM → `Host`) is fully charted. Static + live RE on the pinned
 2026-06-02 image (own words; addresses are facts; no decompiler output). Supersedes the earlier guess

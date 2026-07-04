@@ -273,6 +273,42 @@ const VMETHOD_TARGET_PROLOGUE: [u8; 8] = [0x48, 0x8D, 0x54, 0x24, 0x40, 0xFF, 0x
 /// Latched once the live vmethod target is captured + logged.
 static VMETHOD_TARGET_CAPTURED: AtomicBool = AtomicBool::new(false);
 
+/// **Establish-handler bail localizers.** The handler `0x1423f2820` returns 0 (failure) offline but its
+/// cleanup `0x1423f2f30` resets `+0x41`/`+0x42` on *every* bail, so those flags can't tell us WHERE it
+/// bailed. The flow (own words from disasm) is: gate1 `0x1423f5190` (readiness) → gate2 `call
+/// [vtable+0x68]` (= `0x1423f4870`, the session-established handler) at `0x1423f2899` → `[container+0xa0]
+/// & 0x40` bit (clear ⇒ copy-descriptor path, returns success WITHOUT building) → builder `call
+/// [vtable+0x80]` (= `0x1423f46b0`, a plain fn; NOT the Arxan trampoline the base vtable `0x1431f8360`
+/// pointed at — the *live* derived vtable is `0x1431f8780`). Two read-only latched localizers pin the
+/// bail:
+///  - **gate2-ret** at `0x1423f289c` (`test al,al` after `call [rax+0x68]`): `al` = the session-established
+///    handler's return. `al==0` ⇒ the handler bails here (before the builder).
+///  - **builder-entry** at the builder thunk `0x1423f46b0`: fires IFF the handler reaches the builder;
+///    `rcx`=container, `rdx`=`&local_struct`, `r8b`=`[desc+0x3d]` (the sub-builder selector). `[rdx]` =
+///    `[container+0x48]` (heap ptr) is the builder's first-qword input.
+const GATE2_RET_OFFSET: usize = 0x1_423f_289c - 0x1_4000_0000;
+/// Charted bytes at [`GATE2_RET_OFFSET`]: `84 C0` = `test al,al`, `0F 84 F0 00 00 00` = `je` (long).
+const GATE2_RET_PROLOGUE: [u8; 8] = [0x84, 0xC0, 0x0F, 0x84, 0xF0, 0x00, 0x00, 0x00];
+/// Latched once the gate2 (session-established) return is captured + logged.
+static GATE2_RET_CAPTURED: AtomicBool = AtomicBool::new(false);
+/// The live derived-vtable builder thunk (`container->vtable[0x80]` on the live `ManagerImplSteam` vtable
+/// `0x1431f8780`). `mov rcx,rdx; test r8b,r8b; jne 0x1426372e0; jmp 0x142637440` — dispatches on
+/// `[desc+0x3d]` between two DLNW3D builders.
+const BUILDER_ENTRY_OFFSET: usize = 0x1_423f_46b0 - 0x1_4000_0000;
+/// Charted bytes at [`BUILDER_ENTRY_OFFSET`]: `48 8B CA` = `mov rcx,rdx`, `45 84 C0` = `test r8b,r8b`.
+const BUILDER_ENTRY_PROLOGUE: [u8; 6] = [0x48, 0x8B, 0xCA, 0x45, 0x84, 0xC0];
+/// Latched once the builder entry is observed (proves the handler reached the builder).
+static BUILDER_ENTRY_CAPTURED: AtomicBool = AtomicBool::new(false);
+
+// NOTE: an earlier "svc-standup" localizer hooked 0x14263ce9c (`mov rcx,rax` after the service-standup
+// factory 0x142638b40) to read the factory's return. It is REMOVED because a jmp-back hook mid-way
+// through that deep transport function was unstable — it perturbed rax/flags so the sub-init's
+// `jne 0x14263ceb4` misfired into the teardown path, faulting (write to 0x0 at 0x14263cea7). Without
+// the hook the same drive returns 0 CLEANLY, which is the reliable reading: the SteamServiceImpl
+// standup returns null offline (the socket-manager sub-init 0x14263ce40 takes its clean failure path).
+// If the factory's return must be confirmed again, hook the factory at a FUNCTION BOUNDARY (its entry
+// + a return trampoline), not mid-caller. See docs/SESSION-DRIVE.md.
+
 /// **The real create-veto vmethod** (`0x1423f4330`, live `[container_vtable+8]`). Its first predicate
 /// is `mov eax,[rcx+0x7c0]; shr eax,2; test al,1; je return-false` — i.e. **bit 2 of the dword at
 /// `[container+0x7c0]`** must be set or the vmethod returns false (create veto). `rcx` at entry = the
@@ -405,6 +441,18 @@ fn install_create_gate_trace(config: &Config) {
     let vt = exe_base + VMETHOD_TARGET_OFFSET;
     if prologue_ok("vmethod-target", vt, &VMETHOD_TARGET_PROLOGUE) {
         install_offset_hook("vmethod-target", vt, log_vmethod_target);
+    }
+    // Establish-handler bail localizers (only meaningful while drive_establish_handler drives 0x1423f2820):
+    // gate2-ret pins whether the handler bails at the session-established gate (before the builder), and
+    // builder-entry fires iff it reaches the real builder. Together they localize the offline bail that the
+    // cleanup-reset +0x41/+0x42 flags can't. See docs/SESSION-DRIVE.md > "► NEXT STEP".
+    let g2 = exe_base + GATE2_RET_OFFSET;
+    if prologue_ok("gate2-ret", g2, &GATE2_RET_PROLOGUE) {
+        install_offset_hook("gate2-ret", g2, log_gate2_ret);
+    }
+    let be = exe_base + BUILDER_ENTRY_OFFSET;
+    if prologue_ok("builder-entry", be, &BUILDER_ENTRY_PROLOGUE) {
+        install_offset_hook("builder-entry", be, log_builder_entry);
     }
     // veto-field: read [container+0x7c0] at the real veto vmethod's entry (bit 2 = the create gate),
     // and — when `set_create_veto_bit` is armed — write bit 2 set to test the L3 lever.
@@ -737,6 +785,48 @@ fn log_vmethod_target(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
+/// gate2-ret localizer: at `0x1423f289c` (`test al,al` after the establish handler's `call
+/// [vtable+0x68]` = the session-established handler `0x1423f4870`), `al` = that handler's return. The
+/// handler bails to cleanup (and returns 0) if `al==0`, so this pins whether the bail is gate2 (before
+/// the builder). Latch once; read-only; unwind-firewalled.
+fn log_gate2_ret(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if GATE2_RET_CAPTURED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let al = unsafe { &*regs }.rax as u8;
+        log::info!(
+            "session-probe: gate2-ret — establish handler's [vtable+0x68] (session-established 0x1423f4870) \
+             returned al={al} (0 => handler bails HERE, before the builder; nonzero => proceeds to the \
+             [container+0xa0]&0x40 build/copy branch)",
+        );
+    }));
+}
+
+/// builder-entry localizer: fires IFF the establish handler reaches the connection builder thunk
+/// `0x1423f46b0` (`container->vtable[0x80]` on the live `ManagerImplSteam` vtable). Proves the handler
+/// got past gate1/gate2 and the `[container+0xa0]&0x40` bit into the build path. `rcx`=container,
+/// `rdx`=`&local_struct` (built from our descriptor), `r8b`=`[desc+0x3d]` (sub-builder selector:
+/// nonzero→`0x1426372e0`, zero→`0x142637440`). `[rdx]`=`[container+0x48]` (heap ptr) is the first-qword
+/// input the builder null-checks. Latch once; read-only; unwind-firewalled.
+fn log_builder_entry(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if BUILDER_ENTRY_CAPTURED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let r = unsafe { &*regs };
+        let (container, local, sel) = (r.rcx as usize, r.rdx as usize, r.r8 as u8);
+        // SAFETY: `local` = `&[rbp-0x49]` the handler just filled; its first qword is `[container+0x48]`.
+        let first = if local != 0 { unsafe { (local as *const usize).read_volatile() } } else { 0 };
+        log::info!(
+            "session-probe: builder-entry REACHED — vtable[0x80] builder thunk 0x1423f46b0 \
+             (container={container:#x}, &local={local:#x}, [local]={first:#x}, selector [desc+0x3d]={sel} => \
+             {}) — the handler passed gate1+gate2+the 0xa0 bit; any create failure now is builder-internal",
+            if sel != 0 { "0x1426372e0" } else { "0x142637440" },
+        );
+    }));
+}
+
 /// veto-field tracer: at the real veto vmethod entry (`0x1423f4330`), `rcx` = the container. Reads
 /// `[container+0x7c0]` and reports bit 2 — the vmethod returns false when it's clear (the offline
 /// create veto). Confirms the field + points at the lever (set bit 2 before create). Read-only.
@@ -866,16 +956,24 @@ fn drive_establish_handler(container: usize) {
     let desc: &'static mut [u8] = vec![0u8; 0x140].leak();
     let desc_ptr = desc.as_mut_ptr() as usize;
     unsafe { (desc_ptr as *mut u32).write_volatile(1) };
-    // Pre-probe the readiness gate the handler checks first (0x1423f5190, at +0x2970 from the handler):
-    // call it directly and log its result. 0 => this gate blocks the native builder (the service isn't
-    // "ready" offline); 1 => the gate passes and any bail is downstream at the Arxan builder vtable[0x80].
-    // SAFETY: win64 ABI; rcx=container. The gate locks/unlocks a DLNW3D singleton it get-or-creates.
+    // Instrument the DLNW3D singleton (0x144852dc0 ptr + 0x144852dc8 readiness byte) that the handler's
+    // internal readiness gate (0x1423f5190 -> 0x1423f4fa0) reads, across the drive. The gate returns 0
+    // offline because this singleton is a self-referential empty sentinel (0x144852dd0 = &cell+0x10),
+    // not a stood-up service — so the handler bails at +0x42=0 before the builder. Log the state before
+    // the standalone gate call, after it (does the gate mutate/create the singleton?), and after the
+    // handler, to chart exactly what the offline gate does. SAFETY: both are fixed global cells in the
+    // mapped image (base 0x140000000, no ASLR).
+    let sing = || unsafe { (0x1_4485_2dc0usize as *const usize).read_volatile() };
+    let ready = || unsafe { (0x1_4485_2dc8usize as *const u8).read_volatile() };
+    let (s0, r0) = (sing(), ready());
     let gate_fn = fn_addr.wrapping_add(0x2970);
     let gate: extern "win64" fn(usize) -> u8 = unsafe { std::mem::transmute(gate_fn) };
     let gate_ret = gate(container);
+    let (s1, r1) = (sing(), ready());
     log::info!(
-        "session-probe: drive-establish — readiness gate 0x1423f5190(container) = {gate_ret} \
-         (0 => this gate blocks the native builder offline; 1 => passes, bail is downstream at vtable[0x80])",
+        "session-probe: drive-establish — readiness gate 0x1423f5190 = {gate_ret}; singleton \
+         [0x144852dc0] {s0:#x}->{s1:#x} readiness [0x144852dc8] {r0}->{r1} (self-ref 0x144852dd0 = empty \
+         sentinel; a stood-up service would be a distinct heap ptr)",
     );
     log::info!(
         "session-probe: drive-establish — calling 0x1423f2820(container={container:#x}, desc={desc_ptr:#x}) \
@@ -887,10 +985,13 @@ fn drive_establish_handler(container: usize) {
     let handler: extern "win64" fn(usize, usize) -> u8 = unsafe { std::mem::transmute(fn_addr) };
     let ret = handler(container, desc_ptr);
     let after_708 = unsafe { slot.read_volatile() };
-    // Localize where the handler bailed: it sets [container+0x8ac]=1 at entry (before the
-    // 0x1423f5190 readiness gate), [container+0x41]=1 right after entry, and [container+0x42]=1 only
-    // AFTER passing 0x1423f5190. So +0x42==1 => it passed the gate and the bail was the Arxan builder
-    // vtable[0x80] returning null; +0x42==0 => it bailed at the 0x1423f5190 service-readiness gate.
+    // NB: +0x41/+0x42 are UNRELIABLE bail localizers — the handler's cleanup 0x1423f2f30 resets BOTH to 0
+    // on every bail (0x1423f2fa5/0x1423f2fd7), so +0x42=0 here does NOT mean "bailed at the readiness
+    // gate" (the old reading). Use the gate2-ret + builder-entry HOOK localizers instead: gate2-ret pins
+    // the session-established gate, builder-entry proves the builder was reached. Rig-charted 2026-07-04:
+    // with the double session-established drive removed, gate2 passes and the handler REACHES the builder
+    // (0x142637440), which fails offline because the SteamServiceImpl standup (0x142638b40) returns null.
+    // We still log +0x8ac (set once at entry, not reset) + the raw +0x41/+0x42 for reference.
     let (a41, a42, a8ac) = unsafe {
         (
             ((container + 0x41) as *const u8).read_volatile(),
@@ -898,10 +999,11 @@ fn drive_establish_handler(container: usize) {
             ((container + 0x8ac) as *const u8).read_volatile(),
         )
     };
+    let (s2, r2) = (sing(), ready());
     log::info!(
         "session-probe: drive-establish — 0x1423f2820 returned {ret}; [container+0x708]={after_708:#x} \
-         [+0x41={a41} +0x42={a42} +0x8ac={a8ac}] (non-null +0x708 => builder ran offline; +0x42=1 => passed \
-         the 0x1423f5190 gate, bail was vtable[0x80]; +0x42=0 => bailed at the service-readiness gate)",
+         [+0x41={a41} +0x42={a42} +0x8ac={a8ac} (cleanup-reset; see gate2-ret/builder-entry)] singleton \
+         {s2:#x} readiness {r2} (non-null +0x708 => the native build succeeded and wrapped a connection)",
     );
     if after_708 != 0 {
         // Peek the wrapped connection (holder+0x10) + its vtable, to confirm it's a real SteamConnection.
