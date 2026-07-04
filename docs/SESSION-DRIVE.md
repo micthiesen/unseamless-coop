@@ -1201,6 +1201,19 @@ scoped next build; the Deck is the validation partner.
 Tooling: `scripts/re/scan-vtable.py` (committed) answers "is class X live right now?" for any vtable VA —
 reuse it after a game update to re-confirm which layers are up in a given state.
 
+**Standup chain charted (for path 2).** The DLNW3D service is created on demand by a DLNR3D-side owner:
+- **`0x142638b40(owner)`** — the service factory: allocates `0x18`, base-ctors a `SteamServiceImpl`
+  (`0x14263b6b0`, installs vtable `0x143277270`, sub-ctor `0x14263f1e0`), calls the service's init vmethod
+  `[vtable+8]` (`0x14263b820`) with the owner/config, then wraps it in a `0x10` adapter (`0x14263b5a0`),
+  runs `[service+0x10]`/`[service+0]` start vmethods, and **registers the service back into the owner** via
+  `[owner_vtable+0x68](owner, service)`. So the `owner` (the factory's `rcx`) is a real DLNR3D bridge
+  object whose vtable slot `+0x68` accepts the service — the online flow supplies it.
+- After the service exists, listen/connect (`0x14263b7c0`/`0x14263b720`) → connection-creator `0x142640560`
+  (params = buffer sizes, `+0x5c` ring `0x4b0`) → `SteamConnection` ctor `0x142643b50` + Accept setup
+  `0x14263ffe0` (`AcceptP2PSessionWithUser`). That is the full path 2 build target; the one piece not
+  statically pin-able is the `owner`/config, which is a live game object best captured at runtime when the
+  transport comes up (two-machine, or by cracking the flow-entry signal for path 1).
+
 ### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
 
 **Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
