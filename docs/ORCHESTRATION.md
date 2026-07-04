@@ -13,8 +13,14 @@ It exists because two things in this project are **inherently serial** and one t
   same files, as long as integration is funneled through one actor.
 
 So: workers build in parallel; the orchestrator owns the serial parts (rig, integration, the
-commit to `main`) and helps the human decide what to build next. The orchestrator can also just
-do work itself; spawning workers is a tool, not a requirement.
+commit to `main`) and helps the human decide what to build next. **Delegate by default:** any chunk
+of buildable work that doesn't need the rig goes to a worker; the orchestrator does work itself
+only when it's serial (rig/RE/validation/integration), takes under ~15 minutes, or *is* the
+decision itself. **Core/live RE counts as serial even when it's big** — it's rig-coupled and needs
+Michael in the loop, so don't spin up and integrate workers for it; the delegable RE exception is a
+genuinely independent *static* search (offline binary triage, decompile sweeps, call-site
+charting). The heads-down test: an orchestrator that's been building for a long stretch without
+touching the rig is holding a chunk that should have been a worker.
 
 ## Roles
 
@@ -85,7 +91,7 @@ ping worker, both message directions):
 | Repo instructions & skills | `CLAUDE.md`, `.claude/skills/` | same content via tracked symlinks: `AGENTS.md -> CLAUDE.md`, `.codex/skills -> .claude/skills` (codex does **not** read `.claude/skills` at project level; it does pick up user-level `~/.claude/skills` natively, and it reads only `name`+`description` frontmatter, tolerating the extra claude fields) |
 
 **Workers vs. `Agent`/`Task` subagents.** Fanning out a *chunk of buildable work* (a feature lane, a
-substantial RE pass, a migration — anything whose result is a branch to integrate) is **always** a fleet
+big *static* RE search, a migration — anything whose result is a branch to integrate) is **always** a fleet
 worker, never an `Agent`-tool subagent, even for a single lane. A worker is visible (`worker-ls`),
 watchable by the human, branch-isolated, and integrated through the normal review path; a subagent is an
 invisible black box that produces no integrable branch and can't be watched or reviewed. Subagents stay
@@ -298,7 +304,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
 | `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
-| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set. |
+| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read → verify → brief Michael and wait, no auto-start; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
 | `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
@@ -340,6 +346,32 @@ clobbering real edits. Do **not** use `rift create --copy-all` for this — it w
 4. Orchestrator serves rig/RE requests in serial order and answers.
 5. Worker signals done; orchestrator integrates to `main`.
 6. `worker-rm` tears the worker down.
+
+## Session Continuity (STATE.md, /wrap, /next)
+
+Orchestrator sessions are disposable; the project's fast-moving state is not. The contract that
+makes stop-and-restart cheap:
+
+- **[`STATE.md`](STATE.md)** is the single fast-moving "where we are / what's next" file —
+  **overwritten, never appended** (git holds history). It carries the current picture (Now), the
+  chosen next step with its why (Next), the runners-up (Candidates Not Chosen), the live fleet/rig
+  snapshot (In-Flight), and pointers to what a session learned. Durable knowledge still goes to the
+  proper doc (CLAUDE.md > "Project knowledge lives in the repo"); STATE.md holds pointers and
+  decisions, never the content.
+- **`/wrap`** concludes a session: sweep un-encoded learnings into their homes, decide/confirm Next
+  (via `/next` when open), rewrite STATE.md from ground truth (`worker-ls`, `git status`, rig
+  state), commit. Kill a session only after a wrap — a session's value must never live only in its
+  context window.
+- **`/next`** decides the next step when it's open: 2–4 candidates with a gating analysis (what
+  each unblocks, rig-serial vs delegable, size, risk), a recommendation, and the decision recorded
+  in STATE.md — with ready-to-paste worker briefs for the delegable candidates (this is what makes
+  delegate-by-default cheap to act on).
+- **`orch-start`** seeds a fresh orchestrator with a boot prompt: read STATE.md, **verify** its
+  In-Flight section against ground truth (a session that died without wrapping leaves STATE stale —
+  it's a map, not gospel), then **brief Michael and wait**. The boot orients, it never auto-starts
+  work — Michael may continue Next, run `/next`, or do something else entirely. Restarting the
+  orchestrator is therefore three motions: `/wrap` → kill the session → `orch-start`, with the new
+  session landing oriented but idle.
 
 ## Open Items
 

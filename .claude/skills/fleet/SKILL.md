@@ -18,12 +18,18 @@ You are the **orchestrator** (the default role; see [CLAUDE.md](../../../CLAUDE.
 fleet is here.
 
 The whole point: **workers build features in parallel; you own everything serial** (the rig, RE,
-in-game validation, integration, and the only commits to `main`). Spawning workers is optional, not
-required: do small or rig-coupled work yourself; reach for a worker when a feature is independent
-enough to run on its own for a while.
+in-game validation, integration, and the only commits to `main`). **Delegate by default:** any chunk
+of buildable work that doesn't need the rig goes to a worker; do it yourself only when it's serial
+(rig/RE/validation/integration), takes under ~15 minutes, or *is* the decision itself. **Core/live
+RE stays with you even when it's big** — it's rig-coupled and Michael is in the loop, so don't spin
+up and integrate workers for it; delegate RE only when it's a genuinely independent *static* search
+(offline binary triage, decompile sweeps, call-site charting). The heads-down test: if you've been
+building for a long stretch without touching the rig, that chunk should have been a worker. Your
+job is decide → brief → serve rig requests → integrate, not build. (`/next` drafts ready-to-paste
+briefs for delegable candidates, so spawning stays cheap.)
 
 **When you DO fan out a chunk of work, it goes to a fleet worker — never an `Agent`/`Task` subagent.**
-A chunk of buildable work (a feature lane, a substantial RE pass, a migration — anything whose result is
+A chunk of buildable work (a feature lane, a big *static* RE search, a migration — anything whose result is
 a branch you'd integrate) is always a `worker-new`, even if it's a single lane. Workers are visible in
 `worker-ls`, watchable by Michael, and integrate cleanly; a subagent is an invisible black box that
 can't be reviewed, watched, or merged. **Subagents remain valid only for *supporting* tasks that feed
@@ -256,7 +262,22 @@ scripts/fleet/orch-start
 ```
 
 It launches Claude in tmux `usc-orch` with `--add-dir` over the rifts tree (so you can fetch worker
-branches), no worker overlay (so it's the orchestrator by default), and attaches.
+branches), no worker overlay (so it's the orchestrator by default), and attaches. A fresh start is
+**seeded with the STATE.md boot prompt** — read [`docs/STATE.md`](../../../docs/STATE.md), verify
+its In-Flight section against ground truth, then **brief Michael and wait**. The boot orients only;
+it never auto-starts work — Michael decides whether to continue Next, run `/next`, or do something
+else. (`--no-seed` skips it; a resumed start — `--continue`/`--resume`, or `-c` on claude — is never
+seeded, the context is already there.)
+
+## End A Session Cleanly (/wrap), Decide What's Next (/next)
+
+- **Ending a session** (context is long, work concluded, Michael says wrap up): run **`/wrap`** —
+  it sweeps un-encoded learnings into the right docs, rewrites `docs/STATE.md` from ground truth,
+  and commits, so the session becomes disposable. Then it's safe to kill and `orch-start` fresh.
+- **Unsure what to work on** (Next completed, plans changed, a new wave): run **`/next`** — it
+  enumerates candidates with a gating analysis, records the decision in STATE.md, and drafts
+  worker briefs for the delegable ones.
+- Contract details: [ORCHESTRATION.md](../../../docs/ORCHESTRATION.md) > "Session Continuity".
 
 ## Lifecycle, At A Glance
 

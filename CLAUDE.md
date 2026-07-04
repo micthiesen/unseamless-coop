@@ -24,29 +24,11 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **solo `Host` reached + sticks (warped into the co-op world); rung-3 PIVOTED (2026-07-05) from offline
-> hand-synthesis to the "let the game establish it" (true ERSC) model.** Rungs 1/2/4 (identity, the
-> password-authed Steam side-channel, lobby discovery) ship, confirmed two-machine; the DLNW3D **Steam P2P
-> transport is rig-proven two-machine** (both machines exchange packets by SteamID64, no matchmaking); solo host
-> reaches stable `Host`/`Ingame` (`players=1`, warped into map `1800001`). **Why the pivot:** a 3-lane RE pass
-> proved offline synthesis of roster→2 is a principled dead end — the live-session array capacity is 0 offline so
-> a created `SessionSteam` is destroyed instantly (Lane C), add-member wants two ref-counted *game handle
-> objects* not a scalar SteamID (Lane A), and the transport context's accept-callback at `+0x168` has **no static
-> installer anywhere in the binary**, only a runtime Steam callback (Lane B). So instead of forging that graph by
-> hand, we **drive the game's own session-establishment entry points, fed our rung-4-discovered peer, and let the
-> game wire its own sub-objects — reproduced from a LIVE CAPTURE of a real working ERSC session** (ERSC proves the
-> native session establishes outside EAC over Steam P2P). This is **not** reaching FromSoft's matchmaking servers
-> (off-limits, EAC): peer discovery stays our side-channel, the session stays Steam P2P. **\* Offline synthesis is
-> paused, not killed** — if the capture shows establishment reduces to a small reproducible field/call set we
-> re-open it. **★ LIVE CAPTURE DONE (2026-07-05)** — captured a real 2-player ERSC session
-> ([`docs/ERSC-LIVE-CAPTURE-FINDINGS.md`](docs/ERSC-LIVE-CAPTURE-FINDINGS.md)). Two corrections: `[context+0x168]`
-> is the **reject-stub even in a working session** (the gate-c / "real member-lookup" theory is dead — members
-> come from the session layer, not the transport admit gate); and the full DLNR3D/DLNW3D graph (`SessionSteam`, 6
-> `SessionMemberSteam`, the context, live `SteamConnectionManager`, **`SteamServiceImpl`** — the standup that's
-> null offline) is all present + enumerated with offsets. **► Next: drive the game's establishment to build
-> `SessionSteam` + members + stand up the transport keyed to the rung-4 peer SteamID64; the one concrete wall is
-> why `SteamServiceImpl` standup `0x142638b40` returns null offline.** Plan:
-> [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "★ DECISION (2026-07-05)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Status: the fast-moving state + the chosen next step live in [`docs/STATE.md`](docs/STATE.md) —
+> **read that first.** Headline: rungs 1/2/4 + the Steam P2P transport are shipped and
+> two-machine-proven; rung 3 (the in-world session) pivoted (2026-07-05) to the "let the game
+> establish it" model — plan in [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "★ DECISION",
+> map in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
 
@@ -128,6 +110,15 @@ stacked branches, no PR descriptions. Keep commits small and well-described, kee
 (`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
 pass before pushing). This overrides the global draft-PR/stacking workflow.
 
+**Session state & continuity.** The fast-moving "where we are / what's next" lives in
+[`docs/STATE.md`](docs/STATE.md) (overwritten, never appended; pointers only — content goes to the
+proper doc). End a work session with **`/wrap`** (sweeps un-encoded learnings into their homes,
+rewrites STATE.md from ground truth, commits); decide an open next step with **`/next`** (candidates
++ gating analysis, recorded in STATE.md, worker briefs drafted for delegable ones). A fresh
+orchestrator started via `scripts/fleet/orch-start` is auto-seeded with a boot prompt that reads
+STATE.md, verifies it, and **briefs Michael, then waits** — it never auto-starts work. Full
+contract: [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) > "Session Continuity".
+
 **Ultracheck after each holistic chunk.** When a meaningful, self-contained chunk of work is done
 (a feature wired end to end, a subsystem, a refactor), run `/ultracheck` on it before moving on,
 then apply the surviving findings. Do **not** carve work into smaller pieces to fit this cadence —
@@ -165,8 +156,13 @@ worker, which overrides this). The full design and the `scripts/fleet/` tooling 
 
 - **Orchestrator (default, this session):** owns the rig, RE, and in-game validation; owns
   integration and the only commits to `main`; plans with Michael and manages the worker lifecycle
-  (`scripts/fleet/worker-new|ls|open|rm|integrate`). It can also just do the work itself; spawning
-  workers is optional, not required.
+  (`scripts/fleet/worker-new|ls|open|rm|integrate`). **Delegate by default:** any chunk of buildable
+  work that doesn't need the rig goes to a worker; do it yourself only when it's serial
+  (rig/RE/validation/integration), takes under ~15 minutes, or *is* the decision itself. **Core/live
+  RE is serial by nature** — it's rig-coupled and needs Michael in the loop — so it stays in the
+  orchestrator even when it's big; the delegable RE exception is a genuinely independent *static*
+  search (offline binary triage, decompile sweeps, call-site charting). If you've been heads-down
+  building for a long stretch without touching the rig, that chunk should have been a worker.
 - **Worker:** one lane of feature work in its own rift workspace, WIP-committing to `worker/<name>`.
   Never drives the rig and never commits to `main`; anything serial it asks the orchestrator for by
   message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`). **Reviews its own lane:** a worker
@@ -176,7 +172,7 @@ worker, which overrides this). The full design and the `scripts/fleet/` tooling 
   on the integrated, cross-lane result. See the `fleet` skill > "Offload the review to workers".
 
 **Fan out chunks of work as fleet workers, never as `Agent`/`Task` subagents.** When you parallelize a
-*chunk of buildable work* — a feature lane, a substantial RE pass, a migration, anything whose result is
+*chunk of buildable work* — a feature lane, a big *static* RE search, a migration, anything whose result is
 a branch you'd integrate — spawn a fleet worker (`scripts/fleet/worker-new`), **not** an `Agent`-tool
 subagent. Workers are visible (`worker-ls`), watchable/controllable by Michael, commit to
 `worker/<name>`, and you integrate them; a subagent is an invisible black box that can't be any of those.
