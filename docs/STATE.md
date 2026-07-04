@@ -79,10 +79,16 @@ SteamID64 → `host-admit-success 0x142640ee4` → roster `players=2`, validated
 
 ## In-Flight
 
-- **Workers:** none (`worker-ls` empty). This session's three lanes (overlay-connect, disconnect-suppress,
-  workflow/session-continuity) are all integrated to `main` and removed.
-- **Rig:** **running the user's REAL ERSC stack (our mod NOT applied)** — restored for the live capture; ER
-  not running. **To resume mod dev, `scripts/rig.sh apply` first.** Snapshot intact.
+- **Workers:** `standup-chart` (live) — the delegable static lane from this Next: charting what standup
+  `0x142638b40` reads/tests, deliverable `docs/STANDUP-NULL-FINDINGS.md`. No commits yet (decompile-heavy).
+  Integrate when it reports done; feed its field list into the rig dump (the serial half).
+- **Rig:** **our mod IS applied (diag build)** — re-applied this session for the stay-connected pass; ER not
+  running (killed after validation). Seed config on disk has `stay_connected = true` / `session_probe =
+  false` (validation edit, via `--keep-config`); a plain `apply`/`cycle` rewrites it back to the seed
+  defaults. Snapshot intact.
+- **stay-connected:** install + arm **RIG-VALIDATED** (both sites hook, gate arms, no panic). Two fixes
+  landed (`38917c0`): site-A prologue missing REX `0x40`; probe leave-tracer now gated so it stops stealing
+  site A. Behavioral half (risks #1–#3) still owed — needs a live 2-player session.
 - **Deck:** provisioned as a real ERSC peer (account `testthiesen`, save `ER0000.co2`, password `salmon`);
   its prior our-mod files are backed up at `~/deck-mod-backup-*` on the Deck. To use the Deck as our-mod
   player 2 again, restore that backup (or re-push via `deck.sh`).
