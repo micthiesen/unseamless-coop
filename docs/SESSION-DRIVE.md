@@ -1,6 +1,86 @@
 # Driving a Session Directly (rung-3 call spec)
 
-> ## STATUS (2026-07-04 night, updated) — read this first
+> ## STATUS (2026-07-05, DLNR3D reframe) — read this FIRST, it corrects the block below
+>
+> **The "member machinery is a runtime closure with no static function" conclusion below was partly wrong.**
+> A fresh xref pass climbed the builder chain out of the DLNW3D transport layer into the **DLNR3D session
+> layer** and put real class names on it (RTTI-confirmed):
+> - The context builder that the block below calls an *"unrelated lobby/session-info cache"* (`0x1423fe030`,
+>   reached via `0x142637410`→`0x142638410`) is actually **`DLNR3D::SessionSteam` vtable slot 25** (vtable
+>   `0x1431fa248`, RTTI `.?AVSessionSteam@DLNR3D@@`). It is the *session's own* transport-context builder, not
+>   an unrelated cache. It allocates a 0x190-byte context (alloc `0x141eb9ed0`), ctor `0x142639870`, then
+>   registers via `0x142639b70`.
+> - The member-descriptor builder `0x142402e10` (via `0x1426373e0`→`0x1426382f0`) is **`DLNR3D::SessionMemberSteam`
+>   vtable slot 13** (vtable `0x1431fa978`, RTTI `.?AVSessionMemberSteam@DLNR3D@@`).
+> - **The real "add member" is `0x1423fdf20`** (sits right next to the gate-c stub `0x1423fdf00`): given
+>   `(rcx=session, rdx=arg1, r8=arg2)` it reads the session's sub-object `[session+0x58]` (=S), reads allocator
+>   `[S+0x48]`, allocates **0x170 bytes** (the `SessionMemberSteam` size), and calls the member ctor
+>   `0x142402bf0(alloc, S, session, arg1, arg2)`. It is a vtable slot (no direct callers) — the online flow
+>   invokes it when a peer joins.
+> - **`DLNR3D::SessionSteam` ctor `0x1423fd300`** (created by fn `0x1423f7070`); **`SessionMemberSteam` ctor
+>   `0x142402bf0`**.
+>
+> **⇒ Reframed plan (matches the goal "let the game build a real member from fed peer info"):** rather than
+> hand-synthesizing the member + context + lookup (avenue a below), **drive the game's own DLNR3D SessionSteam
+> to add a member for the peer SteamID our side-channel already discovered.** That runs the real member ctor →
+> the real context/member wiring the transport admit path expects. Three RE lanes in flight (2026-07-05) to
+> nail the exact drive: (A) which vtable/slot is add-member `0x1423fdf20`, its two identity args, and the
+> `0x1423f7070` session-create call chain; (B) whether `[context+0x168]` ever gets a *non-stub* real lookup
+> installed and by whom (does `0x142639b70` really always write the stub, or conditionally?); (C) where the
+> live SessionSteam instance is stored (reachable from CSSessionManager/socketmgr?) + its vtable slot map.
+> Findings land here when they return.
+>
+> **Lane A result (2026-07-05):**
+> - **add-member `0x1423fdf20` = `SessionSteam` vtable slot 26** (offset `0xD0`).
+> - **Its two args are NOT a raw SteamID** — both `rdx`/`r8` are pointers to intrusive ref-counted objects
+>   (refcount at `obj+8`; the ctor `AddRef`s each), stored on the new member at `+0x70` (arg1) and `+0x78`
+>   (arg2). The real member ctor is a base ctor `0x142400210` (member base vtable `0x1431fa688`): it also sets
+>   `[member+0x58]=S`, `[member+0x60]=session`, hooks into a member registry rooted at `S+0x1e8`, and sets
+>   flags `+0xa4=0x10002`. So any `CSteamID` is *inside* one of the two handle objects (one more deref than
+>   charted); which of `+0x70`/`+0x78` is identity vs transport-handle is **unconfirmed**. ⇒ Driving add-member
+>   needs the game's own identity+transport handle objects, which the join handshake produces — not a scalar we
+>   fabricate. This is why the member is "online-populated": the handles come from the connect flow.
+> - **session-create `0x1423f7070` = `SessionManagerSteam` vtable slot 33** (offset `0x108`; RTTI
+>   `.?AVSessionManagerSteam@DLNR3D@@`, vtable `0x1431f9140`). Allocates 0x5f8 (SessionSteam size) from
+>   `[[mgr+8]+0x48]`, builds from `[mgr+8]` (=S), the manager, and one opaque arg; bumps a manager counter
+>   `[mgr+0xa8]`.
+> - **Two drivers of slot 33**, both gated by manager predicate slot 29 under a lock: **slot 1 `0x1423f5c00`**
+>   (flag `r8b=1`, host-create) and **slot 2 `0x1423f62e0`** (flag `0`, join, extra args, distinct follow-up
+>   `0x1423fb260`). **Slot 1 is exactly the probe's existing `LEGB_ENTRY_OFFSET 0x1423f5c00`** — we already
+>   drive the host-create path; **slot 2 `0x1423f62e0` is the DLNR3D-level join** (below the CS join wrapper
+>   `0x140cae640`).
+> - Sibling slot 27 `0x1423fdfa0` = a *second* creator (0x60-byte object, vtable `0x1431fa238`, same arg pair)
+>   — a plausible "pending connection/ticket" companion, not a finder. No SteamID-keyed member lookup found
+>   (Q4 unresolved). Tooling caveat: `static.py fn` spills past `ret`/`jmp` into the next function — cross-check
+>   with `func_bounds()`.
+>
+> **Lane B result (2026-07-05) — the `+0x168` question, exhaustive static answer:**
+> - The context at `[socketmgr+0x48]` is **`DLNW3D::MTInternalThreadSteamSocket`** (vtable `0x1432770b0`,
+>   RTTI-confirmed). The socket-manager itself is **`DLNW3D::SteamConnectionManager`** (vtable `0x143278020`;
+>   slot 3 = worker thread `0x142640bc0`, slot 4 next to admit helper `0x142640e30` — confirms it's "socketmgr").
+> - The ctor `0x142639870` **zeroes** `+0x168/+0x170/+0x178` (not the stub — value-level correction). The
+>   reject-stub `0x1423fdf00` is manufactured by the **driver `0x1423fe030` (SessionSteam slot 25)** on its own
+>   stack (`srcstruct[0]=0x1423fdf00`) and threaded **unconditionally on both branches** through register
+>   `0x142639b70` (a generic 24-byte copy `srcstruct→context+0x168`, no real-vs-stub special case).
+> - **Exhaustive search (call-graph + rip-ref + raw-pointer + a full `disp==0x168` write scan across
+>   0x1423x–0x1426x, RTTI-cross-checked) finds NO writer of any real (non-stub, non-zero) function to
+>   `MTInternalThreadSteamSocket+0x168` anywhere in the image.** The stub is the only value ever assigned. The
+>   `0x1423fdf00` hardcode occurs exactly once (`0x1423fe052`); the register fn is never stored as a
+>   callback/vtable entry (no hidden indirect installer).
+> - **Caveat (the load-bearing one):** this is exhaustive over everything a *static* disassembler sees. A
+>   Steamworks networking callback registered with the Steam API at runtime (external to this binary) could
+>   install a different `+0x168` value invisibly. Confirming where a non-stub value lands online needs a **live
+>   `watch-write.py` capture during a real online host start** — the twice-recommended step.
+>
+> **⇒ Combined A+B read:** the real member handle-objects (add-member's two ref-counted args) AND any real
+> `+0x168` lookup are **produced at runtime by the connect handshake / Steam callbacks, not present statically**.
+> Offline synthesis of roster→2 is therefore blocked short of reimplementing the matchmaker's runtime object
+> graph. This is the empirical case for the **real-online-matchmaking (true ERSC) pivot** over offline forcing —
+> see the recommendation being written up top once Lane C lands.
+>
+> ---
+>
+> ## STATUS (2026-07-04 night, updated) — superseded in part by the DLNR3D reframe above
 >
 > **★★ HOST-SIDE ADMIT REACHED OFFLINE — the joiner's synthetic SYN crosses to the host's game layer; the sole
 > remaining wall is the socket-manager context's member-lookup STUB.** This session drove the joiner→host
