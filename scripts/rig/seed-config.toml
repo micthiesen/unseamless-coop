@@ -173,6 +173,11 @@ force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create)
                            # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which
                            # likely needs a real peer); kept as a charted probe. Logs the flag's pre-call value
                            # either way. See docs/SESSION-DRIVE.md > "Leg B charted".
+instrument_host_accept = true # READ-ONLY host-side observation (2026-07-04): hook the host's admit-new-peer
+                           # 0x142640e30 (logs sender SteamID + datagram size) + roster-add 0x140cb31b0 (logs
+                           # players count + lobby_state). Two-machine: does the joiner's game-P2P reach the
+                           # host admit path, and does the roster grow 1->2? Fires only on the receiving (host)
+                           # machine; inert on the joiner. See docs/SESSION-DRIVE.md > "HOST-SIDE ADMIT/ROSTER".
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether

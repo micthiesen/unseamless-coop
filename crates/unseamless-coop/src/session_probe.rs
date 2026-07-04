@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
-use unseamless_core::config::Config;
+use unseamless_core::config::{AutoSession, Config};
 use unseamless_core::util::{FrameThrottle, Latch};
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
 use windows::core::PCSTR;
@@ -114,6 +114,8 @@ pub fn install_hooks(config: &Config) {
     install_initiation_hooks(config);
     // Independently gated on `drive_create` (you only want the gate trace alongside a driven create).
     install_create_gate_trace(config);
+    // Read-only host-side admit/roster observation (fires on the receiving machine). Role-independent.
+    install_host_accept_trace(config);
 }
 
 /// Place the read-only create/join initiation hooks when `session_probe` is on. No-op otherwise.
@@ -397,12 +399,30 @@ const LEGB_ENTRY_PROLOGUE: [u8; 10] =
 /// observer. See the `[debug.probes] fabricate_slot_array` config flag.
 static FABRICATE_SLOT_ARRAY: AtomicBool = AtomicBool::new(false);
 
-/// Place read-only `jmp-back` tracers on leg-B entry and the 4th create gate when `drive_create` is on.
-/// No-op otherwise. Best-effort: a failed hook logs and is skipped, never aborts (it's a diagnostic).
+/// The effective per-machine rung-3 driver role `(do_create, do_join)`. The create driver (host) and the
+/// join driver (joiner) are mutually exclusive per machine, but the seed config is SHARED across both
+/// machines — so gating them on the standalone `drive_create`/`drive_join` flags alone forces the
+/// shared-seed footgun the two-machine runs kept hitting (flip the seed's flags between the rig apply and
+/// the Deck apply, whoever cycles last wins). `auto_session` is already the per-machine role knob
+/// (`--auto-session host|join`, written into each machine's pushed config, never the shared seed); it
+/// drives the rung-3 role too, exactly as it drives the rung-2 side-channel role. `off` (solo / manual)
+/// falls back to the explicit flags so the solo host workflow (seed `drive_create=true`) is unchanged.
+fn rung3_role(config: &Config) -> (bool, bool) {
+    match config.debug.auto_session {
+        AutoSession::Host => (true, false),
+        AutoSession::Join => (false, true),
+        AutoSession::Off => (config.debug.probes.drive_create, config.debug.probes.drive_join),
+    }
+}
+
+/// Place read-only `jmp-back` tracers on leg-B entry and the 4th create gate when this machine drives
+/// a rung-3 session (create or join). No-op otherwise. Best-effort: a failed hook logs and is skipped,
+/// never aborts (it's a diagnostic).
 fn install_create_gate_trace(config: &Config) {
     // Installs for the joiner too: the join driver needs the same veto-vmethod hook (land_socket_holder,
     // session-established, the online-availability gate patch) the host does.
-    if !config.debug.probes.drive_create && !config.debug.probes.drive_join {
+    let (do_create, do_join) = rung3_role(config);
+    if !do_create && !do_join {
         return;
     }
     let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
@@ -474,7 +494,7 @@ fn install_create_gate_trace(config: &Config) {
     // host, stranding the joiner at TryToJoinSession. join-conn-entry confirms it's called + logs the blob;
     // join-blob-parse fires ONLY if 0x1423f62e0 got past its registry-ready + descriptor checks and reached
     // the blob parser 0x1423fb260 — so whether it fires localizes the failure (before vs at the blob parse).
-    if config.debug.probes.drive_join {
+    if do_join {
         install_offset_hook("join-conn-entry", exe_base + JOIN_CONN_CREATE_OFFSET, log_join_conn_entry);
         install_offset_hook("join-blob-parse", exe_base + JOIN_BLOB_PARSE_OFFSET, log_join_blob_parse);
     }
@@ -637,6 +657,87 @@ fn log_join_blob_parse(_name: &'static str, regs: *mut Registers) {
             r.rdx, r.r8 as u32, r.r9 as u32,
         );
     }));
+}
+
+// --- Host-side admit / roster observation (read-only) -------------------------------------------
+//
+// The receiving (host) machine's inbound path, charted 2026-07-04 (docs/SESSION-DRIVE.md > "HOST-SIDE
+// ADMIT/ROSTER"). The socket-manager worker thread `0x142640bc0` drains ISteamNetworking006 packets;
+// for a datagram whose sender SteamID64 matches no existing connection it calls the **admit-new-peer**
+// helper `0x142640e30(this=socketmgr, sender=rdx, buf=r8, msgSize=r9d)` — which admits the peer only if
+// the datagram is a real DLNW3D SYN (size + control-type gate). Separately, the session-update task
+// promotes drained connection messages into `players` (the roster) via `0x140cb31b0(this=CSSessionManager,
+// msg=rdx)` — the append happens (no offline gate) when the peer isn't already a `players` entry,
+// `lobby_state==Host`, and it's not us. Hooking both read-only tells us, on a two-machine run, whether the
+// joiner's game-P2P reaches the host's admit path at all (and with what packet shape), and whether a
+// roster-add is ever attempted. Pure observers — they log and jmp back, never touch the args.
+/// Host admit-new-peer helper `0x142640e30` (socket-manager worker thread; sender SteamID64 in rdx).
+const HOST_ADMIT_OFFSET: usize = 0x1_4264_0e30 - 0x1_4000_0000;
+/// Session-layer roster-add `0x140cb31b0` (main-thread update task; `msg` in rdx, `CSSessionManager` in rcx).
+const HOST_ROSTER_ADD_OFFSET: usize = 0x1_40cb_31b0 - 0x1_4000_0000;
+
+/// host-admit tracer: `0x142640e30(rcx=socketmgr, rdx=senderSteamID64, r8=buf, r9d=msgSize)`. Fires on the
+/// worker thread when a datagram from an UNKNOWN peer reaches the admit path — so it firing at all means the
+/// joiner's game-P2P crossed to the host's game layer; the size tells us whether it's a real 14-byte SYN
+/// (admitted) or our raw probe ping (rejected by the shape gate).
+fn log_host_admit(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rdx/r9d are by-value scalars (sender id, size), logged not derefed.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: host-admit — 0x142640e30 admit-new-peer from sender {} (msgSize={}) \
+             — the joiner's game-P2P REACHED the host admit path (size 14 => real SYN; else rejected by the shape gate)",
+            unseamless_core::diagnostics::peer_tag(r.rdx as u64),
+            r.r9 as u32,
+        );
+    }));
+}
+
+/// host-roster-add tracer: `0x140cb31b0(rcx=CSSessionManager, rdx=connectionMessage)`. Fires per drained
+/// connection message on the update task; logs the live `players` count (`([G+0x80]-[G+0x78])/0x100`) and
+/// `lobby_state` so a growth from 1→2 is visible right at the append site.
+fn log_host_roster_add(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx = CSSessionManager. `+0x78/+0x80` (players vector first/last) and
+        // `+0xc` (lobby_state) are in-bounds fields; all reads null-guarded.
+        let r = unsafe { &*regs };
+        let g = r.rcx as usize;
+        let (count, lobby) = if g != 0 {
+            unsafe {
+                let first = ((g + 0x78) as *const usize).read_volatile();
+                let last = ((g + 0x80) as *const usize).read_volatile();
+                let count = if last >= first && first != 0 { (last - first) / 0x100 } else { 0 };
+                (count, ((g + 0xc) as *const u32).read_volatile())
+            }
+        } else {
+            (0, 0xffff_ffff)
+        };
+        log::info!(
+            "session-probe: host-roster-add — 0x140cb31b0(msg={:#x}) on CSSessionManager={g:#x} \
+             players_count={count} lobby_state={lobby} (a remote peer becoming a roster entry grows this 1->2)",
+            r.rdx,
+        );
+    }));
+}
+
+/// Install the read-only host-admit + roster-add tracers when `[debug.probes] instrument_host_accept` is on.
+/// Role-independent (fires on whichever machine receives an inbound peer). Best-effort: a failed hook logs
+/// and is skipped. NB: `host-admit` fires on the socket-manager WORKER THREAD, not the main thread — the
+/// handler only logs (no game-state touch), so that's safe.
+fn install_host_accept_trace(config: &Config) {
+    if !config.debug.probes.instrument_host_accept {
+        return;
+    }
+    let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::error!("session-probe: host-accept trace — GetModuleHandle(NULL) failed: {e}");
+            return;
+        }
+    };
+    install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
+    install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
+    log::info!("session-probe: host-accept trace installed (host-admit 0x142640e30 + host-roster-add 0x140cb31b0)");
 }
 
 /// teardown-handler tracer: fires when the DLNW3D async teardown handler `0x1423f46d0` runs (the transport
@@ -2358,14 +2459,15 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
     if config.debug.probes.session_probe {
         features.push(Box::new(SessionFsmProbe::new()));
     }
-    if config.debug.probes.drive_create {
+    let (do_create, do_join) = rung3_role(config);
+    if do_create {
         features.push(Box::new(SessionCreateDriver::new(
             config.debug.probes.force_netsession_ready,
             config.debug.probes.drive_fire_solo,
             config.debug.probes.force_host_transition,
         )));
     }
-    if config.debug.probes.drive_join {
+    if do_join {
         features.push(Box::new(SessionJoinDriver::new(
             config.debug.probes.drive_fire_solo,
             config.debug.probes.p2p_test_peer_a,

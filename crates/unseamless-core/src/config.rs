@@ -323,6 +323,16 @@ pub struct DebugProbes {
     /// docs/SESSION-LIFECYCLE-FINDINGS.md + docs/SESSION-DRIVE.md > "HOST-SETUP DRIVE".
     pub suppress_leave: bool,
 
+    /// **EXPERIMENTAL host-accept instrumentation** (read-only). Installs `jmp-back` tracers on the
+    /// host's inbound-connection admit path — the socket-manager worker thread's "admit a brand-new
+    /// peer" call `0x142640e30` (logs the sender SteamID64 + datagram size) and the session-layer
+    /// roster-add `0x140cb31b0` (logs when a connection message becomes a `players` entry). On a
+    /// two-machine run this answers, empirically, whether the joiner's game-P2P ever reaches the host's
+    /// game-layer admit (and where it's rejected), and whether the host roster grows. Pure observation;
+    /// never writes game state. Fires only on the receiving machine (the host), so it's inert on the
+    /// joiner. See docs/SESSION-DRIVE.md > "HOST-SIDE ADMIT/ROSTER (2026-07-04)".
+    pub instrument_host_accept: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so
