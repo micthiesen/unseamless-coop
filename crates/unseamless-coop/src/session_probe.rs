@@ -675,6 +675,13 @@ fn log_join_blob_parse(_name: &'static str, regs: *mut Registers) {
 const HOST_ADMIT_OFFSET: usize = 0x1_4264_0e30 - 0x1_4000_0000;
 /// Session-layer roster-add `0x140cb31b0` (main-thread update task; `msg` in rdx, `CSSessionManager` in rcx).
 const HOST_ROSTER_ADD_OFFSET: usize = 0x1_40cb_31b0 - 0x1_4000_0000;
+/// Admit gate-c result `0x142640ecd` (`test eax,eax` right after `call [socketmgr+0x40]`): the identity
+/// callback's verdict — `eax==0` accepts, non-zero rejects. Localizes whether a SYN that reached the admit
+/// entry passes the one identity-keyed gate.
+const HOST_ADMIT_GATEC_OFFSET: usize = 0x1_4264_0ecd - 0x1_4000_0000;
+/// Admit SUCCESS `0x142640ee4` (past all gates): the host is creating a connection object for the new peer
+/// (`call [socketmgr_vtable+8]`). If this fires, the host ADMITTED the joiner — a host-side connection exists.
+const HOST_ADMIT_SUCCESS_OFFSET: usize = 0x1_4264_0ee4 - 0x1_4000_0000;
 /// Socket-manager worker-thread P2P drain loop `0x142640bc0` (`this=socketmgr` in rcx). Hooking its entry
 /// confirms the worker actually runs offline and reveals the channel it reads (`[this+0x50]`) + how many
 /// connections it services (`([this+0xc0]-[this+0xb8])/entry`) — the linchpin for whether a joiner SYN on
@@ -724,6 +731,40 @@ fn log_host_roster_add(_name: &'static str, regs: *mut Registers) {
             "session-probe: host-roster-add — 0x140cb31b0(msg={:#x}) on CSSessionManager={g:#x} \
              players_count={count} lobby_state={lobby} (a remote peer becoming a roster entry grows this 1->2)",
             r.rdx,
+        );
+    }));
+}
+
+/// Throttle for [`log_host_admit_gatec`] — a rejected SYN retries every ~2s, so cap the verdict logging.
+static ADMIT_GATEC_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// host-admit-gate-c tracer: `0x142640ecd` (`test eax,eax` after the identity callback). `eax==0` => the
+/// gate ACCEPTS and admit proceeds; non-zero => REJECT (the identity-keyed offline wall, if any). Throttled.
+fn log_host_admit_gatec(_name: &'static str, regs: *mut Registers) {
+    let n = ADMIT_GATEC_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 6 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; eax = the callback's return (low 32 bits of rax).
+        let r = unsafe { &*regs };
+        let verdict = r.rax as u32;
+        log::info!(
+            "session-probe: host-admit-gate-c #{n} — identity callback [socketmgr+0x40] returned {verdict} \
+             ({}) — 0 ACCEPTS (admit proceeds), non-zero REJECTS the new peer",
+            if verdict == 0 { "ACCEPT" } else { "REJECT" },
+        );
+    }));
+}
+
+/// host-admit-success tracer: `0x142640ee4` (past all admit gates). If this fires the host is CREATING a
+/// connection object for the joiner — the host admitted us. The decisive signal that the joiner's SYN
+/// produced a real host-side connection (the step before it can become a `players` roster entry).
+fn log_host_admit_success(_name: &'static str, _regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        log::info!(
+            "session-probe: host-admit-SUCCESS — 0x142640ee4 the host is CREATING a connection for the \
+             admitted peer (all admit gates passed; a host-side connection now exists — the step before roster)",
         );
     }));
 }
@@ -778,11 +819,13 @@ fn install_host_accept_trace(config: &Config) {
         }
     };
     install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
+    install_offset_hook("host-admit-gate-c", exe_base + HOST_ADMIT_GATEC_OFFSET, log_host_admit_gatec);
+    install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);
     install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
     install_offset_hook("host-worker-drain", exe_base + HOST_WORKER_DRAIN_OFFSET, log_host_worker_drain);
     log::info!(
-        "session-probe: host-accept trace installed (host-admit 0x142640e30 + host-roster-add 0x140cb31b0 \
-         + host-worker-drain 0x142640bc0)"
+        "session-probe: host-accept trace installed (host-admit 0x142640e30 + gate-c 0x142640ecd + success \
+         0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0)"
     );
 }
 
@@ -2128,9 +2171,6 @@ pub struct TransportStandupDriver {
     /// otherwise steals every channel-0 datagram before the worker sees it). On when host-accept
     /// instrumentation is armed — the worker-drain / host-admit hooks are the signal then, not our RECV log.
     suppress_drain: bool,
-    /// Sent our one-shot real SYN to the host yet (joiner only). The host admits a brand-new peer on a
-    /// 14-byte DLNW3D SYN (`0x142642830`: header `[0x0e, 0x40, …]`), never on our text ping.
-    syn_sent: bool,
 }
 
 impl TransportStandupDriver {
@@ -2144,7 +2184,6 @@ impl TransportStandupDriver {
             peer_override: [peer_a, peer_b],
             is_host,
             suppress_drain,
-            syn_sent: false,
         }
     }
 
@@ -2442,9 +2481,7 @@ impl TransportStandupDriver {
         let seq = self.ping_seq.wrapping_add(1);
         let suppress_drain = self.suppress_drain;
         let is_host = self.is_host;
-        let send_syn_done = self.syn_sent;
         let mut accepted_ok = false;
-        let mut syn_fired = false;
         // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
         // each slot below is a documented method with the win64 signature transmuted here. Buffers are
         // stack-local and outlive each call. Firewalled: a Rust panic is caught; a hard fault surfaces
@@ -2498,17 +2535,18 @@ impl TransportStandupDriver {
             // (len high). The remaining 12 bytes are the connection-request payload (host doesn't gate on
             // them at admit; a full handshake would). Charted 2026-07-04, docs/SESSION-DRIVE.md >
             // "HOST-SIDE ADMIT/ROSTER". One-shot: we're probing whether the admit path fires at all offline.
-            if !is_host && !send_syn_done {
+            // Repeat on the ping throttle (a real connect retries its SYN until the peer answers), not
+            // one-shot: the first reaches the host's admit path 0x142640e30; if the host creates a
+            // connection, later ones match it and feed it (0x142643db0) instead. Send on channel 30 (the
+            // channel the host worker drains), never our probe channel 0.
+            if !is_host && do_ping {
                 let mut syn = [0u8; 14];
                 syn[0] = 0x0e;
                 syn[1] = 0x40;
-                // Send on the channel the host WORKER reads (30, rig-observed), not our probe channel 0 —
-                // the worker only drains channel 30, so a SYN on 0 is never admitted.
                 let ok = send(iface, peer, syn.as_ptr(), syn.len() as u32, P2P_SEND_RELIABLE, GAME_WORKER_CHANNEL);
-                syn_fired = true;
                 log::info!(
                     "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to host {} on channel {GAME_WORKER_CHANNEL} = {ok} \
-                     (should trip host-admit 0x142640e30 — this is the channel the host worker drains)",
+                     (trips host-admit 0x142640e30 — the channel the host worker drains)",
                     unseamless_core::diagnostics::peer_tag(peer),
                 );
             }
@@ -2531,9 +2569,6 @@ impl TransportStandupDriver {
         }));
         if accepted_ok {
             self.accepted = true;
-        }
-        if syn_fired {
-            self.syn_sent = true;
         }
         if do_ping {
             self.ping_seq = seq;
