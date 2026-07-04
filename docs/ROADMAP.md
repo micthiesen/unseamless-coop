@@ -59,18 +59,14 @@ Shipped to `main`, rig-verified where applicable:
 
 ## Wave 2 — in progress
 
-The out-of-band connection stack (rungs 1, 2, 4) is shipped and **now CONFIRMED live across two real
-machines** in the first two-player friend test (2026-06-27): the joiner-finds-host leg of rung 4 and the
-rung-2 side-channel link both work (`coop: linked … versions match`; the `coop_connect` report showed
-`lobby_created`, `host_id resolved`, `handshake reached`, `version match`, and sent 2674 / received 2011
-messages bidirectionally). So rungs 1, 2, 4 are done *and verified peer-to-peer*. **Rung 3, driving the
-game's own session so players see each other in-world, is the headline-next** (see below). Two findings
-from that session: the in-game multiplayer items are **greyed out offline** (outside EAC), so the rung-3
-FSM can't be triggered the normal way. We first hunted the item-grey gate to re-enable them, but **three
-static candidate families were rig-eliminated** (`is_offline()`, `IsEnableOnlineMode()`, the cached
-online-available chain — see [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), so that hunt is
-**parked**. The approach pivoted (2026-06-28) to **driving `CSSessionManager` directly** — chart and call
-the create/join initiation function, no item needed (the multiplayer items become removable harness). The
+The out-of-band connection stack (rungs 1, 2, 4) is shipped and **CONFIRMED live across two real
+machines** (2026-06-27 friend test: `coop: linked … versions match`, bidirectional traffic). **Rung 3,
+driving the game's own session so players see each other in-world, is the headline-next** — and as of
+**2026-07-04 its hardest unknown, the transport, is SOLVED**: we stand up the game's own DLNW3D transport
+ourselves offline and have rig-proven its legacy P2P works two-machine (rig + Deck). Only the "seam" to
+the session FSM remains. Full state in the rung-3 callout below. *(The earlier item-grey-gate hunt —
+three static candidate families rig-eliminated, [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) —
+is now **moot for the connection**: the transport-leg path sidesteps the multiplayer items entirely.)* The
 **overlay crashes on native Windows**, a pre-release blocker — **ROOT-CAUSED (mechanism) 2026-07-01:
 not DX12/NVIDIA at all.** The friend trace run showed the present hook, imgui init, and rendering
 all healthy on native NVIDIA; his WER record then pinned the death at **`XINPUT1_4.dll+0x9a65` =
@@ -141,57 +137,54 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-06-29) — PICK UP HERE in a new session; full detail in
-  > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md):** the
-  > create/join initiation is **charted** and direct-drive is **rig-PROVEN** — calling the create
-  > wrapper `0x140cad4c0` on `[G]` (no item, no peer) moves `lobby_state` off `None`. **Corrected blocker
-  > (write-watch run):** the Arxan gate `0x140cb4b50` is **NOT** the wall — with
-  > `bypass_session_create_gate` (flips its `jne→jmp`) + `enable_offline_multiplayer` applied, a hardware
-  > write-watch on `[G]+0x24` **HIT at `RIP=0x140cb2086`** (the leg-B store `mov [this+0x24],eax` @
-  > `0x140cb2083`), so control **reaches the network-create vmethod (leg B)** — which returns `eax=0`
-  > offline → `FailedToCreateSession`. (The earlier "gate still rejects, `[G]+0x24=0`" note was a
-  > *peek* artifact: peek can't tell never-written from leg-B-wrote-`0`; the write-watch can, and shows
-  > leg B ran.) **Leg B now captured + charted:** the create vmethod is **`0x1423f5c00`** (resolved live
-  > via `this→*(this+0x60)→+0x710→VT=*()→VT[1]`; CLEAN, not Arxan), and it returns 0 on any of **three
-  > early rejects** — `*(NetworkSession+0x10)==0` (@`0x1423f5c4f`), `vtable[0xe8](…)==false` (@`0x1423f5c69`),
-  > or `vtable[0x108](…)==null` (@`0x1423f5c87`); see [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted".
-  > **Reject #1 forced but insufficient → root cause CONFIRMED (2026-06-29 in-world rig):** forcing
-  > `NetworkSession+0x10` nonzero did **not** unblock; create passes every static gate (rejects #1/#2/#3 +
-  > the 4th gate) then dies in **leg B's tail capacity check** — the session-slot array is **capacity 0**
-  > offline (`cmp count,[rbx+0x20]; jae fail`, `rbx=[[NetworkSession+8]+0x48]`, `[rbx+0x20]==0`), because no
-  > real match/lobby allocated it, so the finished session has nowhere to be stored. It is **not** OOM, the
-  > gate, the 4th gate, or the finalize registry (superseded hypotheses, tombstoned in SESSION-DRIVE.md — incl.
-  > the earlier wrong note that `0x1423fa1b0`'s `0x144842d28` read was the item-grey service; it's a hash
-  > modulus, no proven link). **NEXT (the real fix): drive create with a live rung-4 lobby + a real peer**
-  > (2-player — a real peer is what sizes the slot array) — set `drive_create` + `bypass_session_create_gate`
-  > + `force_netsession_ready` on both machines. Keep `bypass_session_create_gate` ON (confirmed prerequisite).
-  > Tooling ready:
-  > the cdylib drive-probe (`[debug.probes] drive_create`), `scripts/re/watch-write.py` (sudo-free
-  > peek + HW write/rw-watch), and `rig.sh cycle` reaches in-game autonomously. The **create** success path,
-  > the **join** leg, and the real two-player in-world test all need a friend now (a peer sizes the slot
-  > array); solo, only the capacity-0 **failure** mode is confirmable.
+  > **State (2026-07-04) — the transport is SOLVED; only the "seam" to the session FSM remains. PICK UP
+  > at thread 2 below. Full detail in [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN" +
+  > [SESSION-DRIVE.md](SESSION-DRIVE.md) + [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md).**
+  >
+  > **SOLVED — create initiation + real session state.** Driving create (`0x140cad4c0`) moves
+  > `lobby_state None→TryToCreateSession`; driving the container's real session-established handler
+  > (`ManagerImplSteam@DLNR3D::0x1423f4870`) populates genuine session state (veto bit + real SteamID).
+  > Every create gate is charted + satisfiable. (The old "leg-B slot-array capacity-0" blocker is
+  > **superseded** — it was downstream of the real wall below.)
+  >
+  > **THE REAL WALL WAS THE TRANSPORT — now cracked.** After `TryToCreateSession` the session dispatches
+  > vmethods on the connection at `[container+0x708]`, null offline; fabrication is a proven dead end.
+  > That connection is a **`SteamConnection@DLNW3D`** on a lower transport namespace (**DLNW3D**) riding
+  > **legacy `ISteamNetworking006`** P2P. A live scan proved the whole transport is **dormant offline**
+  > (0 objects). Three workers charted it end-to-end; the key fact: legacy P2P is **addressed by CSteamID
+  > alone**, so the un-forgeable server broker-blob (`join_data`) is **unneeded** — we only need the
+  > rung-4 peer SteamID64. **Decision: inject at the transport leg (path C) — stand the transport up
+  > ourselves and feed it the peer; don't intercept FromNet, don't crack the item-grey signal (moot).**
+  >
+  > **RIG-PROVEN (2026-07-03/04):**
+  > - We **build the entire DLNW3D transport ourselves offline** — `SteamServiceImpl` +
+  >   `SteamConnectionManager` + `SteamConnection`, all constructed off the real game heap
+  >   (`0x144842d38`), game alive, `scan-vtable.py` confirms each (`[debug.probes] stand_up_transport`).
+  > - **✅✅ TWO-MACHINE (rig + Steam Deck): the game's legacy P2P works offline.** Both machines drove the
+  >   game's own `ISteamNetworking006` (`Accept` + `Send`/`Read`) at each other's SteamID64 and exchanged
+  >   packets **bidirectionally + sustained, no matchmaking** (`game-p2p — RECV "USC-GAMEP2P#N"` on both).
+  >   ERSC's premise — skip the matchmaker, feed the peer SteamID64 — is validated end-to-end.
+  >   (`[debug.probes] p2p_test_peer_a/_b` feed both SteamIDs so no manual Open/Join link is needed.)
+  >
+  > **REMAINING — thread 2, the "seam" (the last piece to `Host`):** wire the proven transport into the
+  > game's session. `[container+0x708]` wants a **refcounted DLNR3D-level connection** (create refcounts
+  > `[+0x708+8]`, so it's *not* a raw `SteamConnection` — it's a wrapper on the DLNW3D transport). Chart
+  > that object's type + how it's populated (the container's connection-event callbacks
+  > `0x1423f44d0`/`0x1423f4560` alloc per-connection objects on events), build/wire it like the DLNW3D
+  > objects with `+0x8`=iface / `+0x128`=peer, land it at `+0x708`, then drive create → `Host`.
 
-  **Alternative routes to the rung-3 gate (so we don't forget):**
-  - **Steam Deck as player 2.** The "second machine" needn't be a friend — `scripts/deck.sh` drives the
-    Deck as the joiner over SSH, satisfying the peer requirement on your own hardware. The
-    [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) + the `rung3-create-drive` guide are staged for it.
-  - **Static-decompile the slot-array allocator — CHARTED + fabrication rig-tested, NECESSARY BUT NOT
-    SUFFICIENT (2026-07-03).** Done: the checked array is three inline fields on the `NetworkSession`
-    (= `DLNR3D::SessionManagerSteam`) at `+0x18` base / `+0x20` cap / `+0x24` count (correcting the old
-    `[[NetworkSession+8]+0x48]` mislabel — that expr is only leg B's cleanup return-pool), and nothing
-    sizes it solo (the slot-notify vmethods and `session_player_limit` are stubs; only a real Steam
-    session populates it). So we tried **fabricating** the array (`[debug.probes] fabricate_slot_array`):
-    on the solo rig it sized the array in place (`capacity=16`), clearing leg B's tail `cmp
-    count,capacity`, **but create still returned `FailedToCreateSession`** — the sized array is not the
-    last blocker. So fabrication is *not* a solo shortcut; **the 2-player drive (Steam Deck / friend)
-    remains the path to rung-3 create.** Full result in [SESSION-DRIVE.md](SESSION-DRIVE.md) >
-    "Slot-array allocator charted". An **annotated** community / other-mod Ghidra DB of the
-    session/network subsystem would still accelerate the remaining RE (and the identity-map + toggle-lever
-    RE below). *Clean-room (CLAUDE.md):* read any such decompile to understand the **game's** behavior and
-    write our own from that — never transcribe its pseudocode/annotations; if it's ERSC's own
-    decompilation, study the game, not ERSC.
-  - **Validating the overlay fix** has its own non-2-player alternative (the VM XInput-collision repro) —
-    see the Wave-2 intro above.
+  **Seamlessness (independent, additive) — one armed gate, charted.** All game-driven co-op disconnects
+  (boss defeat, area transition, death, host migration, remote-leave) funnel through **one primitive:
+  `leave_session 0x140cae730`** (sole out-of-line writer of `lobby_state=OnLeaveSession`, 24 callers) +
+  one inlined twin (`0x140cb08bc`). An armed flag there suppresses every game-driven disconnect (symmetric
+  — both peers run our mod); do **not** gate the low-level teardown handler `0x1423f46d0`. Then an
+  *additive* re-sync layer across area transitions. See [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md).
+
+  **RE reference docs (this wave):** [COOP-FLOW-FINDINGS.md](COOP-FLOW-FINDINGS.md) (item-use → FromNet
+  spine), [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md) (the transport injection point),
+  [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md) (the disconnect chokepoint). Tooling:
+  `scripts/re/scan-vtable.py` (is-class-X-live), `scripts/re/watch-bt.py` (write-watch + backtrace),
+  `scripts/deck.sh` (Deck as player 2).
 
   It unblocks:
   - **The in-world session itself.** Open/Join/Leave already drive the connection layer (lobby + the

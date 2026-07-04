@@ -1,5 +1,27 @@
 # Driving a Session Directly (rung-3 call spec)
 
+> ## STATUS (2026-07-04) — read this first
+>
+> **The rung-3 transport is SOLVED; only the "seam" to the session FSM remains.** The definitive plan +
+> current state lives in **[COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN"**. In short:
+> - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; driving the container's
+>   session-established handler (`0x1423f4870`) populates real session state.
+> - **The real wall was the TRANSPORT** (`[container+0x708]` = a `SteamConnection@DLNW3D` on legacy
+>   `ISteamNetworking006`, dormant offline). **Cracked:** we now **build the whole DLNW3D transport
+>   ourselves offline** and rig-proved its **legacy P2P works two-machine** (rig + Deck exchange packets,
+>   no matchmaker). See "TRANSPORT CHARTED" + "RIG-PROVEN … DORMANT offline" below (the current sections).
+> - **REMAINING (thread 2):** the seam — wire the transport into a refcounted DLNR3D connection object at
+>   `[container+0x708]` → drive create → `Host`. Plus the seamless teardown gate
+>   ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
+>
+> **Reading guide for the rest of this doc:** the top half (SDK survey, drive requirements, AES key,
+> ordering) is the still-useful call spec. The long **"Why a direct create fails offline"** investigation
+> (from that heading down to "TRANSPORT CHARTED") is the **historical create-veto RE** that *led* to
+> discovering the transport is the wall — kept for its re-derivation facts (the create gates, the
+> container fields `+0x7c0`/`+0x708`/`+0x7f8`), but its chronology and its many superseded/disproven
+> hypotheses are no longer the live picture. The **TRANSPORT CHARTED**, **RIG-PROVEN**, and **DLNW3D
+> service standup chain** sections are the current, load-bearing ones.
+
 What it takes to **drive a `CSSessionManager` session directly** — so that the moment the create/join
 initiation functions are charted (the rung-3 RE in [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) /
 [SESSION-RE-FINDINGS.md](SESSION-RE-FINDINGS.md)), we already know exactly **how to call them**: the
@@ -735,118 +757,14 @@ passed, slot array sized, real peer + live lobby present), so the cheap-combinat
 The next confirmation is the finalize-handle probe below, with the game's own match setup as the model
 (protocol reference: vswarte's `waygate-server`), or ERSC-style session neutralization as the fallback.
 
-### Leg B Post-Capacity Tail Charted: Finalize Handle, Not a Later Store Reject
+### Leg B post-capacity tail (finalize handle) — TOMBSTONE (disproven; superseded by the transport solution)
 
-> **RIG RESULT (2026-07-03) — the finalize-handle hypothesis below is DISPROVEN: leg B never reaches
-> its finalize tail.** Wired both the fires-always finalize-result hook (`0x1423f5cb5`, right after
-> `call 0x1423fab40`) and the failure-only cleanup hook (`0x1423f5cd2`), ran the drive (solo-fabricate
-> and fabricate+peer). **Neither hook ever fired**, though both installed (prologue-verified). The
-> observed sequence is `legb-entry REACHED (cap=0)` → `fabricate (cap=16)` → `create-gate4 REACHED` →
-> `drive-create returned false` — with **no** `legb-finhandle`/`legb-finalize`. So on the failure path
-> leg B exits **before** its finalize/store tail (`0x1423f5cb0..`), i.e. the whole tail chart below —
-> finalize handle, registry-id counter, slot store — is **off the executed path** and cannot be the
-> blocker. Meanwhile `create-gate4` (`0x1423fd7a0`) *is* reached and, by its logged fields
-> (`+0x3b0=35000`, `+0x3b4=5000`, helper `[6,30000,…]` all nonzero), should **pass** its charted veto.
-> **New model:** the real reject is a branch **between `create-gate4` and the finalize call** —
-> either `create-gate4` returns false for a reason beyond the two charted fields, or a separate check
-> right after it sends leg B to an early failure exit. The static chart below is kept as the (partial,
-> now-superseded) tail anatomy, not the failure explanation.
->
-> **Static follow-up (2026-07-03, same image) — the veto is create-gate4's HELPER `0x1423faf60`.**
-> Disassembling leg B: the branch that gates the finalize tail is `0x1423f5c8f: call [rdx+8]`
-> (= `create-gate4` `0x1423fd7a0`) → `0x1423f5c92: test al,al` → `0x1423f5c94: jne 0x1423f5cab`. The
-> finalize path (`0x1423f5cab`, incl. `0x1423f5cb5`/finhandle) is reached **only when gate4 returns
-> nonzero**. finhandle never fired ⇒ **gate4 returned 0**. Disassembling gate4 (`0x1423fd7a0`): it
-> early-returns false only when **both** `[rcx+0x3b0]==0 && [rcx+0x3b4]==0`; ours are `35000`/`5000`,
-> so it skips that and `call 0x1423faf60` (the helper) → `test al,al; je ret-false`. So the helper
-> `0x1423faf60` is returning 0 (or gate4's tail past `0x1423fd7cc` vetoes). The helper's `+0x68..0x78`
-> fields (`[6,30000,…]`, all nonzero) are **not** the whole story — it fails for a reason past them.
-> **DONE (2026-07-03): see "create-gate4 Helper `0x1423faf60` Charted" below.** The helper's return-0 is
-> its first predicate past the five `[6,30000,…]` config-field checks: an **Arxan cookie-encoded vmethod**
-> (`[[session_obj+0x58]+8]` = container-vtable `0x1431f8360` slot `+8` → trampoline `0x14251c480`) whose
-> real target is not statically decodable; every other return-0 in the helper is allocation-shaped. A
-> runtime probe reading that vmethod's `al` (Hook B) + the helper's return at gate4 (Hook A) is specced
-> there. This is the true rung-3 create blocker, not the finalize handle.
-
-Static re-read of leg B (`0x1423f5c00`, same 2026-06-02 image) corrects the "post-store reject" wording
-above: there is **no reject after a successful slot-array store**. Once the tail executes
-`base[count] = session_obj; count++` at `0x1423f5cc9..0x1423f5ccd`, it jumps straight to unlock and
-returns the value already in `esi`. So if the rig logs `fabricate-slot-array` and the wrapper still gets
-`eax=0`, the decisive branch is one of the two checks that can reach the cleanup block at `0x1423f5cd2`
-**before** the store:
-
-- `0x1423f5cb0` calls finalize helper `0x1423fab40(session_obj, mode)`.
-- `0x1423f5cb5` copies the helper's return to `esi`; `0x1423f5cb7` tests it.
-- `0x1423f5cb9` branches to cleanup if the helper returned `0`.
-- Only if that value is nonzero does leg B run the already-charted capacity check
-  (`0x1423f5cbb..0x1423f5cc1`) and store.
-
-The capacity check is now instrumented and fabricated, so the remaining likely zero producer is
-`0x1423fab40`, not a later post-store call. The helper is not merely "allocation succeeded": it calls
-the generic session-object registry helper `0x1423fa1b0` and returns a dword from the backing node behind
-the registry entry (`entry+0x30 -> node+0x10`). If the registry entry is null, it returns `0`; if the
-entry exists but the node's `+0x10` id is `0`, it also returns `0`, and leg B treats that as create
-failure.
-
-The path that can manufacture a zero id is visible in the registry helper:
-
-- `0x1423fa1b0` creates a registry entry via the session object's `+0xd8` vmethod
-  (`0x1423fdfa0`), then creates/allocates the backing node with `0x1423fa100`.
-- `0x1423fa100` uses a counter at `container+0x48` as the new node id, then increments the counter.
-  Here `container = session_obj+0x58+0x670`; since `session_obj+0x58` is copied from
-  `NetworkSession+0x08` by the session-object constructor (`0x1423fd300`), this counter is
-  `[[NetworkSession+0x08]+0x6b8]`.
-- The node constructor `0x1423f7290` stores that id at `node+0x10`. If the counter starts at `0`, the
-  first node's id is `0`; `0x1423fab40` returns that `0`; leg B jumps to cleanup at `0x1423f5cd2`; the
-  slot-array store never happens even though capacity has been fabricated.
-- If the counter starts at `-1`, `0x1423fa100` first normalizes it to `1`, so the first node id is
-  nonzero. That makes `0x1423f5cb7` pass and the fabricated slot array should let the store succeed.
-
-So the concrete reject site to confirm live is **`0x1423f5cb7` in leg B**, testing the finalize handle
-returned by **`0x1423fab40`**. The likely field behind that zero handle is the registry-node id counter
-at **`[[NetworkSession+0x08]+0x6b8]`** being `0` when create is driven outside the game's own match setup.
-That is distinct from the slot array at `NetworkSession+0x18/+0x20/+0x24`: fabrication clears capacity,
-but it does not seed the registry id space.
-
-**Proposed runtime probe (do not need the rig worker to wire this):** add one more `gate-trace` hook next
-to `legb-entry`/`create-gate4`, then run one fabricate+peer rig cycle. Preferred hook:
-**`0x1423f5cb5`** (right after `call 0x1423fab40`, bytes
-`8B F0 85 C0 74 17 8B 43 24 3B 43 20 73 0F`). In the callback:
-
-- read `rbx` as `NetworkSession`, `rdi` as `session_obj`, and `eax` as the finalize handle before the
-  original `mov esi,eax`;
-- read slot `cap/count` from `NetworkSession+0x20/+0x24`;
-- read `sub = *(session_obj+0x58)` and, if non-null, `post_finalize_next_id = *(sub+0x6b8)` after the
-  helper returns;
-- log one line like
-  `session-probe: gate-trace legb-finalize handle=<eax> post-next-id=<post_finalize_next_id> cap=<cap> count=<count>`.
-
-That `post-next-id` value is post-consumption: if the failing id was created from a pre-increment counter
-of `0`, the post-finalize read is expected to show `1`. For direct proof of the consumed id, add a second
-temporary hook inside `0x1423fa100` around the node construction path and log the id passed into
-`0x1423f7290` / written to `node+0x10`.
-
-If the hook installer dislikes relocating that short in-function branch window, use the cleanup target
-**`0x1423f5cd2`** instead (bytes `48 8B 07 48 8B CF FF 50 10 48 8B 43 08`). That hook fires only on
-failure, but it still distinguishes the cause: `esi==0` means the finalize handle failed at
-`0x1423f5cb7`; `esi!=0` means finalize passed and the cleanup came from the capacity branch.
-
-Expected outcomes:
-
-- `handle=0`, `post-next-id=1`, `cap=16`, `count=0` with fabricate armed confirms the likely zero-id
-  model by inference: cleanup is entered from `0x1423f5cb7`, before the store, after consuming id `0`.
-- `handle!=0`, `count>=cap` would mean the capacity fabrication did not land on the exact object leg B
-  uses, or the count changed before the tail check.
-- `handle!=0`, `count<cap`, followed by wrapper `false` would contradict this static chart, because the
-  only path after the store returns that nonzero handle; in that case hook `0x140cb2083` (the caller's
-  `mov [CSSessionManager+0x24],eax`) and log the actual leg-B return in the wrapper.
-
-Re-derive after a game update: find leg B by the `NetworkSession` vtable slot `[+0x08]`, then locate the
-unique tail region around the finalize helper call, the finalize-result test, the
-`NetworkSession+0x24`/`+0x20` capacity check, and the slot-count increment. The cleanup target is the
-block that calls `session_obj->vtable[0x10]`, returns the session object to
-`[NetworkSession+0x08]+0x48`, then zeroes `esi`.
-
+The "leg B's tail rejects on a zero finalize handle" hypothesis was **rig-DISPROVEN** (2026-07-03): leg
+B never reaches its finalize tail on the failure path (the finalize/cleanup hooks never fired). It was
+also mooted entirely by the later finding that the real wall is the **transport** (see the STATUS block
+at the top + "TRANSPORT CHARTED"), not any leg-B tail reject. Re-derivation facts that survive: the slot
+array is three inline `NetworkSession` fields (`+0x18` base / `+0x20` cap / `+0x24` count), and the
+finalize helper is `0x1423fab40`. Detail removed to compact; git history has the full disproven chart.
 ### create-gate4 Helper `0x1423faf60` Charted: the Veto Is an Arxan-Encoded Vmethod
 
 > **RIG CONFIRMED (2026-07-03, solo-fabricate in-world) — the Arxan vmethod IS the veto.** Wired Hook A

@@ -1,5 +1,13 @@
 # Rung-3 Two-Machine Create-Drive Runbook
 
+> **SUPERSEDED (2026-07-04) — this create-drive experiment is not the current path.** It tested whether
+> a real peer sizes leg B's slot array; the answer turned out to be downstream of the real wall (the
+> **transport**, now solved: we build the DLNW3D transport ourselves offline and rig-proved its P2P works
+> two-machine). The current plan is the transport leg + the seam to the session FSM — see
+> [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN" and [SESSION-DRIVE.md](SESSION-DRIVE.md)'s
+> STATUS block. The two-machine *mechanics* below (deck.sh, the config, reading both logs) are still the
+> right harness; only the specific `drive_create`/slot-array framing is superseded.
+
 The exact, copy-pasteable procedure for the **rung-3 create-drive experiment on two machines** — the
 run that answers the one question the solo rig fundamentally can't. Staged now so that the moment a
 second machine is available (a friend or the Steam Deck), the orchestrator sets the config below,
