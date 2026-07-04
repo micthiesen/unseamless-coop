@@ -206,6 +206,19 @@ the one genuinely hard step — driving the game's own session so players see ea
 > send-home, 55s/180s timeouts) — lifecycle-heavy, which is *why* the armed gate matters: connect via the
 > summon flow, then suppress the lifecycle → seamless.
 >
+> **✅✅ TWO-MACHINE BREAKTHROUGH (2026-07-04, rig + Steam Deck) — the game's legacy P2P works offline.**
+> Both machines hand-built the DLNW3D transport, then drove the game's own **`ISteamNetworking006`**
+> (`AcceptP2PSessionWithUser` + `SendP2PPacket`/`ReadP2PPacket`, `stand_up_transport` phase 2) at each
+> other's SteamID64 — and **exchanged packets bidirectionally, sustained, offline, with no matchmaking**
+> (`game-p2p — RECV … "USC-GAMEP2P#N"` on both). This validates path C's core premise end-to-end: the
+> game's transport is legacy P2P **addressed by CSteamID alone**, so skipping the FromSoft matchmaker and
+> feeding the rung-4 peer SteamID64 is sufficient — exactly ERSC's model. (The link needs no manual
+> Open/Join for this: `[debug.probes] p2p_test_peer_a/_b` feed both SteamIDs, each machine picks the other.
+> Note the mod's rung-2 side-channel rides the *modern* `ISteamNetworkingMessages`; this proved the
+> *legacy* API the game itself uses, which was the open question.) **What remains is purely the seam**
+> (thread 2): wire the peer into the `SteamConnection` object (`+0x8` iface, `+0x128` peer) and land it at
+> `[container+0x708]` so the game's *session* rides this proven transport → drive create → Host.
+>
 > **Build order (next) — inject at the transport leg (C):**
 > 1. **Stand up the DLNW3D transport ourselves, offline (the crux).** ✅ **First increment RIG-PROVEN
 >    (2026-07-03, `stand_up_transport` probe):** `ISteamNetworking006` resolves offline (non-null), and a
