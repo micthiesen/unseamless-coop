@@ -1,4 +1,4 @@
-# ERSC Live-Capture Findings (2026-07-05)
+# ERSC Live-Capture Findings (2026-07-04)
 
 What a **real, working 2-player ERSC co-op session** looks like in memory, captured live. This is the
 first time we've observed a *successful* session establishment (rather than our offline attempts), and
@@ -144,3 +144,33 @@ precise and the `+0x168`/gate-c rabbit hole is closed:
 
 Superseded by this doc: the "avenue (a) synthesize the member + real `+0x168`" plan and the "joiner SYN
 → gate-c admit" framing in SESSION-DRIVE.md / CLAUDE.md status (both kept as history).
+
+## Re-running this capture (for the writer-trace follow-up, task #16)
+
+The exact setup, so a future session can stand up a live ERSC session and watch it fast:
+
+1. **Rig → real ERSC:** `scripts/rig.sh restore` (swaps our mod off, ERSC on). Password is in
+   `…/ELDEN RING/Game/SeamlessCoop/ersc_settings.ini` (`cooppassword = salmon`, `save_file_extension =
+   co2`). When done, `scripts/rig.sh apply` to put our mod back.
+2. **Windowed launch:** `printf '1920 1080\n' > "${XDG_RUNTIME_DIR}/unseamless-rig-gamescope"` then
+   `steam -applaunch 1245620` — the rig's `gamescope-wrapper.sh` consumes the one-shot flag and runs
+   windowed (no flag = fullscreen). Michael loads his co-op character and **uses the in-game items to
+   host** (this ERSC is item-driven host/connect, not auto-seamless); the game session only forms when a
+   real peer connects — a solo host shows `lobby_state=0` and none of the session objects.
+3. **Deck → ERSC peer** (`DECK_HOST=deck@10.10.1.57 DECK_PORT=2222`): back up the Deck's current mod
+   (`start_protected_game.exe` + our `dinput8.dll`) to `~/deck-mod-backup-*`, **remove our `dinput8.dll`**
+   (ERSC doesn't use it), then rsync the rig's `start_protected_game.exe` + `SeamlessCoop/{ersc.dll,
+   ersc_settings.ini,locale}` to the Deck's Game dir. **Version must match** (both buildid `22984413` —
+   copying the rig's exact `ersc.dll` guarantees the ERSC match). Deck runs its **own** Steam account
+   (`testthiesen` `76561198681631498`, MostRecent, separate from the rig's main), co-op save =
+   `…/compatdata/1245620/pfx/…/EldenRing/76561198681631498/ER0000.co2` (copy the DLC-free `ER0000.uco`
+   test save to `.co2`; already signed for the Deck account). Michael launches ELDEN RING on the Deck and
+   joins. (No Steam-friends requirement — confirmed both here and in the rung-4 tests.)
+4. **Capture (standalone, no mod):** `[G]=0x143D7A4D0` holds the live `CSSessionManager*`; `lobby_state`
+   at `[csm+0xc]`. Enumerate objects with `scripts/re/scan-vtable.py <vtable>…` (now chunks the high heap;
+   the session objects live at `0x7fff…`). The vtables of interest are in the table above. Read fields with
+   `/proc/<pid>/mem` (see the capture scripts, backed up in `~/Documents/ersc-live-capture*.txt`).
+5. **Writer-trace (the follow-up's point):** arm `scripts/re/watch-write.py --addr <A> --access write`
+   (or `watch-bt.py` for a backtrace) on a **stable** anchor while a fresh join happens — the heap objects
+   realloc per session, so use a static/embedded anchor: `lobby_state` at `[csm+0xc]` (catches host-setup
+   FSM writers on a leave+rehost), or the member-registry root `container+0x1e8` (`0x143dcd3d0+0x1e8`).

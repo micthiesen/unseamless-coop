@@ -70,7 +70,7 @@ driving the game's own session so players see each other in-world, is the headli
 its legacy P2P works two-machine (rig + Deck). **What remains is the SEAM: the game's session-*establishment*
 object graph.**
 >
-> **★ DECISION (2026-07-05) — pivot to the "let the game establish it" (true ERSC) model.** A 3-lane RE pass
+> **★ DECISION (2026-07-04) — pivot to the "let the game establish it" (true ERSC) model.** A 3-lane RE pass
 > this session proved the offline hand-synthesis avenue is a principled dead end: every piece missing offline is
 > a *runtime object the establishment flow builds* — the live-session array capacity is 0 offline so a created
 > `SessionSteam` is destroyed instantly (Lane C); add-member wants two ref-counted *game handle objects*, not a
@@ -85,7 +85,7 @@ object graph.**
 > paused, not killed** — if the capture shows establishment reduces to a small reproducible field/call set, we
 > re-open it; the capture arbitrates. **► Next: a live `watch-write.py` read of a real ERSC establishment at the
 > charted offsets, then reproduce the sequence. Full plan + offsets: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★
-> DECISION (2026-07-05)".** *(Superseded background — the older "seam = wire the connection sub-objects" and both
+> DECISION (2026-07-04)".** *(Superseded background — the older "seam = wire the connection sub-objects" and both
 > hand-build/native-build avenues — is preserved in the rung-3 callout below and in SESSION-DRIVE.md.)*
 *(The earlier item-grey-gate hunt —
 three static candidate families rig-eliminated, [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) —
@@ -160,8 +160,8 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **★ CURRENT DIRECTION (2026-07-05): pivot to "let the game establish it" — see the DECISION in the Wave-2
-  > intro above and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-05)".** Next action is a live
+  > **★ CURRENT DIRECTION (2026-07-04): pivot to "let the game establish it" — see the DECISION in the Wave-2
+  > intro above and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-04)".** Next action is a live
   > `watch-write.py` capture of a real ERSC establishment at the charted offsets, then reproduce the sequence.
   > **The blocks below are the historical hand-synthesis trail (2026-07-02..04) — read them as "ground already
   > explored / why offline was ruled out," not as the current plan.** Reference docs, so we don't re-tread:

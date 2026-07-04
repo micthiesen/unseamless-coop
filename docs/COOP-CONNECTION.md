@@ -144,7 +144,7 @@ the one genuinely hard step — driving the game's own session so players see ea
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
 
-> **★ DIRECTION (2026-07-05): "let the game establish it" (true ERSC model). READ THIS FIRST — the
+> **★ DIRECTION (2026-07-04): "let the game establish it" (true ERSC model). READ THIS FIRST — the
 > callouts below are the historical hand-synthesis trail, now labeled ground-already-explored.** A 3-lane
 > RE pass proved offline hand-synthesis of the session object graph is a principled dead end (array
 > capacity 0 → instant destroy; add-member needs real ref-counted game handle objects; the transport
@@ -155,7 +155,7 @@ the one genuinely hard step — driving the game's own session so players see ea
 > the game's normal session over **Steam P2P** (transport already rig-proven two-machine). It does **not**
 > mean reaching FromSoft's servers. **\* Offline synthesis is paused, not killed** — the capture arbitrates.
 > Full plan + charted offsets + the reachability chain: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION
-> (2026-07-05)".
+> (2026-07-04)".
 
 > **STATE (2026-07-03) — create initiation + real session state are SOLVED; the wall is the game's
 > TRANSPORT layer, which is dormant offline. The finish reduces to a clear architectural choice.** Full

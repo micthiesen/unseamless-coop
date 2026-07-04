@@ -26,7 +26,7 @@ how to build, structure, load, or safely hook the game, read that repo first —
 
 > Status: the fast-moving state + the chosen next step live in [`docs/STATE.md`](docs/STATE.md) —
 > **read that first.** Headline: rungs 1/2/4 + the Steam P2P transport are shipped and
-> two-machine-proven; rung 3 (the in-world session) pivoted (2026-07-05) to the "let the game
+> two-machine-proven; rung 3 (the in-world session) pivoted (2026-07-04) to the "let the game
 > establish it" model — plan in [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "★ DECISION",
 > map in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

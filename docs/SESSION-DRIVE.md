@@ -1,8 +1,8 @@
 # Driving a Session Directly (rung-3 call spec)
 
-> ## ★ DECISION (2026-07-05): pivot rung-3 to the "let the game establish it" (true ERSC) model — READ FIRST
+> ## ★ DECISION (2026-07-04): pivot rung-3 to the "let the game establish it" (true ERSC) model — READ FIRST
 >
-> **★★ UPDATE (2026-07-05, later) — LIVE CAPTURE DONE. See [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md).**
+> **★★ UPDATE (2026-07-04, later) — LIVE CAPTURE DONE. See [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md).**
 > We captured a real working 2-player ERSC session (rig host + Deck joiner) in memory. Two corrections:
 > (1) **`[context+0x168]` is the reject-stub `0x1423fdf00` EVEN in a working session** — the whole gate-c /
 > "install a real member-lookup" theory (avenue a) is a **dead end**; members come from the session layer,
@@ -66,7 +66,7 @@
 >
 > ---
 >
-> ## STATUS (2026-07-05, DLNR3D reframe) — read this FIRST, it corrects the block below
+> ## STATUS (2026-07-04, DLNR3D reframe) — read this FIRST, it corrects the block below
 >
 > **The "member machinery is a runtime closure with no static function" conclusion below was partly wrong.**
 > A fresh xref pass climbed the builder chain out of the DLNW3D transport layer into the **DLNR3D session
@@ -89,14 +89,14 @@
 > **⇒ Reframed plan (matches the goal "let the game build a real member from fed peer info"):** rather than
 > hand-synthesizing the member + context + lookup (avenue a below), **drive the game's own DLNR3D SessionSteam
 > to add a member for the peer SteamID our side-channel already discovered.** That runs the real member ctor →
-> the real context/member wiring the transport admit path expects. Three RE lanes in flight (2026-07-05) to
+> the real context/member wiring the transport admit path expects. Three RE lanes in flight (2026-07-04) to
 > nail the exact drive: (A) which vtable/slot is add-member `0x1423fdf20`, its two identity args, and the
 > `0x1423f7070` session-create call chain; (B) whether `[context+0x168]` ever gets a *non-stub* real lookup
 > installed and by whom (does `0x142639b70` really always write the stub, or conditionally?); (C) where the
 > live SessionSteam instance is stored (reachable from CSSessionManager/socketmgr?) + its vtable slot map.
 > Findings land here when they return.
 >
-> **Lane A result (2026-07-05):**
+> **Lane A result (2026-07-04):**
 > - **add-member `0x1423fdf20` = `SessionSteam` vtable slot 26** (offset `0xD0`).
 > - **Its two args are NOT a raw SteamID** — both `rdx`/`r8` are pointers to intrusive ref-counted objects
 >   (refcount at `obj+8`; the ctor `AddRef`s each), stored on the new member at `+0x70` (arg1) and `+0x78`
@@ -120,7 +120,7 @@
 >   (Q4 unresolved). Tooling caveat: `static.py fn` spills past `ret`/`jmp` into the next function — cross-check
 >   with `func_bounds()`.
 >
-> **Lane B result (2026-07-05) — the `+0x168` question, exhaustive static answer:**
+> **Lane B result (2026-07-04) — the `+0x168` question, exhaustive static answer:**
 > - The context at `[socketmgr+0x48]` is **`DLNW3D::MTInternalThreadSteamSocket`** (vtable `0x1432770b0`,
 >   RTTI-confirmed). The socket-manager itself is **`DLNW3D::SteamConnectionManager`** (vtable `0x143278020`;
 >   slot 3 = worker thread `0x142640bc0`, slot 4 next to admit helper `0x142640e30` — confirms it's "socketmgr").
@@ -144,7 +144,7 @@
 > graph. This is the empirical case for the **real-online-matchmaking (true ERSC) pivot** over offline forcing —
 > see the recommendation being written up top once Lane C lands.
 >
-> **Lane C result (2026-07-05) — live-session storage + full reachability from `CSSessionManager`:**
+> **Lane C result (2026-07-04) — live-session storage + full reachability from `CSSessionManager`:**
 > - **Live sessions are stored in a flat `SessionSteam*[]` array on `SessionManagerSteam`:** `+0x18` = array
 >   ptr, `+0x20` = capacity (dword), `+0x24` = count (dword). Both create drivers (host slot 1 `0x1423f5c00`,
 >   join slot 2 `0x1423f62e0`) do, after a successful `0x1423f7070` create: `if count<cap { array[count++]=session }
