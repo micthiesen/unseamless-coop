@@ -161,6 +161,9 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   > `watch-write.py` capture of a real ERSC establishment at the charted offsets, then reproduce the sequence.
   > **The blocks below are the historical hand-synthesis trail (2026-07-02..04) — read them as "ground already
   > explored / why offline was ruled out," not as the current plan.** Reference docs, so we don't re-tread:
+  > - **[ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) — READ FIRST.** A real 2-player ERSC
+  >   session captured in memory: the full live object graph + offsets, and the two corrections (`+0x168` is
+  >   the reject-stub even when co-op works; the DLNR3D/DLNW3D graph is the real mechanism).
   > - [SESSION-DRIVE.md](SESSION-DRIVE.md) — the rung-3 call spec + all RE (DLNR3D reframe, Lanes A/B/C, the
   >   `CSSessionManager → container → SessionManagerSteam → session-array` reachability chain + every offset).
   > - [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md) — how we stand up the DLNW3D transport ourselves

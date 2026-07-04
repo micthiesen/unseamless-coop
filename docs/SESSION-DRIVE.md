@@ -2,6 +2,17 @@
 
 > ## ★ DECISION (2026-07-05): pivot rung-3 to the "let the game establish it" (true ERSC) model — READ FIRST
 >
+> **★★ UPDATE (2026-07-05, later) — LIVE CAPTURE DONE. See [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md).**
+> We captured a real working 2-player ERSC session (rig host + Deck joiner) in memory. Two corrections:
+> (1) **`[context+0x168]` is the reject-stub `0x1423fdf00` EVEN in a working session** — the whole gate-c /
+> "install a real member-lookup" theory (avenue a) is a **dead end**; members come from the session layer,
+> not the transport admit gate. (2) The full DLNR3D/DLNW3D graph (`SessionSteam`, 6 `SessionMemberSteam`,
+> the context, live `SteamConnectionManager`, **`SteamServiceImpl`** — the standup that's null offline) is
+> all present and enumerated with offsets. The reproduce target is now precise: drive the game's
+> establishment to build `SessionSteam` + members + stand up the transport keyed to the rung-4 peer
+> SteamID64; the one concrete wall is why `SteamServiceImpl` standup (`0x142638b40`) returns null offline.
+> The `+0x168`/gate-c framing throughout the blocks below is **superseded** (kept as history).
+>
 > **We are no longer hand-synthesizing the session object graph offline. We will drive the game's own
 > session-*establishment* machinery, fed our rung-4-discovered peer, and let the game build its own
 > members/context/connection — reproduced from a LIVE CAPTURE of a real working ERSC session.**

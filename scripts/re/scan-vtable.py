@@ -49,31 +49,44 @@ def main():
     needles = {struct.pack("<Q", t): t for t in targets}
     counts = {t: 0 for t in targets}
     mem = open(f"/proc/{pid}/mem", "rb", buffering=0)
+    # Scan every readable region in CHUNK-sized slabs. Do NOT skip large mappings: the Wine/Proton
+    # high heap (0x7fff...) where live game objects live is one big (>1GB) mapping — an earlier
+    # `size > 1GB: continue` silently missed the entire session object graph (found "0" of classes that
+    # were live). CHUNK is a multiple of 8, and we only accept 8-aligned hits, so an aligned vtable
+    # pointer is always fully inside one chunk (never split across a boundary) — no overlap needed.
+    CHUNK = 256 * 1024 * 1024
     for lo, hi, path in read_maps(pid):
-        size = hi - lo
-        if size <= 0 or size > 0x40000000:
+        if hi <= lo:
             continue
-        try:
-            mem.seek(lo)
-            buf = mem.read(size)
-        except (OSError, ValueError):
-            continue
-        for needle, tva in needles.items():
-            start = 0
-            while True:
-                i = buf.find(needle, start)
-                if i < 0:
-                    break
-                if i % 8 == 0:  # aligned -> plausible object header
-                    obj = lo + i
-                    counts[tva] += 1
-                    if counts[tva] <= 8:
-                        dump = " ".join(
-                            f"{struct.unpack_from('<Q', buf, i + k * 8)[0]:#018x}"
-                            for k in range(4) if i + k * 8 + 8 <= len(buf)
-                        )
-                        print(f"  vtable {tva:#x}  OBJ@ {obj:#x}  [{dump}]  ({path or 'anon'})")
-                start = i + 1
+        a = lo
+        while a < hi:
+            n = min(CHUNK, hi - a)
+            try:
+                mem.seek(a)
+                buf = mem.read(n)
+            except (OSError, ValueError):
+                a += n
+                continue
+            if not buf:
+                a += n
+                continue
+            for needle, tva in needles.items():
+                start = 0
+                while True:
+                    i = buf.find(needle, start)
+                    if i < 0:
+                        break
+                    if (a + i) % 8 == 0:  # aligned -> plausible object header
+                        obj = a + i
+                        counts[tva] += 1
+                        if counts[tva] <= 8:
+                            dump = " ".join(
+                                f"{struct.unpack_from('<Q', buf, i + k * 8)[0]:#018x}"
+                                for k in range(4) if i + k * 8 + 8 <= len(buf)
+                            )
+                            print(f"  vtable {tva:#x}  OBJ@ {obj:#x}  [{dump}]  ({path or 'anon'})")
+                    start = i + 1
+            a += n
     print("\n=== summary ===")
     for t in targets:
         print(f"  vtable {t:#x}: {counts[t]} live object(s)")

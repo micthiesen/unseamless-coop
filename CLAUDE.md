@@ -38,9 +38,14 @@ how to build, structure, load, or safely hook the game, read that repo first —
 > native session establishes outside EAC over Steam P2P). This is **not** reaching FromSoft's matchmaking servers
 > (off-limits, EAC): peer discovery stays our side-channel, the session stays Steam P2P. **\* Offline synthesis is
 > paused, not killed** — if the capture shows establishment reduces to a small reproducible field/call set we
-> re-open it. **► Next: a live `watch-write.py` read of a real ERSC establishment at the charted offsets
-> (`SessionManagerSteam+0x18/0x20/0x24`, add-member handles, `MTInternalThreadSteamSocket+0x168`,
-> `[container+0x48]`), then reproduce the sequence → host-admit-success `0x142640ee4` → roster `players=2`.** Plan:
+> re-open it. **★ LIVE CAPTURE DONE (2026-07-05)** — captured a real 2-player ERSC session
+> ([`docs/ERSC-LIVE-CAPTURE-FINDINGS.md`](docs/ERSC-LIVE-CAPTURE-FINDINGS.md)). Two corrections: `[context+0x168]`
+> is the **reject-stub even in a working session** (the gate-c / "real member-lookup" theory is dead — members
+> come from the session layer, not the transport admit gate); and the full DLNR3D/DLNW3D graph (`SessionSteam`, 6
+> `SessionMemberSteam`, the context, live `SteamConnectionManager`, **`SteamServiceImpl`** — the standup that's
+> null offline) is all present + enumerated with offsets. **► Next: drive the game's establishment to build
+> `SessionSteam` + members + stand up the transport keyed to the rung-4 peer SteamID64; the one concrete wall is
+> why `SteamServiceImpl` standup `0x142638b40` returns null offline.** Plan:
 > [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "★ DECISION (2026-07-05)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
