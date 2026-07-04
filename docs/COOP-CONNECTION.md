@@ -161,35 +161,57 @@ the one genuinely hard step — driving the game's own session so players see ea
 >   never stood up offline.** So `+0x708` is null because the layer below it is dormant — the gate is
 >   *flow-entry* (whether the game enters its online session flow), above the connection layer.
 >
-> **The finish — two paths (see SESSION-DRIVE.md > "RIG-PROVEN … DORMANT offline"):**
-> 1. **Ride the game's own transport (ERSC-faithful).** Get the game to enter its online flow so it
->    stands up its *own* DLNW3D transport + session graph, then intercept the **matchmaking handoff** to
->    substitute our rung-4 password-peer (ERSC reuses the game's netcode; it replaces the peer-brokering,
->    **not** the transport). Blocked on the flow-entry / online-availability signal — the **same** signal
->    greying the multiplayer items ([OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)), which has
->    beaten three static passes and needs a runtime trace.
-> 2. **Stand up the DLNW3D transport ourselves.** Charted entry points (factory `0x142638b40`,
->    connection-creator `0x142640560`, connect/register `0x14263b720`/`0x14263b7c0`). Bounded, bypasses
->    the elusive signal, but out-of-flow (needs the live `owner`/config captured at runtime). More than
->    ERSC does.
+> **THE PLAN (2026-07-03, two worker passes + a live check collapsed the "two paths" into one
+> ERSC-faithful route that SIDESTEPS the elusive online signal).** We do **not** drive create directly
+> and we do **not** hand-build the transport. Instead: drive/intercept the game's own **matchmaking
+> (FromNet) request layer** to substitute our password-peer for the FromSoft server, and let the game
+> stand up its *own* DLNW3D transport downstream. The layers, now charted end-to-end:
 >
-> Both terminate at a **two-machine** validation (rig + Steam Deck). **Correction to the old framing
-> below:** the prior "leg B tail slot-array capacity-0 → a real peer sizes it" model is *superseded* —
-> the slot array being empty is downstream of the same dormant transport; sizing it (fabrication or a
-> peer) never reached `Host` because the connection object it needs doesn't exist offline.
+> - **Matchmaking layer (FromNet) — LIVE offline, directly drivable.** A co-op item-use routes
+>   item → SosDb request method → one of 8 `SosSign*Job`s → job `Execute` (vtable slot 3) → a
+>   `FromNet::Request*Params` issued through the **FromNet request dispatcher singleton `0x143d87350`**
+>   (accessor `0x1407a72a0` = `mov rax,[0x143d87350]; ret`; **rig-confirmed non-null offline** =
+>   `0x143b42d58`). The dispatcher's **send virtual is the clean ERSC intercept surface** (summon
+>   `Execute` `0x140a52650`; send at `0x140a528b8` via `[dispatcher]→[+0xb0]→[+0x38]`) — one dispatcher,
+>   8 request types, one send slot. Full chart: [COOP-FLOW-FINDINGS.md](COOP-FLOW-FINDINGS.md).
+> - **The request spine has ZERO online-availability gate checks**, so a direct request-layer call
+>   **dodges the menu-layer grey entirely** — we never have to crack the elusive item-grey signal
+>   (three static passes failed on it; now moot for the connection). Its only preconditions:
+>   `[SosDb+8]==1` (**rig-confirmed already `1` in-world offline** — SosDb `0x143d5ae60`) and the send
+>   reaching a peer — which is exactly what we intercept.
+> - **Transport layer (DLNW3D) — dormant until brokered.** `SteamConnection@DLNW3D` over
+>   `ISteamNetworking006`; **rig-confirmed 0 objects offline.** It stands up *downstream* of the FromNet
+>   broker resolving a peer. So the fix is not to build it (old path 2) or crack a flow-entry gate (old
+>   path 1) — it's to feed the FromNet layer a peer so the game builds the transport itself. Chart:
+>   [SESSION-DRIVE.md](SESSION-DRIVE.md) > "TRANSPORT CHARTED".
 >
-> **Seamlessness is a separate, additive layer (matters regardless of path 1/2).** ERSC's bulk is
-> *suppressing the game's own disconnect events* (send-phantom-home after a boss, area-scoping, return-on-
-> death). Reasoned architecture: gate the **teardown chokepoint** (the orderly "begin leaving the session"
-> transition — `lobby_state → OnLeaveSession` / `request_leave`) behind an *armed* flag we set only for
-> intentional disconnects, so all the logic-driven leave triggers no-op — rather than hooking every event.
-> Both peers run our mod, so the suppression is symmetric. Necessary but not sufficient: seamless also
-> needs the *active* re-sync across area transitions. (Under RE now — worker `teardown-chokepoint`.)
+> **Seamlessness — one armed gate, rig-cheap to add.** All game-driven co-op leaves (boss defeat, area
+> transition, death, host migration, remote-leave) funnel through **one primitive: `leave_session`
+> `0x140cae730`** (sole out-of-line writer of `lobby_state=OnLeaveSession`, 24 callers) + one inlined
+> twin (`0x140cb08bc` in the update task). An **armed flag** at the top of `leave_session` (ahead of its
+> deferred-leave latch) + the twin suppresses *every* game-driven disconnect; symmetric because both
+> peers run our mod. Do **not** gate the low-level teardown handler `0x1423f46d0` (too late; it also
+> catches genuine peer/network-loss we want to honor). Chart:
+> [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md). Seamless still needs an *additive*
+> re-sync layer (keep sync across area transitions) — separate from the gate.
 >
-> **In flight (parallel workers, 2026-07-03):** `teardown-chokepoint` (is the leave path one gateable
-> chokepoint? → docs/SESSION-LIFECYCLE-FINDINGS.md) and `coop-flow` (the item-use → session/transport
-> standup → matchmaking-handoff path, and whether a direct trigger dodges the menu grey →
-> docs/COOP-FLOW-FINDINGS.md).
+> **The session it establishes is the classic guest-phantom summon** (`PhantomJoinData`, warp-in /
+> send-home, 55s/180s timeouts) — lifecycle-heavy, which is *why* the armed gate matters: connect via the
+> summon flow, then suppress the lifecycle → seamless.
+>
+> **Build order (next):**
+> 1. **Chart the FromNet response → transport-standup link** — where a "connect to peer X" broker
+>    response triggers the DLNW3D factory `0x142638b40`; that's the **injection point**. Cross-ref
+>    vswarte's `waygate-server` (below) for the summon/join request+response wire format = *what* to inject.
+> 2. **Drive a summon request offline + hook the dispatcher send** (`0x140a528b8`) to log its params
+>    (validate drivability + read the request struct). SosDb is already ready in-world.
+> 3. **Intercept the send** to substitute our rung-4 password-peer (loopback / Deck SteamID) → confirm
+>    the game stands up its own `SteamConnection@DLNW3D` (`scan-vtable.py`) → two-machine validation.
+> 4. **Arm the teardown gate** (`leave_session`) once a session forms, to keep it alive across events.
+>
+> **Correction to the old framing below:** the prior "leg B tail slot-array capacity-0 → a real peer
+> sizes it" model is *superseded* — that's downstream of the dormant transport; the real move is the
+> FromNet-layer peer substitution, not driving create directly.
 
 > **Protocol reference — `waygate-server` (cloned locally at `../waygate-server`).** vswarte's
 > [Elden Ring matchmaking-server reimplementation](https://github.com/vswarte/waygate-server) (Rust, MIT —
