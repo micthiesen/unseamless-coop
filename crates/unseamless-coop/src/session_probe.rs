@@ -1137,6 +1137,20 @@ const SVC_BASE_CTOR_OFFSET: usize = 0x263b6b0;
 /// Bytes the factory allocates for a `SteamServiceImpl` before base-ctoring it.
 const SVC_SIZE: usize = 0x18;
 
+/// Offset of the DLNR3D/container global heap pointer `0x144842d38` (lazily created — the heap the
+/// container itself is allocated from, so the natural heap for the DLNW3D service/manager).
+const HEAP_GLOBAL_OFFSET: usize = 0x4842d38;
+/// Offset of the heap creator `0x141ec61d0` (`fn() -> heap`; only called if the global is still null).
+const HEAP_CREATE_OFFSET: usize = 0x1ec61d0;
+/// Offset of the game allocator `0x141eb9ed0` (`fn(size, align, heap) -> ptr`; tail-calls
+/// `[[r8=heap]+0x50]`).
+const GAME_ALLOC_OFFSET: usize = 0x1eb9ed0;
+/// Offset of the `SteamConnectionManager@DLNW3D` ctor `0x14263f700` (`fn(this, heap) -> this`; installs
+/// vtable `0x143278020`, allocates sub-buffers off `heap`).
+const MANAGER_CTOR_OFFSET: usize = 0x263f700;
+/// Bytes the connect thunk allocates for a `SteamConnectionManager` before ctoring it.
+const MANAGER_SIZE: usize = 0x1b8;
+
 /// One-shot: stand up a DLNW3D `SteamServiceImpl` offline (path C, first increment). Fires once in-world
 /// (active main player present, same world gate as the create driver). Gated on
 /// `[debug.probes] stand_up_transport`.
@@ -1217,6 +1231,41 @@ impl Feature for TransportStandupDriver {
             log::info!(
                 "session-probe: transport-standup — SteamServiceImpl constructed @ {svc:#x} vtable={vtable:#x} \
                  (SteamServiceImpl vtable static = 0x143277270 + exe rebase; scan-vtable.py to confirm it's live)",
+            );
+
+            // 3. The game's DLNR3D heap (the container's own heap, global 0x144842d38 lazily made by
+            // 0x141ec61d0). Wire it into [service+8] — the connect thunk sources the heap from there —
+            // and use it to allocate the manager. Since the container is live, the heap already exists.
+            let heap_global = (exe_base + HEAP_GLOBAL_OFFSET) as *mut usize;
+            let mut heap = heap_global.read_volatile();
+            if heap == 0 {
+                let make_heap: extern "win64" fn() -> usize =
+                    std::mem::transmute(exe_base + HEAP_CREATE_OFFSET);
+                heap = make_heap();
+                heap_global.write_volatile(heap);
+                log::info!("session-probe: transport-standup — created DLNR3D heap = {heap:#x}");
+            }
+            log::info!("session-probe: transport-standup — DLNR3D game heap = {heap:#x}");
+            ((svc + 8) as *mut usize).write_volatile(heap);
+
+            // 4. Build the SteamConnectionManager: alloc 0x1b8 off the heap, ctor 0x14263f700(mgr, heap)
+            // (installs vtable 0x143278020, allocates its sub-buffers off the heap). Solo-testable — the
+            // manager needs no peer; only the connection's Accept does. scan-vtable confirms it's live.
+            let alloc: extern "win64" fn(usize, usize, usize) -> usize =
+                std::mem::transmute(exe_base + GAME_ALLOC_OFFSET);
+            let mgr_buf = alloc(MANAGER_SIZE, 8, heap);
+            log::info!("session-probe: transport-standup — manager buf ({MANAGER_SIZE:#x}B off game heap) = {mgr_buf:#x}");
+            if mgr_buf == 0 {
+                log::error!("session-probe: transport-standup — manager alloc returned NULL; aborting");
+                return;
+            }
+            let mgr_ctor: extern "win64" fn(usize, usize) -> usize =
+                std::mem::transmute(exe_base + MANAGER_CTOR_OFFSET);
+            let mgr = mgr_ctor(mgr_buf, heap);
+            let mgr_vtable = (mgr as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — SteamConnectionManager constructed @ {mgr:#x} vtable={mgr_vtable:#x} \
+                 (static = 0x143278020 + exe rebase; scan-vtable.py 0x143278020 to confirm)",
             );
         }));
     }
