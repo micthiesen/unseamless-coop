@@ -304,7 +304,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
 | `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
-| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read → verify → brief Michael and wait, no auto-start; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
+| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read STATE → brief Michael and wait, no auto-start and no machine-state audit; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
 | `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
@@ -352,26 +352,27 @@ clobbering real edits. Do **not** use `rift create --copy-all` for this — it w
 Orchestrator sessions are disposable; the project's fast-moving state is not. The contract that
 makes stop-and-restart cheap:
 
-- **[`STATE.md`](STATE.md)** is the single fast-moving "where we are / what's next" file —
-  **overwritten, never appended** (git holds history). It carries the current picture (Now), the
-  chosen next step with its why (Next), the runners-up (Candidates Not Chosen), the live fleet/rig
-  snapshot (In-Flight), and pointers to what a session learned. Durable knowledge still goes to the
-  proper doc (CLAUDE.md > "Project knowledge lives in the repo"); STATE.md holds pointers and
-  decisions, never the content.
+- **[`STATE.md`](STATE.md)** is the single fast-moving "what we're working on / what's next" file —
+  **overwritten, never appended** (git holds history). It is **about the work**: the current picture
+  (Now), the chosen next step with its why (Next), the runners-up (Candidates Not Chosen), and
+  pointers to what a session learned. It does **not** track machine state — no fleet/rig/git
+  snapshot. Live workers are `worker-ls` (live, can't drift); rig/Deck state is cheap to re-derive
+  and re-apply so it's not worth recording; workers integrate before a wrap so there's nothing
+  uncommitted to note. Durable knowledge goes to the proper doc (CLAUDE.md > "Project knowledge
+  lives in the repo"); STATE.md holds pointers and decisions, never the content.
 - **`/wrap`** concludes a session: sweep un-encoded learnings into their homes, decide/confirm Next
-  (via `/next` when open), rewrite STATE.md from ground truth (`worker-ls`, `git status`, rig
-  state), commit. Kill a session only after a wrap — a session's value must never live only in its
-  context window.
+  (via `/next` when open), rewrite STATE.md to reflect the current work, commit. Kill a session only
+  after a wrap — a session's value must never live only in its context window.
 - **`/next`** decides the next step when it's open: 2–4 candidates with a gating analysis (what
   each unblocks, rig-serial vs delegable, size, risk), a recommendation, and the decision recorded
   in STATE.md — with ready-to-paste worker briefs for the delegable candidates (this is what makes
   delegate-by-default cheap to act on).
-- **`orch-start`** seeds a fresh orchestrator with a boot prompt: read STATE.md, **verify** its
-  In-Flight section against ground truth (a session that died without wrapping leaves STATE stale —
-  it's a map, not gospel), then **brief Michael and wait**. The boot orients, it never auto-starts
-  work — Michael may continue Next, run `/next`, or do something else entirely. Restarting the
-  orchestrator is therefore three motions: `/wrap` → kill the session → `orch-start`, with the new
-  session landing oriented but idle.
+- **`orch-start`** seeds a fresh orchestrator with a boot prompt: read STATE.md, then **brief
+  Michael and wait**. The boot orients from the work picture and gets moving; it doesn't audit
+  machine state first (that's `worker-ls` on demand, and re-applying the rig if a rig task comes
+  up). It never auto-starts work — Michael may continue Next, run `/next`, or do something else
+  entirely. Restarting the orchestrator is therefore three motions: `/wrap` → kill the session →
+  `orch-start`, with the new session landing oriented but idle.
 
 ## Open Items
 

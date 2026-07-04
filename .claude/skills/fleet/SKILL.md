@@ -263,17 +263,18 @@ scripts/fleet/orch-start
 
 It launches Claude in tmux `usc-orch` with `--add-dir` over the rifts tree (so you can fetch worker
 branches), no worker overlay (so it's the orchestrator by default), and attaches. A fresh start is
-**seeded with the STATE.md boot prompt** — read [`docs/STATE.md`](../../../docs/STATE.md), verify
-its In-Flight section against ground truth, then **brief Michael and wait**. The boot orients only;
-it never auto-starts work — Michael decides whether to continue Next, run `/next`, or do something
-else. (`--no-seed` skips it; a resumed start — `--continue`/`--resume`, or `-c` on claude — is never
-seeded, the context is already there.)
+**seeded with the STATE.md boot prompt** — read [`docs/STATE.md`](../../../docs/STATE.md) (which is
+about the work, not machine state), then **brief Michael and wait**. The boot orients from the work
+picture; it doesn't audit machine state first. It never auto-starts work — Michael decides whether
+to continue Next, run `/next`, or do something else. (`--no-seed` skips it; a resumed start —
+`--continue`/`--resume`, or `-c` on claude — is never seeded, the context is already there.)
 
 ## End A Session Cleanly (/wrap), Decide What's Next (/next)
 
 - **Ending a session** (context is long, work concluded, Michael says wrap up): run **`/wrap`** —
-  it sweeps un-encoded learnings into the right docs, rewrites `docs/STATE.md` from ground truth,
-  and commits, so the session becomes disposable. Then it's safe to kill and `orch-start` fresh.
+  it sweeps un-encoded learnings into the right docs, rewrites `docs/STATE.md` to reflect the
+  current work, and commits, so the session becomes disposable. Then it's safe to kill and
+  `orch-start` fresh.
 - **Unsure what to work on** (Next completed, plans changed, a new wave): run **`/next`** — it
   enumerates candidates with a gating analysis, records the decision in STATE.md, and drafts
   worker briefs for the delegable ones.

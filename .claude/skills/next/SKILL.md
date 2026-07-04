@@ -18,13 +18,14 @@ The output is always two things: a **recommendation with its why**, and an **upd
 
 ## 1. Gather Ground Truth (Cheap, Parallel)
 
-- Read [`docs/STATE.md`](../../../docs/STATE.md) — the previous Next, the candidates not chosen
-  (your shortlist starts here), and the in-flight snapshot.
+- Read [`docs/STATE.md`](../../../docs/STATE.md) — the previous Next and the candidates not chosen
+  (your shortlist starts here).
 - Read [`docs/ROADMAP.md`](../../../docs/ROADMAP.md) for the gating structure (what's
   solo-doable vs 2-player-gated vs rung-3-gated), and the plan doc STATE's Next points at.
-- `git log --oneline` since STATE's "Last rewritten" date — what actually landed since the
+- `git log --oneline` since STATE's "Last updated" date — what actually landed since the
   decision was recorded.
-- `scripts/fleet/worker-ls` — lanes already running (don't recommend work a live worker owns).
+- `scripts/fleet/worker-ls` — lanes already running (don't recommend work a live worker owns). This
+  is the live source for what's in flight; STATE doesn't track it.
 
 Don't re-read the deep RE docs unless a candidate genuinely hinges on a detail; the point of
 STATE.md is that you shouldn't have to.

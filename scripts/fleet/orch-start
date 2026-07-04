@@ -35,7 +35,7 @@ harness="$(fleet_harness)"
 # never seeded on a resumed session (--continue/-c/--resume already carry the
 # context). NOTE: -c means "continue" only for claude; for codex it's the config
 # override flag, so the codex branch skips only on --continue (mapped to resume).
-BOOT_PROMPT='Boot: read docs/STATE.md first. Verify its In-Flight section against ground truth (scripts/fleet/worker-ls, git status, git log since its "Last rewritten" date) -- a session that died without /wrap leaves it stale. Then give Michael a short brief: where things stand, what Next is, anything In-Flight needing attention. Do NOT start working -- wait for his direction (he may continue Next, run /next, or ask something else entirely).'
+BOOT_PROMPT='Boot: read docs/STATE.md -- it is about the work (Now / Next / candidates), not machine state. Give Michael a short brief: where things stand and what Next is. Do NOT audit machine state to orient (no worker-ls / rig-status sweep -- workers are on worker-ls only if you need it, and the rig is cheap to re-apply if a rig task comes up). Do NOT start working -- wait for his direction (he may continue Next, run /next, or ask something else entirely).'
 seed=1
 args=()
 for a in "$@"; do

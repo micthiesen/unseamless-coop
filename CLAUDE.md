@@ -72,21 +72,20 @@ The only split is build-vs-run, both on this one machine:
 
 > **Install with `scripts/rig.sh apply`, NEVER `scripts/deploy.sh`.** This PC runs the user's
 > *real* ERSC + Elden Mod Loader + own-mods stack. `rig.sh` snapshots that stack to a safe backup
-> before standing in for it (and `rig.sh restore` puts it back); `deploy.sh` is the bare install
-> primitive with **no backup safety**, so running it directly clobbers the real `dinput8.dll`
-> (Elden Mod Loader) and launcher with no way back. Same rule for launch/log/kill/restore: drive
-> everything through `rig.sh` (see the `/test-loop` skill, layer 4).
+> before standing in for it; `deploy.sh` is the bare install primitive with **no backup safety**, so
+> running it directly clobbers the real `dinput8.dll` (Elden Mod Loader) and launcher with no way
+> back. Drive launch/log/kill through `rig.sh` too (see the `/test-loop` skill, layer 4).
 >
-> **`apply`/`cycle` freely; `restore` only when Michael explicitly asks.** Apply and re-launch as
-> often as a work session needs (the snapshot is taken once and is repeatable); leave the mod applied
-> when you finish a chunk. Don't swap his real ERSC stack back on your own initiative — he keeps
-> iterating across many cycles and will say when he wants it restored. `cycle` reliably lands in-game
-> autonomously (it reaches a loaded save via the ydotool popup-dismiss).
+> **`apply`/`cycle` freely — re-applying is cheap and repeatable.** Apply and re-launch as often as a
+> work session needs; don't track or reason about "is the mod applied" — if in doubt, just apply. It
+> reaches in-game autonomously (`cycle` loads a save via the ydotool popup-dismiss). **Never restore
+> the rig, and don't think about it** — Michael puts his own stack back manually when he wants it
+> (`rig.sh restore` exists for him); it's not your concern and not a thing to remember or mention.
 >
-> **But NEVER while the game is already running** — a running ELDEN RING you didn't launch means
-> Michael is playing: don't apply (it overwrites the process's mapped `dinput8.dll` in place),
-> don't launch, don't kill. `rig.sh apply`/`cycle` now refuse on their own when the game is up
-> (`--force` overrides); treat that refusal as "come back later", not an obstacle to work around.
+> **But NEVER apply/launch/kill while the game is already running** — a running ELDEN RING you didn't
+> launch means Michael is playing: applying would overwrite the process's mapped `dinput8.dll` in
+> place. `rig.sh apply`/`cycle` refuse on their own when the game is up (`--force` overrides); treat
+> that refusal as "come back later", not an obstacle to work around.
 
 The log-line contract (install → heartbeat → effect lines) keeps behavior legible — write code so
 its effects show up in the log.
@@ -110,14 +109,16 @@ stacked branches, no PR descriptions. Keep commits small and well-described, kee
 (`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
 pass before pushing). This overrides the global draft-PR/stacking workflow.
 
-**Session state & continuity.** The fast-moving "where we are / what's next" lives in
-[`docs/STATE.md`](docs/STATE.md) (overwritten, never appended; pointers only — content goes to the
-proper doc). End a work session with **`/wrap`** (sweeps un-encoded learnings into their homes,
-rewrites STATE.md from ground truth, commits); decide an open next step with **`/next`** (candidates
-+ gating analysis, recorded in STATE.md, worker briefs drafted for delegable ones). A fresh
-orchestrator started via `scripts/fleet/orch-start` is auto-seeded with a boot prompt that reads
-STATE.md, verifies it, and **briefs Michael, then waits** — it never auto-starts work. Full
-contract: [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) > "Session Continuity".
+**Session state & continuity.** The fast-moving "what we're working on / what's next" lives in
+[`docs/STATE.md`](docs/STATE.md) — **about the work**, not machine state (overwritten, never
+appended; pointers only — content goes to the proper doc). It deliberately does **not** track live
+workers (that's `scripts/fleet/worker-ls`), rig/Deck state (cheap to re-apply, never to remember or
+restore), or uncommitted git state. End a work session with **`/wrap`** (sweeps un-encoded learnings
+into their homes, rewrites STATE.md to reflect the work, commits); decide an open next step with
+**`/next`** (candidates + gating analysis, recorded in STATE.md, worker briefs drafted for delegable
+ones). A fresh orchestrator started via `scripts/fleet/orch-start` is auto-seeded with a boot prompt
+that reads STATE.md and **briefs Michael, then waits** — it never auto-starts work or audits machine
+state first. Full contract: [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) > "Session Continuity".
 
 **Ultracheck after each holistic chunk.** When a meaningful, self-contained chunk of work is done
 (a feature wired end to end, a subsystem, a refactor), run `/ultracheck` on it before moving on,
