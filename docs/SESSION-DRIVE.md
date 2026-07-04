@@ -1234,6 +1234,29 @@ descriptor)` and RE the descriptor against the Arxan builder. Both are deep; (b)
 descriptor yields. The transport itself (service/manager/connection ctors, legacy P2P) is proven; the gap is
 the connection's full **activation** wiring, which is a genuinely hard sub-problem, not a one-line lever.
 
+**✅ RIG RESULT 5 (2026-07-04) — the native-builder path is VIABLE offline (the key experiment).** Drove
+the game's own connection-establish handler `0x1423f2820(container, descriptor)` at the veto hook
+(`drive_establish_handler` lever; preconditions `[container+0x40]=1`/`[container+0x41]=0` set, a zeroed
+0x140-byte descriptor with a guessed count field). Findings, all decisive:
+- **NO CRASH.** The handler runs cleanly offline — driving the game's own native path does not fault (unlike
+  every hand-build attempt). The game stays alive; create just returns `FailedToCreateSession`.
+- **The readiness gate PASSES offline.** `0x1423f5190(container)` — the get-or-create + lock + readiness
+  check on the DLNW3D singleton `0x144852dc0` that the handler tests first — **returns 1**. So the DLNW3D
+  layer is **not hard-gated on being online** at this level; the handler proceeds past it.
+- **The sole remaining bail is the Arxan builder `container->vtable[0x80]` (`0x14251c480`) returning null**
+  on our guessed descriptor (`+0x8ac=1` confirms the handler entered the body; `+0x708` stayed null, i.e.
+  no connection was built/stored). It returns null *cleanly* — it's rejecting our params, not crashing.
+
+**This reframes the whole finish.** The problem is no longer "stand up an entire dormant transport by hand"
+(whack-a-mole through uninit sub-objects) — it's the **single contained problem of the descriptor**: what
+`~0x120-byte` config makes `vtable[0x80]` actually build the connection. The builder does all the sub-object
+wiring itself once it succeeds, so getting the descriptor right yields a *fully-wired* connection at
+`+0x708` → the driven create's `ConnectionRefInfo` loop → `Host`. **Next: capture the Arxan-decoded target
+of `vtable[0x80]` at runtime** (the same trampoline-decode probe used for the veto vmethod: hook the call
+site, read the decoded `rbx`, log it), disassemble the real builder offline, and read off the descriptor
+layout it requires — then fill the descriptor and re-drive. The descriptor is the last unknown, and it's now
+a bounded RE with a clear method, not open-ended.
+
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
 `ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =

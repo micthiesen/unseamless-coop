@@ -866,6 +866,17 @@ fn drive_establish_handler(container: usize) {
     let desc: &'static mut [u8] = vec![0u8; 0x140].leak();
     let desc_ptr = desc.as_mut_ptr() as usize;
     unsafe { (desc_ptr as *mut u32).write_volatile(1) };
+    // Pre-probe the readiness gate the handler checks first (0x1423f5190, at +0x2970 from the handler):
+    // call it directly and log its result. 0 => this gate blocks the native builder (the service isn't
+    // "ready" offline); 1 => the gate passes and any bail is downstream at the Arxan builder vtable[0x80].
+    // SAFETY: win64 ABI; rcx=container. The gate locks/unlocks a DLNW3D singleton it get-or-creates.
+    let gate_fn = fn_addr.wrapping_add(0x2970);
+    let gate: extern "win64" fn(usize) -> u8 = unsafe { std::mem::transmute(gate_fn) };
+    let gate_ret = gate(container);
+    log::info!(
+        "session-probe: drive-establish — readiness gate 0x1423f5190(container) = {gate_ret} \
+         (0 => this gate blocks the native builder offline; 1 => passes, bail is downstream at vtable[0x80])",
+    );
     log::info!(
         "session-probe: drive-establish — calling 0x1423f2820(container={container:#x}, desc={desc_ptr:#x}) \
          [pre: +0x40={before40} +0x41={before41} +0x708=0; forced +0x40=1 +0x41=0, desc+0=1]",
@@ -876,9 +887,21 @@ fn drive_establish_handler(container: usize) {
     let handler: extern "win64" fn(usize, usize) -> u8 = unsafe { std::mem::transmute(fn_addr) };
     let ret = handler(container, desc_ptr);
     let after_708 = unsafe { slot.read_volatile() };
+    // Localize where the handler bailed: it sets [container+0x8ac]=1 at entry (before the
+    // 0x1423f5190 readiness gate), [container+0x41]=1 right after entry, and [container+0x42]=1 only
+    // AFTER passing 0x1423f5190. So +0x42==1 => it passed the gate and the bail was the Arxan builder
+    // vtable[0x80] returning null; +0x42==0 => it bailed at the 0x1423f5190 service-readiness gate.
+    let (a41, a42, a8ac) = unsafe {
+        (
+            ((container + 0x41) as *const u8).read_volatile(),
+            ((container + 0x42) as *const u8).read_volatile(),
+            ((container + 0x8ac) as *const u8).read_volatile(),
+        )
+    };
     log::info!(
         "session-probe: drive-establish — 0x1423f2820 returned {ret}; [container+0x708]={after_708:#x} \
-         (NON-NULL => the game's OWN DLNW3D builder built + stored a connection OFFLINE)",
+         [+0x41={a41} +0x42={a42} +0x8ac={a8ac}] (non-null +0x708 => builder ran offline; +0x42=1 => passed \
+         the 0x1423f5190 gate, bail was vtable[0x80]; +0x42=0 => bailed at the service-readiness gate)",
     );
     if after_708 != 0 {
         // Peek the wrapped connection (holder+0x10) + its vtable, to confirm it's a real SteamConnection.
