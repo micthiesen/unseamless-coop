@@ -208,6 +208,18 @@ task #16's writer-trace should **watch-write `[0x143d855c8]+0x10` (and `0x144842
 host+join** to catch who sets it and to what — that is the value to reproduce for offline co-op, and it is
 unrelated to `SteamServiceImpl`.
 
+> **RIG-OBSERVED (2026-07-04, clean vanilla-offline, at the title/menu — drivers all off).** Ran the
+> offline half of this list. **Confirmed:** #4 — scan-vtable for `0x143277270`/`0x143278020`/`0x143276cb8`
+> = **0/0/0** undriven (and 2/2/1 with our `stand_up_transport`/`land_socket_holder` on, one `SteamServiceImpl`
+> at `0x7ffe93856190` carrying owner `0x143d87750` = the config) — so flow-non-entry is real and the driven
+> factory succeeds offline, exactly as charted. **Refuted the #1 prediction:** `[0x143d855c8]` is populated
+> offline (`0x7fffb09e0000`) and `[[0x143d855c8]+0x10]` reads **`1`, not `0`**. So gate `0x140de2620`'s first
+> test (`cmp [rcx+0x10],0; jne`) does **not** take the false path offline — the operative offline≠live differ
+> is **below** `[+0x10]`, at the `0x144842d40` singleton availability query (`[singleton_vt+0x18]`), which is
+> where the writer-trace (task #16) should aim. (Caveat: read at the title/menu, not idle-in-world; an
+> in-world + live read is still owed to be certain, but a non-zero `[+0x10]` already rules it out as *the*
+> zero-offline field.)
+
 ---
 
 ## 5. Minimal writes/calls to make the standup pass offline
