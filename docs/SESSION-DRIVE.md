@@ -1211,6 +1211,29 @@ Open question it also answers: whether `container->vtable[0x80]` stands the DLNW
 it does, the whole transport comes up the game's own way). **Next task: RE the `0x1423f2820` descriptor +
 drive it at the veto hook** (where the container is `rcx`), instead of the hand-built connection.
 
+**RIG RESULT 4 (2026-07-04) — FSM shortcut disproven; native builder is Arxan-fronted.** Two decisive
+findings closing out the shortcut space:
+- **`force_host_transition` does NOT stick.** The sole `lobby_state=Host(3)` writer is `0x140cb2ae0` (it also
+  sets `protocol_state=Ingame(6)` + runs the host setup), called by the session-update task `0x140cafd10`.
+  Driving it directly after create: it writes Host(3) at entry, but its **host-setup body touches the
+  incomplete connection, faults, and the game resets the session** — the read right after returns
+  `lobby_state=None`. So forcing the FSM past the connection does not hold: **a real Host session genuinely
+  requires a working DLNW3D connection.** Every fabrication/FSM shortcut is now exhausted.
+- **The native connection builder is Arxan-obfuscated.** `container->vtable[0x80]` = `0x14251c480` is an
+  **Arxan trampoline** (`lock cmpxchg` on `0x1448577d8`, decode via cookie `0x143c5adb0`, `call rbx`) — the
+  real builder is runtime-decoded, unreadable statically. Driving the establish handler `0x1423f2820` invokes
+  it *naturally* (the trampoline decodes when called through the vtable), so that path is mechanically open —
+  **but the `~0x120-byte descriptor` it needs would be reverse-engineered by guessing**, since the consumer
+  (`vtable[0x80]`) is opaque. That's the crux of task #13, and it carries real uncertainty (Arxan consumer +
+  possible online-gating in `0x1423f5190`).
+
+**Bottom line for the finish.** Reaching `Host` requires a *working* DLNW3D connection (proven: shortcuts
+don't hold). The two ways to get one: **(a)** finish the hand-build — chart + init each remaining connection
+sub-object (`+0x120` iface-holder, then whatever's next); or **(b)** drive `0x1423f2820(container,
+descriptor)` and RE the descriptor against the Arxan builder. Both are deep; (b) is fewer unknowns *if* the
+descriptor yields. The transport itself (service/manager/connection ctors, legacy P2P) is proven; the gap is
+the connection's full **activation** wiring, which is a genuinely hard sub-problem, not a one-line lever.
+
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
 `ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =
