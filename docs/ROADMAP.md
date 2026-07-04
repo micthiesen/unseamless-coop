@@ -146,12 +146,13 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-07-04) — transport built + landed → `TryToCreateSession`; the finish is the SEAM
-  > (activating our connection so the FSM drives it to `Host`), NOT the descriptor. The native-builder path is
-  > ruled out (offline + two-machine). PICK UP at [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md) and
-  > SESSION-DRIVE.md > "NATIVE-BUILD TRACE (2026-07-04)" (the load-bearing section);
-  > [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 + [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md)
-  > for background.**
+  > **State (2026-07-04 pm) — MAJOR: the `SteamServiceImpl` standup WORKS OFFLINE (the "native-builder dead
+  > end" was a misdiagnosis). We land the correct object at `[container+0x708]` (a socket-manager wrapper, not a
+  > raw connection), drive create → `TryToCreateSession`, and clear host-setup faults #1–#3 (dispatch / heap /
+  > listen slot-pool) by driving the socket-manager's own init. Live wall: fault #4 — the socket-manager's
+  > spawned WORKER THREAD crashes doing Steam context init. PICK UP at SESSION-DRIVE.md > "HOST-SETUP DRIVE
+  > (2026-07-04 pm)" (the load-bearing section); [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md) +
+  > [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 for background.**
   >
   > **SOLVED — create initiation + real session state.** Driving create (`0x140cad4c0`) moves
   > `lobby_state None→TryToCreateSession`; driving the container's real session-established handler

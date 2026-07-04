@@ -1060,6 +1060,54 @@ fn land_socket_holder(container: usize) {
         log::warn!("session-probe: land-socket-holder — 0x18B alloc off container heap returned null; skipping");
         return;
     }
+    // Run the socket-manager's FULL init (`0x14263a9d0`) so its service stands up the game's way — the
+    // sub-init `0x14263ce40` (charted 2026-07-04 pm) null-checks descriptor[0] (owner) + descriptor[8],
+    // copies descriptor[0..0x60] → socketmgr[0x40..0xa0], then calls the service standup `0x142638b40`
+    // with owner=descriptor[0]. KEY FINDING: the service init check `0x14263f450` ALWAYS returns true, so
+    // the standup only returns null if owner==0 — the prior "standup null offline" was likely the removed
+    // svc-standup probe perturbing flags, NOT an online gate. Descriptor from the native trace:
+    // [0]=owner=[container+0x48], [8]=0x1423f2d70 (non-null, satisfies the 2nd check), [0x10]=container,
+    // [0x1c]=ring size. `conn` is the wrapper; [conn+8]=socketmgr. Do NOT pre-set [socketmgr+0x40] (the
+    // sub-init bails if it's already non-null). SAFETY: descriptor is a leaked 0x60-byte buffer; init is a
+    // win64 game fn resolved from the live exe base; a hard fault surfaces via the crashdump SEH handler.
+    let socketmgr = unsafe { ((conn + 8) as *const usize).read_volatile() };
+    if socketmgr != 0 {
+        let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+            Ok(h) => h.0 as usize,
+            Err(_) => 0,
+        };
+        if exe_base != 0 {
+            let desc: &'static mut [u8] = vec![0u8; 0x60].leak();
+            let dp = desc.as_mut_ptr() as usize;
+            // Seed the descriptor from the socket-manager's POST-CTOR state (socketmgr[0x40..0xa0]) so the
+            // sub-init's copy (descriptor[0..0x60] → socketmgr[0x40..0xa0]) PRESERVES the config defaults the
+            // base ctor 0x14263cb70 set there (ring sizes/timeouts at +0x58/0x5c/0x60/0x74..0x9c) — a
+            // mostly-zero descriptor clobbered them and the socket-manager's worker thread then spun up
+            // misconfigured and jumped to garbage (fault #4, 2026-07-04 pm). Then override only the three
+            // init pointers the ctor left null: [0]=owner, [8]=local8 (non-null 2nd check), [0x10]=container.
+            // SAFETY: `dp` is a freshly-leaked 0x60-byte buffer; source is the in-bounds socketmgr config region.
+            unsafe {
+                std::ptr::copy_nonoverlapping((socketmgr + 0x40) as *const u8, dp as *mut u8, 0x60);
+                (dp as *mut usize).write_volatile(heap); // descriptor[0] = owner (the container heap)
+                ((dp + 8) as *mut usize).write_volatile(exe_base + SOCKMGR_LOCAL8_OFFSET); // [8] non-null
+                ((dp + 0x10) as *mut usize).write_volatile(container); // [0x10] = container
+            }
+            let init: extern "win64" fn(usize, usize) -> u8 =
+                unsafe { std::mem::transmute(exe_base + SOCKMGR_INIT_OFFSET) };
+            log::info!(
+                "session-probe: land-socket-holder — driving socketmgr init 0x14263a9d0({socketmgr:#x}, \
+                 desc{{owner={heap:#x}, [8]={:#x}, container={container:#x}}}) — standup owner=[container+0x48]",
+                exe_base + SOCKMGR_LOCAL8_OFFSET,
+            );
+            let ok = init(socketmgr, dp);
+            let svc = unsafe { ((socketmgr + 0x38) as *const usize).read_volatile() };
+            let f40 = unsafe { ((socketmgr + 0x40) as *const usize).read_volatile() };
+            log::info!(
+                "session-probe: land-socket-holder — socketmgr init returned {ok} — [+0x38]service={svc:#x} \
+                 [+0x40]owner={f40:#x} (nonzero service => the standup SUCCEEDED offline!)",
+            );
+        }
+    }
     let ctor: extern "win64" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ctor_fn) };
     let holder = ctor(buf, conn);
     // refcount (+8) = 1: the game's establish handler addrefs 0->1 right after building the holder, so
@@ -1071,6 +1119,45 @@ fn land_socket_holder(container: usize) {
          (wraps SteamConnection {conn:#x}, refcount=1) and wrote [container+0x708] on container={container:#x} \
          (create's ConnectionRefInfo loop now has a real refcountable object; drive create to test Host)",
     );
+    dump_conn_graph(conn);
+}
+
+/// Read-only dump of the `SteamConnection@DLNW3D` sub-object graph the host-setup path walks, so a rig
+/// run pins exactly which sub-object/vtable slot is null before we wire it. Host-setup fault #1
+/// (2026-07-04 pm): `0x1423f6bf2` reads `[container+0x708]`→holder→`conn`, then `0x14203f1f0` does
+/// `rcx=[conn+8]; rax=[rcx]; jmp [rax+0x18]` — a vtable dispatch on the `[conn+8]` sub-object. A solo
+/// stood-up connection faults there (execute-null: `[[conn+8]]+0x18 == 0`). This logs the whole chain
+/// (`[conn+0]` main vtable, `[conn+8]` sub-object ptr, its vtable, and slots +0x10/+0x18/+0x20 of that
+/// vtable) so we can identify the sub-object's class + which method the host expects. All reads are
+/// guarded (a null link stops the walk); never writes.
+fn dump_conn_graph(conn: usize) {
+    if conn == 0 {
+        return;
+    }
+    // SAFETY: `conn` is the live standup `SteamConnection` just wrapped into the holder; every read below
+    // is a bounded qword deref of an in-bounds field, and each link is null-checked before it's followed.
+    unsafe {
+        let rd = |p: usize| -> usize {
+            if p == 0 { 0 } else { (p as *const usize).read_volatile() }
+        };
+        let conn_vt = rd(conn);
+        let sub = rd(conn + 0x8); // [conn+8] — the sub-object the host-setup dispatches on
+        let sub_vt = rd(sub); // [[conn+8]] — its vtable
+        let slot10 = if sub_vt != 0 { rd(sub_vt + 0x10) } else { 0 };
+        let slot18 = if sub_vt != 0 { rd(sub_vt + 0x18) } else { 0 }; // the null the host-setup jumps to
+        let slot20 = if sub_vt != 0 { rd(sub_vt + 0x20) } else { 0 };
+        let sub_is_embedded = sub == conn + 0x20;
+        let vt10 = rd(conn + 0x10); // second vtable the ctor installs
+        let f120 = rd(conn + 0x120); // iface-holder sub-object (real established conn has this)
+        let peer = rd(conn + 0x128);
+        log::info!(
+            "session-probe: conn-graph {conn:#x} — [+0]vt={conn_vt:#x} [+0x10]vt={vt10:#x} \
+             [+8]sub={sub:#x}{} sub.vtable={sub_vt:#x} sub.vt[+0x10]={slot10:#x} \
+             sub.vt[+0x18]={slot18:#x} (host-setup jmps HERE; 0 => the fault) sub.vt[+0x20]={slot20:#x} \
+             [+0x120]ifaceholder={f120:#x} [+0x128]peer={peer:#x}",
+            if sub_is_embedded { " (=conn+0x20 embedded)" } else { " (separate obj)" },
+        );
+    }
 }
 
 /// `jmp-back` detour body for a session create/join initiation call, shared by both entries (they
@@ -1491,6 +1578,34 @@ const CONN_ARRAY_PTR_OFF: usize = 0x78;
 const CONN_PARAMS_WORDS: usize = 0x30 / 4;
 const CONN_PARAMS_COUNT_WORD: usize = 0x18 / 4;
 
+// --- Socket-manager wrapper (the object [container+0x708]'s holder actually holds) ---------------
+//
+// CHART (2026-07-04 pm): the SocketManagerHolder@DLNR3D at [container+0x708] holds — at holder+0x10 —
+// NOT a raw SteamConnection but the game builder's return: a 0x10-byte WRAPPER
+// `{ vtable=0x143276a00, [+8]=socketmgr }` around an `MTInternalThreadSteamSocketManager@DLNW3D`
+// (0x150 bytes, vtable 0x143276cb8). Host-setup (`0x14203f1f0`) does `wrapper->[+8]socketmgr->vtable[3]`
+// (slot +0x18) — so landing a SteamConnection there made it read a connection data field as a vtable
+// (garbage 0x100000000 → fault). We build the socket-manager via its CTOR ONLY (`0x142638140`; the ctor
+// chain 0x14263a0b0→0x14263cb70 needs no service/heap — only the *init* 0x14263a9d0 hits the null
+// SteamServiceImpl standup, which we skip), then the wrapper via `0x14203f100` + overwrite its vtable
+// with 0x143276a00 exactly as the builder does. Re-derive: builder body `0x142637440` (alloc 0x150 →
+// ctor 0x142638140 → init [vt+8] → on success alloc 0x10 → 0x14203f100(wrap, sm) → [wrap]=0x143276a00).
+/// Socket-manager ctor `0x142638140` (`fn(this)`; installs vtable `0x143276cb8`, no service/heap needed).
+const SOCKMGR_CTOR_OFFSET: usize = 0x2638140;
+/// Bytes the builder allocates for the socket-manager.
+const SOCKMGR_SIZE: usize = 0x150;
+/// Wrapper init `0x14203f100` (`fn(this, socketmgr)`; sets `[this+8]=socketmgr`, `[this]=0x1430ea580`).
+const WRAPPER_INIT_OFFSET: usize = 0x203f100;
+/// Bytes the builder allocates for the 0x10-byte wrapper.
+const WRAPPER_SIZE: usize = 0x10;
+/// The wrapper's final vtable `0x143276a00` (the builder overwrites the init's 0x1430ea580 with this).
+const WRAPPER_VTABLE_OFFSET: usize = 0x3276a00;
+/// Socket-manager init vmethod `0x14263a9d0` (`fn(this, descriptor) -> bool`; sub-init 0x14263ce40 copies
+/// descriptor[0..0x60] → this[0x40..0xa0] then stands up the service via 0x142638b40(owner=descriptor[0])).
+const SOCKMGR_INIT_OFFSET: usize = 0x263a9d0;
+/// Native descriptor `local[8]` value `0x1423f2d70` — a non-null the sub-init's 2nd null-check requires.
+const SOCKMGR_LOCAL8_OFFSET: usize = 0x23f2d70;
+
 /// One-shot: stand up a DLNW3D `SteamServiceImpl` offline (path C, first increment). Fires once in-world
 /// (active main player present, same world gate as the create driver). Gated on
 /// `[debug.probes] stand_up_transport`.
@@ -1700,7 +1815,6 @@ impl Feature for TransportStandupDriver {
             // *activation* unnecessary: it jumps straight to lobby_state=Host, so the session-update task
             // never runs the connection-activation path. The holder at +0x708 only needs to be a valid
             // refcountable object for create's ConnectionRefInfo loop, which it is.
-            conn_out = conn;
             let conn_vtable = (conn as *const usize).read_volatile();
             let iface_field = ((conn + 0x8) as *const usize).read_volatile();
             let peer_field = ((conn + 0x128) as *const usize).read_volatile();
@@ -1708,15 +1822,52 @@ impl Feature for TransportStandupDriver {
                 "session-probe: transport-standup — wired SteamConnection @ {conn:#x} (manager array slot 0) \
                  vtable={conn_vtable:#x} [+0x8 iface={iface_field:#x} +0x128 peer={peer_field:#x}]",
             );
+
+            // 6. Build the socket-manager WRAPPER the SocketManagerHolder actually holds (see the
+            // SOCKMGR_* chart above). Host-setup dispatches `wrapper->[+8]socketmgr->vtable[3]`, so
+            // [holder+0x10] must be this wrapper, NOT the raw connection. Ctor-only socket-manager
+            // (no init → no null standup); then the wrapper. Publish the WRAPPER to the seam.
+            let sm_buf = alloc(SOCKMGR_SIZE, 8, heap);
+            if sm_buf == 0 {
+                log::error!("session-probe: transport-standup — socket-manager alloc returned NULL; aborting wrapper build");
+                return;
+            }
+            let sm_ctor: extern "win64" fn(usize) -> usize =
+                std::mem::transmute(exe_base + SOCKMGR_CTOR_OFFSET);
+            let socketmgr = sm_ctor(sm_buf);
+            let sm_vtable = (socketmgr as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — MTInternalThreadSteamSocketManager ctored @ {socketmgr:#x} \
+                 vtable={sm_vtable:#x} (static 0x143276cb8 + rebase; ctor-only, no service init)",
+            );
+            let wrap_buf = alloc(WRAPPER_SIZE, 8, heap);
+            if wrap_buf == 0 {
+                log::error!("session-probe: transport-standup — wrapper alloc returned NULL; aborting");
+                return;
+            }
+            let wrap_init: extern "win64" fn(usize, usize) -> usize =
+                std::mem::transmute(exe_base + WRAPPER_INIT_OFFSET);
+            let wrapper = wrap_init(wrap_buf, socketmgr);
+            // The builder overwrites the init's transient vtable (0x1430ea580) with the final one.
+            ((wrapper) as *mut usize).write_volatile(exe_base + WRAPPER_VTABLE_OFFSET);
+            let wrap_vt = (wrapper as *const usize).read_volatile();
+            let wrap_inner = ((wrapper + 8) as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — socket-manager WRAPPER built @ {wrapper:#x} \
+                 vtable={wrap_vt:#x} (static 0x143276a00) [+8]socketmgr={wrap_inner:#x} — this is what [holder+0x10] holds",
+            );
+            // Publish the WRAPPER (not the raw connection) for the seam.
+            conn_out = wrapper;
         }));
         self.iface = resolved_iface;
-        // Publish the built connection for the seam (`land_socket_holder` wraps it into a
-        // SocketManagerHolder at [container+0x708]). 0 if a build step bailed before the connection.
+        // Publish the built socket-manager WRAPPER for the seam (`land_socket_holder` wraps it into a
+        // SocketManagerHolder at [container+0x708], so [holder+0x10]=wrapper — the object host-setup
+        // dispatches on). 0 if a build step bailed before the wrapper.
         if conn_out != 0 {
             STANDUP_CONNECTION.store(conn_out, Ordering::Relaxed);
             log::info!(
-                "session-probe: transport-standup — published standup connection {conn_out:#x} for the seam \
-                 (land_socket_holder will wrap it at [container+0x708])",
+                "session-probe: transport-standup — published socket-manager wrapper {conn_out:#x} for the seam \
+                 (land_socket_holder wraps it at [container+0x708]; host-setup dispatches wrapper->socketmgr->vtable[3])",
             );
         }
         if self.iface != 0 {

@@ -1,11 +1,20 @@
 # Driving a Session Directly (rung-3 call spec)
 
-> ## STATUS (2026-07-04, updated) — read this first
+> ## STATUS (2026-07-04 pm, updated) — read this first
 >
-> **The driven establish handler now REACHES the game's own connection builder, but the build fails at the
-> `SteamServiceImpl` standup — offline AND two-machine. Driving the game's native builder is a DEAD END for
-> reaching `Host`; pivot to standing up our own Steam P2P transport (the ERSC model).** The current,
-> load-bearing section is **"NATIVE-BUILD TRACE (2026-07-04)"** below (read it for thread 2). In short:
+> **NEW: the `SteamServiceImpl` standup WORKS OFFLINE — the "native-builder dead end" was a misdiagnosis.**
+> Driving the socket-manager's own init `0x14263a9d0` stood up a real service offline (`init returned 1`,
+> `[socketmgr+0x38]` non-null); the service-init check `0x14263f450` always returns true, so the standup
+> `0x142638b40` only nulls on `owner==0`. We landed the CORRECT object at `[container+0x708]` (a 0x10-byte
+> socket-manager **wrapper**, not a raw connection) and cleared host-setup faults #1–#3 (dispatch, heap, listen
+> slot-pool). **Current wall: fault #4 — the socket-manager's spawned WORKER THREAD** (`MTInternalThread`)
+> crashes at `0x142640bc0` doing per-connection `SteamInternal_ContextInit` (`[0x144c0d0a4]`→garbage). The full
+> writeup + fault chain is **"HOST-SETUP DRIVE (2026-07-04 pm)"** below — read that first; the older
+> "NATIVE-BUILD TRACE" section is now marked superseded.
+>
+> **(Superseded reading, kept for history:)** ~~The driven establish handler REACHES the game's own connection
+> builder, but the build fails at the `SteamServiceImpl` standup — offline AND two-machine. Driving the native
+> builder is a DEAD END.~~ In short:
 > - **SOLVED:** driving create (`0x140cad4c0`) reaches `TryToCreateSession`; the session-established handler
 >   (`0x1423f4870`) populates real container state (veto bit `[+0x7c0]` bit 2, identity `+0x7f8`).
 > - **The build is now REACHED** (this session): the establish handler `0x1423f2820` runs gate1 (readiness) →
@@ -1084,7 +1093,59 @@ listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest
 `call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
 a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 
-### NATIVE-BUILD TRACE (2026-07-04, rig) — the build is REACHED; the offline wall is the SteamServiceImpl standup
+### HOST-SETUP DRIVE (2026-07-04 pm, rig) — the SteamServiceImpl standup WORKS OFFLINE; wall is now the socket-manager worker thread
+
+> **HEADLINE — the "standup returns null offline" claim below is WRONG (misdiagnosis, now corrected).** Driving
+> the socket-manager's own init `0x14263a9d0` with a hand-built descriptor **stood up a real `SteamServiceImpl`
+> offline**: `socketmgr init returned 1`, `[socketmgr+0x38]service = <non-null heap ptr>`. The service init
+> check `0x14263f450` **always returns true** (both branches `mov al,1`), so the standup `0x142638b40` only
+> returns null when its `owner` (rcx) is 0 — it is **not** online-gated. The earlier "standup returns null"
+> reading came from the removed `svc-standup` probe perturbing flags mid-function; the native-builder path was
+> abandoned on a false wall.
+>
+> **What this session proved (all rig-logged 2026-07-04 pm; solo, `drive_session_established`+`force_host_transition`
+> on, `stand_up_transport`+`land_socket_holder`+`drive_create` on, `drive_establish_handler` off):**
+> 1. **`[container+0x708]`'s `SocketManagerHolder` holds a 0x10-byte WRAPPER at `+0x10`, NOT a raw connection.**
+>    The wrapper is `{ vtable=0x143276a00, [+8]=socketmgr }` around an `MTInternalThreadSteamSocketManager@DLNW3D`
+>    (0x150 bytes, vtable `0x143276cb8`). Host-setup dispatches `wrapper->[+8]socketmgr->vtable[3]` (slot `+0x18`).
+>    Landing a raw `SteamConnection` there made host-setup read a connection data field (`[conn+0x20]`) as a
+>    vtable → garbage `0x100000000` → fault. Re-derive: builder body `0x142637440` (alloc 0x150 → socketmgr ctor
+>    `0x142638140` → init `[vt+8]` → on success alloc 0x10 → wrapper init `0x14203f100(wrap, sm)` → `[wrap]=0x143276a00`).
+> 2. **The socket-manager standup succeeds offline** (see headline). Descriptor from the native trace:
+>    `[0]=owner=[container+0x48]`, `[8]=0x1423f2d70` (non-null, satisfies the sub-init's 2nd null-check),
+>    `[0x10]=container`; the sub-init `0x14263ce40` copies `descriptor[0..0x60] → socketmgr[0x40..0xa0]` then
+>    calls the standup with `owner=descriptor[0]`. **Seed the descriptor from the socketmgr's post-ctor state**
+>    (preserve the base-ctor config defaults at `+0x58/0x5c/0x60/0x74..0x9c`) or the worker spins up misconfigured.
+> 3. **Host-setup fault chain — charted + cleared in order** (each fix exposed the next, deeper one):
+>    - **#1 dispatch** `0x14203f1f0` (`wrapper->socketmgr->vtable[+0x18]`): fixed by landing the socket-manager
+>      wrapper instead of a raw connection.
+>    - **#2 null heap** `0x14263845f` (`r8=[socketmgr+0x40]`; allocator `0x141eb9ed0` derefs `[r8]`=null): fixed
+>      by the full init (which sets `+0x40`). (Do **not** pre-set `+0x40` — the sub-init bails if it's non-null.)
+>    - **#3 empty listen slot-pool** `0x14263aff0` (free-list `[socketmgr+0xd0]`=0xffffffff → no free slot → the
+>      failed listen releases the sub-object → cleanup faults on its null vtable): fixed by the init sizing the
+>      pool at `socketmgr+0xc0` from `[socketmgr+0x60]` = `descriptor[0x20]` (the connection count).
+> 4. **CURRENT WALL — fault #4: the socket-manager's WORKER THREAD.** `MTInternalThreadSteamSocketManager` spawns
+>    an OS worker thread (stack jumps to `~0x5eaffxxx`) that runs `0x142640bc0` — per-connection ISteamNetworking006
+>    context setup (`lea rcx,[0x143c602b0]` the iface holder; `call [0x144c0d0a4]` = the `SteamInternal_ContextInit`
+>    import) — and **jumps to a garbage target that changes every run** (`0x3b14e4c0`, `0x2146e800`, …) → execute-DEP
+>    fault. Changing garbage + stable return addr `0x142640c48` = uninitialized/corrupted worker state (a stack
+>    canary `xor rsp,[0x143c5adb0]` guards its 0x510-byte frame). Not yet resolved. **► NEXT: runtime-inspect the
+>    worker thread** — read `[0x144c0d0a4]` live (is the import itself bad, or is the call target computed from a
+>    corrupt base?), examine the connection object the worker is initializing, and check whether the socketmgr's
+>    descriptor still lacks a field the worker needs. Also try letting the natural session-update task drive Host
+>    over frames instead of the synchronous `force_host_transition` jam (which may race the worker).
+>
+> Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
+> the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
+> the veto → `TryToCreateSession`), `force_host_transition=true` (drive `0x140cb2ae0` to reach host-setup).
+
+### NATIVE-BUILD TRACE (2026-07-04, rig) — SUPERSEDED: the "standup null offline" wall was a misdiagnosis (see HOST-SETUP DRIVE above)
+
+> **⚠ SUPERSEDED by "HOST-SETUP DRIVE (2026-07-04 pm)" above.** The "SteamServiceImpl standup `0x142638b40`
+> returns null offline" conclusion in this section is **WRONG** — driving the socket-manager init directly
+> stood up a real service offline (init returned 1, service non-null). The standup only nulls on `owner==0`;
+> its service-init check always returns true. This section's two-machine reasoning (a real peer's Steam context
+> is needed) rests on that false wall and no longer holds. Kept for the address chart only.
 
 > **STATUS (supersedes "RESULT 5 / viable offline" below — that reading was wrong).** The driven establish
 > handler now **reaches the game's own connection builder** and runs it to the point where it tries to stand

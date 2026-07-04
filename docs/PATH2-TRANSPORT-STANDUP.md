@@ -1,9 +1,18 @@
 # Rung 3 finish — the ACTIVATION SEAM (wire our stood-up connection into the session FSM)
 
-> **Scope doc for the next session.** Written 2026-07-04. Supersedes an earlier draft of this file that
+> **UPDATE 2026-07-04 pm — substantial progress; two claims below are now CORRECTED.** (a) The object at
+> `[container+0x708]` is a `SocketManagerHolder` whose `+0x10` holds a 0x10-byte **socket-manager wrapper**
+> (`{vtable 0x143276a00, [+8]=MTInternalThreadSteamSocketManager}`), **not** a raw `SteamConnection` — landing a
+> connection there is the type error that caused the first host-setup fault. (b) The `SteamServiceImpl` standup
+> `0x142638b40` **WORKS OFFLINE** (driving the socket-manager init stood up a real service; the "standup null →
+> native-builder dead end" was a misdiagnosis). Host-setup faults #1–#3 are cleared; the live wall is the
+> socket-manager's **worker thread** doing Steam context init. Read [SESSION-DRIVE.md](SESSION-DRIVE.md) >
+> **"HOST-SETUP DRIVE (2026-07-04 pm)"** for the full chain + next steps; the rest of this file predates it.
+>
+> **Scope doc (original).** Written 2026-07-04. Supersedes an earlier draft of this file that
 > framed the work as "stand up our own transport" — that turned out to be already done. The real remaining
-> gap is the **seam**: making the game's session FSM *activate* the working connection we already build. Full
-> RE state: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "NATIVE-BUILD TRACE (2026-07-04)" + "TWO-MACHINE RESULT".
+> gap is the **seam**: making the game's session FSM *activate* the connection. Full RE state now in
+> "HOST-SETUP DRIVE (2026-07-04 pm)".
 
 ## The one-sentence goal
 
