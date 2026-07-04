@@ -78,6 +78,35 @@
 > graph. This is the empirical case for the **real-online-matchmaking (true ERSC) pivot** over offline forcing —
 > see the recommendation being written up top once Lane C lands.
 >
+> **Lane C result (2026-07-05) — live-session storage + full reachability from `CSSessionManager`:**
+> - **Live sessions are stored in a flat `SessionSteam*[]` array on `SessionManagerSteam`:** `+0x18` = array
+>   ptr, `+0x20` = capacity (dword), `+0x24` = count (dword). Both create drivers (host slot 1 `0x1423f5c00`,
+>   join slot 2 `0x1423f62e0`) do, after a successful `0x1423f7070` create: `if count<cap { array[count++]=session }
+>   else { session->vtable[2](tick); session->vtable[0](DESTROY) }`. **Offline, capacity stays 0 → every created
+>   session is immediately destroyed** before it can be stored/observed. This is the mechanical root of the
+>   documented "create dies at leg B's tail capacity check". (The probe's `FABRICATE_SLOT_ARRAY` targets exactly
+>   this array.)
+> - **Reachability chain from the mod's live `CSSessionManager*`:**
+>   ```
+>   CSSessionManager +0x48 (container2 holder) +0x18 -> ManagerImplSteam* ("container"/S; RTTI
+>       .?AVManagerImplSteam@DLNR3D@@, size 0x908; == CSSessionManager+0x60 shorthand)
+>   ManagerImplSteam +0x708 -> SocketManagerHolder* (null until stood up)
+>                    +0x710 -> embedded SessionManagerSteam ("NetworkSession", vtable 0x1431f9140, size 0xb0)
+>   SessionManagerSteam +0x08 owner back-ptr (= ManagerImplSteam) | +0x18/+0x20/+0x24 session array/cap/count
+>                       +0xa8 session-id/generation counter (starts 1) | vtable[29] create-gate predicate
+>                       vtable[33]=0x1423f7070 create-session
+>   ```
+> - **`[SessionSteam+0x58]` = back-pointer to the owning `ManagerImplSteam` container** — the same object whose
+>   `+0x708` holds the socket-manager wrapper. So session→container→socket-manager is one deref apart; AddMember
+>   (slot 26) reads `[session+0x58]` for the container, then `[container+0x48]` for the allocator.
+> - **SessionSteam vtable (`0x1431fa248`) map:** slot 0 = dtor (0x1423fd480, `operator delete` size 0x5f8),
+>   **slot 1 = IsReady/readiness gate `0x1423fd7a0` (= the probe's existing `CREATE_GATE4_OFFSET`)**, slot 2 =
+>   tick, slot 25 = build-context (0x1423fe030), slot 26 = AddMember (0x1423fdf20), slot 27 = 0x60-byte companion
+>   creator (0x1423fdfa0), slot 33 = adjustor thunk into `[session+0x5a8]`. Sizes: SessionSteam 0x5f8,
+>   SessionManagerSteam 0xb0 (embedded), ManagerImplSteam 0x908, SessionMemberSteam 0x170.
+> - Unconfirmed: whether any *other* method caches a "current session" pointer elsewhere; the `+0x18/+0x20/+0x24`
+>   array is the only storage the two create sites touch.
+>
 > ---
 >
 > ## STATUS (2026-07-04 night, updated) — superseded in part by the DLNR3D reframe above
