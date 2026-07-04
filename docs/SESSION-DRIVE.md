@@ -1,6 +1,44 @@
 # Driving a Session Directly (rung-3 call spec)
 
-> ## STATUS (2026-07-04 pm, updated) — read this first
+> ## STATUS (2026-07-04 night, updated) — read this first
+>
+> **★★ HOST-SIDE ADMIT REACHED OFFLINE — the joiner's synthetic SYN crosses to the host's game layer; the sole
+> remaining wall is the socket-manager context's member-lookup STUB.** This session drove the joiner→host
+> transport-level connect and instrumented the host's inbound path end-to-end on a two-machine run (rig host +
+> Deck joiner). The full charted chain, all rig-confirmed:
+> 1. The host's socket-manager **worker thread RUNS offline** (`0x142640bc0`) and reads P2P on **channel 30**
+>    (`nChannel=[socketmgr+0x50]`, live-observed — NOT channel 0).
+> 2. The joiner sends a real **14-byte DLNW3D SYN** `[0x0e, 0x40, …]` (the exact shape the admit gate
+>    `0x142642830` accepts: size 14, header control-length 14) **on channel 30**, and it **REACHES the host's
+>    admit-new-peer helper `0x142640e30`** (`host-admit` fires, sender=joiner, msgSize=14). First time the
+>    joiner's game-P2P ever crossed to the host game layer offline.
+> 3. Admit gates **a (size `[socketmgr+0x5c]≥14`) and b (SYN shape) PASS.** It bails at **gate c**
+>    (`0x142640ecd`): the identity callback **`[socketmgr+0x40]` = `0x142639810`→`0x142639d00`** returns **1
+>    (REJECT)** every time, so `host-admit-success` (`0x142640ee4`, connection creation) never fires and the
+>    **host roster stays `players=1`**.
+> 4. **Root cause pinned to one instruction:** `0x142639d00` calls the context's member-lookup
+>    **`[context+0x168]`**, and on our synthesized socket-manager **that slot is a STUB `0x1423fdf00` = `mov
+>    eax,1; ret`** (always reject; populates no out-struct — the following `cmp [rbp],0; je reject` would also
+>    fail). The context is `[socketmgr+0x48]` (vtable `0x1432770b0`, near `SteamServiceImpl` `0x143277270`); its
+>    member collection is `[context+0x170]`. The online flow installs a real lookup + registered members here;
+>    our offline standup left the stub.
+>
+> **⇒ THE remaining piece for host roster → 2:** make the host's socket-manager context recognize the joiner as
+> a member so gate c's `[context+0x168]` lookup returns 0 **and** populates the out-struct connection
+> descriptor. Two avenues to chart next: **(a)** drive a *more complete* service/context init so `[context+0x168]`
+> gets a real lookup (does a fuller `0x14263a9d0`/service standup populate it?); or **(b)** find the host-side
+> **member-register** call (the counterpart to the joiner's connect — likely the register thunk `0x14263b7c0`
+> from FROMNET-LINK-FINDINGS §1a, "hooks a connection into the service collection") and register the joiner's
+> SteamID64 in `[context+0x170]` before the SYN arrives. Then admit should reach `0x142640ee4`, create a
+> host-side connection, and the update task's roster-add `0x140cb31b0` (charted: **no offline gate** — appends a
+> new `players` entry when the peer is unmatched + `lobby_state==Host` + not-local) grows the roster to 2.
+>
+> Levers/code (this session): read-only host instrumentation under `[debug.probes] instrument_host_accept`
+> (`host-admit`/`gate-c`/`success`/`roster-add`/`worker-drain` hooks in `session_probe.rs`); the joiner's
+> repeating 14-byte SYN on channel 30 + host-role drain suppression in `TransportStandupDriver::drive_p2p`; the
+> rung-3 role now derives from `auto_session` (`rung3_role`), so a single shared seed + `--auto-session host|join`
+> drives both machines. Correction banked: the earlier "`0x1423f18a0` transport↔session bridge" lead was wrong —
+> `0x1423f18a0` is just a locked getter of the container identity `[+0x7f8]`.
 >
 > **★ HOST REACHED AND STICKS — solo `lobby_state=Host`, `protocol=Ingame`, warped into the co-op world.** The
 > full host path now works offline: stand up the socket-manager wrapper at `[container+0x708]`, drive its own

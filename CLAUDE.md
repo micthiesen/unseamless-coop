@@ -24,22 +24,22 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **connection stack shipped; the driven establish handler now REACHES the game's own connection
-> builder, but the build fails at the `SteamServiceImpl` standup offline AND two-machine — driving the game's
-> native builder is a DEAD END for `Host`. Next: stand up our own Steam P2P transport (the ERSC model).**
-> Rungs 1/2/4 (identity, the password-authed Steam side-channel, lobby discovery) ship and are confirmed
-> two-machine. Rung 3: we drive the game's own connection-establish handler `0x1423f2820`; this session
-> unblocked the *build path* (the **live derived vtable is `0x1431f8780`** so the real builder is
-> `0x1423f46b0`, a plain fn — the earlier "Arxan builder `0x14251c480`" was a wrong-vtable artifact; and
-> **`drive_session_established` must be OFF** — it double-drove `0x1423f4870`, bailing gate2 "already
-> established"). The build now runs down to the **`SteamServiceImpl` standup `0x142638b40`, which returns
-> null**, so `+0x708` stays null. **Two-machine (rig + Deck) proved a real linked peer does NOT unblock it**
-> — the game's DLNW3D transport is gated on its own online-session flow (EAC/matchmaker), which our private
-> rung-2 side-channel doesn't trigger. **► Next: pivot to path 2 (own-transport standup)** — resolve
-> `ISteamNetworking006` (`0x142640b90`), instantiate `SteamServiceImpl`/`SteamConnectionManager`, register
-> the P2P callbacks, drive connect/accept with the rung-4 peer SteamID64s so a real `SteamConnection` lands
-> at `[container+0x708]`. Current plan: [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "NATIVE-BUILD
-> TRACE (2026-07-04)" / "► NEXT STEP"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Status: **solo `Host` reached + sticks (warped into the co-op world); the joiner's synthetic transport
+> connect now REACHES the host's game-layer admit path offline (two-machine) — the sole remaining wall is the
+> host socket-manager context's member-lookup STUB.** Rungs 1/2/4 (identity, the password-authed Steam
+> side-channel, lobby discovery) ship, confirmed two-machine. Host: stand up the socket-manager wrapper at
+> `[container+0x708]`, drive create → `TryToCreateSession`, force host-setup's online gate `0x140de2620` true →
+> stable `Host`/`Ingame`, `players=1`, warp into map `1800001`. Joiner→host transport (this session,
+> rig-confirmed): the host's socket-manager **worker thread runs offline** (`0x142640bc0`) reading P2P **channel
+> 30**; the joiner sends a real **14-byte DLNW3D SYN** on channel 30 → it **reaches the host admit helper
+> `0x142640e30`** (passes size + SYN-shape gates) but is **rejected at gate c** (`0x142640ecd`): the context
+> member-lookup `[socketmgr+0x40]`→`0x142639d00`→`[context+0x168]` is a **stub `0x1423fdf00` (`mov eax,1; ret`)**
+> that always rejects, so no host-side connection is created and the **roster stays 1**. **► Next: make the host
+> context recognize the joiner as a member** (drive a fuller service/context init that installs a real
+> `[context+0x168]` lookup, or register the joiner's SteamID64 in the context member collection `[context+0x170]`
+> via the register thunk `0x14263b7c0`) so gate c accepts + populates the connection descriptor → admit succeeds
+> (`0x142640ee4`) → roster-add `0x140cb31b0` (no offline gate) grows to 2. Plan:
+> [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "STATUS (2026-07-04 night)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
 
