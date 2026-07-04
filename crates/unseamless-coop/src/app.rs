@@ -560,6 +560,12 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
             0x75,
             &[0xEB],
         );
+        // NOTE: redirecting the join's registry call to the create method (slot +0x10 -> +8, 0x1423f62e0 ->
+        // 0x1423f5c00) was TESTED and does NOT help — leg B still returns a null handle from the join context
+        // (the join passes r8=blob_begin where create passes r8=0, and leg B builds a *host* self-connection
+        // anyway, not a connection TO the host). The only correct path for the joiner is the blob method
+        // 0x1423f62e0 creating a connection to the host from a VALID host blob — chart 0x1423fb260 /
+        // 0x1423fa1b0 (the blob format) and supply it. See docs/SESSION-DRIVE.md milestone #11.
     }
 }
 
