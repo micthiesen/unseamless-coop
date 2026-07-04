@@ -566,6 +566,25 @@ fn apply_boot_patches(config: &unseamless_core::config::Config) {
         // anyway, not a connection TO the host). The only correct path for the joiner is the blob method
         // 0x1423f62e0 creating a connection to the host from a VALID host blob — chart 0x1423fb260 /
         // 0x1423fa1b0 (the blob format) and supply it. See docs/SESSION-DRIVE.md milestone #11.
+        //
+        // FORCE the joiner's connection-status poll to "connected". The session-update task's joiner branch
+        // (0x140caff11) polls the connection status: `mov edx,[r14+0x28]; mov rcx,rax; call [r8+8];
+        // mov rbx,rax`, and rbx==0 => the connection is ready (falls through to the roster loop + Client
+        // transition 0x140cb0076); rbx!=0 => reset via 0x140cb3b80. Our synthesized connection returns a
+        // nonzero (not-yet-connected/error) status, so the joiner resets in ~9 frames. Flip the `mov rbx,rax`
+        // (48 8B D8) to `xor rbx,rbx` (48 31 DB) so the joiner treats the connection as connected and advances
+        // to Client — the analog of the host's online-availability gate bypass; world-sync then rides the
+        // proven P2P transport. Landmark = the joiner poll site (0x140caff2b..0x140caff36); the `mov rbx,rax`
+        // is at offset 10. Joiner-branch-only (the host takes the [G+0x24] branch), so inert on the host.
+        const JOIN_POLL_RESULT: &[pelite::pattern::Atom] =
+            pelite::pattern!("41 8B 56 28 48 8B C8 41 FF 50 08 48 8B D8");
+        crate::patch::overwrite_landmark(
+            "force_join_poll_connected",
+            JOIN_POLL_RESULT,
+            11,
+            0x48,
+            &[0x48, 0x31, 0xDB],
+        );
     }
 }
 
