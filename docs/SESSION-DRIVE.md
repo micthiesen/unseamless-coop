@@ -1204,6 +1204,17 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    thunk `0x14263b720`) and have the host accept (its P2P callbacks are registered by the connection-creator), so
 >    the game's session-establish packets cross our proven transport. The join inner's post-blob calls to chart:
 >    `0x1423f1930` (network-session setup on `[this+0x60]`), `0x140caeb30`, `0x140cb55b0` (`[this+0x2f0]`).
+> 10. **EXACT STUCK POINT charted — the joiner has no connection handle `[session+0x24]`.** The session-update task
+>    `0x140cafd10` gates its whole per-frame body on `cmp [r14+0x24], 0; je skip` (r14 = CSSessionManager). `[+0x24]`
+>    is the **network connection handle**: the task fetches the net-session (`[r14+0x60]` → `0x1423f1920`) and polls
+>    the handle's status (`call [netsess_vt+8]` with `edx=[r14+0x24]`); a live handle drives the host branch
+>    (`0x140cb2ae0`) or, past the roster loop, the **Client transition `0x140cb2f80`** (called unconditionally once
+>    the join branch is entered — so Client is NOT separately gated; the block is the handle). On the joiner `[+0x24]`
+>    is **0** (the bypassed blob never established the connection), so the task early-returns every frame and the
+>    joiner sits at `TryToJoinSession` forever. **⇒ The precise remaining work: establish a real connection to the
+>    host so `[session+0x24]` becomes a live handle** — drive the joiner's socket-manager connect to the host SteamID
+>    (avenue b), obtain the game's connection handle, route it to `[r14+0x24]`, and have the host accept so its roster
+>    grows. This is the genuine session-establish piece; the transport underneath it is already proven two-machine.
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
