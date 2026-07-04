@@ -1,5 +1,60 @@
 # Driving a Session Directly (rung-3 call spec)
 
+> ## ★ DECISION (2026-07-05): pivot rung-3 to the "let the game establish it" (true ERSC) model — READ FIRST
+>
+> **We are no longer hand-synthesizing the session object graph offline. We will drive the game's own
+> session-*establishment* machinery, fed our rung-4-discovered peer, and let the game build its own
+> members/context/connection — reproduced from a LIVE CAPTURE of a real working ERSC session.**
+>
+> **Why (empirical, this session's 3-lane RE — full detail in the DLNR3D-reframe block below):** every piece
+> that's missing offline is a *runtime object the game's establishment flow builds*, not something forgeable
+> from the static image:
+> - the live-session array capacity is 0 offline, so a created `SessionSteam` is destroyed the instant it's
+>   built (Lane C);
+> - add-member takes two ref-counted *game handle objects* the connect handshake produces, not a scalar
+>   SteamID we can fabricate (Lane A);
+> - the transport context's accept-callback at `+0x168` is baked to a reject-stub with **no code path anywhere
+>   in the binary** that installs a real one — it can only arrive via a runtime Steam callback (Lane B).
+>
+> Hand-forging these field-by-field has been whack-a-mole across many sessions and is a dead end. But the
+> game's native session **does** establish outside EAC over Steam P2P — **ERSC proves it** (ERSC players see
+> each other in-world with no FromSoft matchmaking), and our own **Steam P2P transport is already rig-proven
+> two-machine**. So the winning move is to *observe a working establishment and reproduce its sequence*, letting
+> the game wire its own construction-time sub-objects (the exact thing we kept losing by hand).
+>
+> **What "the ERSC / online-matchmaking model" means here (and does NOT mean):** drive the game's own
+> *matchmaking/session-establishment code* (its create/join/establish entry points) with a peer we discovered
+> ourselves. It does **NOT** mean reaching FromSoft's matchmaking servers — those stay unreachable outside EAC
+> and off-limits by design. The peer is still found via our rung-4 password-keyed Steam-lobby side-channel; the
+> session still rides **Steam P2P** (transport already proven). We're reproducing what ERSC does, not going
+> back onto the official servers.
+>
+> **\* The offline hand-synthesis avenue (a) is paused, not killed.** If the live capture shows the
+> establishment reduces to a small deterministic set of fields/calls we *can* reproduce without a live handshake
+> — i.e. offline turns out viable or simpler — we re-open it. The capture is the arbiter of offline-vs-drive; it
+> serves both paths (it also hands avenue (a) the real objects to clone).
+>
+> **► NEXT STEPS (in order):**
+> 1. **Live-read capture of a REAL working co-op establishment (ERSC).** Attach the standalone ptrace watcher
+>    `scripts/re/watch-write.py` (no mod needed — ERSC runs outside EAC; `kernel.yama.ptrace_scope=0`) to a live
+>    ERSC host process during a real host+join with a second player, and watch the charted offsets as the
+>    session comes up:
+>    - `SessionManagerSteam +0x18/+0x20/+0x24` (session array ptr / **capacity** / count) — *who sizes capacity?*
+>    - `SessionSteam` slot-26 add-member args (the two ref-counted handle objects) — *what are they, where from?*
+>    - `MTInternalThreadSteamSocket +0x168` — *what real value lands, and what installs it (the Steam callback)?*
+>    - `[container(ManagerImplSteam)+0x48]` owner/config — *what makes the `SteamServiceImpl` standup
+>      `0x142638b40` return non-null* (this is exactly what the native-builder dead-end couldn't satisfy offline);
+>    - `[container+0x708]` socket-manager wrapper; `[container+0x710]` embedded `SessionManagerSteam`.
+>    Capture the **values**, the **call order**, and **what triggers each writer**. (Reachability chain to all of
+>    these from a live `CSSessionManager*` is charted — see the Lane C block below.) Needs Michael + one real
+>    player in an ERSC session; orchestrator drives the watcher.
+> 2. **Chart the minimal establishment entry sequence** from the capture, then **reproduce it in the mod**
+>    driven by the rung-4-discovered peer (the game builds its own graph).
+> 3. **Validate two-machine (rig + Deck):** host-admit-success `0x142640ee4` fires → roster `players=2` → both
+>    players in one another's world.
+>
+> ---
+>
 > ## STATUS (2026-07-05, DLNR3D reframe) — read this FIRST, it corrects the block below
 >
 > **The "member machinery is a runtime closure with no static function" conclusion below was partly wrong.**

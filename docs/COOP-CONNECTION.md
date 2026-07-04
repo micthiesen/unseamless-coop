@@ -144,6 +144,19 @@ the one genuinely hard step — driving the game's own session so players see ea
 
 ### Rung 3 — Drive the game's session (the hard RE, on our terms)
 
+> **★ DIRECTION (2026-07-05): "let the game establish it" (true ERSC model). READ THIS FIRST — the
+> callouts below are the historical hand-synthesis trail, now labeled ground-already-explored.** A 3-lane
+> RE pass proved offline hand-synthesis of the session object graph is a principled dead end (array
+> capacity 0 → instant destroy; add-member needs real ref-counted game handle objects; the transport
+> context's `+0x168` accept-callback has no static installer, only a runtime Steam callback). So we pivot:
+> **drive the game's own session-*establishment* entry points, fed our rung-4-discovered peer, and let the
+> game wire its own sub-objects — reproduced from a LIVE CAPTURE of a real working ERSC session.** This is
+> consistent with this doc's own thesis (below): skip FromSoft matchmaking, find the peer ourselves, run
+> the game's normal session over **Steam P2P** (transport already rig-proven two-machine). It does **not**
+> mean reaching FromSoft's servers. **\* Offline synthesis is paused, not killed** — the capture arbitrates.
+> Full plan + charted offsets + the reachability chain: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION
+> (2026-07-05)".
+
 > **STATE (2026-07-03) — create initiation + real session state are SOLVED; the wall is the game's
 > TRANSPORT layer, which is dormant offline. The finish reduces to a clear architectural choice.** Full
 > trace: [SESSION-DRIVE.md](SESSION-DRIVE.md); the load-bearing picture:

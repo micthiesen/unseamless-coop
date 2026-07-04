@@ -1,5 +1,13 @@
 # Rung 3 finish — the ACTIVATION SEAM (wire our stood-up connection into the session FSM)
 
+> **★ DIRECTION UPDATE (2026-07-05) — rung 3 PIVOTED to "let the game establish it" (true ERSC model).** The
+> transport standup this doc describes is **proven and still used** (don't rebuild it), but the "wire our
+> stood-up connection into the FSM by hand" seam-framing is superseded: a 3-lane RE pass proved hand-synthesis
+> of the session object graph is a dead end, so we now drive the game's own establishment (fed a discovered
+> peer) and let it wire its own sub-objects, reproduced from a **live ERSC capture**. Read
+> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-05)" first; this file is the transport-standup
+> reference underneath that.
+
 > **UPDATE 2026-07-04 pm — substantial progress; two claims below are now CORRECTED.** (a) The object at
 > `[container+0x708]` is a `SocketManagerHolder` whose `+0x10` holds a 0x10-byte **socket-manager wrapper**
 > (`{vtable 0x143276a00, [+8]=MTInternalThreadSteamSocketManager}`), **not** a raw `SteamConnection` — landing a

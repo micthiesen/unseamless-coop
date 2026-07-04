@@ -24,26 +24,24 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **solo `Host` reached + sticks (warped into the co-op world); the joiner's synthetic transport
-> connect now REACHES the host's game-layer admit path offline (two-machine) — the sole remaining wall is the
-> host socket-manager context's member-lookup STUB.** Rungs 1/2/4 (identity, the password-authed Steam
-> side-channel, lobby discovery) ship, confirmed two-machine. Host: stand up the socket-manager wrapper at
-> `[container+0x708]`, drive create → `TryToCreateSession`, force host-setup's online gate `0x140de2620` true →
-> stable `Host`/`Ingame`, `players=1`, warp into map `1800001`. Joiner→host transport (this session,
-> rig-confirmed): the host's socket-manager **worker thread runs offline** (`0x142640bc0`) reading P2P **channel
-> 30**; the joiner sends a real **14-byte DLNW3D SYN** on channel 30 → it **reaches the host admit helper
-> `0x142640e30`** (passes size + SYN-shape gates) but is **rejected at gate c** (`0x142640ecd`): the context
-> member-lookup `[socketmgr+0x40]`→`0x142639d00`→`[context+0x168]` is a **stub `0x1423fdf00` (`mov eax,1; ret`)**
-> that always rejects, so no host-side connection is created and the **roster stays 1**. RE-verified: the context's
-> member machinery (a real `[context+0x168]` lookup + find-or-create `0x142639950` + the member object
-> `0x14263d060` consumes) is **populated only by the online/matchmaker flow** — offline our synthesized context
-> permanently has the reject stub (the context ctors zero `+0x168`; no real lookup exists as a static fn; the
-> `[socketmgr+0x48]` writer is callback-driven and never fires offline; `0x14263b7c0` is a generic insert, NOT a
-> SteamID register). **► Next: reimplement the per-peer member construction offline** (avenue a — synthesize the
-> member + native `[context+0x168]`/`0x142639950` stand-ins + finish the SYN handshake), or first **live
-> `watch-write.py` `[socketmgr+0x48]`/`+0x168` during a REAL online host start** to capture the real closure to
-> reproduce. Then admit succeeds (`0x142640ee4`) → roster-add `0x140cb31b0` (no offline gate) grows to 2. Plan:
-> [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "STATUS (2026-07-04 night)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Status: **solo `Host` reached + sticks (warped into the co-op world); rung-3 PIVOTED (2026-07-05) from offline
+> hand-synthesis to the "let the game establish it" (true ERSC) model.** Rungs 1/2/4 (identity, the
+> password-authed Steam side-channel, lobby discovery) ship, confirmed two-machine; the DLNW3D **Steam P2P
+> transport is rig-proven two-machine** (both machines exchange packets by SteamID64, no matchmaking); solo host
+> reaches stable `Host`/`Ingame` (`players=1`, warped into map `1800001`). **Why the pivot:** a 3-lane RE pass
+> proved offline synthesis of roster→2 is a principled dead end — the live-session array capacity is 0 offline so
+> a created `SessionSteam` is destroyed instantly (Lane C), add-member wants two ref-counted *game handle
+> objects* not a scalar SteamID (Lane A), and the transport context's accept-callback at `+0x168` has **no static
+> installer anywhere in the binary**, only a runtime Steam callback (Lane B). So instead of forging that graph by
+> hand, we **drive the game's own session-establishment entry points, fed our rung-4-discovered peer, and let the
+> game wire its own sub-objects — reproduced from a LIVE CAPTURE of a real working ERSC session** (ERSC proves the
+> native session establishes outside EAC over Steam P2P). This is **not** reaching FromSoft's matchmaking servers
+> (off-limits, EAC): peer discovery stays our side-channel, the session stays Steam P2P. **\* Offline synthesis is
+> paused, not killed** — if the capture shows establishment reduces to a small reproducible field/call set we
+> re-open it. **► Next: a live `watch-write.py` read of a real ERSC establishment at the charted offsets
+> (`SessionManagerSteam+0x18/0x20/0x24`, add-member handles, `MTInternalThreadSteamSocket+0x168`,
+> `[container+0x48]`), then reproduce the sequence → host-admit-success `0x142640ee4` → roster `players=2`.** Plan:
+> [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "★ DECISION (2026-07-05)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
 

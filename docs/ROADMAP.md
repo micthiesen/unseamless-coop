@@ -63,17 +63,27 @@ The out-of-band connection stack (rungs 1, 2, 4) is shipped and **CONFIRMED live
 machines** (2026-06-27 friend test: `coop: linked … versions match`, bidirectional traffic). **Rung 3,
 driving the game's own session so players see each other in-world, is the headline-next.** The
 **transport is built** — we stand up the game's own DLNW3D transport ourselves offline and have rig-proven
-its legacy P2P works two-machine (rig + Deck). **What remains is the SEAM: getting a connection at
-`[container+0x708]` that the session FSM will ACTIVATE to `Host`.** As of **2026-07-04** both avenues to a
-fully-session-wired connection are walled and the wall is precisely charted: (a) our **hand-built** connection
-lands at `+0x708` and reaches `TryToCreateSession`, but the session-update task faults driving it to `Host`
-(sub-objects the host-setup touches aren't wired); (b) making the **game build it** (drive the establish
-handler `0x1423f2820` so the wiring is done for us) reaches the game's own builder but its `SteamServiceImpl`
-standup `0x142638b40` returns null — **offline AND two-machine, and even with `ISteamNetworking006` resolved**
-— because the standup's `owner`/config (`[container+0x48]`) is only valid inside the game's own online-session
-flow (EAC/matchmaker), which we bypass. So the rung-3 finish is **the seam, not the transport**: chart exactly
-what the host-setup path touches on the connection and wire those on our stood-up connection. Full state in the
-rung-3 callout below. *(The earlier item-grey-gate hunt —
+its legacy P2P works two-machine (rig + Deck). **What remains is the SEAM: the game's session-*establishment*
+object graph.**
+>
+> **★ DECISION (2026-07-05) — pivot to the "let the game establish it" (true ERSC) model.** A 3-lane RE pass
+> this session proved the offline hand-synthesis avenue is a principled dead end: every piece missing offline is
+> a *runtime object the establishment flow builds* — the live-session array capacity is 0 offline so a created
+> `SessionSteam` is destroyed instantly (Lane C); add-member wants two ref-counted *game handle objects*, not a
+> scalar SteamID (Lane A); and the transport context's accept-callback at `+0x168` has **no static installer
+> anywhere in the image** — it only arrives via a runtime Steam callback (Lane B). So instead of forging that
+> graph field-by-field (whack-a-mole, many sessions), we **drive the game's own establishment entry points, fed
+> our rung-4-discovered peer, and let the game wire its own sub-objects** — reproduced from a **live capture of a
+> real working ERSC session**. ERSC proves the native session establishes outside EAC over Steam P2P, and our
+> Steam P2P transport is already rig-proven two-machine, so this is reproducing a thing that demonstrably works.
+> **This does NOT mean reaching FromSoft's matchmaking servers** (off-limits, EAC): the peer is still found via
+> our own password-keyed lobby side-channel and the session still rides Steam P2P. **\* Offline synthesis is
+> paused, not killed** — if the capture shows establishment reduces to a small reproducible field/call set, we
+> re-open it; the capture arbitrates. **► Next: a live `watch-write.py` read of a real ERSC establishment at the
+> charted offsets, then reproduce the sequence. Full plan + offsets: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★
+> DECISION (2026-07-05)".** *(Superseded background — the older "seam = wire the connection sub-objects" and both
+> hand-build/native-build avenues — is preserved in the rung-3 callout below and in SESSION-DRIVE.md.)*
+*(The earlier item-grey-gate hunt —
 three static candidate families rig-eliminated, [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) —
 is now **moot for the connection**: the transport-leg path sidesteps the multiplayer items entirely.)* The
 **overlay crashes on native Windows**, a pre-release blocker — **ROOT-CAUSED (mechanism) 2026-07-01:
@@ -145,6 +155,23 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
 - **Rung 3: drive the session FSM (the headline-next).** RE the create/join functions that move
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
+
+  > **★ CURRENT DIRECTION (2026-07-05): pivot to "let the game establish it" — see the DECISION in the Wave-2
+  > intro above and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-05)".** Next action is a live
+  > `watch-write.py` capture of a real ERSC establishment at the charted offsets, then reproduce the sequence.
+  > **The blocks below are the historical hand-synthesis trail (2026-07-02..04) — read them as "ground already
+  > explored / why offline was ruled out," not as the current plan.** Reference docs, so we don't re-tread:
+  > - [SESSION-DRIVE.md](SESSION-DRIVE.md) — the rung-3 call spec + all RE (DLNR3D reframe, Lanes A/B/C, the
+  >   `CSSessionManager → container → SessionManagerSteam → session-array` reachability chain + every offset).
+  > - [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md) — how we stand up the DLNW3D transport ourselves
+  >   (proven two-machine); the transport is done, don't rebuild it.
+  > - [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md) — the FromNet/session-establish link RE.
+  > - [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md) — FSM states, leave/teardown, the disconnect
+  >   chokepoints (also the disconnect-suppression feature's basis).
+  > - [COOP-FLOW-FINDINGS.md](COOP-FLOW-FINDINGS.md) — the create-flow gates (leg B, capacity-0 destroy).
+  > - [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) / [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) — the rig
+  >   RE + drive procedures (watch-write, the probe flags); [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)
+  >   — the item-grey-gate hunt, rig-eliminated + now moot.
 
   > **State (2026-07-04 night) — ★ SOLO HOST STICKS + JOINER SYN REACHES HOST ADMIT two-machine; gap = the
   > host context member-lookup stub.** Two-machine (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the

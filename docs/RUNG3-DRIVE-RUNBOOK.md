@@ -1,12 +1,17 @@
 # Rung-3 Two-Machine Create-Drive Runbook
 
-> **SUPERSEDED (2026-07-04) — this create-drive experiment is not the current path.** It tested whether
-> a real peer sizes leg B's slot array; the answer turned out to be downstream of the real wall (the
-> **transport**, now solved: we build the DLNW3D transport ourselves offline and rig-proved its P2P works
-> two-machine). The current plan is the transport leg + the seam to the session FSM — see
-> [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 "THE PLAN" and [SESSION-DRIVE.md](SESSION-DRIVE.md)'s
-> STATUS block. The two-machine *mechanics* below (deck.sh, the config, reading both logs) are still the
-> right harness; only the specific `drive_create`/slot-array framing is superseded.
+> **SUPERSEDED (2026-07-05) — the create-drive/offline-synthesis framing is retired; rung-3 has PIVOTED to
+> "let the game establish it" (true ERSC model).** This experiment tested whether a real peer sizes leg B's
+> slot array; that (and the whole offline hand-synthesis avenue) is now a proven dead end (3-lane RE: array
+> capacity 0 → instant destroy, add-member needs real game handle objects, the `+0x168` accept-callback has
+> no static installer). **The current next action is a LIVE-READ capture, not a drive:** attach the
+> standalone ptrace watcher `scripts/re/watch-write.py` to a real working **ERSC** host during a genuine
+> host+join, and read what the game's own establishment writes at the charted offsets
+> (`SessionManagerSteam+0x18/0x20/0x24`, add-member handles, `MTInternalThreadSteamSocket+0x168`,
+> `[container+0x48]`), then reproduce that sequence. Full plan: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★
+> DECISION (2026-07-05)"; map: [ROADMAP.md](ROADMAP.md) > Wave 2. **The two-machine *mechanics* below
+> (`deck.sh`, the config, reading both logs) are still the right harness** for the reproduce-and-validate
+> step; only the `drive_create`/slot-array framing is superseded.
 
 The exact, copy-pasteable procedure for the **rung-3 create-drive experiment on two machines** — the
 run that answers the one question the solo rig fundamentally can't. Staged now so that the moment a
