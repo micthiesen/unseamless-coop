@@ -57,7 +57,13 @@ a real ERSC host+join (Deck as peer 2), the two things that actually build the s
   capture" (setup) + its dump/writer-trace list; [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md)
   §4 (the ranked offline-vs-live reads); [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION".
 - **Serial:** needs Michael + a live 2-player ERSC session (rig on real ERSC + Deck as ERSC peer);
-  orchestrator drives the watcher.
+  orchestrator drives the watcher. **Gated on Michael's availability**, so while it waits, the
+  static-prep worker below aims it.
+- **Being prepped now (delegable):** a worker is statically charting the two live-trace targets — the
+  session-member *writers* (`container+0x1e8` registry root / `SessionSteam` member slots, roster-add
+  `0x140cb31b0` call graph) and the availability-singleton query (`0x144842d40` `[vt+0x18]`, and who
+  writes its state) — so the live pass arms known anchors with expected values instead of discovering
+  them. Turns the scarce live session into a fast confirm.
 
 ## Candidates Not Chosen
 
@@ -72,6 +78,8 @@ a real ERSC host+join (Deck as peer 2), the two things that actually build the s
 - **Single-source the duplicated `leave_session` offset/prologue** (task #13) — fold into the next
   `session_probe.rs`/`stay_connected.rs` churn, not standalone. (This session already re-derived the
   correct site-A prologue — the leading REX `0x40` — so the two copies should share one constant.)
+- **Static-prep of the live-trace targets** — *chosen as the delegable companion to Next* (see the
+  worker note under Next); not a runner-up, listed here so it isn't re-proposed.
 
 ## Learned Recently (Pointers Only)
 
