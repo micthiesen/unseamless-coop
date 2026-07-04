@@ -505,8 +505,13 @@ fn install_create_gate_trace(config: &Config) {
     // raw-patch its entry to `ret` — the doc's "early-return before the lobby_state=7 write" gate — to see
     // if the host then sticks in Host/Ingame. (A jmp-back hook can't early-return, so suppression is a patch.)
     // Read-only diagnostics: leave-session + teardown-handler both proved NOT on the driven-host reset path
-    // (neither fires). Kept as harmless charting for the general seamless-teardown work.
-    install_offset_hook("leave-session", exe_base + LEAVE_SESSION_OFFSET, log_leave_session);
+    // (neither fires). The leave-session tracer contends for the same entry bytes as stay_connected's
+    // site-A gate (whoever installs first wins; the other degrades with a logged byte-check refusal), so
+    // it is gated on `session_probe` — an RE/charting run flips that on and owns the site; a validation
+    // run with `drive_create` + `stay_connected` leaves it off and the gate installs cleanly.
+    if config.debug.probes.session_probe {
+        install_offset_hook("leave-session", exe_base + LEAVE_SESSION_OFFSET, log_leave_session);
+    }
     install_offset_hook("teardown-handler", exe_base + TEARDOWN_HANDLER_OFFSET, log_teardown_handler);
     // `suppress_leave` (repurposed): the driven host actually resets via host-setup's OWN final validity
     // gate `0x140de2620` (reached from `0x140cb2ae0` via `0x140ddfb20`), which reads the online-session

@@ -78,13 +78,16 @@ const LEAVE_INLINE_ENTRY_OFFSET: usize = 0x1_40cb_0840 - PREFERRED_BASE;
 /// hook jumps here, taking exactly the path the inline's own guards take.
 const LEAVE_INLINE_JOIN_OFFSET: usize = 0x1_40cb_08f7 - PREFERRED_BASE;
 
-/// Charted entry bytes of `leave_session` (site A), read off the pinned 2026-06-02 exe
-/// (`scripts/re/static.py fn 0x140cae730`): `push rbx; sub rsp,0x20; mov rax,[rip+0x30cbd93]
-/// (= the CSSessionManager keystone G 0x143d7a4d0); mov rbx,rcx`. 15 bytes — past ilhook's 14-byte
-/// stolen window, so the verified bytes cover everything the hook relocates. The rip disp32
-/// (`93 BD 0C 03`) is layout-specific, which is what makes this a sharp drift detector.
+/// Charted entry bytes of `leave_session` (site A): `rex push rbx (40 53); sub rsp,0x20;
+/// mov rax,[rip+0x30cbd93] (= the CSSessionManager keystone G 0x143d7a4d0); mov rbx,rcx`. 15 bytes
+/// — past ilhook's 14-byte stolen window, so the verified bytes cover everything the hook
+/// relocates. The rip disp32 (`93 BD 0C 03`) is layout-specific, which is what makes this a sharp
+/// drift detector. Re-derived from a LIVE read on the rig (2026-07-04 validation pass): the
+/// original static chart dropped the leading bare REX prefix `0x40` and never matched. The live
+/// bytes self-verify via the displacement: the `mov rax` ends at `0x140cae73d`, and
+/// `0x140cae73d + 0x30cbd93 = 0x143d7a4d0` = G exactly (one byte earlier misses G by one).
 const LEAVE_SESSION_PROLOGUE: [u8; 15] =
-    [0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x05, 0x93, 0xBD, 0x0C, 0x03, 0x48, 0x8B, 0xD9];
+    [0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x05, 0x93, 0xBD, 0x0C, 0x03, 0x48, 0x8B];
 /// Charted entry bytes of the inline twin (site B), read off the pinned exe (windowed disasm at
 /// `0x140cb0840`): `mov eax,[r14+0xc]; cmp eax,1; je +0xaa (-> 0x140cb08f7); cmp eax,4`. 16 bytes,
 /// covering the full stolen window; the concrete `je` rel32 (`AA 00 00 00`) pins the join-point

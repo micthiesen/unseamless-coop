@@ -14,11 +14,24 @@ re-derivation recipe at the bottom so a game update can be re-charted fast.
 > reimplement a co-op mod that loads *outside* anti-cheat. We study *what* the game does at session
 > teardown, then reimplement around it. See CLAUDE.md > Safety / legitimacy.
 
-> **Implemented (2026-07-04):** this gate shipped as `gameplay.stay_connected` (default off until
-> the rig pass below) — `crates/unseamless-coop/src/stay_connected.rs` hooks both charted sites
-> (A = `leave_session` entry, B = the inline twin's entry, jumping to the `0x140cb08f7` join)
-> behind a runtime-armed flag, byte-verified at install. The "Risks / what to verify on the rig"
-> list below is that feature's validation recipe.
+> **Implemented (2026-07-04):** this gate shipped as `gameplay.stay_connected` (default off) —
+> `crates/unseamless-coop/src/stay_connected.rs` hooks both charted sites (A = `leave_session`
+> entry, B = the inline twin's entry, jumping to the `0x140cb08f7` join) behind a runtime-armed
+> flag, byte-verified at install. The "Risks / what to verify on the rig" list below is that
+> feature's validation recipe.
+>
+> **Install + arm RIG-VALIDATED (2026-07-04).** A solo rig pass (`stay_connected = true`,
+> `session_probe = false`) confirmed both sites hook and the gate arms cleanly, no panic
+> (`leave gate hooked at … site A`/`site B`, `leave-suppression ARMED`, feature `= ok`). Two fixes
+> landed in that pass: (1) **site-A prologue was wrong** — the static chart dropped the leading bare
+> REX `0x40` on `push rbx`, so `leave_session`'s byte-check always refused; corrected to the
+> live-read 15 bytes `40 53 48 83 EC 20 48 8B 05 93 BD 0C 03 48 8B` (self-verifies: the `mov rax`
+> rip-disp resolves to G `0x143d7a4d0` exactly). (2) `session_probe`'s **read-only `leave-session`
+> tracer now installs only when `session_probe` is on** — it and the site-A gate contend for the
+> same entry bytes, so a validation run (`drive_create` + `stay_connected`, probe off) no longer has
+> the tracer steal site A. **Still owed:** the *behavioral* half (risks #1–#3 below) needs a real
+> 2-player session — solo there is no session to leave, so boss/area/death routing + sibling-effect
+> playability can only be checked live.
 >
 > **Refinement of site B (charted while wiring the gate).** Task 4 below calls the inline at
 > `0x140cb0840` "an inlined copy of A's exact body" and lists the net-status-low / received-leave /
