@@ -9,11 +9,17 @@
 > the item-grey online signal, legitimate for offline co-op). Rig-confirmed: `None → TryToCreateSession → Host`,
 > `players=1` (`player[0] host=true local=true`), the warp into map `1800001` COMPLETES, and the session HOLDS
 > (no teardown, game running, `in_gameplay=true`). Config: `stand_up_transport`+`land_socket_holder`+`drive_create`
-> +`drive_session_established`+`suppress_leave` on, `drive_establish_handler` off. **► The remaining goal — TWO
-> sessions connected — needs a JOINER driver:** the join wrapper `0x140cae640` is peer-directed and its payload
-> (`a`/`b`/stack5) is uncharted (SESSION-RE-FINDINGS.md defers it to a two-player test). Build a join driver
-> (bypassing the same gates), feed it the rung-4 host SteamID64, run rig-hosts / Deck-joins. See "HOST-SETUP
-> DRIVE (2026-07-04 pm)" below for the full chain.
+> +`drive_session_established`+`suppress_leave` on, `drive_establish_handler` off.
+>
+> **★ JOINER BUILT + TWO-MACHINE RUN (rig host + Deck joiner).** `SessionJoinDriver` (`[debug.probes] drive_join`)
+> drives the join wrapper `0x140cae640` → **`TryToJoinSession`** (holds, no crash), with two join-side gate
+> bypasses (`bypass_session_join_gate` + `bypass_session_join_blob_gate` in `app.rs`). Two-machine, rig-confirmed:
+> rig = stable `Host`/`Ingame` (in the co-op world), Deck = `TryToJoinSession`, and the legacy P2P transport is
+> **live both ways** (`game-p2p — RECV` on both). **► FINAL GAP — the session-layer handshake:** the Deck never
+> reaches `Client` and the rig roster stays `players=1`, because bypassing the blob-parse left the joiner's session
+> with **no host connection endpoint**. Wire that endpoint (a real SteamID-only blob, or drive the joiner's
+> socket-manager to connect to the host SteamID) so the establish handshake flows to `Client`. See milestone #9
+> in "HOST-SETUP DRIVE (2026-07-04 pm)" below for the full chain + the two avenues.
 >
 > **The `SteamServiceImpl` standup WORKS OFFLINE — the "native-builder dead end" was a misdiagnosis.**
 > Driving the socket-manager's own init `0x14263a9d0` stood up a real service offline (`init returned 1`,
@@ -1176,16 +1182,28 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 > 7. **★ HOST STICKS (rig-confirmed).** With the gate forced: `None → TryToCreateSession → Host`, `protocol=Ingame`,
 >    `players=1` (`player[0] host=true local=true`), warp into map `1800001` completes (`warp_pending` clears,
 >    `in_gameplay=true`), session HOLDS (no teardown, game running). The solo host is DONE.
-> 8. **► JOIN DRIVER — the remaining goal (two sessions).** Entry charted this session: join wrapper
->    `0x140cae640(this, dl=flag, r8=a, r9d=b, stack=c)` → inner `0x140cb2470` (stores `lobby_state=TryToJoinSession(4)`;
->    wrapper sets `FailedToJoinSession(5)` on failure). The payload `a`(r8)/`b`(r9d)/`c` is peer-directed and its
->    exact layout is still uncharted (SESSION-RE-FINDINGS.md > "JOIN" defers it to a two-player run). Join hits the
->    same shared availability gate `0x140cb4b50` create does (handled by `bypass_session_create_gate`) and will need
->    its own socket-manager standup + the same online-availability bypass. **Plan:** build a `SessionJoinDriver`
->    mirroring `SessionCreateDriver` (stand up transport, land the wrapper, force the validity gate, drive
->    `0x140cae640` with a payload built from the rung-4 host SteamID64 — legacy P2P is SteamID-addressed, so the
->    server broker blob should be unneeded), then run rig-hosts / Deck-joins and chart `a`'s minimal fields from the
->    inner's reads (`0x140cb2470` consumes `rdi=r8` past the gate). Expect a fault-chain like the host side.
+> 8. **JOIN DRIVER — reaches TryToJoinSession (built + rig-confirmed).** `SessionJoinDriver` (`[debug.probes]
+>    drive_join`) mirrors the create driver: builds a minimal blob from the rung-4 host SteamID64 and calls the join
+>    wrapper `0x140cae640` → inner `0x140cb2470`. Two join-side gate bypasses (in `app.rs` under
+>    `bypass_session_create_gate`, join-specific bytes so inert on the host): `bypass_session_join_gate` (the
+>    availability gate `0x140cb4b50` call site `E8 DB 25 00 00 … 75 07`, flip `jne`→`jmp`) and
+>    `bypass_session_join_blob_gate` (the blob-parse result gate `41 FF 52 10 89 43 28 85 C0 75 04`, flip `jne`→`jmp`
+>    — our synthesized host produces no real matchmaker blob). Rig-confirmed: the driven join returns true and holds
+>    at `lobby=TryToJoinSession` (no crash/teardown), waiting for a host connection.
+> 9. **★ TWO-MACHINE (rig host + Deck joiner) — both in the correct FSM states, transport live, session handshake
+>    NOT yet complete.** Rig drives create → stable `Host`/`Ingame` (in the co-op world); Deck drives join → holds at
+>    `TryToJoinSession`; the legacy `ISteamNetworking006` P2P transport is confirmed bidirectional between them
+>    (`game-p2p — RECV` on both). But the Deck never advances to `Client` and the rig roster stays `players=1` — the
+>    game's **session-layer join handshake doesn't run over the transport**. Root cause: we bypassed the blob-parse
+>    (`bypass_session_join_blob_gate`), so the joiner's session has **no host connection endpoint** to reach — the
+>    blob is what normally wires the joiner's session to the host's connection. **► FINAL GAP / NEXT:** wire the host
+>    connection into the joiner's `TryToJoinSession` session so the game's establish handshake flows to `Client`
+>    (roster → 2 on the host). Two avenues: (a) chart the minimal blob fields the parse (`[r10+0x10]` on `[begin,end)`)
+>    needs to set the host endpoint, and supply a real (SteamID-only) blob instead of bypassing; or (b) after
+>    `TryToJoinSession`, drive the joiner's stood-up socket-manager to CONNECT to the host SteamID (the game's connect
+>    thunk `0x14263b720`) and have the host accept (its P2P callbacks are registered by the connection-creator), so
+>    the game's session-establish packets cross our proven transport. The join inner's post-blob calls to chart:
+>    `0x1423f1930` (network-session setup on `[this+0x60]`), `0x140caeb30`, `0x140cb55b0` (`[this+0x2f0]`).
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
