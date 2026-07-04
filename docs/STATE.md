@@ -38,32 +38,34 @@ Last updated: **2026-07-04**.
 
 ## Next
 
-**Task #16 — the live writer-trace, now tightly scoped.** The static path is exhausted; the one
-field that differs offline-vs-live is a *runtime* value, so it can only be pinned live. Watch, during
-a real ERSC host+join (Deck as peer 2), the two things that actually build the session:
+**Task #16 — the live writer-trace, AIMED and ready to run.** The static path is exhausted; the one
+field that differs offline-vs-live is a *runtime* value, so it can only be pinned live. The aim sheet
+[WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) charts **four watchpoints to arm in one live ERSC
+host+join** (Deck as peer 2) — the live session is now a fast confirm, not discovery:
 
-1. **The member-add writers** — how a `SessionMemberSteam` gets added to `SessionSteam` (the live
-   capture named the objects; catch the RIPs + values that populate a member on a fresh join). Anchor
-   on a stable field (`[csm+0xc]` lobby_state, or the member-registry root `container+0x1e8`).
-2. **The online-availability signal** — the `0x144842d40` singleton's state and its `[vt+0x18]`
-   availability-query result, plus `[[0x143d855c8]+0x10]`, in a real session vs offline.
+- **A1 (member registry):** `watch-bt.py --addr 0x143dcd5b8` (container+0x1e8). Fires on the host as
+  the joiner is admitted; backtrace should show `0x1423ff7c0 ← 0x142400210 ← 0x142402bf0 ←
+  0x1423fdf20` (SessionSteam vt[26] add-member). **The value to nail down: which inline offset is the
+  member count/head** (so a future offline reproduction knows what to write).
+- **A2 (session-create, secondary):** `watch-bt.py --addr 0x143dcdb04` (SessionManagerSteam count) —
+  count `0→1`.
+- **B2 (availability singleton):** `watch-bt.py --addr 0x144842d40` — catches get-or-create and hands
+  over the **live singleton ptr**; then follow `[vt+0x18]`'s returned container and watch a field
+  inside it (the real, statically-unpinnable differ — a live two-step).
+- **B1 (confirm-only):** deref `[0x143d855c8]`, watch `+0x10` — already RIG-OBSERVED `=1` offline, so
+  the differ is *below* it at the singleton query; arm just to confirm the online value.
 
 - **Why this / why now:** the standup red herring is closed and offline synthesis is a proven dead
   end, so the only way forward is to observe a working establishment and reproduce its sequence. The
-  offline side of the diff is already captured this session (0/0/0 transport objects undriven;
-  `[[0x143d855c8]+0x10]` read as `1` at menu — so the differ is *below* that field, at the singleton
-  query), so the live session is a quick grab-and-diff, not open-ended.
-- **Plan:** [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Re-running this
-  capture" (setup) + its dump/writer-trace list; [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md)
-  §4 (the ranked offline-vs-live reads); [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION".
-- **Serial:** needs Michael + a live 2-player ERSC session (rig on real ERSC + Deck as ERSC peer);
-  orchestrator drives the watcher. **Gated on Michael's availability**, so while it waits, the
-  static-prep worker below aims it.
-- **Being prepped now (delegable):** a worker is statically charting the two live-trace targets — the
-  session-member *writers* (`container+0x1e8` registry root / `SessionSteam` member slots, roster-add
-  `0x140cb31b0` call graph) and the availability-singleton query (`0x144842d40` `[vt+0x18]`, and who
-  writes its state) — so the live pass arms known anchors with expected values instead of discovering
-  them. Turns the scarce live session into a fast confirm.
+  offline side of the diff is already captured (0/0/0 transport objects undriven; `[[0x143d855c8]+0x10]`
+  `=1` at menu), and the writers are statically charted, so the live pass is a quick aimed grab.
+- **Plan:** [WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) (the four arm recipes + re-derive
+  rules) is the primary; [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Re-running
+  this capture" (rig/Deck setup); [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md) §2/§3
+  (the availability gate).
+- **Serial + Michael-gated:** needs a live 2-player ERSC session (rig on real ERSC + Deck as ERSC
+  peer); orchestrator drives the watchers. This is the next thing to do the moment Michael is at the
+  machine.
 
 ## Candidates Not Chosen
 
@@ -75,14 +77,16 @@ a real ERSC host+join (Deck as peer 2), the two things that actually build the s
 - **stay-connected behavioral validation** (risks #1–#3: boss/area/death route through the gate +
   stay playable) — needs a live 2-player session; install+arm is already rig-validated. Fold into the
   next live co-op run, or just notice it in play.
-- **Static-prep of the live-trace targets** — *chosen as the delegable companion to Next* (see the
-  worker note under Next); not a runner-up, listed here so it isn't re-proposed.
-
-(Done since this decision: task #13 — the duplicated `leave_session` offset is now single-sourced
-from `stay_connected::LEAVE_SESSION_OFFSET`, referenced by `session_probe`.)
+(Done this session, no longer candidates: **static-prep of the live-trace targets** — landed as
+[WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md), now folded into Next above; **task #13** — the
+duplicated `leave_session` offset is single-sourced from `stay_connected::LEAVE_SESSION_OFFSET`.)
 
 ## Learned Recently (Pointers Only)
 
+- [WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) — the static aim sheet for the task-#16 live
+  capture: four watchpoints (member registry, session-create, availability singleton, gate input),
+  each with a backtrace-verified writer chain, arm recipes, and re-derive rules. Both writers sit
+  behind vtable dispatch, so the live pass uses `watch-bt` backtraces to prove the chain.
 - [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md) — the standup factory is satisfiable offline;
   the offline wall is flow-non-entry + the downstream runtime availability signal, not the factory.
   §4 has the ranked offline-vs-live dump list; §5 the minimal driven-standup recipe.
