@@ -1125,15 +1125,21 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >      failed listen releases the sub-object → cleanup faults on its null vtable): fixed by the init sizing the
 >      pool at `socketmgr+0xc0` from `[socketmgr+0x60]` = `descriptor[0x20]` (the connection count).
 > 4. **CURRENT WALL — fault #4: the socket-manager's WORKER THREAD.** `MTInternalThreadSteamSocketManager` spawns
->    an OS worker thread (stack jumps to `~0x5eaffxxx`) that runs `0x142640bc0` — per-connection ISteamNetworking006
+>    an OS worker thread (stack `~0x5eaffxxx`) that runs `0x142640bc0` — per-connection ISteamNetworking006
 >    context setup (`lea rcx,[0x143c602b0]` the iface holder; `call [0x144c0d0a4]` = the `SteamInternal_ContextInit`
->    import) — and **jumps to a garbage target that changes every run** (`0x3b14e4c0`, `0x2146e800`, …) → execute-DEP
->    fault. Changing garbage + stable return addr `0x142640c48` = uninitialized/corrupted worker state (a stack
->    canary `xor rsp,[0x143c5adb0]` guards its 0x510-byte frame). Not yet resolved. **► NEXT: runtime-inspect the
->    worker thread** — read `[0x144c0d0a4]` live (is the import itself bad, or is the call target computed from a
->    corrupt base?), examine the connection object the worker is initializing, and check whether the socketmgr's
->    descriptor still lacks a field the worker needs. Also try letting the natural session-update task drive Host
->    over frames instead of the synchronous `force_host_transition` jam (which may race the worker).
+>    import) — and **jumps to a garbage target that changes every run** (`0x3b14e4c0`, `0x2146e800`, `0x2e06e440`,
+>    …) → execute-DEP fault, stable return addr `0x142640c48`. **Ruled out:** the import is NOT bad — reading the
+>    three Steam IAT slots live shows all valid (`[0x144c0d09c]`, `[0x144c0d0a4]`=`SteamInternal_ContextInit`,
+>    `[0x144c0d0ac]` all point into loaded `steam_api64.dll` at `0x6ffffc37xxxx`). So `SteamInternal_ContextInit`
+>    runs and the crash is INSIDE it (or just after) — it invokes an **uninitialized callback** in the per-connection
+>    context the worker built (changing garbage = uninitialized stack/heap). **Also ruled out:** not a
+>    `force_host_transition` race — with it OFF the natural session-update task reaches `TryToCreateSession` and the
+>    worker crashes identically. **► NEXT: live worker-thread debug** (Frida/ptrace on the spawned thread) to catch
+>    the exact instruction + the context struct it derefs, and find which socketmgr/connection field leaves the
+>    context callback uninitialized. Candidate lead: our standup's resolver `0x142640b90` overwrites `[holder 0x143c602b0]`
+>    with the raw iface (the original value was the resolver fn `0x142640b90`) — check whether that mutation breaks
+>    the worker's `SteamInternal_ContextInit(holder)`. The connection we hand the socketmgr also skips Accept-setup
+>    `0x14263ffe0` (the "+0x120 iface-holder" / incompatible-heap path), a likely source of the uninitialized context.
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes

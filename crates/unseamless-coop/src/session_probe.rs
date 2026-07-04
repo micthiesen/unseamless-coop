@@ -1720,6 +1720,21 @@ impl Feature for TransportStandupDriver {
                 if iface == 0 { "NULL — P2P interface unavailable offline!" } else { "resolved OK" },
             );
 
+            // DIAGNOSTIC (2026-07-04 pm): the socketmgr worker thread crashes calling the Steam import at
+            // IAT slot 0x144c0d0a4 (SteamInternal_ContextInit) → garbage. The resolver above uses the sibling
+            // slots 0x144c0d09c/0x144c0d0ac successfully, so read all three to see if 0x144c0d0a4 alone is
+            // unbound/garbage (a delay-load import the game never touches offline). If so, GetProcAddress on
+            // steam_api64.dll + patch the slot is the fix. All are fixed .data addresses (no ASLR).
+            // These slots are 4-aligned (not 8), so use unaligned reads (x86 qword read is fine; Rust's
+            // debug-assert would otherwise panic on the misalignment).
+            let iat9c = ((exe_base + 0x4c0d09c) as *const usize).read_unaligned();
+            let iata4 = ((exe_base + 0x4c0d0a4) as *const usize).read_unaligned();
+            let iatac = ((exe_base + 0x4c0d0ac) as *const usize).read_unaligned();
+            log::info!(
+                "session-probe: transport-standup — Steam IAT slots: [0x144c0d09c]={iat9c:#x} \
+                 [0x144c0d0a4]={iata4:#x} (SteamInternal_ContextInit — worker crashes here) [0x144c0d0ac]={iatac:#x}",
+            );
+
             // 2. Construct a SteamServiceImpl@DLNW3D via its base ctor (bypasses the factory's `owner`).
             // The game allocator `0x141eb9ed0(size, align, heap)` tail-calls `[[r8=heap]+0x50]` — it needs
             // a DLNew heap object in r8 that the factory sources from its `owner` (dormant offline). For
