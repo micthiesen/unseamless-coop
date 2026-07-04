@@ -1106,12 +1106,132 @@ impl Feature for SessionCreateDriver {
     }
 }
 
+// --- Rung-3 TRANSPORT-STANDUP driver (ERSC path C, experimental) --------------------------------
+//
+// The transport leg of the ERSC-faithful connection (docs/COOP-CONNECTION.md > "THE PLAN" +
+// docs/FROMNET-LINK-FINDINGS.md). The game's DLNW3D Steam-P2P transport is DORMANT offline
+// (scan-vtable.py: 0 SteamServiceImpl/Manager/Connection), so `[container+0x708]` — the SteamConnection
+// the driven create needs — is never built. Path C stands the transport up ourselves; because ER's
+// transport is the LEGACY `ISteamNetworking006` P2P API (addressed by CSteamID alone, Steam relay does
+// NAT), the whole connection needs only the rung-4 peer SteamID64 — no server-brokered `join_data`.
+//
+// This is the FIRST, lowest-risk increment: resolve `ISteamNetworking006` and construct a
+// `SteamServiceImpl@DLNW3D` via its charted base ctor, logging each step. A `scan-vtable.py` run then
+// confirms whether a SteamServiceImpl exists offline — i.e. whether we can construct DLNW3D objects at
+// all without the game's online flow. The manager + connection + peer-bind + Accept come in later
+// increments (synthesized params; the connect itself needs a two-machine peer).
+//
+// Addresses (from the exe preferred base 0x140000000; docs/SESSION-DRIVE.md > "TRANSPORT CHARTED"):
+// iface resolver 0x142640b90 stores the interface at holder 0x143c602b0; allocator 0x141eb9ed0(size,
+// align); SteamServiceImpl base ctor 0x14263b6b0(this)->this installs vtable 0x143277270 (sub-ctor
+// 0x14263f1e0). Re-derive after a game update via the RTTI/vtable walk in SESSION-DRIVE.md.
+
+/// Offset (from exe base) of the ISteamNetworking006 resolver `0x142640b90`.
+const ISTEAM_RESOLVER_OFFSET: usize = 0x2640b90;
+/// Offset of the ISteamNetworking006 interface-context holder `0x143c602b0` (resolver stores the
+/// interface pointer at `[holder]`).
+const ISTEAM_HOLDER_OFFSET: usize = 0x3c602b0;
+/// Offset of the `SteamServiceImpl@DLNW3D` base ctor `0x14263b6b0` (`fn(this) -> this`; installs
+/// vtable `0x143277270`).
+const SVC_BASE_CTOR_OFFSET: usize = 0x263b6b0;
+/// Bytes the factory allocates for a `SteamServiceImpl` before base-ctoring it.
+const SVC_SIZE: usize = 0x18;
+
+/// One-shot: stand up a DLNW3D `SteamServiceImpl` offline (path C, first increment). Fires once in-world
+/// (active main player present, same world gate as the create driver). Gated on
+/// `[debug.probes] stand_up_transport`.
+pub struct TransportStandupDriver {
+    fired: bool,
+}
+
+impl TransportStandupDriver {
+    fn new() -> Self {
+        Self { fired: false }
+    }
+}
+
+impl Feature for TransportStandupDriver {
+    fn name(&self) -> &'static str {
+        "transport-standup-driver"
+    }
+
+    fn phase(&self) -> CSTaskGroupIndex {
+        // Main thread — the ctors/interface resolve run in the game's own context, like the create driver.
+        CSTaskGroupIndex::FrameBegin
+    }
+
+    fn on_frame(&mut self, _tick: Tick) {
+        if self.fired {
+            return;
+        }
+        // Same world gate as the create driver: a loaded world with the active main player present,
+        // not the title/load-transition (the ctors touch game heap/context).
+        if !crate::playstate::current().in_game() {
+            return;
+        }
+        if crate::sdk::with_active_main_player(|_| ()).is_none() {
+            return;
+        }
+        self.fired = true;
+        let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+            Ok(h) => h.0 as usize,
+            Err(e) => {
+                log::error!("session-probe: transport-standup — GetModuleHandle(NULL) failed: {e}");
+                return;
+            }
+        };
+        // SAFETY: each address is exe base + a charted `.text`/`.data` offset (win64 ABI). A Rust panic
+        // is caught here; a hard fault inside a game call surfaces via the crashdump SEH handler
+        // (catch_unwind can't catch SIGSEGV). Each step logs before/after so a crash localizes to the
+        // last line printed. The constructed object is intentionally leaked (process-lifetime probe).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            // 1. Resolve ISteamNetworking006 into its holder (the legacy P2P interface the transport uses).
+            let holder = exe_base + ISTEAM_HOLDER_OFFSET;
+            let before = (holder as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — resolving ISteamNetworking006 (holder {holder:#x}, before={before:#x})",
+            );
+            let resolver: extern "win64" fn(usize) =
+                std::mem::transmute(exe_base + ISTEAM_RESOLVER_OFFSET);
+            resolver(holder);
+            let iface = (holder as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — ISteamNetworking006 = {iface:#x} ({})",
+                if iface == 0 { "NULL — P2P interface unavailable offline!" } else { "resolved OK" },
+            );
+
+            // 2. Construct a SteamServiceImpl@DLNW3D via its base ctor (bypasses the factory's `owner`).
+            // The game allocator `0x141eb9ed0(size, align, heap)` tail-calls `[[r8=heap]+0x50]` — it needs
+            // a DLNew heap object in r8 that the factory sources from its `owner` (dormant offline). For
+            // this construct-and-scan test we hand the base ctor a leaked, 8-aligned zeroed buffer instead
+            // (the service is a process-lifetime probe, never freed). If the sub-ctor `0x14263f1e0` tries
+            // to allocate off a heap wired into the object, the next crash localizes that — then we source
+            // the game's default heap. `SVC_SIZE`/8 words = the factory's 0x18-byte alloc.
+            let buf_vec: &'static mut [usize] = vec![0usize; SVC_SIZE / 8].leak();
+            let buf = buf_vec.as_mut_ptr() as usize;
+            log::info!("session-probe: transport-standup — service buf (leaked {SVC_SIZE:#x}B) = {buf:#x}");
+            let ctor: extern "win64" fn(usize) -> usize =
+                std::mem::transmute(exe_base + SVC_BASE_CTOR_OFFSET);
+            let svc = ctor(buf);
+            let vtable = (svc as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — SteamServiceImpl constructed @ {svc:#x} vtable={vtable:#x} \
+                 (SteamServiceImpl vtable static = 0x143277270 + exe rebase; scan-vtable.py to confirm it's live)",
+            );
+        }));
+    }
+}
+
 /// The session probe's gated frame features, for [`crate::app::build_features`] to `extend` with —
 /// mirroring [`crate::diag::probe_features`] so every `[debug.probes]`-gated feature is appended the
 /// same way (one assembly style, gating kept inside this module). The FSM-transition logger when
-/// `session_probe` is on; the experimental [`SessionCreateDriver`] when `drive_create` is on.
+/// `session_probe` is on; the experimental [`SessionCreateDriver`] when `drive_create` is on; the
+/// [`TransportStandupDriver`] (path C) when `stand_up_transport` is on.
 pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
     let mut features: Vec<Box<dyn Feature>> = Vec::new();
+    if config.debug.probes.stand_up_transport {
+        features.push(Box::new(TransportStandupDriver::new()));
+    }
     if config.debug.probes.session_probe {
         features.push(Box::new(SessionFsmProbe::new()));
     }

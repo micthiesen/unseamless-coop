@@ -111,10 +111,15 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
                            # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
-drive_create = true        # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
+drive_create = false       # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
                            # charted create-session fn on [G] (no item, no peer) and log whether lobby_state
-                           # moves to TryToCreateSession. Pair with gameplay.enable_offline_multiplayer = true
-                           # (the create builder calls is_offline twice). See docs/SESSION-DRIVE.md.
+                           # moves to TryToCreateSession. OFF for the transport-standup run (stand_up_transport
+                           # below) so create doesn't fire+crash on the null +0x708 and muddy the log; flip back
+                           # on for a create-drive run. Pair with gameplay.enable_offline_multiplayer = true.
+stand_up_transport = true  # rung-3 transport-leg standup (ERSC path C): one-shot in-world resolve of
+                           # ISteamNetworking006 + construct a DLNW3D SteamServiceImpl offline. Confirm with
+                           # scripts/re/scan-vtable.py 0x143277270 (expect a live SteamServiceImpl after). First
+                           # increment of the DLNW3D standup — see docs/COOP-CONNECTION.md > "THE PLAN".
 fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_create; writes base/cap onto the
                            # live NetworkSession from inside the leg-B entry hook, only if still empty). ON for
                            # the 2026-07-03 combo run: fabricated array + a real linked peer (solo runs proved

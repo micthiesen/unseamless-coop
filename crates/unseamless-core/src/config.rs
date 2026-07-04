@@ -285,6 +285,13 @@ pub struct DebugProbes {
     /// the real state create needs, not stubs. Off by default; a rig experiment (worker create-veto-writer
     /// charted the handler; see docs/SESSION-DRIVE.md > VERDICT).
     pub drive_session_established: bool,
+
+    /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
+    /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
+    /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is
+    /// stand-up-able by us (it's dormant offline — the whole DLNW3D layer reads 0 objects). Off by
+    /// default; the first, lowest-risk increment of the transport-standup build (the crux of path C).
+    pub stand_up_transport: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
