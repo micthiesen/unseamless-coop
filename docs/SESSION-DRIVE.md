@@ -10,9 +10,13 @@
 >   `ISteamNetworking006`, dormant offline). **Cracked:** we now **build the whole DLNW3D transport
 >   ourselves offline** and rig-proved its **legacy P2P works two-machine** (rig + Deck exchange packets,
 >   no matchmaker). See "TRANSPORT CHARTED" + "RIG-PROVEN … DORMANT offline" below (the current sections).
-> - **REMAINING (thread 2):** the seam — wire the transport into a refcounted DLNR3D connection object at
->   `[container+0x708]` → drive create → `Host`. Plus the seamless teardown gate
->   ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
+> - **SEAM CHARTED (2026-07-04):** `[container+0x708]` is a **`SocketManagerHolder@DLNR3D`** — a 0x18-byte
+>   refcounted wrapper `{ vtable 0x1431f9280, refcount@+8, SteamConnection*@+0x10 }` (ctor `0x1423f7180`),
+>   *not* a raw `SteamConnection`. Build it around our standup connection, land it at `[container+0x708]`
+>   (surgically, at the veto-vmethod hook `0x1423f4330` where `rcx`=container), drive create → `Host`. Full
+>   chart + build in **"SEAM CHARTED"** below.
+> - **REMAINING (thread 2):** *implement* that seam probe + rig-verify create reaches `Host`; then the
+>   seamless teardown gate ([SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)).
 >
 > **Reading guide for the rest of this doc:** the top half (SDK survey, drive requirements, AES key,
 > ordering) is the still-useful call spec. The long **"Why a direct create fails offline"** investigation
@@ -999,7 +1003,15 @@ transport primitive set the ERSC-model reimplementation talks to. **Wrappers ove
 | `0x142641150` | `[iface+0x28]` | **CloseP2PChannelWithUser** |
 
 **2. `[container+0x708]` holds a `SteamConnection@DLNW3D`** (vtable **`0x143278370`**, base vtable
-`0x143278358`; ctor **`0x142643b50`** installs both). Its slot 0 (`0x142643dd0`) is send-on-connection:
+`0x143278358`; ctor **`0x142643b50`** installs both).
+> **CORRECTED 2026-07-04 — see "SEAM CHARTED" below.** `[container+0x708]` does **not** hold the raw
+> `SteamConnection` directly. It holds a **`SocketManagerHolder@DLNR3D`** (a 0x18-byte
+> `ReferenceCountObject` subclass) that *wraps* the `SteamConnection` at its own `+0x10`. This matters:
+> the holder's `+0x8` is a **refcount** (create does `lock xadd [holder+8]`), whereas a raw
+> `SteamConnection`'s `+0x8` is the *iface* — so writing a bare `SteamConnection` at `+0x708` (as the
+> "real-connection test" below proposed) would corrupt the iface pointer and mis-wrap. The rest of this
+> paragraph (the `SteamConnection` internals) is correct *about the wrapped connection at holder+0x10*.
+> Its slot 0 (`0x142643dd0`) is send-on-connection:
 it reads `[conn+0x8]` = the ISteamNetworking interface and `[conn+0x128]` = the **peer SteamID64**, then
 calls the SendP2PPacket wrapper. So the connection object the DLNR3D `ConnectionRefInfo` loop wraps is a
 low-level Steam P2P connection carrying `{iface, peerSteamID}` — exactly what `AcceptP2PSessionWithUser`
@@ -1065,6 +1077,74 @@ listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest
 `SteamNetworking0NN` string the image contains (resolver = its lone rip-ref), and the wrapper fns are the
 `call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
 a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
+
+### SEAM CHARTED (2026-07-04, static) — `[container+0x708]` is a `SocketManagerHolder@DLNR3D`; the build is small and known
+
+The thread-2 "seam" (transport → session FSM → `Host`) is now fully charted. Static RE on the pinned
+2026-06-02 image (own words; addresses are facts; no decompiler output). This supersedes the guess in
+"TRANSPORT CHARTED §2" that `+0x708` holds a raw `SteamConnection`.
+
+**What `[container+0x708]` actually is.** A **`SocketManagerHolder@DLNR3D`** (RTTI off vtable
+`0x1431f9280`) — a tiny **0x18-byte** object, subclass of `ReferenceCountObject@DLNR3D` (base vtable
+`0x1431f85c0`). Layout, from its ctor **`0x1423f7180`**:
+
+```
+struct SocketManagerHolder {   // 0x18 bytes, ReferenceCountObject@DLNR3D
+    void*            vtable;    // +0x00  = 0x1431f9280
+    uint32_t         refcount;  // +0x08  (ctor sets 0; establish-handler addrefs → 1)
+    // +0x0c pad
+    SteamConnection* conn;      // +0x10  = the raw DLNW3D SteamConnection (vtable 0x143278370)
+};
+```
+
+So `+0x708` is a **refcounted DLNR3D wrapper around the DLNW3D transport** — not the transport itself.
+`+0x8` is the refcount create atomically increments (`0x141eba1c0 = lock xadd dword [rcx],1`), which is
+why a raw `SteamConnection` (whose `+0x8` is the iface) can never stand in.
+
+**Who writes `+0x708` in the real path — the connection-establish handler `0x1423f2820`** (`rcx` =
+container; 0 static callers, Arxan/vtable-dispatched):
+1. `r14 = container->vtable[0x80](descriptor, …)` — container-vtable slot `+0x80` (`0x14251c480`, an
+   Arxan trampoline) builds the raw `SteamConnection@DLNW3D`.
+2. `buf = game_alloc(0x18, 8, [container+0x48])`; `holder = 0x1423f7180(buf, r14)` — wrap it.
+3. `[container+0x708] = holder`; `lock xadd [holder+8],1` (refcount → 1).
+
+**Why create crashed offline (the whole rung-3 wall, in one line).** The **create-gate4 helper
+`0x1423faf60`** (`rdi` = the 0x5f8-byte `SessionSteam`; `container = [rdi+0x58]`) loops over the player
+count `[rdi+0x68]` and per player: allocates a **0x10c0-byte `ConnectionRefInfo@DLNR3D`** (vtable
+`0x1431f85d8`) and calls its ctor **`0x1423f3230(refinfo, rdx=[container+0x708], r8=&[rdi+0x268])`**. The
+ctor stores `[container+0x708]` at `refinfo+0x18` and does `lea rcx,[[container+0x708]+8]; call
+0x141eba1c0` (addref). With `+0x708` null offline → `lock xadd [0x8],1` → **the fault**. (The gate4 helper
+also runs the container's Arxan-encoded **veto vmethod** `[container_vtable+8]` = `0x1423f4330`, which
+gates on `[container+0x7c0]` bit 2 — set by the session-established handler — *before* it reaches the
+`+0x708` read.)
+
+**The build (path β — wrap our own standup connection).** We already stand up a real
+`SteamConnection@DLNW3D` (with peer at `+0x128`), rig-proven. So the seam needs only:
+1. `holder_buf = game_alloc(0x18, 8, heap)`; `0x1423f7180(holder_buf, our_steam_connection)` → holder.
+2. `holder->refcount (+8) = 1`.
+3. Find the **live container** (`ManagerImpl@DLNR3D`, vtable `0x1431f8360`; `scan-vtable.py 0x1431f8360`)
+   and write `holder → [container+0x708]` — **on the same container create uses** (`[SessionSteam+0x58]`).
+   The surgical injection point: the existing **veto-vmethod entry hook** (`0x1423f4330`, `rcx` =
+   container) fires during create right before the `+0x708` read, so populate `+0x708` there if null
+   (exactly how `fabricate_slot_array` lazily sizes the slot array at leg-B entry) — guaranteeing we hit
+   the create's own container. This replaces the old `set_create_veto_bit` hollow-fab with a real holder.
+4. Also needs `[container+0x7c0]` bit 2 (the veto bit) — set by driving the session-established handler
+   `0x1423f4870` (`drive_session_established`) or the `set_create_veto_bit` lever.
+
+**Alternative (path α — drive the establish handler `0x1423f2820(container, descriptor)`):** does the
+whole thing natively (builds raw conn via vtable+0x80, wraps, stores, addrefs), but needs a valid ~0x120
+byte `descriptor` (connection params) and the container preconditions (`[container+0x40]` true,
+`[container+0x41]` false). Path β sidesteps the descriptor by reusing our already-built connection, so
+it's the first pick; α is the fallback if the wrapped standup connection isn't sufficient downstream.
+
+**RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
+`0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
+`ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =
+`ManagerImpl@DLNR3D` (vt `0x1431f8360`); addref = `0x141eba1c0` (`lock xadd`). Re-derive: the single
+caller of ctor `0x1423f3230` is the gate4 helper `0x1423faf60`; the two writers of qword `[reg+0x708]`
+in the DLNR3D range are the container ctor `0x1423f20b0` (zero-init) and the establish handler
+`0x1423f2820` (real); the holder ctor `0x1423f7180` is a 5-instruction fn that installs vt `0x1431f9280`
+and stores its `rdx` arg at `+0x10`.
 
 ### RIG-PROVEN (2026-07-03) — the entire DLNW3D transport is DORMANT offline; the gate is above the connection layer
 

@@ -233,8 +233,13 @@ the one genuinely hard step — driving the game's own session so players see ea
 >    SteamID64 → `SteamConnection+0x128`, run Accept setup `0x14263ffe0` (`AcceptP2PSessionWithUser`) +
 >    register thunk `0x14263b7c0`. Two-machine (rig host + Deck): each side connects to the other's
 >    SteamID; confirm P2P packets flow (`SendP2PPacket 0x142640b20` / `ReadP2PPacket 0x142640bc0`).
-> 3. **Land it at `[container+0x708]`** → the driven create's `ConnectionRefInfo` loop now has a real
->    `SteamConnection` → drive create → `Host`. (This closes the original rung-3 create goal.)
+> 3. **Land it at `[container+0x708]`** — **SEAM CHARTED (2026-07-04):** `+0x708` is a
+>    **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted wrapper `{vtable 0x1431f9280, refcount@+8,
+>    SteamConnection*@+0x10}`, ctor `0x1423f7180`), *not* a raw `SteamConnection`. Wrap our standup
+>    connection in a holder (refcount=1) and write it to `[container+0x708]` at the veto-vmethod hook
+>    (`0x1423f4330`, `rcx`=container) so create's `ConnectionRefInfo` loop has a real refcountable object →
+>    drive create → `Host`. Full chart: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "SEAM CHARTED". (Closes the
+>    original rung-3 create goal.)
 > 4. **Arm the teardown gate** (`leave_session 0x140cae730` + twin) once a session forms, to keep it
 >    alive across boss/area/death events → seamless. Then the additive re-sync layer.
 >
