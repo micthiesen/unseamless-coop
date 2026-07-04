@@ -1136,6 +1136,59 @@ listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest
 `call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
 a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 
+### RIG-PROVEN (2026-07-03) — the entire DLNW3D transport is DORMANT offline; the gate is above the connection layer
+
+Ran a live-memory vtable scan (`scripts/re/scan-vtable.py`, read-only `/proc/<pid>/mem`, no sudo) on the
+game **in-world, offline**, for the container + the three DLNW3D transport vtables:
+
+```
+vtable 0x1431f8780 (ManagerImplSteam@DLNR3D, container):     3 live objects   ← positive control (born unconditionally)
+vtable 0x143277270 (SteamServiceImpl@DLNW3D):                0 live objects
+vtable 0x143278020 (SteamConnectionManager@DLNW3D):          0 live objects
+vtable 0x143278370 (SteamConnection@DLNW3D):                 0 live objects
+```
+
+**The DLNW3D transport is never instantiated offline — no service, no manager, no connection exists in
+the process.** This converts VERDICT §7's static inference into a proven runtime fact and settles the
+finish path decisively:
+
+- **`[container+0x708]` is null offline because the whole transport below it is dormant**, not because a
+  single field failed to get written. The gate sits **above** the connection layer — the game never
+  enters the flow that stands up `SteamServiceImpl`/`SteamConnectionManager`.
+- **The solo "drive the connection-manager" lever is dead:** there is no live `SteamConnectionManager` to
+  drive `0x142640560` on. (The manager is created dynamically by the online session flow; offline it
+  doesn't exist — consistent with the factory/vtable-dispatched, 0-static-caller charting above.)
+- **The ISteamNetworking006 interface has never even been fetched offline:** its holder `0x143c602b0`
+  still holds the resolver fn `0x142640b90` with a null resolved-pointer (qword1 = 0) — `SteamInternal_ContextInit`
+  for the P2P interface has not run. (By contrast the container's identity Steam-context holders
+  `0x143b48fd0`/`0x143b48a00` read as initialized, which is why the session-established handler's
+  Steam-context branch *passes* when we drive it — Steam is up in our process; the handler simply is
+  never *dispatched* offline. So the blocker is event-dispatch/flow-entry, not the Steam context itself.)
+
+**The two finish paths, now sharply defined (pick on the next session):**
+1. **Crack the flow-entry / online-availability signal (unifies with item-grey, VERDICT §8).** Find what
+   makes the game enter the online session flow so it dispatches session/connection-established events and
+   stands up its own DLNW3D transport. This is the runtime-trace task the item-grey doc calls for; if
+   solved, the game builds the real graph and a driven-or-item-triggered create reaches `Host`. Highest
+   leverage (fixes create **and** the greyed items together), but the signal has beaten every static pass.
+2. **Stand up the DLNW3D transport ourselves (the full ERSC-model reimplementation).** Resolve
+   `ISteamNetworking006` (via `0x142640b90` / `SteamInternal_FindOrCreateUserInterface`), instantiate a
+   `SteamServiceImpl` + `SteamConnectionManager`, register the `P2PSessionRequest_t`/`P2PSessionConnectFail_t`
+   callbacks (`CCallback<SteamCallbackWrapper>`), and drive connect/accept with the rung-4-resolved peer
+   SteamID64s so a real `SteamConnection` lands at `[container+0x708]`. This is a substantial build (the
+   transport subsystem in miniature), but every entry point it needs is now charted above, and it does
+   **not** depend on cracking the elusive signal — it bypasses the game's flow-entry entirely, which is
+   precisely how ERSC runs co-op outside the matchmaker. **This is the recommended track:** it's bounded
+   (the transport surface is finite and mapped) where path 1 is an open-ended signal hunt.
+
+Both paths still terminate at a **two-machine** validation (rig host + Steam Deck joiner) — a
+`SteamConnection` is inherently peer-to-peer, so a lone host's `+0x708` self/listen connection only
+becomes exercised once a real peer sends the first P2P packet. The transport standup (path 2) is the
+scoped next build; the Deck is the validation partner.
+
+Tooling: `scripts/re/scan-vtable.py` (committed) answers "is class X live right now?" for any vtable VA —
+reuse it after a game update to re-confirm which layers are up in a given state.
+
 ### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
 
 **Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
