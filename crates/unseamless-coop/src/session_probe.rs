@@ -1150,6 +1150,13 @@ const GAME_ALLOC_OFFSET: usize = 0x1eb9ed0;
 const MANAGER_CTOR_OFFSET: usize = 0x263f700;
 /// Bytes the connect thunk allocates for a `SteamConnectionManager` before ctoring it.
 const MANAGER_SIZE: usize = 0x1b8;
+/// Offset of the `SteamConnection@DLNW3D` ctor `0x142643b50` (`fn(slot, manager, ring_size) -> conn`;
+/// installs vtable `0x143278370`, zero-inits via sub-ctors `0x142642200`/`0x142642290`).
+const CONN_CTOR_OFFSET: usize = 0x2643b50;
+/// Generous buffer for a `SteamConnection` (the manager slot stride is ~0x140 bytes).
+const CONN_SIZE: usize = 0x200;
+/// Default per-connection ring size the connection-creator uses (`+0x5c`); passed as the ctor's `r8`.
+const CONN_RING_SIZE: usize = 0x4b0;
 
 /// One-shot: stand up a DLNW3D `SteamServiceImpl` offline (path C, first increment). Fires once in-world
 /// (active main player present, same world gate as the create driver). Gated on
@@ -1266,6 +1273,28 @@ impl Feature for TransportStandupDriver {
             log::info!(
                 "session-probe: transport-standup — SteamConnectionManager constructed @ {mgr:#x} vtable={mgr_vtable:#x} \
                  (static = 0x143278020 + exe rebase; scan-vtable.py 0x143278020 to confirm)",
+            );
+
+            // 5. Build a SteamConnection via its ctor 0x142643b50(slot, manager, ring_size). The creator
+            // builds it in-place in a manager slot; for construction validation we hand it a standalone
+            // heap buffer. The ctor only installs the vtable + zero-inits (sub-ctors 0x142642200/0x142642290)
+            // — no peer, no P2P — so it's solo-testable. The peer (+0x128) is runtime-bound before Accept
+            // (the two-machine step); Accept/connect + landing at [container+0x708] come next.
+            let conn_buf = alloc(CONN_SIZE, 8, heap);
+            log::info!("session-probe: transport-standup — connection buf ({CONN_SIZE:#x}B off game heap) = {conn_buf:#x}");
+            if conn_buf == 0 {
+                log::error!("session-probe: transport-standup — connection alloc returned NULL; aborting");
+                return;
+            }
+            let conn_ctor: extern "win64" fn(usize, usize, usize) -> usize =
+                std::mem::transmute(exe_base + CONN_CTOR_OFFSET);
+            let conn = conn_ctor(conn_buf, mgr, CONN_RING_SIZE);
+            let conn_vtable = (conn as *const usize).read_volatile();
+            let iface_field = ((conn + 0x8) as *const usize).read_volatile();
+            let peer_field = ((conn + 0x128) as *const usize).read_volatile();
+            log::info!(
+                "session-probe: transport-standup — SteamConnection constructed @ {conn:#x} vtable={conn_vtable:#x} \
+                 [+0x8 iface={iface_field:#x} +0x128 peer={peer_field:#x}] (static vtable = 0x143278370; scan-vtable.py to confirm)",
             );
         }));
     }
