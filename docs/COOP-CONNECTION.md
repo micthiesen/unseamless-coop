@@ -207,12 +207,15 @@ the one genuinely hard step — driving the game's own session so players see ea
 > summon flow, then suppress the lifecycle → seamless.
 >
 > **Build order (next) — inject at the transport leg (C):**
-> 1. **Stand up the DLNW3D transport ourselves, offline (the crux).** A probe that resolves
->    `ISteamNetworking006` (`0x142640b90`, holder `0x143c602b0`) and constructs a `SteamServiceImpl` +
->    `SteamConnectionManager` (factory `0x142638b40` with a synthesized `owner`, or the base ctor
->    `0x14263b6b0` + connection-creator `0x142640560` directly). **Validate with `scan-vtable.py`** that a
->    `SteamServiceImpl`/`Manager` now exists offline. This is the one runtime-bound unknown; everything
->    else is charted.
+> 1. **Stand up the DLNW3D transport ourselves, offline (the crux).** ✅ **First increment RIG-PROVEN
+>    (2026-07-03, `stand_up_transport` probe):** `ISteamNetworking006` resolves offline (non-null), and a
+>    `SteamServiceImpl@DLNW3D` **constructs cleanly** via base ctor `0x14263b6b0` (vtable `0x143277270`,
+>    sub-ctor set `+0x10=0x2710`; game stayed alive; `scan-vtable.py` = 1 live object). So the DLNW3D
+>    ctors are **not** online-gated — the transport is stand-up-able by us. **Next:** the game allocator
+>    `0x141eb9ed0(size, align, heap)` needs a **DLNew heap in r8** (the factory sources it from its
+>    `owner`, dormant offline) — find the game's default heap, then build the `SteamConnectionManager`
+>    (connect thunk `0x14263b720` / connection-creator `0x142640560`) + `SteamConnection` (ctor
+>    `0x142643b50`) on it.
 > 2. **Bind the peer + connect.** Create a `SteamConnection` (ctor `0x142643b50`), write our rung-4 peer
 >    SteamID64 → `SteamConnection+0x128`, run Accept setup `0x14263ffe0` (`AcceptP2PSessionWithUser`) +
 >    register thunk `0x14263b7c0`. Two-machine (rig host + Deck): each side connects to the other's
