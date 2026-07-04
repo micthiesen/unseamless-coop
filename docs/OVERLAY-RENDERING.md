@@ -269,6 +269,17 @@ The Actions tab renders from `unseamless_core::menu::action_rows(ctx) -> Vec<Act
   friendly_fire_on}`, which are **always-`false` placeholders** until rung 3 sources them from the
   session FSM (see [COOP-CONNECTION.md](COOP-CONNECTION.md)). The actions themselves are still inert
   pending rung 3.
+- **A status row sits above the action rows**: the connect-layer phase / role / party size
+  (`SessionStatus::line`, host-tested in core; `coop::session_status()` is the read-only accessor —
+  the display-only companion to `session_flags()`), coloured by phase (grey solo, amber
+  connecting/hosting/contact-lost, blue connected). It's the *persistent* connected-state readout —
+  the "connected" toast fades and the corner banners carry conditions (setup progress, lost contact,
+  version mismatch), not the steady in-session state. The setup-phase copy is shared constants in
+  core (`OPENING_WORLD_MESSAGE` & co) rendered by both the banners and the row, so the two surfaces
+  can't drift; a liveness-lost partner flips the row to `ContactLost` so it never claims a live
+  2-player session under the "Lost contact" banner. While Open/Join are shown but gated off, a
+  one-line hint under it says what the player is waiting on (`menu::connect_gate_hint`: load into
+  the world first, or Steam still coming up).
 
 ### Debug tab: detail panes independent of the summary
 

@@ -39,6 +39,10 @@ use std::time::{Duration, Instant};
 
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::{ConnectReport, ForwardedLogArtifact, LobbyProgress, LobbyRole, VersionCheck, peer_tag};
+use unseamless_core::menu::{
+    LINKING_MESSAGE, OPENING_WORLD_MESSAGE, SEARCHING_WORLD_MESSAGE, SessionPhase, SessionStatus,
+    WORLD_OPEN_WAITING_MESSAGE,
+};
 use unseamless_core::notifications::Severity;
 use unseamless_core::peer::{
     CONFIG_SYNCED_MESSAGE, PEER_ARRIVED_MESSAGE, PEER_DEPARTED_MESSAGE, PEER_RETURNED_MESSAGE, Peer,
@@ -97,6 +101,19 @@ impl SessionState {
         self as u8
     }
 
+    /// The display-only [`SessionPhase`] this lifecycle state shows as on the overlay's Actions-tab
+    /// status row ([`session_status`]). A separate mapping (not one shared enum) on purpose: this
+    /// enum is the connect layer's internal atomic wire, `SessionPhase` the stable UI seam — keeping
+    /// them distinct lets the internals be rebuilt without the UI's type moving underneath it.
+    fn phase(self) -> SessionPhase {
+        match self {
+            SessionState::Off => SessionPhase::Solo,
+            SessionState::Connecting => SessionPhase::Connecting,
+            SessionState::Hosting => SessionPhase::Hosting,
+            SessionState::Connected => SessionPhase::Connected,
+        }
+    }
+
     /// Inverse of [`as_u8`](SessionState::as_u8); an unknown tag falls back to [`SessionState::Off`]
     /// (the safe default — "no session"), so an unexpected tag never fabricates an in-session state.
     fn from_u8(v: u8) -> Self {
@@ -148,6 +165,26 @@ pub fn session_flags() -> SessionFlags {
     SessionFlags {
         in_session: SessionState::from_u8(SESSION.load(Ordering::Relaxed)) != SessionState::Off,
         is_host: IS_HOST.load(Ordering::Relaxed),
+    }
+}
+
+/// The connect-layer state for the overlay's Actions-tab **status row** — the richer, display-only
+/// companion to [`session_flags`] (which stays the minimal gating view), read the same way: relaxed
+/// atomics, safe from the Present thread every frame. The party size is the 1:1 side-channel's for
+/// now — `2` once the partner links, `1` otherwise; the rung-3 roster will feed the real count
+/// through this same accessor without the UI changing.
+pub fn session_status() -> SessionStatus {
+    let mut phase = SessionState::from_u8(SESSION.load(Ordering::Relaxed)).phase();
+    // The lifecycle stays `Connected` while the partner is merely silent — the liveness sweep raises
+    // the "Lost contact" banner but doesn't end the session (they may return). Fold the link
+    // diagnostic in so the status row can't claim a live 2-player session that banner contradicts.
+    if phase == SessionPhase::Connected && Phase::from_u8(PHASE.load(Ordering::Relaxed)) == Phase::Lost {
+        phase = SessionPhase::ContactLost;
+    }
+    SessionStatus {
+        phase,
+        is_host: IS_HOST.load(Ordering::Relaxed),
+        party_size: if phase == SessionPhase::Connected { 2 } else { 1 },
     }
 }
 
@@ -504,10 +541,12 @@ fn start_session(config: &Config, intent: LobbyIntent) {
     // explicit Acquire/Release. Keep this order (and the SESSION-first order in `leave`/`fail_session`).
     IS_HOST.store(is_host, Ordering::Relaxed);
     SESSION.store(SessionState::Connecting.as_u8(), Ordering::Relaxed);
+    // Shared constants (not local literals) so the Actions-tab status row, which renders the same
+    // copy from `SessionStatus::line`, can never drift from these banners.
     set_banner(
         BANNER_SESSION,
         Severity::Info,
-        if is_host { "Opening your world..." } else { "Searching for a world..." },
+        if is_host { OPENING_WORLD_MESSAGE } else { SEARCHING_WORLD_MESSAGE },
     );
     let password = config.session.password.clone();
     // Only a client forwards its debug log to the host, and only when asked; the host has nothing to
@@ -608,7 +647,7 @@ fn run_discovery(password: String, intent: LobbyIntent, forward_pref: bool, gene
                 // and here can't publish HOSTING over a newer session's state.
                 if deadline.take().is_some() && !stale(generation) {
                     SESSION.store(SessionState::Hosting.as_u8(), Ordering::Relaxed);
-                    set_banner(BANNER_SESSION, Severity::Info, "World open, waiting for a friend to join.");
+                    set_banner(BANNER_SESSION, Severity::Info, WORLD_OPEN_WAITING_MESSAGE);
                     hosting_since = Some(Instant::now());
                 }
                 // Soft one-time nudge: a host with no joiner after a good while may be the both-opened-a-
@@ -716,7 +755,7 @@ fn run_session(
     // A joiner has nothing open yet; show the linking state until the handshake lands. (A host already
     // shows "world open — waiting"; the connected toast supersedes both on link.)
     if !is_host {
-        set_banner(BANNER_SESSION, Severity::Info, "Linking with your friend...");
+        set_banner(BANNER_SESSION, Severity::Info, LINKING_MESSAGE);
     }
 
     let transport = SteamP2PTransport { net, local_id: self_id, peer_id };

@@ -30,7 +30,7 @@ use hudhook::{Hudhook, ImguiRenderLoop, MessageFilter, RenderContext};
 use log::Level;
 use unseamless_core::config::Config;
 use unseamless_core::diagnostics::DiagnosticReport;
-use unseamless_core::menu::SessionContext;
+use unseamless_core::menu::{SessionContext, SessionPhase};
 use unseamless_core::notifications::{Banner, Severity, Toast};
 use unseamless_core::protocol::SessionAction;
 use unseamless_core::settings::{Setting, registry};
@@ -782,6 +782,26 @@ impl Overlay {
     /// host-tested `first_enabled`/`step_enabled`. (The debug-panel toggle and Export-diagnostics action
     /// live in the Debug tab, not here.)
     fn draw_actions_tab(&mut self, ui: &Ui, ctx: &SessionContext, pad: crate::input::PadEdges) {
+        // Status row above the action rows: the connect-layer phase / role / party size, plain voice
+        // (the copy is host-tested in core, `SessionStatus::line`). Coloured by phase so the state
+        // reads at a glance: neutral grey while solo, amber while setting up / waiting / partner
+        // silent, blue once connected. This is the *persistent* connected-state readout — the
+        // "connected" toast fades, and the corner banners carry *conditions* (setup progress, lost
+        // contact, a version mismatch), not the steady in-session state.
+        let status = crate::coop::session_status();
+        let status_color = match status.phase {
+            SessionPhase::Solo => GREY,
+            SessionPhase::Connecting | SessionPhase::Hosting | SessionPhase::ContactLost => AMBER,
+            SessionPhase::Connected => BLUE,
+        };
+        ui.text_colored(rgba(status_color, 1.0), status.line());
+        // One-line "what am I waiting on" hint while Open/Join are shown but gated off (title screen /
+        // Steam still coming up); None whenever there's nothing to explain.
+        if let Some(hint) = unseamless_core::menu::connect_gate_hint(ctx) {
+            ui.text_disabled(hint);
+        }
+        ui.separator();
+
         let rows = unseamless_core::menu::action_rows(ctx);
         let total = rows.len();
         let enabled = |i: usize| rows[i].enabled;

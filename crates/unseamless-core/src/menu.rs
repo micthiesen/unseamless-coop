@@ -11,6 +11,10 @@
 //!   [`Menu::select_index`]/[`Menu::activate`]) with its own cursor and the same shared nav helpers.
 //!   Reserved for a future editable menu; not driven by the overlay today (see [`Menu::new`]).
 //!
+//! The Actions tab also draws a **status row** above the action rows — the session phase / role /
+//! party size ([`SessionStatus::line`]) plus a one-line hint for why Open/Join are gated off
+//! ([`connect_gate_hint`]) — whose copy lives here so it's host-tested with the rest of the model.
+//!
 //! ## Divergence from ERSC (intentional)
 //! ERSC drives session actions (host/join/leave/…) through **in-game items** and fixed hotkeys.
 //! We drive them through this menu instead (rendered as an overlay; see
@@ -38,6 +42,101 @@ pub struct SessionContext {
     pub pvp_on: bool,
     pub pvp_teams_on: bool,
     pub friendly_fire_on: bool,
+}
+
+// Session-lifecycle copy shared by the connect layer's corner banners (the cdylib's `set_banner`
+// calls) and the status row's [`SessionStatus::line`], so the two surfaces render the same literal
+// and can't drift into telling the player two different stories. ASCII only (`...`, never the
+// ellipsis character) — the overlay font has no glyph past ASCII (pinned by the tests below).
+/// Banner + status copy while a host's world is being opened.
+pub const OPENING_WORLD_MESSAGE: &str = "Opening your world...";
+/// Banner + status copy while a joiner searches for a world.
+pub const SEARCHING_WORLD_MESSAGE: &str = "Searching for a world...";
+/// Banner + status copy for a host whose world is open, awaiting a friend.
+pub const WORLD_OPEN_WAITING_MESSAGE: &str = "World open, waiting for a friend to join.";
+/// Banner copy for a joiner whose partner is resolved, while the rung-2 handshake completes. The
+/// connect layer publishes no distinct linking phase (a joiner goes `Connecting -> Connected`), so
+/// during this brief window the status row still shows [`SEARCHING_WORLD_MESSAGE`] — a known,
+/// accepted lag (vaguer than the banner, and it resolves within the handshake budget).
+pub const LINKING_MESSAGE: &str = "Linking with your friend...";
+
+/// User-facing co-op session **phase** for the overlay's Actions-tab status row. The cdylib's connect
+/// layer maps its internal session lifecycle onto this (a stable, display-only view), so the connect
+/// internals can be rebuilt without the UI changing. Distinct from [`SessionContext`]: the phase is
+/// *display* state (what to tell the player), the context is *gating* state (which rows to
+/// show/enable) — the two change together but answer different questions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionPhase {
+    /// No session — solo play.
+    #[default]
+    Solo,
+    /// Host setting up its world, or joiner searching for / linking with one.
+    Connecting,
+    /// Host: world open, waiting for a friend to join.
+    Hosting,
+    /// Partner linked — the session is live.
+    Connected,
+    /// Partner linked but currently silent (the liveness sweep lost contact). The session hasn't
+    /// ended — they may return — but the status row must not claim a live partner while the "Lost
+    /// contact" banner says otherwise.
+    ContactLost,
+}
+
+/// The connect-layer state the overlay's Actions-tab **status row** renders: the phase, our role, and
+/// the party headcount. Built by the cdylib from its live session state ([`SessionPhase`] is the
+/// stable seam); the display copy lives in [`SessionStatus::line`] so it stays host-tested here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionStatus {
+    pub phase: SessionPhase,
+    /// Whether the active/starting session is ours to host (Open World) vs joined (Join world). Only
+    /// meaningful when `phase` isn't [`SessionPhase::Solo`].
+    pub is_host: bool,
+    /// Players in the session, ourselves included (`1` = alone). Sourced from the connect layer —
+    /// today the 1:1 side-channel (so `2` once connected); the rung-3 roster will feed real counts
+    /// through this same field without the UI changing.
+    pub party_size: usize,
+}
+
+impl SessionStatus {
+    /// The one-line, plain-voice status for the Actions tab (a diagnostic surface, so no ER tone).
+    /// The setup-phase arms render the *same shared constants* the session banners do
+    /// ([`OPENING_WORLD_MESSAGE`] & co), so the corner banner and the status row can't drift apart.
+    /// (Known gap: a joiner's brief linking window shows [`LINKING_MESSAGE`] on the banner while
+    /// the row stays on the searching copy — see that constant's doc.) ASCII only (`...`, never the
+    /// ellipsis character) — the overlay font has no glyph past ASCII.
+    pub fn line(&self) -> String {
+        match self.phase {
+            SessionPhase::Solo => "Not in a session.".into(),
+            SessionPhase::Connecting if self.is_host => OPENING_WORLD_MESSAGE.into(),
+            SessionPhase::Connecting => SEARCHING_WORLD_MESSAGE.into(),
+            SessionPhase::Hosting => WORLD_OPEN_WAITING_MESSAGE.into(),
+            SessionPhase::Connected => format!(
+                "In a session, {} player{} (you {}).",
+                self.party_size,
+                if self.party_size == 1 { "" } else { "s" }, // real roster counts can transit 1
+                if self.is_host { "are hosting" } else { "joined" },
+            ),
+            SessionPhase::ContactLost => "In a session, but contact with your friend is lost.".into(),
+        }
+    }
+}
+
+/// Why Open world / Join world are disabled right now, as a short plain-voice hint the Actions tab
+/// draws under the status row — or `None` when they're usable, or when there's nothing to explain
+/// (in a session the connect rows aren't shown at all). Without this, the title-screen menu is just
+/// two greyed rows with no way to tell what the player is waiting on. Ordered by what to fix first:
+/// loading into the world is the player's own action; Steam readiness is usually just a short wait.
+pub fn connect_gate_hint(ctx: &SessionContext) -> Option<&'static str> {
+    if ctx.in_session {
+        return None;
+    }
+    if !ctx.in_game {
+        return Some("Load into your world first.");
+    }
+    if !ctx.steam_ready {
+        return Some("Waiting for Steam networking...");
+    }
+    None
 }
 
 /// One row in the menu.
@@ -734,6 +833,93 @@ mod tests {
                 ("Friendly fire: on", ToggleFriendlyFire),
             ],
         );
+    }
+
+    // ----- SessionStatus / connect_gate_hint: the Actions-tab status row -----
+
+    #[test]
+    fn session_status_line_covers_every_phase_and_role() {
+        let status = |phase, is_host, party_size| SessionStatus { phase, is_host, party_size }.line();
+        // Solo ignores role/count.
+        assert_eq!(status(SessionPhase::Solo, false, 1), "Not in a session.");
+        assert_eq!(status(SessionPhase::Solo, true, 1), "Not in a session.");
+        // Connecting is role-worded, matching the session banners verbatim.
+        assert_eq!(status(SessionPhase::Connecting, true, 1), "Opening your world...");
+        assert_eq!(status(SessionPhase::Connecting, false, 1), "Searching for a world...");
+        assert_eq!(status(SessionPhase::Hosting, true, 1), "World open, waiting for a friend to join.");
+        // Connected reports the party size and the role.
+        assert_eq!(status(SessionPhase::Connected, true, 2), "In a session, 2 players (you are hosting).");
+        assert_eq!(status(SessionPhase::Connected, false, 2), "In a session, 2 players (you joined).");
+        // The count rides through verbatim, so a rung-3 roster can grow it without a copy change —
+        // and a transient count of 1 pluralizes correctly rather than reading "1 players".
+        assert_eq!(status(SessionPhase::Connected, false, 4), "In a session, 4 players (you joined).");
+        assert_eq!(status(SessionPhase::Connected, true, 1), "In a session, 1 player (you are hosting).");
+        // Contact lost: still in a session, but the row must not claim a live partner (the same
+        // story the "Lost contact" banner tells). Role-independent copy.
+        assert_eq!(status(SessionPhase::ContactLost, true, 1), "In a session, but contact with your friend is lost.");
+        assert_eq!(status(SessionPhase::ContactLost, false, 1), "In a session, but contact with your friend is lost.");
+    }
+
+    #[test]
+    fn session_copy_constants_are_the_banner_strings() {
+        // The banner copy in the cdylib renders these same constants; pinning the literals here
+        // means an edit to either surface's wording must come through this shared, tested point.
+        assert_eq!(OPENING_WORLD_MESSAGE, "Opening your world...");
+        assert_eq!(SEARCHING_WORLD_MESSAGE, "Searching for a world...");
+        assert_eq!(WORLD_OPEN_WAITING_MESSAGE, "World open, waiting for a friend to join.");
+        assert_eq!(LINKING_MESSAGE, "Linking with your friend...");
+        for msg in [OPENING_WORLD_MESSAGE, SEARCHING_WORLD_MESSAGE, WORLD_OPEN_WAITING_MESSAGE, LINKING_MESSAGE] {
+            assert!(msg.is_ascii(), "non-ASCII banner copy: {msg:?}");
+        }
+    }
+
+    #[test]
+    fn session_status_line_is_ascii_only() {
+        // The overlay font is a printable-ASCII subset (OVERLAY-RENDERING.md): a non-ASCII char (em
+        // dash, ellipsis) renders as a missing glyph. Pin every phase/role combination to ASCII.
+        for phase in [
+            SessionPhase::Solo,
+            SessionPhase::Connecting,
+            SessionPhase::Hosting,
+            SessionPhase::Connected,
+            SessionPhase::ContactLost,
+        ] {
+            for is_host in [false, true] {
+                let line = SessionStatus { phase, is_host, party_size: 2 }.line();
+                assert!(line.is_ascii(), "non-ASCII status line: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn connect_gate_hint_explains_each_gate_and_clears_when_usable() {
+        // Ready (Steam up + in-game, out of session): no hint — the rows speak for themselves.
+        let ready = SessionContext { steam_ready: true, in_game: true, ..Default::default() };
+        assert_eq!(connect_gate_hint(&ready), None);
+        // Not in-game wins (the player's own action), even when Steam is also not ready.
+        assert_eq!(
+            connect_gate_hint(&SessionContext::default()),
+            Some("Load into your world first."),
+            "both gates closed: the in-game hint leads",
+        );
+        assert_eq!(
+            connect_gate_hint(&SessionContext { steam_ready: true, in_game: false, ..Default::default() }),
+            Some("Load into your world first."),
+        );
+        // In-game but Steam still coming up: the wait hint.
+        assert_eq!(
+            connect_gate_hint(&SessionContext { steam_ready: false, in_game: true, ..Default::default() }),
+            Some("Waiting for Steam networking..."),
+        );
+        // In a session the connect rows are hidden entirely — nothing to explain, whatever the gates.
+        let in_session = SessionContext { in_session: true, ..Default::default() };
+        assert_eq!(connect_gate_hint(&in_session), None);
+        // Every hint is ASCII (same font constraint as the status line).
+        for ctx in [SessionContext::default(), SessionContext { steam_ready: true, ..Default::default() }] {
+            if let Some(hint) = connect_gate_hint(&ctx) {
+                assert!(hint.is_ascii(), "non-ASCII hint: {hint:?}");
+            }
+        }
     }
 
     #[test]
