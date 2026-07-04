@@ -146,7 +146,14 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-07-04 pm) — ★ SOLO HOST REACHED AND STICKS.** The full offline host path works:
+  > **State (2026-07-04 pm) — ★ SOLO HOST STICKS + JOINER REACHES TryToJoinSession two-machine; final gap = the
+  > session handshake.** Two-machine (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the co-op world),
+  > Deck = holds at `TryToJoinSession`, legacy P2P transport live both ways. The Deck doesn't reach `Client` /
+  > roster stays 1 because bypassing the blob-parse left the joiner with no host connection endpoint. NEXT: wire
+  > that endpoint (real SteamID-only blob, or drive the joiner's socket-manager to connect to the host SteamID) so
+  > the establish handshake completes. Details: SESSION-DRIVE.md > "HOST-SETUP DRIVE" milestone #9. (Host path below:)
+  >
+  > **★ SOLO HOST REACHED AND STICKS.** The full offline host path works:
   > the `SteamServiceImpl` standup works offline (the "native-builder dead end" was a misdiagnosis); we land the
   > correct object at `[container+0x708]` (a socket-manager wrapper, not a raw connection) + drive its own init;
   > drive create → `TryToCreateSession`; and bypass host-setup's final online-availability gate `0x140de2620`
