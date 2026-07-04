@@ -1757,6 +1757,32 @@ impl Feature for SessionJoinDriver {
             "session-probe: drive-join returned {ret} — lobby_state now {after:?} \
              (TryToJoinSession/Client=driven OK; FailedToJoinSession=internal gate rejected)",
         );
+        // Chart the connection-handle registry the update task polls. The joiner path (0x140caff11) polls
+        // [G+0x28]; the registry is *(G+0x60)+0x710 (via 0x1423f1930), and its vtable slot +0x10 is the
+        // blob→connection method (create uses +8 → [G+0x24]). Log [G+0x24]/[G+0x28] + the registry vtable +
+        // slot +0x10/+8 addresses so we can disassemble the blob parser and build a valid blob (a real
+        // handle in [G+0x28] is what advances the joiner to Client).
+        // SAFETY: `base` is the live CSSessionManager; +0x24/+0x28/+0x60 are in-bounds; the registry chain
+        // is null-guarded before each deref.
+        unsafe {
+            let h24 = ((base + 0x24) as *const u32).read_volatile();
+            let h28 = ((base + 0x28) as *const u32).read_volatile();
+            let netman = ((base + 0x60) as *const usize).read_volatile();
+            let (reg, reg_vt, slot8, slot10) = if netman != 0 {
+                let reg = netman + 0x710;
+                let vt = (reg as *const usize).read_volatile();
+                let s8 = if vt != 0 { ((vt + 8) as *const usize).read_volatile() } else { 0 };
+                let s10 = if vt != 0 { ((vt + 0x10) as *const usize).read_volatile() } else { 0 };
+                (reg, vt, s8, s10)
+            } else {
+                (0, 0, 0, 0)
+            };
+            log::info!(
+                "session-probe: drive-join — handles [G+0x24]={h24:#x} (create/host) [G+0x28]={h28:#x} \
+                 (join/client — update task polls THIS); registry {reg:#x} vtable={reg_vt:#x} \
+                 create-slot[+8]={slot8:#x} join-slot[+0x10]={slot10:#x} (disasm the join-slot to chart the blob)",
+            );
+        }
     }
 }
 

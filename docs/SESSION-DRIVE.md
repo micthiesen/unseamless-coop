@@ -1215,6 +1215,22 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    host so `[session+0x24]` becomes a live handle** — drive the joiner's socket-manager connect to the host SteamID
 >    (avenue b), obtain the game's connection handle, route it to `[r14+0x24]`, and have the host accept so its roster
 >    grows. This is the genuine session-establish piece; the transport underneath it is already proven two-machine.
+> 11. **DEEPER: the joiner polls `[G+0x28]`, not `[G+0x24]` — and `[G+0x28]` is the JOIN registry handle.** Re-read
+>    of the update task: `cmp [r14+0x24],0; je 0x140caff11`, and **`0x140caff11: cmp [r14+0x28],0; je skip`** — so
+>    the JOINER branch polls `[G+0x28]`. Both handles come from the same connection registry
+>    `registry = *(G+0x60)+0x710` (rig-logged live: `vtable 0x1431f9140`), whose vtable slot **`+8` = `0x1423f5c00`**
+>    (create/leg-B → `[G+0x24]`) and **`+0x10` = `0x1423f62e0`** (join, connection-from-blob → `[G+0x28]`). The join
+>    inner calls `0x1423f62e0(registry, descriptor, blob_begin, blob_len)`; it returns **0** for our dummy blob, so
+>    `[G+0x28]=0`. Inside `0x1423f62e0`: a registry-ready check (`0x141eba210` on `[registry+0x10]`), two descriptor
+>    validations (`[reg_vt+0xe8]`, `[reg_vt+0x108]` → a connection object), then the blob parser
+>    **`0x1423fb260(conn, blob_begin, blob_len, …)`** (needs `begin!=0 && len!=0` — our 8-byte blob passes — then
+>    processes the blob into `[conn+0x58]+0x1e8`); on success it appends the connection to the registry array
+>    (`[registry+0x18][count]=conn; inc [registry+0x24]`) and yields the handle. **⇒ Precise next target: make
+>    `0x1423f62e0` return a nonzero handle** — instrument its four fail branches to find which check rejects our blob
+>    (registry-ready / descriptor / create-conn / blob-parse), chart the minimal blob `0x1423fb260` accepts (likely a
+>    SteamID-only structure into `[conn+0x58]+0x1e8`), and supply it instead of the bypass. Then `[G+0x28]` is a live
+>    handle, the update task polls it, and TryToJoinSession advances to `Client` as the host connection completes over
+>    the proven transport. (Diagnostic added: the join driver logs `[G+0x24]/[G+0x28]` + the registry vtable/slots.)
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
