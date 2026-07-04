@@ -38,34 +38,44 @@ Last rewritten: **2026-07-04** (live-capture session).
 ## Next
 
 **Reproduce the ERSC establishment — start by resolving the one concrete wall: why `SteamServiceImpl`
-standup `0x142638b40` returns null offline.** Use the live capture as the known-good reference: chart
-what the standup reads/requires, diff against an offline `stand_up_transport` attempt, then drive the
-game to build `SessionSteam` + members + the transport keyed to the rung-4 peer SteamID64 →
-`host-admit-success 0x142640ee4` → roster `players=2`, validated two-machine.
+standup `0x142638b40` returns null offline.** Decided 2026-07-04 (/next, confirmed same day): split it
+into a delegable static lane + a serial rig batch, run concurrently:
+
+1. **Worker lane (delegable, brief drafted):** statically chart the standup's full read/test set —
+   what `0x142638b40` and its callees dereference and check, especially on the `owner`/config
+   `[container+0x48]` — using the live capture as the known-good reference (it returned
+   `0x7fff66cdfe00` in a real session; the config object exists offline too, so the failing check is
+   subtler than a null owner). Deliverable: a findings doc naming the exact failing check, the field
+   list to dump offline for the live-vs-offline diff, and (if chartable) the minimal writes/calls to
+   make it pass. Docs-only lane.
+2. **Rig batch (serial, orchestrator):** `rig.sh apply`, then one cycle that validates the
+   stay-connected gate solo and dumps the offline values of the worker's field list (the diff's
+   offline side).
+
+Then drive the game to build `SessionSteam` + members + the transport keyed to the rung-4 peer
+SteamID64 → `host-admit-success 0x142640ee4` → roster `players=2`, validated two-machine.
 
 - **Why this / why now:** the capture proved the mechanism (native DLNR3D/DLNW3D graph, not the
   gate-c/`+0x168` path we chased) and that everything needed exists in a real session; the standup
-  null is the specific gap between our offline state and the known-good one.
+  null is the specific gap between our offline state and the known-good one. The static chart is the
+  cheap probe that makes the rig cycle count — a reproduce attempt before it is blind.
 - **Plan:** [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-04)" +
   [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) (offsets + reproduce target). Tasks
   #14 (reproduce) and #15 (standup null).
-- **Serial:** rig-owned (needs our mod re-applied — see In-Flight).
 
 ## Candidates Not Chosen
 
+- **Writer-trace live follow-up** (task #16) — arm a watchpoint on a stable anchor (`[csm+0xc]` or
+  `container+0x1e8`) during a fresh Deck join to catch the establishment RIPs; highest-fidelity answer
+  but costs another full live 2-player ERSC session (setup in ERSC-LIVE-CAPTURE-FINDINGS.md >
+  "Re-running this capture"). The fallback if the static chart can't pin the failing check.
 - **Offline synthesis of the session graph** — the live capture confirmed it's a dead end at the object
   level (runtime-built native objects), not just "harder." Re-open only if the standup / establishment
   reduces to a small reproducible field/call set.
 - **The gate-c / `+0x168` "real member-lookup"** avenue — **DEBUNKED** (stub even in a working session);
   do not re-chase.
-- **Writer-trace live follow-up** (task #16) — arm a watchpoint on a stable anchor during a fresh join to
-  catch the establishment RIPs; valuable but needs another live 2-player session (setup in
-  ERSC-LIVE-CAPTURE-FINDINGS.md > "Re-running this capture"). Do it if static charting of the establishment
-  stalls.
 - **Single-source the duplicated `leave_session` offset/prologue** (task #13) — fold into the pivot churn
   on `session_probe.rs`, not standalone.
-- **stay-connected rig validation** — solo-drivable; do on a cycle when the rig's free (needs our mod
-  re-applied).
 
 ## In-Flight
 
