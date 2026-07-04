@@ -297,6 +297,16 @@ pub struct DebugProbes {
     /// > "SEAM CHARTED".
     pub land_socket_holder: bool,
 
+    /// **EXPERIMENTAL rung-3 NATIVE-BUILDER lever** (pairs with `drive_create`). Instead of hand-building
+    /// the connection, drive the game's own **connection-establish handler `0x1423f2820`**(container,
+    /// descriptor) at the veto hook: it calls `container->vtable[0x80]` (the Arxan-obfuscated native
+    /// connection builder) to construct a fully-wired `SteamConnection`, wraps it in the
+    /// `SocketManagerHolder`, and stores it at `[container+0x708]` — the whole seam, the game's way. Answers
+    /// the load-bearing question: does the DLNW3D builder run **offline** at all? Sets the handler's
+    /// preconditions (`[container+0x40]=1`, `[container+0x41]=0`) and hands it a zeroed descriptor. Off by
+    /// default. See docs/SESSION-DRIVE.md > "SEAM CHARTED".
+    pub drive_establish_handler: bool,
+
     /// **EXPERIMENTAL rung-3 HOST-transition lever** (pairs with `drive_create`). After the driven create
     /// reaches `TryToCreateSession`, call the game's own Host-transition function `0x140cb2ae0`, the sole
     /// writer of `lobby_state=Host(3)` (it also sets `protocol_state=Ingame(6)` and runs the host setup).

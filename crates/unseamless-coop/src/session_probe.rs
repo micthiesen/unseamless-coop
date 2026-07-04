@@ -297,6 +297,16 @@ static SESSION_ESTABLISHED_FN: AtomicUsize = AtomicUsize::new(0);
 /// `0x1423f4870` = `ManagerImplSteam@DLNR3D`'s session-established handler (vtable slot +0x68).
 const SESSION_ESTABLISHED_OFFSET: usize = 0x1_423f_4870 - 0x1_4000_0000;
 
+/// Armed by `[debug.probes] drive_establish_handler`: at the veto hook, drive the game's own
+/// connection-establish handler `0x1423f2820(container, descriptor)` (which calls the Arxan native builder
+/// `container->vtable[0x80]`) to build + wrap + store a connection at `[container+0x708]` natively.
+static DRIVE_ESTABLISH_HANDLER: AtomicBool = AtomicBool::new(false);
+/// Resolved absolute address of the connection-establish handler `0x1423f2820` (set at install).
+static ESTABLISH_HANDLER_FN: AtomicUsize = AtomicUsize::new(0);
+/// `0x1423f2820` = `ManagerImpl@DLNR3D`'s connection-establish handler: `container->vtable[0x80]` builds
+/// the raw connection, `0x1423f7180` wraps it, it's stored at `[container+0x708]` + addref'd.
+const ESTABLISH_HANDLER_OFFSET: usize = 0x1_423f_2820 - 0x1_4000_0000;
+
 /// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
 /// `SocketManagerHolder@DLNR3D` around the standup connection and land it at `[container+0x708]` — the
 /// refcounted DLNR3D wrapper the driven create's `ConnectionRefInfo` loop reads + addrefs. Supersedes the
@@ -407,6 +417,8 @@ fn install_create_gate_trace(config: &Config) {
     LAND_SOCKET_HOLDER.store(config.debug.probes.land_socket_holder, Ordering::Relaxed);
     HOLDER_CTOR_FN.store(exe_base + HOLDER_CTOR_OFFSET, Ordering::Relaxed);
     GAME_ALLOC_FN.store(exe_base + GAME_ALLOC_OFFSET, Ordering::Relaxed);
+    DRIVE_ESTABLISH_HANDLER.store(config.debug.probes.drive_establish_handler, Ordering::Relaxed);
+    ESTABLISH_HANDLER_FN.store(exe_base + ESTABLISH_HANDLER_OFFSET, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
     if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
         install_offset_hook("veto-field", vv, log_veto_field);
@@ -770,6 +782,12 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
                 );
             }
         }
+        // NATIVE-BUILDER experiment: drive the game's own connection-establish handler 0x1423f2820 to
+        // build + wrap + store a connection at [container+0x708] the game's way (via the Arxan native
+        // builder container->vtable[0x80]). Answers whether the DLNW3D builder runs offline at all.
+        if DRIVE_ESTABLISH_HANDLER.load(Ordering::Relaxed) {
+            drive_establish_handler(container);
+        }
         // SEAM: build a real SocketManagerHolder@DLNR3D around our standup connection and land it at
         // [container+0x708], so the driven create's ConnectionRefInfo loop reads a valid refcountable
         // object (refcount at +8) instead of null. This is the charted replacement for the hollow
@@ -814,6 +832,63 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
             );
         }
     }));
+}
+
+/// Drive the game's own connection-establish handler `0x1423f2820(container, descriptor)` — the native
+/// path that calls the Arxan builder `container->vtable[0x80]` to construct a fully-wired `SteamConnection`,
+/// wraps it in a `SocketManagerHolder`, and stores it at `[container+0x708]` + addrefs. This is the
+/// experiment: does the DLNW3D builder run offline? No-op if `+0x708` is already populated. Sets the
+/// handler's entry preconditions (`[container+0x40]=1`, `[container+0x41]=0`) and hands it a leaked, mostly
+/// zeroed descriptor with a guessed connection-count field (`desc+0 = 1` — the field that, if the stack
+/// struct flows to the connection-creator as its params, becomes `params+0x18` = count).
+fn drive_establish_handler(container: usize) {
+    // SAFETY: `container` = the veto vmethod's live `ManagerImpl@DLNR3D`; `+0x708` is an in-bounds qword.
+    let slot = (container + 0x708) as *mut usize;
+    if unsafe { slot.read_volatile() } != 0 {
+        return; // already populated — don't double-drive
+    }
+    let fn_addr = ESTABLISH_HANDLER_FN.load(Ordering::Relaxed);
+    if fn_addr == 0 {
+        return;
+    }
+    // Preconditions: the handler bails at entry unless [container+0x40]==1 and [container+0x41]==0.
+    // SAFETY: both are in-bounds byte flags on the container.
+    let p40 = (container + 0x40) as *mut u8;
+    let p41 = (container + 0x41) as *mut u8;
+    let (before40, before41) = unsafe { (p40.read_volatile(), p41.read_volatile()) };
+    unsafe {
+        p40.write_volatile(1);
+        p41.write_volatile(0);
+    }
+    // Leaked, mostly-zeroed descriptor (the handler reads dwords [desc..desc+0x34] + bytes at +0x3c/+0x3d
+    // and copies ~0x120 bytes to [container+0xb0]). 0x140 bytes is generous. Guess the connection-count
+    // field at desc+0 = 1 (see the doc comment); everything else defaults inside the builder.
+    let desc: &'static mut [u8] = vec![0u8; 0x140].leak();
+    let desc_ptr = desc.as_mut_ptr() as usize;
+    unsafe { (desc_ptr as *mut u32).write_volatile(1) };
+    log::info!(
+        "session-probe: drive-establish — calling 0x1423f2820(container={container:#x}, desc={desc_ptr:#x}) \
+         [pre: +0x40={before40} +0x41={before41} +0x708=0; forced +0x40=1 +0x41=0, desc+0=1]",
+    );
+    // SAFETY: win64 ABI; rcx=container, rdx=descriptor. Builds the connection via the container's Arxan
+    // vtable[0x80], wraps + stores at +0x708. A hard fault surfaces via the crashdump SEH handler; the
+    // caller (log_veto_field) is unwind-firewalled.
+    let handler: extern "win64" fn(usize, usize) -> u8 = unsafe { std::mem::transmute(fn_addr) };
+    let ret = handler(container, desc_ptr);
+    let after_708 = unsafe { slot.read_volatile() };
+    log::info!(
+        "session-probe: drive-establish — 0x1423f2820 returned {ret}; [container+0x708]={after_708:#x} \
+         (NON-NULL => the game's OWN DLNW3D builder built + stored a connection OFFLINE)",
+    );
+    if after_708 != 0 {
+        // Peek the wrapped connection (holder+0x10) + its vtable, to confirm it's a real SteamConnection.
+        let conn = unsafe { ((after_708 + 0x10) as *const usize).read_volatile() };
+        let vt = if conn != 0 { unsafe { (conn as *const usize).read_volatile() } } else { 0 };
+        log::info!(
+            "session-probe: drive-establish — holder[+0x10]=connection={conn:#x} vtable={vt:#x} \
+             (SteamConnection@DLNW3D static vtable = 0x143278358/0x143278370)",
+        );
+    }
 }
 
 /// Build a real `SocketManagerHolder@DLNR3D` around the transport-standup connection and write it to

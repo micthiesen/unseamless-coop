@@ -114,10 +114,15 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
 drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
-stand_up_transport = true  # rung-3 transport-leg standup (ERSC path C): one-shot in-world resolve of
-                           # ISteamNetworking006 + construct a DLNW3D SteamServiceImpl offline. Confirm with
-                           # scripts/re/scan-vtable.py 0x143277270 (expect a live SteamServiceImpl after). First
-                           # increment of the DLNW3D standup — see docs/COOP-CONNECTION.md > "THE PLAN".
+drive_establish_handler = true # NATIVE-BUILDER EXPERIMENT (2026-07-04): drive the game's own
+                           # connection-establish handler 0x1423f2820 at the veto hook — it calls the Arxan
+                           # native builder container->vtable[0x80] to build a fully-wired connection, wraps
+                           # it, stores at [container+0x708]. Answers: does the DLNW3D builder run offline?
+                           # Pairs with drive_create + drive_session_established (veto bit 2). Supersedes the
+                           # hand-built land_socket_holder path (off below) for this run.
+stand_up_transport = false # off for the native-builder run (the establish handler builds its own connection;
+                           # our hand-built transport isn't needed and would only add noise). Flip back on for
+                           # a hand-build/two-machine P2P run. See docs/COOP-CONNECTION.md > "THE PLAN".
 # Two-machine game-P2P test (phase 2 of stand_up_transport): both machines' SteamID64s. Each machine
 # drives the game's legacy ISteamNetworking006 P2P at whichever of these isn't its own — no manual
 # Open/Join link needed. rig=76561198004789432, deck=76561198681631498.
@@ -135,12 +140,14 @@ drive_session_established = true # SEAM TEST: drive 0x1423f4870 for real init (s
                            # was still null (the create ConnectionRefInfo addref on null); land_socket_holder
                            # below now fills +0x708 with a real refcountable object first. See SESSION-DRIVE.md
                            # > "SEAM CHARTED".
-land_socket_holder = true  # SEAM TEST (2026-07-04): build a real SocketManagerHolder@DLNR3D wrapping the
+land_socket_holder = false # off for the native-builder run (drive_establish_handler builds +0x708 natively).
+                           # SEAM TEST (2026-07-04): build a real SocketManagerHolder@DLNR3D wrapping the
                            # stand_up_transport connection and land it at [container+0x708] (refcount=1) at the
                            # veto-vmethod hook, so the driven create's ConnectionRefInfo loop reads a valid
                            # object instead of null-derefing. Needs stand_up_transport + drive_create on. The
                            # charted finish of rung-3 create — see docs/SESSION-DRIVE.md > "SEAM CHARTED".
-force_host_transition = true # SEAM TEST (2026-07-04): after create reaches TryToCreateSession, call the game's
+force_host_transition = false # off: proven not to stick (host setup faults on a dead connection). Left as a
+                           # charted lever. SEAM TEST: after create reaches TryToCreateSession, call the game's
                            # Host writer 0x140cb2ae0 directly (sets lobby_state=Host + protocol=Ingame + host
                            # setup), so the update task takes the host-maintenance branch instead of the
                            # connection-activation branch that crashes on our incomplete connection.
