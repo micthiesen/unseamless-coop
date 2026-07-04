@@ -174,16 +174,61 @@ cmd_setup() {
   say "Next: scripts/deck.sh apply   (build + push the mod), then launch / cycle."
 }
 
+# Per-machine co-op role (--auto-session): mirrors rig.sh. The shared seed config deliberately
+# carries NO `auto_session` key — the role is per-MACHINE (host on the rig, join on the Deck) while
+# the seed is shared, and every cycle re-applies it, so a role written into the seed gets clobbered
+# the moment the OTHER machine cycles (the both-machines-hosted footgun of 2026-07-04). The flag
+# writes the role into the config staged for THIS Deck instead; pass it on every apply/cycle that
+# needs one (a bare re-apply resets it to off, the mod's default when the key is absent).
+validate_auto_session() {
+  case "$1" in
+    host|join|off) ;;
+    "") die "--auto-session requires a value: host|join|off" ;;
+    *) die "--auto-session must be 'host', 'join', or 'off' (got '$1')" ;;
+  esac
+}
+
+# Set `[debug] auto_session = "$2"` in config file $1 (same logic as rig.sh): replace an existing key
+# line (never append a duplicate — a duplicate TOML key fails the whole parse), else insert directly
+# under [debug], else append a fresh [debug] table (only when none exists).
+set_auto_session() {  # $1 = config file, $2 = host|join|off
+  local file="$1" val="$2"
+  if grep -qE '^[[:space:]]*auto_session[[:space:]]*=' "$file"; then
+    sed -i -E "s/^[[:space:]]*auto_session[[:space:]]*=.*/auto_session = \"$val\"/" "$file"
+  elif grep -q '^\[debug\]' "$file"; then
+    sed -i "/^\[debug\]/a auto_session = \"$val\"" "$file"
+  else
+    printf '\n[debug]\nauto_session = "%s"\n' "$val" >> "$file"
+  fi
+}
+
+# Role-staged temp config, cleaned by an EXIT trap. Deliberately a GLOBAL + EXIT (not a `local` +
+# RETURN trap like cmd_seed_save's): `die`/set -e exit the shell without returning from the function,
+# and a RETURN trap does NOT fire on that path (verified empirically) — an EXIT trap does, and needs
+# a var that's still in scope at fire time.
+TMPCFG=""
+trap '[[ -z "${TMPCFG:-}" ]] || rm -f "$TMPCFG"' EXIT
+
 cmd_apply() {
-  local profile=diag do_build=1 keep_config=0
+  local profile=diag do_build=1 keep_config=0 auto_session=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)     profile=release ;;
       --no-build)    do_build=0 ;;
       --keep-config) keep_config=1 ;;
+      # Validate in the arm so a missing/empty value dies with a clear message instead of silently
+      # leaving the role unset (and, when the flag is the last arg, tripping the loop's trailing
+      # `shift` on an empty list — a message-less set -e abort).
+      --auto-session)   auto_session="${2:-}"; validate_auto_session "$auto_session"; shift ;;
+      --auto-session=*) auto_session="${1#*=}"; validate_auto_session "$auto_session" ;;
       *) die "apply: unknown flag '$1'" ;;
     esac; shift
   done
+  # --keep-config skips pushing a config at all (the Deck keeps its current one), so there is nothing
+  # for --auto-session to write into. Editing the remote config in place would silently diverge from
+  # the keep-what's-there contract; make the conflict explicit instead.
+  [[ $keep_config -eq 1 && -n "$auto_session" ]] \
+    && die "--auto-session writes the pushed config, but --keep-config keeps the Deck's existing one — drop one of the two"
   resolve_paths
   [[ $do_build -eq 1 ]] && build "$profile"
   local out; out="$(artifact_dir "$profile")"
@@ -197,7 +242,23 @@ cmd_apply() {
   ssh_base "mkdir -p $(qsh "$DECK_STAGING")"
   rsync_to "$dll" "$DECK_STAGING/unseamless_coop.dll"
   rsync_to "$launcher" "$DECK_STAGING/start_protected_game.exe"
-  [[ $keep_config -eq 0 ]] && rsync_to "$SEED_CONFIG" "$DECK_STAGING/unseamless_coop.toml"
+  if [[ $keep_config -eq 0 ]]; then
+    # Stage the shared seed as-is, or — with --auto-session — a temp copy with this Deck's role
+    # written in (the seed itself carries no role; see set_auto_session above). The temp rides the
+    # global TMPCFG so the EXIT trap reaps it even if the rsync below dies mid-push.
+    local cfg_src="$SEED_CONFIG"
+    if [[ -n "$auto_session" ]]; then
+      TMPCFG="$(mktemp "${TMPDIR:-/tmp}/unseamless-deck-config.XXXXXX.toml")"
+      cp "$SEED_CONFIG" "$TMPCFG"
+      set_auto_session "$TMPCFG" "$auto_session"
+      cfg_src="$TMPCFG"
+    fi
+    rsync_to "$cfg_src" "$DECK_STAGING/unseamless_coop.toml"
+    if [[ -n "$TMPCFG" ]]; then rm -f "$TMPCFG"; TMPCFG=""; fi
+    if [[ -n "$auto_session" ]]; then
+      ok "config staged with [debug] auto_session = \"$auto_session\" (per-invocation — a later bare apply/cycle resets it to off)"
+    fi
+  fi
   # Build-info for the marker (so the Deck records what build it's running).
   local sha; sha="$(cd "$ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
   printf 'profile: %s\ngit: %s\nbuilt: %s\n' "$profile" "$sha" "$(date -Is)" \
@@ -288,14 +349,19 @@ usage() {
 deck.sh — remote rig over SSH (player 2). Set DECK_HOST=user@host first.
 
   setup                 push the on-Deck helper, mark the host a throwaway rig, report deps (run once per Deck)
-  apply [--release] [--no-build] [--keep-config]
-                        build the DLL here, rsync it + the launcher + seed config, install on the Deck
+  apply [--release] [--no-build] [--keep-config] [--auto-session host|join|off]
+                        build the DLL here, rsync it + the launcher + seed config, install on the Deck.
+                        --auto-session sets THIS machine's co-op role in the pushed config (the shared
+                        seed carries no role); per-invocation — pass it on every apply/cycle that needs
+                        one. Incompatible with --keep-config (which pushes no config at all).
   seed-save [file]      push a save into the Deck's prefix; re-signs for the Deck account when needed (needs local python3)
   seed-input            (re)build + push the static uinput-tap key-tapper that dismiss uses (setup does this too)
   launch                start the game on the Deck via the running Steam
   dismiss               tap Enter via the bundled uinput-tap to clear popups + select Continue (no daemon)
   kill                  stop the game + launcher on the Deck
-  cycle [apply-opts]    apply -> kill -> launch -> wait -> dismiss (the solo-on-Deck smoke test)
+  cycle [apply-opts]    apply -> kill -> launch -> wait -> dismiss (the solo-on-Deck smoke test).
+                        Re-applies the seed config every run; for a two-machine run pass the role
+                        each time: cycle --auto-session join (rig side: rig.sh cycle --auto-session host)
   log [-f]              print/follow the latest Deck log
   pull-logs [dest]      rsync the Deck's logs back here (default .deck-logs/)
   status | paths | check

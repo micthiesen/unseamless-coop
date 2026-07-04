@@ -103,6 +103,14 @@ This run rides the **lobby-discovery build** (the one where rung 4's discovery p
   staging a guide over a chat round-trip. The whole subsystem is debug-only, so **every machine must
   run a diag build** (release strips it entirely). Authoring + the committed list:
   [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill.
+- `[debug] auto_session` (the headless Open/Join trigger) is **per-MACHINE and never staged in the
+  shared seed config** — each machine's apply/cycle re-applies the seed, so a role written there gets
+  clobbered by the other machine's next cycle (both end up hosting: "A world with this password is
+  already open"). Pass it per invocation instead: `scripts/rig.sh cycle --auto-session host` /
+  `scripts/deck.sh cycle --auto-session join` on the rig/Deck pair, or bake it into a friend bundle
+  with `rig.sh package --auto-session join` (the fallback for an overlay-less machine). The host
+  holds its open lobby indefinitely (only the lobby *setup* is time-boxed), so the joiner can be
+  (re)launched any time after the host is up.
 
 > The `lobby_callback_probe` (rung-4 gate) has already served its purpose solo — it confirmed ER pumps
 > via `RunCallbacks` and `CreateLobby` succeeds. It can stay off for the friend test; the live

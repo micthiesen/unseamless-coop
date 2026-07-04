@@ -266,9 +266,41 @@ build() {
 
 artifact_dir() { echo "$ROOT/target/$TRIPLE/$1"; }
 
+# ---- per-machine co-op role (--auto-session) -----------------------------------------------------
+# The shared seed config deliberately carries NO `auto_session` key: the role is per-MACHINE (host on
+# the rig, join on the Deck) while the seed is SHARED — `rig.sh apply` and `deck.sh apply` both write
+# it, and every `cycle` re-applies it. A role written into the seed therefore gets clobbered the
+# moment the OTHER machine cycles (the both-machines-hosted footgun of 2026-07-04). So the role is a
+# per-invocation flag instead: `apply/cycle --auto-session host|join` writes it into the INSTALLED
+# config after the seed copy. Pass it on every apply/cycle that needs a role; a bare re-apply resets
+# it to off (the mod's default when the key is absent).
+validate_auto_session() {
+  case "$1" in
+    host|join|off) ;;
+    "") die "--auto-session requires a value: host|join|off" ;;
+    *) die "--auto-session must be 'host', 'join', or 'off' (got '$1')" ;;
+  esac
+}
+
+# Set `[debug] auto_session = "$2"` in config file $1. Replace an existing key line (never append a
+# second one — a duplicate TOML key fails the whole parse and the mod falls back to defaults, which
+# trips the startup password guard); else insert directly under [debug] (a blind file-end append
+# would land the key in whatever [section] happens to end the file); else append a fresh [debug]
+# table (only when none exists — a duplicate table header is the same whole-parse failure).
+set_auto_session() {  # $1 = config file, $2 = host|join|off
+  local file="$1" val="$2"
+  if grep -qE '^[[:space:]]*auto_session[[:space:]]*=' "$file"; then
+    sed -i -E "s/^[[:space:]]*auto_session[[:space:]]*=.*/auto_session = \"$val\"/" "$file"
+  elif grep -q '^\[debug\]' "$file"; then
+    sed -i "/^\[debug\]/a auto_session = \"$val\"" "$file"
+  else
+    printf '\n[debug]\nauto_session = "%s"\n' "$val" >> "$file"
+  fi
+}
+
 # ---- apply (safe, repeatable) --------------------------------------------------------------------
 cmd_apply() {
-  local profile=diag do_build=1 keep_config=0 with_mods="" force=0
+  local profile=diag do_build=1 keep_config=0 with_mods="" force=0 auto_session=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)     profile=release ;;
@@ -278,6 +310,11 @@ cmd_apply() {
       --force)       force=1 ;;
       --with-mods)   with_mods="${2:-}"; shift ;;
       --with-mods=*) with_mods="${1#*=}" ;;
+      # Validate in the arm so a missing/empty value dies with a clear message instead of silently
+      # leaving the role unset (and, when the flag is the last arg, tripping the loop's trailing
+      # `shift` on an empty list — a message-less set -e abort).
+      --auto-session)   auto_session="${2:-}"; validate_auto_session "$auto_session"; shift ;;
+      --auto-session=*) auto_session="${1#*=}"; validate_auto_session "$auto_session" ;;
       *) die "apply: unknown option '$1'" ;;
     esac
     shift
@@ -338,11 +375,25 @@ cmd_apply() {
 
   # Seed config: a known starting point with debug logging on. Don't clobber an edited one if asked.
   mkdir -p "$(dirname "$CONFIG_DST")"
+  local wrote_seed=0
   if [[ $keep_config -eq 1 && -f "$CONFIG_DST" ]]; then
     ok "kept existing config ($CONFIG_DST)"
   else
     cp "$SEED_CONFIG" "$CONFIG_DST"
-    ok "wrote seed config ($CONFIG_DST) — [debug] enabled, password 'coop-test'"
+    wrote_seed=1
+    ok "wrote seed config ($CONFIG_DST) — [debug] enabled, password 'coop-test'. Every apply/cycle re-writes this from the seed (--keep-config preserves an edited one)."
+  fi
+  # Per-machine role: written AFTER the seed copy so it survives the re-apply. It also lands on a
+  # --keep-config'd config — the explicit flag wins over whatever the kept file says. NB the
+  # reset-to-off on a bare re-apply only happens via the seed re-write, so on a KEPT config the
+  # role persists until explicitly overridden — say so instead of promising a reset that won't come.
+  if [[ -n "$auto_session" ]]; then
+    set_auto_session "$CONFIG_DST" "$auto_session"
+    if [[ $wrote_seed -eq 1 ]]; then
+      ok "set [debug] auto_session = \"$auto_session\" (per-invocation — the next apply/cycle that re-writes the seed resets it to off)"
+    else
+      ok "set [debug] auto_session = \"$auto_session\" (written onto the kept config — persists there until explicitly overridden)"
+    fi
   fi
 
   # Record what we applied so `status` is honest and `backup` knows our mod is installed.
@@ -822,8 +873,8 @@ cmd_package() {
       --guide)      guide_arg="${2:-}"; shift ;;   # bake a rig-guide name into the bundle config
       --guide=*)    guide_arg="${1#*=}" ;;
       --session-probe) probe=1 ;;                  # bake [debug.probes] session_probe = true
-      --auto-session)   auto_arg="${2:-}"; shift ;;  # bake [debug] auto_session = host|join
-      --auto-session=*) auto_arg="${1#*=}" ;;
+      --auto-session)   auto_arg="${2:-}"; validate_auto_session "$auto_arg"; shift ;;  # bake [debug] auto_session = host|join|off
+      --auto-session=*) auto_arg="${1#*=}"; validate_auto_session "$auto_arg" ;;        #   (per-machine — see cmd_apply)
       --no-overlay) no_overlay=1 ;;                # bake [debug] overlay = false (headless machine)
       *) die "package: unknown option '$1'" ;;
     esac
@@ -1017,6 +1068,13 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
         --with-mods a,b    Also load these mods (by name) from the snapshot — for loader testing.
                            Default: mods/ is left empty (clean observation run).
         --keep-config      Don't overwrite an existing on-disk config (default: write the seed).
+        --auto-session R   THIS machine's co-op role: host|join|off. Written into the installed
+                           config after the seed copy (the shared seed carries no role, so two
+                           machines can't clobber each other's — see the two-machine recipe in the
+                           steam-deck skill). Per-invocation: pass it on every apply/cycle that
+                           needs a role; a bare re-apply resets it to off. With --keep-config the
+                           role is written onto the kept config instead and persists there (no
+                           seed re-write to reset it).
   restore                EXPLICIT rollback to the original stack. The only thing that un-applies.
   status                 Show snapshot state, what's installed, and the latest run log.
   launch [--wait]        steam -applaunch (uses your gamescope launch options). Renders at the rig
@@ -1042,6 +1100,9 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
                          Auto-dismisses the startup popups; pass --no-dismiss to skip that.
                          --in-world additionally loads the save and waits until in-world.
+                         NB: re-applies the seed config every run (see apply). Two-machine run:
+                         'cycle --in-world --auto-session host' here, 'deck.sh cycle
+                         --auto-session join' on the Deck — no seed edits.
   package [opts]         Build + assemble a Windows friend-install zip in dist/. Bundles our binaries,
                          a shared seed config, a sha256 MANIFEST, and the PowerShell installer. The zip
                          is password-protected ('$FRIEND_ZIP_PASSWORD') to dodge browser/AV false-positives.

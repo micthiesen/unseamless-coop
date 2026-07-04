@@ -24,12 +24,12 @@ You build the DLL here and push it; the Deck stays stateless (only the helper + 
 | Verb | What it does |
 |---|---|
 | `setup` | One-time per Deck: push the helper, mark the host a throwaway rig (required by `apply`), seed the `uinput-tap` tapper, report deps. |
-| `apply [--release] [--no-build] [--keep-config]` | Build the DLL (default `diag`) + rsync it, the launcher, and the seed config; install on the Deck (dll→`dinput8.dll`, launcher→`start_protected_game.exe`, config, marker; empties `mods/`). |
+| `apply [--release] [--no-build] [--keep-config] [--auto-session host\|join\|off]` | Build the DLL (default `diag`) + rsync it, the launcher, and the seed config; install on the Deck (dll→`dinput8.dll`, launcher→`start_protected_game.exe`, config, marker; empties `mods/`). `--auto-session` sets THIS machine's co-op role in the pushed config (per-invocation; the shared seed carries no role). |
 | `seed-save [file]` | Fallback only: push a compatible save into the Deck's Proton prefix as `ER0000.<ext>`, re-signing its embedded SteamID64 for the Deck account when needed. |
 | `launch` | Start the game via the Deck's running Steam (outside EAC, via the applied launcher). |
 | `dismiss` | Tap Enter (`uinput-tap`) to clear the startup popups + select Continue → gameplay. |
 | `kill` | Stop the game + launcher. |
-| `cycle [apply-opts]` | `apply → kill → launch → wait-for-framework → dismiss`. The solo-on-Deck smoke test. |
+| `cycle [apply-opts]` | `apply → kill → launch → wait-for-framework → dismiss`. The solo-on-Deck smoke test; add `--auto-session join` for the two-player run. |
 | `log [-f]` | Print/follow the latest Deck log over SSH. |
 | `pull-logs [dest]` | rsync the Deck's logs back here (default `.deck-logs/`). |
 | `status` / `paths` / `check` | Applied state / resolved Deck paths / remote deps. |
@@ -39,7 +39,11 @@ You build the DLL here and push it; the Deck stays stateless (only the helper + 
 ## Two-player run
 
 `deck.sh` and `rig.sh` apply the **same** `scripts/rig/seed-config.toml`, so both machines share the
-password + settings. Edit that file once to change both.
+password + settings — edit that file once to change both. The per-machine **role** is the one
+exception: it is **never a seed edit**. Each machine's `cycle` re-applies the shared seed, so a role
+written into the seed gets clobbered by the other machine's next cycle (the both-machines-hosted
+footgun). Pass it per invocation instead — `--auto-session host|join` writes `[debug] auto_session`
+into that machine's installed config *after* the seed copy.
 
 ```bash
 export DECK_HOST=deck@10.10.1.57 DECK_PORT=2222
@@ -50,13 +54,19 @@ scripts/deck.sh setup
 # fallback only, for compatible non-DLC saves:
 # scripts/deck.sh seed-save               # after the game has run once (creates the save profile)
 
-# each test:
-scripts/rig.sh apply  && scripts/deck.sh apply
-scripts/rig.sh cycle  && scripts/deck.sh cycle    # both into gameplay
-# in-game: one Open World, the other Join world. Read logs:
-scripts/rig.sh log -f                             # player 1
-scripts/deck.sh pull-logs && less .deck-logs/*    # player 2
+# each test — no seed edits; the role is a flag on every cycle:
+scripts/rig.sh cycle --in-world --auto-session host   # player 1: hosts once in-world
+scripts/deck.sh cycle --auto-session join             # player 2: joins (dismiss lands it in-world)
+scripts/rig.sh log -f                                 # player 1
+scripts/deck.sh pull-logs && less .deck-logs/*        # player 2
 ```
+
+Launch order is forgiving: once the host's lobby is open it **stays** open (`HOST_SETUP_TIMEOUT` only
+bounds the lobby *setup*; an open lobby is then held indefinitely while the host waits for a joiner), so
+the Deck can be cycled — or re-cycled after a flub — any time after the host is up. Re-cycling either
+machine is safe as long as you pass its role flag again: a bare `cycle` re-applies the seed and resets
+the role to off. `--keep-config` skips the config re-write entirely if you've hand-edited a machine's
+installed config (on the Deck it's incompatible with `--auto-session`, which needs to write the config).
 
 For the **rung-3 create-drive test**, set the probes in `seed-config.toml` and follow
 [FRIEND-TEST-RUNBOOK.md](../../../docs/FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test".

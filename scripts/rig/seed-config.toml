@@ -87,9 +87,14 @@ overlay = true
 # "rig-observation" (session-observer run), "rung3-create-drive" (two-machine create-drive; see
 # docs/RUNG3-DRIVE-RUNBOOK.md). See docs/RIG-GUIDES.md; author new ones per the rig-guides skill.
 guide = "rung3-create-drive"
-# Headless Open/Join trigger (same gate + code path as the overlay actions): "host" on the rig,
-# "join" on the Deck, so the two-machine run needs no hands on either overlay. One-shot per launch.
-auto_session = "off"
+# Headless Open/Join trigger ([debug] auto_session) — deliberately NOT set here. The role is
+# per-MACHINE (host on the rig, join on the Deck) but this seed is SHARED: rig.sh and deck.sh both
+# re-apply it on every cycle, so a role written here would clobber the other machine's role on its
+# next cycle (the both-machines-hosted footgun, 2026-07-04). Pass the role per invocation instead —
+# the flag writes it into the installed config after the seed copy:
+#   scripts/rig.sh  cycle --auto-session host
+#   scripts/deck.sh cycle --auto-session join
+# Absent = "off" (the mod default). Same gate + code path as the overlay actions; one-shot per launch.
 # Which role this machine plays for an active `guide`: "host" / "join" / "solo" (default "solo"). One
 # shared guide runs on every machine; each shows only the steps tagged for its role. For a two-player
 # guide set "host" on the hosting machine and "join" on the joiner.

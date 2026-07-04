@@ -89,8 +89,12 @@ both sides before launch, not synced after.
 | `[debug] rig_role` | leave default `solo` | none | the guide's connect step **derives** each machine's role from its Open/Join action |
 | `[debug] enabled` | `true` | baked by `package` | all the signal lines are `info!`, so the default level suffices (`debug` adds nothing here — the SteamID-bearing register-dump hooks are inert, their sites uncharted) |
 
-Optional / fallback: `--auto-session host` / `--auto-session join` (`[debug] auto_session`) starts
-the connection without the overlay menu — only for a machine that must run `--no-overlay`
+Optional / fallback: `[debug] auto_session` starts the connection without the overlay menu. It is
+**per-machine, never a seed edit** — the shared seed carries no `auto_session` key (each machine's
+cycle re-applies the seed, so a role written there gets clobbered by the other machine's next
+cycle). On the rig/Deck pair it's a per-invocation flag: `scripts/rig.sh cycle --auto-session host`
+/ `scripts/deck.sh cycle --auto-session join`. For a friend (Windows) bundle it's a package flag
+(`rig.sh package --auto-session join`) — the fallback for a machine that must run `--no-overlay`
 (`[debug] overlay = false`), which also loses the guide and the Export button (collect its
 `unseamless-coop/logs/` by hand — see the privacy note at the bottom).
 
@@ -129,6 +133,8 @@ Then apply + launch through the rig as usual (see [RIG-RUNBOOK.md](RIG-RUNBOOK.m
 ```bash
 scripts/rig.sh apply            # snapshots the real stack, installs the mod + seed config
 scripts/rig.sh cycle --in-world # launch and land in a loaded save unattended (~33s)
+# headless / two-machine variant: add the per-machine role as a flag (never a seed edit):
+#   scripts/rig.sh cycle --in-world --auto-session host
 scripts/rig.sh log -f           # watch this machine's log live
 ```
 
@@ -160,14 +166,19 @@ force_netsession_ready = true
 
 The Deck rides the **same seed config** as the rig (`scripts/deck.sh apply` pushes
 `scripts/rig/seed-config.toml`), so the edits from Machine 1 cover both sides automatically —
-password included. Per the [`/steam-deck`](../.claude/skills/steam-deck/SKILL.md) skill:
+password included. The per-machine **role** is the exception: it's a per-invocation flag, never a
+seed edit (a role in the shared seed gets clobbered when the other machine cycles). Per the
+[`/steam-deck`](../.claude/skills/steam-deck/SKILL.md) skill:
 
 ```bash
-scripts/deck.sh apply           # build here, rsync mod + seed config, install on the Deck
-scripts/deck.sh seed-save       # if the Deck needs a save
-scripts/deck.sh cycle           # launch + click into gameplay
-scripts/deck.sh pull-logs       # collect its logs afterward
+scripts/deck.sh seed-save                   # if the Deck needs a save
+scripts/deck.sh cycle --auto-session join   # apply + launch + click into gameplay, join role as a flag
+scripts/deck.sh pull-logs                   # collect its logs afterward
 ```
+
+Order is forgiving: the rig host's lobby stays open once created (only the setup is time-boxed), so
+cycle the Deck any time after the host side is up — and re-cycle it freely, passing the role flag
+each time.
 
 ## The in-game procedure (the guide drives it — don't hand-relay)
 
