@@ -44,7 +44,7 @@
 //! by default): when armed it writes the `NetworkSession`'s empty slot-array fields so a solo create
 //! can reach `Host` — a deliberate experiment, gated and guarded (only writes an unallocated array).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
@@ -675,6 +675,14 @@ fn log_join_blob_parse(_name: &'static str, regs: *mut Registers) {
 const HOST_ADMIT_OFFSET: usize = 0x1_4264_0e30 - 0x1_4000_0000;
 /// Session-layer roster-add `0x140cb31b0` (main-thread update task; `msg` in rdx, `CSSessionManager` in rcx).
 const HOST_ROSTER_ADD_OFFSET: usize = 0x1_40cb_31b0 - 0x1_4000_0000;
+/// Socket-manager worker-thread P2P drain loop `0x142640bc0` (`this=socketmgr` in rcx). Hooking its entry
+/// confirms the worker actually runs offline and reveals the channel it reads (`[this+0x50]`) + how many
+/// connections it services (`([this+0xc0]-[this+0xb8])/entry`) — the linchpin for whether a joiner SYN on
+/// our probe channel is even seen. Throttled (the loop runs every worker tick).
+const HOST_WORKER_DRAIN_OFFSET: usize = 0x1_4264_0bc0 - 0x1_4000_0000;
+/// Throttle for [`log_host_worker_drain`] — the drain loop fires every worker tick, so log only the first
+/// few to confirm it runs + capture the channel, then go silent.
+static WORKER_DRAIN_LOGS: AtomicU32 = AtomicU32::new(0);
 
 /// host-admit tracer: `0x142640e30(rcx=socketmgr, rdx=senderSteamID64, r8=buf, r9d=msgSize)`. Fires on the
 /// worker thread when a datagram from an UNKNOWN peer reaches the admit path — so it firing at all means the
@@ -687,7 +695,7 @@ fn log_host_admit(_name: &'static str, regs: *mut Registers) {
         log::info!(
             "session-probe: host-admit — 0x142640e30 admit-new-peer from sender {} (msgSize={}) \
              — the joiner's game-P2P REACHED the host admit path (size 14 => real SYN; else rejected by the shape gate)",
-            unseamless_core::diagnostics::peer_tag(r.rdx as u64),
+            unseamless_core::diagnostics::peer_tag(r.rdx),
             r.r9 as u32,
         );
     }));
@@ -720,6 +728,40 @@ fn log_host_roster_add(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
+/// host-worker-drain tracer: `0x142640bc0(rcx=socketmgr)`. Fires on the worker thread each drain tick;
+/// throttled to the first few so we learn (a) the worker RUNS offline, (b) which channel it reads
+/// (`[socketmgr+0x50]`), and (c) how many connections it services (`[socketmgr+0xb8..0xc0]`). If it reads a
+/// channel other than our probe channel 0, a joiner SYN on channel 0 will never reach the admit path.
+fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
+    let n = WORKER_DRAIN_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 5 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx = socketmgr. `+0x50` (channel), `+0xb8/+0xc0` (connection
+        // vector begin/end) are in-bounds fields; all reads null-guarded.
+        let r = unsafe { &*regs };
+        let sm = r.rcx as usize;
+        let (channel, begin, end) = if sm != 0 {
+            unsafe {
+                (
+                    ((sm + 0x50) as *const i32).read_volatile(),
+                    ((sm + 0xb8) as *const usize).read_volatile(),
+                    ((sm + 0xc0) as *const usize).read_volatile(),
+                )
+            }
+        } else {
+            (-1, 0, 0)
+        };
+        // Connection-vector stride is unknown here; report the raw byte span so a non-empty span is visible.
+        let span = end.saturating_sub(begin);
+        log::info!(
+            "session-probe: host-worker-drain #{n} — 0x142640bc0 socketmgr={sm:#x} reads channel={channel} \
+             connections_span={span:#x}B (worker RUNS offline; a joiner SYN must land on THIS channel to be admitted)",
+        );
+    }));
+}
+
 /// Install the read-only host-admit + roster-add tracers when `[debug.probes] instrument_host_accept` is on.
 /// Role-independent (fires on whichever machine receives an inbound peer). Best-effort: a failed hook logs
 /// and is skipped. NB: `host-admit` fires on the socket-manager WORKER THREAD, not the main thread — the
@@ -737,7 +779,11 @@ fn install_host_accept_trace(config: &Config) {
     };
     install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
     install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
-    log::info!("session-probe: host-accept trace installed (host-admit 0x142640e30 + host-roster-add 0x140cb31b0)");
+    install_offset_hook("host-worker-drain", exe_base + HOST_WORKER_DRAIN_OFFSET, log_host_worker_drain);
+    log::info!(
+        "session-probe: host-accept trace installed (host-admit 0x142640e30 + host-roster-add 0x140cb31b0 \
+         + host-worker-drain 0x142640bc0)"
+    );
 }
 
 /// teardown-handler tracer: fires when the DLNW3D async teardown handler `0x1423f46d0` runs (the transport
@@ -2074,10 +2120,21 @@ pub struct TransportStandupDriver {
     /// Two-machine test peer override (both machines' SteamID64s; `0` = unset). Used when no rung-2
     /// link is present — each machine picks whichever isn't its own. See `p2p_test_peer_a` in config.
     peer_override: [u64; 2],
+    /// This machine is the host (rung-3 create role). The host lets the game's own socket-manager worker
+    /// thread service inbound P2P (so the joiner's SYN reaches the admit path `0x142640e30`); the joiner
+    /// emits a real DLNW3D SYN to the host. Derived from `auto_session` (see [`rung3_role`]).
+    is_host: bool,
+    /// Skip our own inbound P2P drain so the game's worker thread receives the packets instead (our drain
+    /// otherwise steals every channel-0 datagram before the worker sees it). On when host-accept
+    /// instrumentation is armed — the worker-drain / host-admit hooks are the signal then, not our RECV log.
+    suppress_drain: bool,
+    /// Sent our one-shot real SYN to the host yet (joiner only). The host admits a brand-new peer on a
+    /// 14-byte DLNW3D SYN (`0x142642830`: header `[0x0e, 0x40, …]`), never on our text ping.
+    syn_sent: bool,
 }
 
 impl TransportStandupDriver {
-    fn new(peer_a: u64, peer_b: u64) -> Self {
+    fn new(peer_a: u64, peer_b: u64, is_host: bool, suppress_drain: bool) -> Self {
         Self {
             built: false,
             iface: 0,
@@ -2085,6 +2142,9 @@ impl TransportStandupDriver {
             ping_throttle: FrameThrottle::every(120),
             ping_seq: 0,
             peer_override: [peer_a, peer_b],
+            is_host,
+            suppress_drain,
+            syn_sent: false,
         }
     }
 
@@ -2375,7 +2435,11 @@ impl TransportStandupDriver {
         let do_accept = !self.accepted;
         let do_ping = self.ping_throttle.tick();
         let seq = self.ping_seq.wrapping_add(1);
+        let suppress_drain = self.suppress_drain;
+        let is_host = self.is_host;
+        let send_syn_done = self.syn_sent;
         let mut accepted_ok = false;
+        let mut syn_fired = false;
         // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
         // each slot below is a documented method with the win64 signature transmuted here. Buffers are
         // stack-local and outlive each call. Firewalled: a Rust panic is caught; a hard fault surfaces
@@ -2400,22 +2464,46 @@ impl TransportStandupDriver {
                 );
             }
             // Drain inbound packets on our probe channel (bounded so a flood can't stall the frame).
-            let mut buf = [0u8; 256];
-            let mut size: u32 = 0;
-            for _ in 0..16 {
-                if !is_avail(iface, &mut size, P2P_PROBE_CHANNEL) {
-                    break;
+            // SKIPPED when `suppress_drain` (host-accept instrumentation): our drain otherwise steals
+            // every channel-0 datagram before the game's own socket-manager worker thread can read it, so
+            // the joiner's SYN never reaches the admit path. With it suppressed, the worker-drain
+            // (0x142640bc0) + host-admit (0x142640e30) hooks are the signal instead of our RECV log.
+            if !suppress_drain {
+                let mut buf = [0u8; 256];
+                let mut size: u32 = 0;
+                for _ in 0..16 {
+                    if !is_avail(iface, &mut size, P2P_PROBE_CHANNEL) {
+                        break;
+                    }
+                    let mut remote: u64 = 0;
+                    let mut got: u32 = 0;
+                    if read(iface, buf.as_mut_ptr(), buf.len() as u32, &mut got, &mut remote, P2P_PROBE_CHANNEL) {
+                        let n = (got as usize).min(buf.len());
+                        log::info!(
+                            "session-probe: game-p2p — RECV {n}B from peer {}: {:?} <<< GAME LEGACY P2P WORKS OFFLINE",
+                            unseamless_core::diagnostics::peer_tag(remote),
+                            String::from_utf8_lossy(&buf[..n]),
+                        );
+                    }
                 }
-                let mut remote: u64 = 0;
-                let mut got: u32 = 0;
-                if read(iface, buf.as_mut_ptr(), buf.len() as u32, &mut got, &mut remote, P2P_PROBE_CHANNEL) {
-                    let n = (got as usize).min(buf.len());
-                    log::info!(
-                        "session-probe: game-p2p — RECV {n}B from peer {}: {:?} <<< GAME LEGACY P2P WORKS OFFLINE",
-                        unseamless_core::diagnostics::peer_tag(remote),
-                        String::from_utf8_lossy(&buf[..n]),
-                    );
-                }
+            }
+            // Joiner one-shot: send a real 14-byte DLNW3D SYN to the host so the host's admit path
+            // (0x142640e30 gate 0x142642830) can admit us — it accepts ONLY a 14-byte packet whose header
+            // encodes control length 14: byte[0]=0x0e (len low), byte[1] has bit 0x40 set with low-3-bits=0
+            // (len high). The remaining 12 bytes are the connection-request payload (host doesn't gate on
+            // them at admit; a full handshake would). Charted 2026-07-04, docs/SESSION-DRIVE.md >
+            // "HOST-SIDE ADMIT/ROSTER". One-shot: we're probing whether the admit path fires at all offline.
+            if !is_host && !send_syn_done {
+                let mut syn = [0u8; 14];
+                syn[0] = 0x0e;
+                syn[1] = 0x40;
+                let ok = send(iface, peer, syn.as_ptr(), syn.len() as u32, P2P_SEND_RELIABLE, P2P_PROBE_CHANNEL);
+                syn_fired = true;
+                log::info!(
+                    "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to host {} = {ok} \
+                     (should trip host-admit 0x142640e30 if the host worker drains this channel)",
+                    unseamless_core::diagnostics::peer_tag(peer),
+                );
             }
             // Throttled outbound reliable ping.
             if do_ping {
@@ -2437,6 +2525,9 @@ impl TransportStandupDriver {
         if accepted_ok {
             self.accepted = true;
         }
+        if syn_fired {
+            self.syn_sent = true;
+        }
         if do_ping {
             self.ping_seq = seq;
         }
@@ -2450,16 +2541,18 @@ impl TransportStandupDriver {
 /// [`TransportStandupDriver`] (path C) when `stand_up_transport` is on.
 pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
     let mut features: Vec<Box<dyn Feature>> = Vec::new();
+    let (do_create, do_join) = rung3_role(config);
     if config.debug.probes.stand_up_transport {
         features.push(Box::new(TransportStandupDriver::new(
             config.debug.probes.p2p_test_peer_a,
             config.debug.probes.p2p_test_peer_b,
+            do_create, // host role = the create driver's machine
+            config.debug.probes.instrument_host_accept,
         )));
     }
     if config.debug.probes.session_probe {
         features.push(Box::new(SessionFsmProbe::new()));
     }
-    let (do_create, do_join) = rung3_role(config);
     if do_create {
         features.push(Box::new(SessionCreateDriver::new(
             config.debug.probes.force_netsession_ready,
