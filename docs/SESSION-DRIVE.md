@@ -1231,6 +1231,26 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    SteamID-only structure into `[conn+0x58]+0x1e8`), and supply it instead of the bypass. Then `[G+0x28]` is a live
 >    handle, the update task polls it, and TryToJoinSession advances to `Client` as the host connection completes over
 >    the proven transport. (Diagnostic added: the join driver logs `[G+0x24]/[G+0x28]` + the registry vtable/slots.)
+> 12. **JOINER NOW CREATES A CONNECTION + HANDLE — the blocker was an uninitialized registry, not the blob.**
+>    Localized `0x1423f62e0` with entry + blob-parse hooks: it fires but the blob parser `0x1423fb260` is **not**
+>    reached, so it fails at its FIRST check — the registry-ready `0x141eba210` (which is just `return [registry+0x10]`).
+>    Live read confirmed the joiner's registry (`*(G+0x60)+0x710`) is **fully uninitialized**: `[+0x10]=0`, array
+>    `[+0x18]=0`, cap `[+0x20]=0`, count `[+0x24]=0`. The host's create inits it; the join expects it pre-inited. The
+>    join driver now **initializes it** (ready `[+0x10]=1`, a leaked slot array `[+0x18]`, cap `[+0x20]=16`, count 0)
+>    before the join call. Result (rig solo AND two-machine): `0x1423f62e0` passes the ready check, the game **CREATES
+>    a connection** (`[conn+0x58]` populated), registers it (`count=1`), and returns a handle — **`[G+0x28]=1`** at
+>    last, joiner reaches `TryToJoinSession`. **But it resets to `None` in ~9 frames** (two-machine, host up), and
+>    neither `leave_session` nor the teardown handler fires — so the update task's poll returns "failed" immediately.
+>    **⇒ Two remaining causes, both from the FAKED registry init:** (a) the connection-create registers into the
+>    `+0x710` registry, but the update task polls the **`+0x670`** net-session (`0x1423f1920`) sub-object — my fake
+>    `+0x710` init does NOT establish the real `+0x670`↔`+0x710` linkage a proper init would, so the poll with
+>    `handle=1` finds nothing → immediate fail; and (b) the created connection has **no host peer** (the blob would
+>    set it — our raw 8-byte SteamID isn't the right format, and the peer isn't bound on the connection). **► NEXT:
+>    initialize the net-session/registry the GAME's way** (find the init that links `+0x670`/`+0x710` and allocates
+>    the array — the host's create does it; chart its writer of `[registry+0x10]`), then wire the host peer into the
+>    created connection (valid blob or bind the peer at the connection's peer offset). Then the poll should see a real
+>    connecting→connected status over the proven transport and advance to `Client`. This is the genuine net-session
+>    init + peer-wire piece; everything up to a live `[G+0x28]` handle now works.
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
