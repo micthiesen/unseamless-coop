@@ -1137,6 +1137,29 @@ byte `descriptor` (connection params) and the container preconditions (`[contain
 `[container+0x41]` false). Path β sidesteps the descriptor by reusing our already-built connection, so
 it's the first pick; α is the fallback if the wrapped standup connection isn't sufficient downstream.
 
+**✅ RIG RESULT (2026-07-04) — the seam clears the create crash; create reaches `TryToCreateSession`.**
+Ran `stand_up_transport` + `drive_create` + `drive_session_established` + `land_socket_holder`, solo drive.
+The log proves the seam works end to end:
+- `land-socket-holder — built SocketManagerHolder @ 0x7ffe… (wraps SteamConnection 0x143dd5a60,
+  refcount=1) and wrote [container+0x708]` — the holder landed on the create's own container `0x143dcd440`.
+- `gate4-helper-ret — helper 0x1423faf60 returned al=1` — **the `ConnectionRefInfo` loop that used to
+  null-deref now succeeds** (it wrapped `[container+0x708]` + addref'd its refcount). This was the wall.
+- `legb-finhandle REACHED — handle(eax)=1 … slot-array cap=16` — leg B finalize succeeded (with the
+  fabricated slot array), and `drive-create returned true — lobby_state now TryToCreateSession`.
+
+The previous crash (`eldenring.exe+0x1eba1c5`, the `lock xadd` on null `+0x708`) is **gone**. A **new,
+downstream crash** now follows: `0xc0000008` (STATUS_INVALID_HANDLE), backtrace through **our connection**
+(`0x143dd5a60`, twice) and the **DLNW3D service factory region** (`+0x263845a`, `+0x263742a`), plus the
+container/NetworkSession. Reading: after create returns `TryToCreateSession`, the session machinery tries
+to **activate/use** the connection through the service, and our connection — built with the bare ctor
+`0x142643b50` only — is **missing the full wire-up** (ring buffers + Accept setup `0x14263ffe0` + service
+registration via thunk `0x14263b7c0`). This is the expected next layer: whack-a-mole, one crash deeper.
+**Next increment:** build the standup connection via the connection-creator `0x142640560` (allocs the ring
+buffers, ctors, runs Accept setup) instead of the bare ctor — or run `0x14263ffe0` on it + register it with
+`0x14263b7c0` — then re-drive and watch whether `lobby_state` advances `TryToCreateSession → Host`. (Note:
+the standup connection came up with vtable `0x143278358` (the base), peer `+0x128` bound to the override
+SteamID — both as expected.)
+
 **RTTI map (this seam):** `[container+0x708]` = `SocketManagerHolder@DLNR3D` (vt `0x1431f9280`, ctor
 `0x1423f7180`); its `+0x10` = `SteamConnection@DLNW3D` (vt `0x143278370`); the per-player wrapper =
 `ConnectionRefInfo@DLNR3D` (vt `0x1431f85d8`, 0x10c0 bytes, ctor `0x1423f3230`); container =
