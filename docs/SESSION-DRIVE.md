@@ -1028,6 +1028,114 @@ a game-native connection over Steam P2P (ERSC's networking model), driven with `
 (the connection count) matched to the real roster. That is the scoped next effort — a networking
 subsystem, empirically proven un-shortcuttable, not another field poke.
 
+### TRANSPORT CHARTED (2026-07-03, static) — the `+0x708` connection is a `SteamConnection@DLNW3D`; the whole DLNW3D P2P layer is now mapped
+
+The previously-black-box "`+0x708` needs a real connection" is now a **charted layer**. The connection
+object is not a DLNR3D type at all — it lives in a **separate lower namespace, `DLNW3D`** (Dantelion
+network **W**ire/transport, vs `DLNR3D` = the **R**untime/session layer built on top). Static RE on the
+same pinned 2026-06-02 image (base `0x140000000`; own words, addresses are facts, no decompiler output).
+
+**The two-layer architecture (the ERSC transport surface, exactly):**
+
+```
+DLNR3D (session/game layer):  ManagerImplSteam (container, vtable 0x1431f8780)
+                              → NetworkSession/SessionManagerSteam (container+0x710)
+                              → SessionSteam (leg-B 0x5f8 obj) → ConnectionRefInfo (wraps [container+0x708])
+    │ built on
+DLNW3D (Steam P2P transport): SteamServiceImpl → SteamConnectionManager → SteamConnection
+                              + SteamSocket / SteamSocketManager (MTDispatched/MTInternalThread = worker threads)
+                              + FsdpConnection / FsdpConnectionManager / FsdpConnectionBufferContainer (protocol framing)
+                              + ProtocolConnectionAdapter
+                              + CCallback<SteamCallbackWrapper>  → P2PSessionRequest_t / P2PSessionConnectFail_t
+```
+
+Full DLNW3D RTTI set (from the image's `.?AV…@DLNW3D@@` names): `SteamServiceImpl`, `ServiceImpl`,
+`SteamConnectionManager`, `SteamConnection`, `MTBaseConnection/Socket/SocketManager`,
+`MTDispatchedConnection/Socket/SocketManager/SteamConnection/SteamSocket/SteamSocketManager`,
+`MTInternalThread…` (same set), `FsdpConnection/Manager/BufferContainer`, `ProtocolConnectionAdapter`.
+
+**1. The transport is `ISteamNetworking006` — the LEGACY Steam P2P API** (`SendP2PPacket` /
+`ReadP2PPacket` / `AcceptP2PSessionWithUser` + the `P2PSessionRequest_t` callback), **not**
+`SteamNetworkingSockets`/`Messages` (neither string is in the image; only `SteamNetworking006` at
+`0x143277fd0`). Interface holder (`SteamInternal_ContextInit` target) = **`0x143c602b0`**, resolved by
+`0x142640b90` (`SteamInternal_FindOrCreateUserInterface("SteamNetworking006")`). This is the whole
+transport primitive set the ERSC-model reimplementation talks to. **Wrappers over the interface vtable**
+(all reached via holder `0x143c602b0`):
+| Wrapper fn | ISteamNetworking006 slot | Steam call |
+|---|---|---|
+| `0x142640b20` | `[iface+0x00]` | **SendP2PPacket** (caller `0x142643dd0` = SteamConnection send: `rdx=[conn+0x128]`=peer, `rcx=[conn+8]`=iface) |
+| `0x142640bc0` | `[iface+0x10]` | **ReadP2PPacket** (= SteamConnectionManager vtable slot 3, the poll) |
+| `0x1426408b0` | `[iface+0x18]` | **AcceptP2PSessionWithUser** |
+| `0x142641150` | `[iface+0x28]` | **CloseP2PChannelWithUser** |
+
+**2. `[container+0x708]` holds a `SteamConnection@DLNW3D`** (vtable **`0x143278370`**, base vtable
+`0x143278358`; ctor **`0x142643b50`** installs both). Its slot 0 (`0x142643dd0`) is send-on-connection:
+it reads `[conn+0x8]` = the ISteamNetworking interface and `[conn+0x128]` = the **peer SteamID64**, then
+calls the SendP2PPacket wrapper. So the connection object the DLNR3D `ConnectionRefInfo` loop wraps is a
+low-level Steam P2P connection carrying `{iface, peerSteamID}` — exactly what `AcceptP2PSessionWithUser`
+/ `SendP2PPacket` operate on.
+
+**3. Connection-creation entry points (the "listen-connection creator" the goal names):**
+- **`0x142640560`** — the SteamConnectionManager's *create-a-connection* method: `rcx` = manager, `rdx`
+  = a **params struct** (`[rdx]!=0`, `[rdx+0x18]!=0` guarded; copies 0x30 bytes of config — buffer sizes
+  — into `[manager+0x40..0x70]`; `+0x5c` ring size defaults `0x4b0`, clamped `≤0x7ff`), allocates the
+  connection's ring buffers (`0x142641a40`/`0x142641b90`/`0x142641e30`/`0x142641ce0`), constructs the
+  `SteamConnection` (`0x142643b50`), and runs the per-connection Accept/setup `0x14263ffe0`.
+- **`0x14263ffe0`** — per-connection Accept + wire-up: registers the connection's callbacks
+  (`0x14263fcf0`/`0x14263fd00` via `0x1426440b0`), initializes fields (`+0x70/+0xa8/+0xf0/+0x118`), and
+  calls `AcceptP2PSessionWithUser`. Called by both the create path (`0x142640560`) and the register path.
+- Service entry thunks (Arxan-obscured, tail-jump into the methods): **`0x14263b720`** = *create/connect*
+  (`(service, params)`: allocs a `0x1b8` connection-manager via ctor `0x14263f700`, then `0x142640560`);
+  **`0x14263b7c0`** = *register/activate an existing connection* (`(service, connection)`: runs
+  `0x14263ffe0` on it, then hooks it into the service's collection via `[[service+8]]+0x68`). Both are
+  dispatched (0 direct callers) from the DLNW3D service factory region `0x142638b40..0x142638c40`.
+- `SteamServiceImpl@DLNW3D` ctor = `0x14263b6e0` (installs vtable `0x143277270`), base ctor `0x14263b6b0`
+  called from factory `0x142638b40`. The service/manager are **factory+vtable dispatched, 0 static
+  callers** — i.e. instantiated dynamically by the online session flow, which is why static can't reach
+  the trigger (the same runtime-resolution wall the VERDICT below describes).
+
+**4. Why this refines the finish (and one NEW untested lever).** The container ctor `0x1423f20b0` only
+**zeroes** `+0x708` (at `0x1423f2159`, right before the embedded `NetworkSession` at `+0x710`); no
+DLNR3D-cluster code writes a real value there. `+0x708` is populated by the **DLNW3D layer** when a real
+Steam P2P `SteamConnection` forms — created by `SteamConnectionManager` either on the host's own
+listen/create (`0x14263b720`/`0x142640560`) or on an incoming `P2PSessionRequest_t`
+(`AcceptP2PSessionWithUser` → register `0x14263b7c0`). Two consequences:
+- Every fabrication attempt failed because a hollow `+0x708` has no real `SteamConnection` vtable
+  (`0x143278370`); the session machinery dispatches its vmethods and faults. A **real DLNW3D
+  `SteamConnection`** at `+0x708` (never yet tested — the doc only ever fabricated a *hollow* one) has
+  valid vtables and might survive the `0x1423f6c00` collection-dispatch. That is the highest-EV next
+  experiment, but it requires the DLNW3D service+manager to exist, which offline they may not (see 3).
+- The connection carries `{iface=[+8], peerSteamID=[+0x128]}` and rides `SendP2PPacket`/`ReadP2PPacket`
+  on channel-scoped `ISteamNetworking006`. This is precisely the surface ERSC drives: feed peer
+  SteamID64s directly (from rung-4 lobby discovery) into the SteamConnectionManager and let the game's
+  own DLNW3D transport connect over Steam P2P — no FromSoft matchmaking server. **The reimplementation
+  target is now concrete:** stand up / drive `SteamConnectionManager@DLNW3D` for the resolved peers so a
+  real `SteamConnection` lands at `[container+0x708]`, with `[session_obj+0x68]` (connection count)
+  matched to the roster.
+
+**Next-experiment spec (for the next rig/two-machine run):**
+1. **Observe first (read-only, safe):** at boot / title / in-world offline, walk the container
+   (`ManagerImplSteam@DLNR3D`, live ~`0x143dcdxxx`) and check whether a DLNW3D `SteamServiceImpl`
+   (vtable `0x143277270`) / `SteamConnectionManager` (vtable `0x143278020`) is instantiated at all. If
+   the service exists idle offline, the connect path is drivable solo with the Deck's SteamID; if not,
+   the service itself is gated on the online signal (same as `+0x7c0`/`+0x708`) and the two-machine
+   game-native connection is required.
+2. **Real-connection test (if the manager exists):** drive `0x142640560` (or the service create thunk
+   `0x14263b720`) with a params struct pointing at the peer SteamID64, capture the resulting
+   `SteamConnection`, store it at `[container+0x708]`, then drive create — watch whether it survives the
+   `ConnectionRefInfo` loop **and** the `0x1423f6c00` collection-dispatch that hollow `+0x708` crashed on.
+   Guard with `watch-bt.py` on `container+0x708` to capture the write chain / any crash backtrace.
+3. **Two-machine (the doc's baseline):** rig host + Steam Deck joiner; the connection forms game-native
+   over Steam P2P. The open question is the *trigger* — whether driving the DLNW3D
+   connect/listen with the peer's SteamID (ERSC model) brings up the SteamConnection, or whether the
+   whole DLNW3D service is dormant until the online-availability signal (VERDICT §7) is set.
+
+**Re-derive after a game update:** the connection type is `.?AVSteamConnection@DLNW3D@@` (RTTI off vtable
+`[-8]` COL); its send slot 0 reads `{+0x8=iface, +0x128=peerSteamID}`; the transport is whichever
+`SteamNetworking0NN` string the image contains (resolver = its lone rip-ref), and the wrapper fns are the
+`call [holder-resolved iface + slot]` sites; the connection-creator is the manager method that constructs
+a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
+
 ### VERDICT (2026-07-03, static, worker:create-veto-writer) — the container-init gate is the item-grey signal; static walls → finish with a runtime trace
 
 **Bottom line: the veto chain is *satisfiable* (rig milestone `df12f2d`: seeding bit 2 of `+0x7c0`
