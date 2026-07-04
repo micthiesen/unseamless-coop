@@ -315,9 +315,9 @@ const HOLDER_CTOR_OFFSET: usize = 0x1_423f_7180 - 0x1_4000_0000;
 /// The container heap pointer field (`[container+0x48]`) the game's establish handler allocates the
 /// 0x18-byte holder from — use the same heap so the game's own deleter matches on teardown.
 const CONTAINER_HEAP_OFF: usize = 0x48;
-/// The `SteamConnection@DLNW3D` field offsets the transport rides on: iface at `+0x8`, peer SteamID64 at
-/// `+0x128` (docs/FROMNET-LINK-FINDINGS.md §1b) — bound on the standup connection before it's wrapped.
-const CONN_IFACE_OFF: usize = 0x8;
+/// The peer SteamID64 offset on a `SteamConnection@DLNW3D` (`+0x128`, docs/FROMNET-LINK-FINDINGS.md §1b),
+/// bound on the creator-built connection before it's wrapped. (NB: `+0x8` is NOT the iface on a
+/// creator-built connection — it's a lock-bearing DLNW3D sub-object; do not write it. See the wire step.)
 const CONN_PEER_OFF: usize = 0x128;
 
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
@@ -1252,6 +1252,12 @@ const MANAGER_SIZE: usize = 0x1b8;
 const CONN_CREATOR_OFFSET: usize = 0x2640560;
 /// Offset on the manager of the pointer to its `SteamConnection` array (`slot i = [manager+0x78] + i*0x140`).
 const CONN_ARRAY_PTR_OFF: usize = 0x78;
+/// Offset of the per-connection Accept setup `0x14263ffe0` (`fn(connection)`; the register-path step the
+/// connection-creator skips). Registers the connection callbacks (`0x1426440b0`), inits the active-state
+/// fields (`+0x70/+0xa8/+0xf0/+0x118`), copies peer `+0x128 -> +0x130`, and calls AcceptP2PSessionWithUser
+/// — installing the connection's active vtable state so the session's dispatch `[[conn+8].vtable+0x18]`
+/// isn't null (rig null-call crash 2026-07-04). Needs the peer bound at `+0x128` first.
+const CONN_ACCEPT_OFFSET: usize = 0x263ffe0;
 /// Params bytes copied to `[manager+0x40..0x70]`: only `[params]!=0` and `[params+0x18]=count!=0` are
 /// guarded; `[params+0x1c]=ring size` (0 → default `0x4b0`). We pass `{ [0]=1, count=1 }`, rest 0.
 const CONN_PARAMS_WORDS: usize = 0x30 / 4;
@@ -1452,14 +1458,29 @@ impl Feature for TransportStandupDriver {
                 return;
             }
             let conn = array_base;
-            // Bind the transport fields the send/accept path reads (FROMNET §1b): iface at +0x8, peer
-            // SteamID64 at +0x128 (Accept setup normally writes them; bind explicitly so the wrapped
-            // connection is addressable). This is a fully wired connection (ring buffers via the creator),
-            // so the session's activate has real buffers to work with.
-            ((conn + CONN_IFACE_OFF) as *mut usize).write_volatile(iface);
+            // Bind ONLY the peer SteamID64 at +0x128 (the ctor zero-inits it; the session's connect path
+            // keys on it). Do NOT touch +0x8 — on a *creator-built* connection [conn+0x8] is a DLNW3D
+            // sub-object carrying a DLLightMutex (the session locks [[conn+8]+8]); the bare-ctor "+0x8 =
+            // iface" from FROMNET §1b does NOT apply here, and overwriting it with the raw iface clobbered
+            // that lock → INVALID_HANDLE crash (rig 2026-07-04, fn 0x1423fe030 → 0x142637410 → 0x142638410).
             if peer_for_conn != 0 {
                 ((conn + CONN_PEER_OFF) as *mut u64).write_volatile(peer_for_conn);
             }
+            // Bind the ISteamNetworking006 iface at +0x120 — the connection's REAL iface holder (NOT +0x8,
+            // which is a lock sub-object). Accept setup derefs it (`[[conn+0x120]]` = the iface vtable) to
+            // reach AcceptP2PSessionWithUser via `[iface_vtable+0x18]`; the creator leaves it null, so bind
+            // our resolved iface here (rig null-read crash at 0x142640062, 2026-07-04).
+            ((conn + 0x120) as *mut usize).write_volatile(iface);
+            // Run the per-connection Accept setup (0x14263ffe0) — the register-path step the creator skips.
+            // It installs the connection's active-state vtable/fields + copies the peer +0x128 -> +0x130 +
+            // AcceptP2PSessionWithUser, so the session's [[conn+8].vtable+0x18] dispatch resolves instead of
+            // hitting a null slot. Must run AFTER the peer (+0x128) and iface (+0x120) are bound.
+            let accept: extern "win64" fn(usize) = std::mem::transmute(exe_base + CONN_ACCEPT_OFFSET);
+            accept(conn);
+            log::info!(
+                "session-probe: transport-standup — ran Accept setup 0x14263ffe0 on connection {conn:#x} \
+                 (active-state init + AcceptP2PSessionWithUser)",
+            );
             conn_out = conn;
             let conn_vtable = (conn as *const usize).read_volatile();
             let iface_field = ((conn + 0x8) as *const usize).read_volatile();
