@@ -61,10 +61,19 @@ Shipped to `main`, rig-verified where applicable:
 
 The out-of-band connection stack (rungs 1, 2, 4) is shipped and **CONFIRMED live across two real
 machines** (2026-06-27 friend test: `coop: linked … versions match`, bidirectional traffic). **Rung 3,
-driving the game's own session so players see each other in-world, is the headline-next** — and as of
-**2026-07-04 its hardest unknown, the transport, is SOLVED**: we stand up the game's own DLNW3D transport
-ourselves offline and have rig-proven its legacy P2P works two-machine (rig + Deck). Only the "seam" to
-the session FSM remains. Full state in the rung-3 callout below. *(The earlier item-grey-gate hunt —
+driving the game's own session so players see each other in-world, is the headline-next.** The
+**transport is built** — we stand up the game's own DLNW3D transport ourselves offline and have rig-proven
+its legacy P2P works two-machine (rig + Deck). **What remains is the SEAM: getting a connection at
+`[container+0x708]` that the session FSM will ACTIVATE to `Host`.** As of **2026-07-04** both avenues to a
+fully-session-wired connection are walled and the wall is precisely charted: (a) our **hand-built** connection
+lands at `+0x708` and reaches `TryToCreateSession`, but the session-update task faults driving it to `Host`
+(sub-objects the host-setup touches aren't wired); (b) making the **game build it** (drive the establish
+handler `0x1423f2820` so the wiring is done for us) reaches the game's own builder but its `SteamServiceImpl`
+standup `0x142638b40` returns null — **offline AND two-machine, and even with `ISteamNetworking006` resolved**
+— because the standup's `owner`/config (`[container+0x48]`) is only valid inside the game's own online-session
+flow (EAC/matchmaker), which we bypass. So the rung-3 finish is **the seam, not the transport**: chart exactly
+what the host-setup path touches on the connection and wire those on our stood-up connection. Full state in the
+rung-3 callout below. *(The earlier item-grey-gate hunt —
 three static candidate families rig-eliminated, [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md) —
 is now **moot for the connection**: the transport-leg path sidesteps the multiplayer items entirely.)* The
 **overlay crashes on native Windows**, a pre-release blocker — **ROOT-CAUSED (mechanism) 2026-07-01:
@@ -137,9 +146,10 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **State (2026-07-04) — create reaches `TryToCreateSession`; the finish is ONE bounded RE (the descriptor
-  > for the game's native connection builder). PICK UP at "► NEXT STEP". Full current plan in
-  > [SESSION-DRIVE.md](SESSION-DRIVE.md) > "SEAM + the native-builder finish" (the load-bearing section);
+  > **State (2026-07-04) — transport built + landed → `TryToCreateSession`; the finish is the SEAM
+  > (activating our connection so the FSM drives it to `Host`), NOT the descriptor. The native-builder path is
+  > ruled out (offline + two-machine). PICK UP at [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md) and
+  > SESSION-DRIVE.md > "NATIVE-BUILD TRACE (2026-07-04)" (the load-bearing section);
   > [COOP-CONNECTION.md](COOP-CONNECTION.md) > rung 3 + [FROMNET-LINK-FINDINGS.md](FROMNET-LINK-FINDINGS.md)
   > for background.**
   >
@@ -171,17 +181,28 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   > **SEAM CHARTED + reached `TryToCreateSession` (2026-07-04).** `[container+0x708]` = a
   > **`SocketManagerHolder@DLNR3D`** (0x18-byte refcounted wrapper `{vtable 0x1431f9280, refcount@+8,
   > SteamConnection*@+0x10}`, ctor `0x1423f7180`), *not* a raw connection. Landing a real holder cleared the
-  > original create crash and drove create to `TryToCreateSession`. **But** the connection **must be built by
-  > the game** — hand-building it is whack-a-mole (sub-objects are construction-time-wired from a full
-  > service), and forcing the FSM to `Host` (`0x140cb2ae0`) doesn't stick (host setup faults on a dead
-  > connection). Both ruled out on the rig.
+  > original create crash and drove create to `TryToCreateSession`. **But** driving the FSM the rest of the way
+  > faults: forcing `Host` (`0x140cb2ae0`) doesn't stick (host-setup faults on the connection), and
+  > hand-building the connection field-by-field is whack-a-mole (sub-objects are construction-time-wired).
   >
-  > **► NEXT (the finish) — drive the game's own connection builder.** Rig-proven viable offline: driving the
-  > connection-establish handler `0x1423f2820(container, descriptor)` runs **without crashing**, its
-  > **readiness gate passes** (`0x1423f5190`=1, so DLNW3D isn't online-gated here), and the *only* bail is the
-  > **Arxan builder `container->vtable[0x80]` rejecting our guessed descriptor**. So the finish = **RE the
-  > descriptor**: capture `vtable[0x80]`'s runtime-decoded target (technique in the `reverse-engineer` skill),
-  > disassemble it, read off its param layout, fill it, re-drive → `Host`. Step-by-step: SESSION-DRIVE.md >
+  > **NATIVE-BUILDER PATH — RULED OUT (2026-07-04, offline AND two-machine).** The idea was to make the *game*
+  > build a fully-wired connection by driving the establish handler `0x1423f2820`. This session got it to
+  > **reach the game's own builder** (two fixes: the live derived vtable is `0x1431f8780` so the real builder
+  > is the plain fn `0x1423f46b0` — the earlier "Arxan builder `0x14251c480`" was a wrong-vtable artifact; and
+  > `drive_session_established` must be OFF, else it double-drives `0x1423f4870` and the handler's own gate2
+  > call bails "already established"). But the builder's `SteamServiceImpl` standup **`0x142638b40` returns
+  > null** — and this is now pinned to the standup's `owner`/config (`[container+0x48]`), NOT to a missing
+  > iface or peer: it still fails **with a real linked peer** (rig+Deck) AND **with `ISteamNetworking006`
+  > resolved** (`stand_up_transport` on). The game's standup only works inside its own online-session flow,
+  > which we bypass by construction. Dead end.
+  >
+  > **► NEXT (the finish) — the SEAM, not the transport.** We already build a working DLNW3D connection
+  > (`stand_up_transport`: service + connection, P2P proven two-machine) and land it at `+0x708`
+  > (`land_socket_holder`) → `TryToCreateSession`. The one remaining gap is **activation**: the session
+  > host-setup faults on sub-objects of our connection it expects a full session-establish to have wired.
+  > Finish = **chart exactly what the host-setup path (`0x140cb2ae0` + the session-update task) touches/derefs
+  > on the `SteamConnection`, and wire those on our stood-up connection** so the FSM drives it to `Host`.
+  > Scoped in [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md); step-by-step: SESSION-DRIVE.md >
   > "► NEXT STEP".
 
   **Seamlessness (independent, additive) — one armed gate, charted.** All game-driven co-op disconnects

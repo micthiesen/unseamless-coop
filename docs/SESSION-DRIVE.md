@@ -1162,14 +1162,23 @@ not put the game into that flow, so its transport stays dormant. (The joiner Dec
 too and crashed at `0x141eba203` — the refcount addref near `0x141eba1c0`, the classic `+0x708`-null path;
 the host's clean result is the load-bearing datum.)
 
-**⇒ The "drive the game's native builder" path is a DEAD END for reaching `Host`** — offline *and*
-two-machine. The game will not build the connection for us while we run outside its online flow. **Pivot to
-path 2 (the ERSC model): stand up our OWN Steam P2P transport** — resolve `ISteamNetworking006` via
-`0x142640b90`, instantiate the `SteamServiceImpl`/`SteamConnectionManager` ourselves, register the
-`P2PSessionRequest_t`/`…ConnectFail_t` callbacks, drive connect/accept with the rung-4 peer SteamID64s so a
-real `SteamConnection` lands at `[container+0x708]` — bypassing the game's flow-entry entirely, exactly how
-ERSC runs co-op outside the matchmaker. The standup chain is charted in the "RIG-PROVEN (2026-07-03)" section
-below (the `0x142638b40` factory + the connect/accept path). That is the recommended next build.
+**CONFOUND RULED OUT (2026-07-04, same session).** The standup-null was NOT the missing `ISteamNetworking006`
+iface: re-ran with `stand_up_transport` on (which resolves the iface into the global holder `0x143c602b0`) —
+`ISteamNetworking006 = 0x43cdf910 (resolved OK)`, our own `SteamServiceImpl` built, a connection created — and
+the establish handler's build **still failed** (`0x1423f2820 returned 0`, `+0x708=0x0`). So the native
+standup `0x142638b40` fails on its **`owner`/config** (`[container+0x48]`), which is only valid inside the
+game's own online-session flow — not on the iface (resolved) and not on a peer (linked). Native builder =
+confirmed dead end.
+
+**⇒ The finish is the SEAM, not the transport — and NOT a from-scratch path 2.** We already build a working
+DLNW3D connection ourselves (`stand_up_transport`: iface resolved, `SteamServiceImpl` + `SteamConnectionManager`
++ `SteamConnection` built off the game heap, legacy P2P **rig-proven two-machine**), and we already land it at
+`[container+0x708]` (`land_socket_holder` wraps it in a `SocketManagerHolder`) → create reaches
+`TryToCreateSession`. The ONE remaining gap is **activation**: the session-update task / host-setup
+(`0x140cb2ae0`) faults driving our connection to `Host`, because it derefs sub-objects a full game
+session-establish would have wired that our standup doesn't. **Next: chart exactly what the host-setup path
+touches/derefs on the `SteamConnection`, and wire those on our stood-up connection so the FSM activates it →
+`Host`.** Scoped in [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md).
 
 **► NEXT STEP.** Path 2 (own-transport standup) — **scoped in
 [PATH2-TRANSPORT-STANDUP.md](PATH2-TRANSPORT-STANDUP.md)** (start there). The make-or-break first milestone:

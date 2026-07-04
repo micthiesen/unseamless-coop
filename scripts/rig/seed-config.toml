@@ -114,15 +114,17 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
 drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
-drive_establish_handler = true # NATIVE-BUILDER EXPERIMENT (2026-07-04): drive the game's own
-                           # connection-establish handler 0x1423f2820 at the veto hook — it calls the Arxan
-                           # native builder container->vtable[0x80] to build a fully-wired connection, wraps
-                           # it, stores at [container+0x708]. Answers: does the DLNW3D builder run offline?
-                           # Pairs with drive_create + drive_session_established (veto bit 2). Supersedes the
-                           # hand-built land_socket_holder path (off below) for this run.
-stand_up_transport = false # off for the native-builder run (the establish handler builds its own connection;
-                           # our hand-built transport isn't needed and would only add noise). Flip back on for
-                           # a hand-build/two-machine P2P run. See docs/COOP-CONNECTION.md > "THE PLAN".
+drive_establish_handler = false # RULED OUT (2026-07-04): driving the game's own establish handler
+                           # 0x1423f2820 reaches the game's builder (real builder = 0x1423f46b0 off the LIVE
+                           # derived vtable 0x1431f8780; the "Arxan 0x14251c480" was a wrong-vtable artifact),
+                           # but its SteamServiceImpl standup 0x142638b40 returns null — offline, two-machine,
+                           # AND with ISteamNetworking006 resolved. The standup's owner/config is online-flow-
+                           # only. Off. See docs/PATH2-TRANSPORT-STANDUP.md > "RULED OUT".
+stand_up_transport = true  # SEAM WORK (next session): build our own working DLNW3D transport (resolves
+                           # ISteamNetworking006 into holder 0x143c602b0, builds service+manager+connection).
+                           # Pairs with land_socket_holder to land the connection at +0x708. The native
+                           # builder is ruled out; the finish is activating THIS connection. See
+                           # docs/PATH2-TRANSPORT-STANDUP.md.
 # Two-machine game-P2P test (phase 2 of stand_up_transport): both machines' SteamID64s. Each machine
 # drives the game's legacy ISteamNetworking006 P2P at whichever of these isn't its own — no manual
 # Open/Join link needed. rig=76561198004789432, deck=76561198681631498.
@@ -145,7 +147,8 @@ drive_session_established = false # DISABLED (2026-07-04 test): the establish ha
                            # was still null (the create ConnectionRefInfo addref on null); land_socket_holder
                            # below now fills +0x708 with a real refcountable object first. See SESSION-DRIVE.md
                            # > "SEAM CHARTED".
-land_socket_holder = false # off for the native-builder run (drive_establish_handler builds +0x708 natively).
+land_socket_holder = true  # SEAM WORK (next session): pairs with stand_up_transport to land our built
+                           # connection at +0x708 → TryToCreateSession. Then chart what host-setup faults on.
                            # SEAM TEST (2026-07-04): build a real SocketManagerHolder@DLNR3D wrapping the
                            # stand_up_transport connection and land it at [container+0x708] (refcount=1) at the
                            # veto-vmethod hook, so the driven create's ConnectionRefInfo loop reads a valid
