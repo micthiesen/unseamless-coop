@@ -1251,6 +1251,25 @@ a `SteamConnection` and calls the `AcceptP2PSessionWithUser` wrapper.
 >    created connection (valid blob or bind the peer at the connection's peer offset). Then the poll should see a real
 >    connecting→connected status over the proven transport and advance to `Client`. This is the genuine net-session
 >    init + peer-wire piece; everything up to a live `[G+0x28]` handle now works.
+> 13. **JOINER REACHES CLIENT (forced) — then JoinCheck needs the host's real session data.** The update task's
+>    joiner branch resets on any nonzero connection-status poll (`mov rbx,rax` at `0x140caff36`; `rbx!=0` →
+>    `0x140cb3b80` reset, `rbx==0` → roster loop + Client `0x140cb0076`). Our connection returns a not-connected
+>    status. Forcing the poll to 0 (`xor rbx,rbx`, `force_join_poll_connected` in app.rs — joiner-branch-only, inert
+>    on the host) **advances the joiner `None → TryToJoinSession → Client`** (`protocol=JoinCheck`, `players=1`,
+>    rig-confirmed). It then **faults ~30s later in JoinCheck** at `0x1403f4860` (`movzx eax,[rcx+0x1c5]`) because
+>    `rcx=[r14+0x1e508]` is **null** — the client reading host-provided session data (roster/world/session-key) that
+>    only exists once the host actually transmits it over a real connection. **⇒ CONCLUSION / the true remaining
+>    work:** every forced shortcut (host online-gate, joiner poll) reaches the right FSM state but the underlying
+>    connection is not a real game session connection to the peer, so JoinCheck (joiner) / world-sync has no host
+>    data and the host never sees the joiner (roster stays 1). Completing "two sessions in each other's worlds"
+>    genuinely requires the game's **session-establish protocol to run over the transport** — the joiner's DLNR3D
+>    connection actually connecting to the host over `ISteamNetworking006` (proven working), the host accepting via
+>    its registered P2P callbacks, and the host↔joiner join-data/world-sync exchange. That is the core FromSoft
+>    session netcode between two independently-synthesized offline sessions — a substantial multi-session RE +
+>    reimplementation with real offline-feasibility uncertainty, not a further one-field wire. This session took it
+>    from "believed impossible" to: host lives in the co-op world; joiner reaches Client; transport proven
+>    two-machine; the exact remaining protocol layer charted (net-session `+0x670`/`+0x710`, `0x1423fa1b0` hash-map
+>    registration, the JoinCheck host-data derefs).
 >
 > Levers/code: the socket-manager wrapper build + `dump_conn_graph` are in `session_probe.rs`'s `TransportStandupDriver`;
 > the full-init drive is in `land_socket_holder`. Config: `drive_session_established=true` (real bit2 → create passes
