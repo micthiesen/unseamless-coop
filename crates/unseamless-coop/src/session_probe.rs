@@ -469,6 +469,15 @@ fn install_create_gate_trace(config: &Config) {
     if prologue_ok("builder-entry", be, &BUILDER_ENTRY_PROLOGUE) {
         install_offset_hook("builder-entry", be, log_builder_entry);
     }
+    // Joiner connection-establish localizers (only meaningful with drive_join): the joiner's [G+0x28]
+    // handle comes from the registry's connection-from-blob 0x1423f62e0; it returns 0 for our synthesized
+    // host, stranding the joiner at TryToJoinSession. join-conn-entry confirms it's called + logs the blob;
+    // join-blob-parse fires ONLY if 0x1423f62e0 got past its registry-ready + descriptor checks and reached
+    // the blob parser 0x1423fb260 — so whether it fires localizes the failure (before vs at the blob parse).
+    if config.debug.probes.drive_join {
+        install_offset_hook("join-conn-entry", exe_base + JOIN_CONN_CREATE_OFFSET, log_join_conn_entry);
+        install_offset_hook("join-blob-parse", exe_base + JOIN_BLOB_PARSE_OFFSET, log_join_blob_parse);
+    }
     // leave-session (0x140cae730): the sole out-of-line writer of lobby_state=OnLeaveSession. Our driven
     // host session forms (protocol=Ingame, player added, warp starts) then is torn down ~2s later. With
     // `suppress_leave` off we install a READ-ONLY hook logging when it fires + its caller (does the teardown
@@ -589,6 +598,43 @@ fn log_leave_session(_name: &'static str, regs: *mut Registers) {
         log::info!(
             "session-probe: leave-session — 0x140cae730(this={this:#x}) lobby_state={lobby} caller={caller:#x} \
              (the game is ending the session; caller-ImageBase offset = caller-0x140000000)",
+        );
+    }));
+}
+
+/// Registry connection-from-blob `0x1423f62e0(registry, descriptor, blob_begin, blob_len)` — the joiner's
+/// [G+0x28] handle source. Hooked read-only to confirm it's called and log the blob range.
+const JOIN_CONN_CREATE_OFFSET: usize = 0x1_423f_62e0 - 0x1_4000_0000;
+/// Blob parser `0x1423fb260(conn, blob_begin, blob_len, arg)` — reached only if `0x1423f62e0` passed its
+/// registry-ready + descriptor checks + created the connection. Whether it fires localizes the failure.
+const JOIN_BLOB_PARSE_OFFSET: usize = 0x1_423f_b260 - 0x1_4000_0000;
+
+/// join-conn-entry tracer: `0x1423f62e0(rcx=registry, rdx=descriptor, r8=blob_begin, r9d=blob_len)`.
+fn log_join_conn_entry(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; args are by-value / bounded reads, all logged not derefed deeply.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: join-conn-entry — 0x1423f62e0(registry={:#x}, descriptor={:#x}, blob_begin={:#x}, \
+             blob_len={}) — the joiner's [G+0x28] handle source (returns 0 => joiner stuck at TryToJoinSession)",
+            r.rcx, r.rdx, r.r8, r.r9 as u32,
+        );
+    }));
+}
+
+/// join-blob-parse tracer: `0x1423fb260(rcx=conn, rdx=blob_begin, r8d=blob_len, r9d=arg)`. If this fires, the
+/// connection WAS created (0x1423f62e0's earlier checks passed) and the failure (if any) is at/after the blob
+/// parse; if it never fires, the failure is earlier (registry-ready or descriptor validation).
+fn log_join_blob_parse(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; conn+0x58 is a bounded read, null-guarded.
+        let r = unsafe { &*regs };
+        let conn = r.rcx as usize;
+        let c58 = if conn != 0 { unsafe { ((conn + 0x58) as *const usize).read_volatile() } } else { 0 };
+        log::info!(
+            "session-probe: join-blob-parse REACHED — 0x1423fb260(conn={conn:#x}, blob_begin={:#x}, \
+             blob_len={}, arg={}); [conn+0x58]={c58:#x} (connection WAS created; failure is at/after the parse)",
+            r.rdx, r.r8 as u32, r.r9 as u32,
         );
     }));
 }
@@ -1744,6 +1790,31 @@ impl Feature for SessionJoinDriver {
         // SAFETY: `fn_addr` is the join wrapper at the live exe base; called with this=[G] (live singleton),
         // a minimal {begin,end} blob descriptor that outlives the call, and guessed scalar args, on the main
         // thread with lobby_state==None. A fault surfaces via the crashdump SEH handler.
+        // Initialize the connection registry the join needs. The join's connection-from-blob 0x1423f62e0
+        // bails at its FIRST check (registry-ready 0x141eba210 = `return [registry+0x10]`) because on the
+        // joiner the registry (*(G+0x60)+0x710) is fully uninitialized ([+0x10]=0, array/cap/count=0) — the
+        // host's create inits it, the join expects it pre-inited. Wire it: a leaked slot array at +0x18, a
+        // capacity at +0x20, count 0 at +0x24, and the ready flag +0x10=1. Then 0x1423f62e0 passes the ready
+        // check and proceeds to create + register the host connection (next fault, if any, localizes further).
+        // SAFETY: `base` is the live CSSessionManager; +0x60 is in-bounds; the registry is a live sub-object.
+        unsafe {
+            let netman = ((base + 0x60) as *const usize).read_volatile();
+            if netman != 0 {
+                let reg = netman + 0x710;
+                if ((reg + 0x10) as *const u32).read_volatile() == 0 {
+                    let slots: &'static mut [usize] = vec![0usize; 16].leak(); // 16 connection slots
+                    ((reg + 0x18) as *mut usize).write_volatile(slots.as_mut_ptr() as usize);
+                    ((reg + 0x20) as *mut u32).write_volatile(16); // capacity
+                    ((reg + 0x24) as *mut u32).write_volatile(0); // count
+                    ((reg + 0x10) as *mut u32).write_volatile(1); // ready
+                    log::info!(
+                        "session-probe: drive-join — initialized empty registry {reg:#x} (ready[+0x10]=1, \
+                         array[+0x18]={:#x} cap=16) so 0x1423f62e0 passes its ready check",
+                        slots.as_ptr() as usize,
+                    );
+                }
+            }
+        }
         let join: JoinFn = unsafe { std::mem::transmute::<usize, JoinFn>(fn_addr) };
         log::info!(
             "session-probe: drive-join @frame {} — calling join wrapper {fn_addr:#x}(this={base:#x}, flag=0, \
@@ -1777,10 +1848,23 @@ impl Feature for SessionJoinDriver {
             } else {
                 (0, 0, 0, 0)
             };
+            // The registry-ready check 0x141eba210 just returns [registry+0x10]; 0x1423f62e0 fails there if
+            // it's 0. Also read the connection array [registry+0x18], capacity [+0x20], count [+0x24].
+            let (r10, r18, r20, r24) = if reg != 0 {
+                (
+                    ((reg + 0x10) as *const u32).read_volatile(),
+                    ((reg + 0x18) as *const usize).read_volatile(),
+                    ((reg + 0x20) as *const u32).read_volatile(),
+                    ((reg + 0x24) as *const u32).read_volatile(),
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
             log::info!(
                 "session-probe: drive-join — handles [G+0x24]={h24:#x} (create/host) [G+0x28]={h28:#x} \
                  (join/client — update task polls THIS); registry {reg:#x} vtable={reg_vt:#x} \
-                 create-slot[+8]={slot8:#x} join-slot[+0x10]={slot10:#x} (disasm the join-slot to chart the blob)",
+                 create-slot[+8]={slot8:#x} join-slot[+0x10]={slot10:#x} | registry-ready[+0x10]={r10:#x} \
+                 (0 => 0x1423f62e0 fails the ready check) array[+0x18]={r18:#x} cap[+0x20]={r20} count[+0x24]={r24}",
             );
         }
     }

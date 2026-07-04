@@ -116,8 +116,8 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
                            # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
-drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
-drive_join = false         # JOIN driver (joiner): drive 0x140cae640 -> TryToJoinSession -> Client. Charting run.
+drive_create = false        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
+drive_join = true         # JOIN driver (joiner): drive 0x140cae640 -> TryToJoinSession -> Client. Charting run.
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
 drive_establish_handler = false # RULED OUT (2026-07-04): driving the game's own establish handler
