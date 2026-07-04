@@ -2171,6 +2171,11 @@ const ISTEAM_ACCEPT_SLOT: usize = 0x18;
 const P2P_SEND_RELIABLE: u32 = 2;
 /// P2P channel for our game-transport probe pings (0; the game's own transport is dormant offline).
 const P2P_PROBE_CHANNEL: i32 = 0;
+/// The channel the game's socket-manager worker thread actually reads (`ReadP2PPacket(nChannel=
+/// [socketmgr+0x50])` in `0x142640bc0`). Rig-observed live = **30** (the worker-drain probe logs it). A
+/// joiner SYN must land on THIS channel or the host worker never sees it. Re-derive after a game update
+/// from the `host-worker-drain` log line (`instrument_host_accept`).
+const GAME_WORKER_CHANNEL: i32 = 30;
 
 impl Feature for TransportStandupDriver {
     fn name(&self) -> &'static str {
@@ -2497,11 +2502,13 @@ impl TransportStandupDriver {
                 let mut syn = [0u8; 14];
                 syn[0] = 0x0e;
                 syn[1] = 0x40;
-                let ok = send(iface, peer, syn.as_ptr(), syn.len() as u32, P2P_SEND_RELIABLE, P2P_PROBE_CHANNEL);
+                // Send on the channel the host WORKER reads (30, rig-observed), not our probe channel 0 —
+                // the worker only drains channel 30, so a SYN on 0 is never admitted.
+                let ok = send(iface, peer, syn.as_ptr(), syn.len() as u32, P2P_SEND_RELIABLE, GAME_WORKER_CHANNEL);
                 syn_fired = true;
                 log::info!(
-                    "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to host {} = {ok} \
-                     (should trip host-admit 0x142640e30 if the host worker drains this channel)",
+                    "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to host {} on channel {GAME_WORKER_CHANNEL} = {ok} \
+                     (should trip host-admit 0x142640e30 — this is the channel the host worker drains)",
                     unseamless_core::diagnostics::peer_tag(peer),
                 );
             }
