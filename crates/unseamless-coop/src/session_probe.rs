@@ -1244,13 +1244,18 @@ const GAME_ALLOC_OFFSET: usize = 0x1eb9ed0;
 const MANAGER_CTOR_OFFSET: usize = 0x263f700;
 /// Bytes the connect thunk allocates for a `SteamConnectionManager` before ctoring it.
 const MANAGER_SIZE: usize = 0x1b8;
-/// Offset of the `SteamConnection@DLNW3D` ctor `0x142643b50` (`fn(slot, manager, ring_size) -> conn`;
-/// installs vtable `0x143278370`, zero-inits via sub-ctors `0x142642200`/`0x142642290`).
-const CONN_CTOR_OFFSET: usize = 0x2643b50;
-/// Generous buffer for a `SteamConnection` (the manager slot stride is ~0x140 bytes).
-const CONN_SIZE: usize = 0x200;
-/// Default per-connection ring size the connection-creator uses (`+0x5c`); passed as the ctor's `r8`.
-const CONN_RING_SIZE: usize = 0x4b0;
+/// Offset of the connection-creator `0x142640560` (`fn(manager, params) -> bool`; allocates the manager's
+/// ring buffers + a `SteamConnection` array at `[manager+0x78]` (`params.count` slots of 0x140 bytes each,
+/// ctored via `0x142643b50`) and registers the P2P callbacks (`0x142643fe0`). This is the **full** wire-up
+/// a bare standalone ctor skips — without the manager ring buffers, the session's activate faults
+/// (INVALID_HANDLE). Called by the connect thunk `0x14263b720`.
+const CONN_CREATOR_OFFSET: usize = 0x2640560;
+/// Offset on the manager of the pointer to its `SteamConnection` array (`slot i = [manager+0x78] + i*0x140`).
+const CONN_ARRAY_PTR_OFF: usize = 0x78;
+/// Params bytes copied to `[manager+0x40..0x70]`: only `[params]!=0` and `[params+0x18]=count!=0` are
+/// guarded; `[params+0x1c]=ring size` (0 → default `0x4b0`). We pass `{ [0]=1, count=1 }`, rest 0.
+const CONN_PARAMS_WORDS: usize = 0x30 / 4;
+const CONN_PARAMS_COUNT_WORD: usize = 0x18 / 4;
 
 /// One-shot: stand up a DLNW3D `SteamServiceImpl` offline (path C, first increment). Fires once in-world
 /// (active main player present, same world gate as the create driver). Gated on
@@ -1420,24 +1425,37 @@ impl Feature for TransportStandupDriver {
                  (static = 0x143278020 + exe rebase; scan-vtable.py 0x143278020 to confirm)",
             );
 
-            // 5. Build a SteamConnection via its ctor 0x142643b50(slot, manager, ring_size). The creator
-            // builds it in-place in a manager slot; for construction validation we hand it a standalone
-            // heap buffer. The ctor only installs the vtable + zero-inits (sub-ctors 0x142642200/0x142642290)
-            // — no peer, no P2P — so it's solo-testable. The peer (+0x128) is runtime-bound before Accept
-            // (the two-machine step); Accept/connect + landing at [container+0x708] come next.
-            let conn_buf = alloc(CONN_SIZE, 8, heap);
-            log::info!("session-probe: transport-standup — connection buf ({CONN_SIZE:#x}B off game heap) = {conn_buf:#x}");
-            if conn_buf == 0 {
-                log::error!("session-probe: transport-standup — connection alloc returned NULL; aborting");
+            // 5. FULLY WIRE the connection via the connection-creator 0x142640560(manager, params) — the
+            // method the connect thunk 0x14263b720 runs after building the manager. It allocates the
+            // manager's ring buffers ([manager+0x88/0xb0/0xd0/0xf8/0x198]) and a SteamConnection array at
+            // [manager+0x78] (params.count slots, each 0x140 bytes, ctored via 0x142643b50), then registers
+            // the P2P callbacks. The prior increment built a *bare standalone* connection with no ring
+            // buffers, so the session's activate faulted (INVALID_HANDLE, crashdump 2026-07-04). params:
+            // [0]!=0 and [0x18]=count!=0 are the only guards; count=1, ring size 0 => default 0x4b0.
+            let mut params = [0u32; CONN_PARAMS_WORDS];
+            params[0] = 1; // [params+0x00] -> [manager+0x40] (nonzero guard)
+            params[CONN_PARAMS_COUNT_WORD] = 1; // [params+0x18] -> [manager+0x58] = connection count
+            let creator: extern "win64" fn(usize, *const u32) -> bool =
+                std::mem::transmute(exe_base + CONN_CREATOR_OFFSET);
+            let created = creator(mgr, params.as_ptr());
+            log::info!(
+                "session-probe: transport-standup — connection-creator 0x142640560(manager, params{{count=1}}) = {created}",
+            );
+            if !created {
+                log::error!("session-probe: transport-standup — connection-creator returned false; array not built");
                 return;
             }
-            let conn_ctor: extern "win64" fn(usize, usize, usize) -> usize =
-                std::mem::transmute(exe_base + CONN_CTOR_OFFSET);
-            let conn = conn_ctor(conn_buf, mgr, CONN_RING_SIZE);
+            // First connection slot: [manager+0x78] holds the array base; slot 0 = *(manager+0x78) + 0.
+            let array_base = ((mgr + CONN_ARRAY_PTR_OFF) as *const usize).read_volatile();
+            if array_base == 0 {
+                log::error!("session-probe: transport-standup — manager connection array [+0x78] null; aborting");
+                return;
+            }
+            let conn = array_base;
             // Bind the transport fields the send/accept path reads (FROMNET §1b): iface at +0x8, peer
-            // SteamID64 at +0x128. The ctor zero-inits both (Accept setup normally writes them, which we
-            // skip), so bind them here — this is what makes the connection a real, addressable one the
-            // SocketManagerHolder can wrap for the seam.
+            // SteamID64 at +0x128 (Accept setup normally writes them; bind explicitly so the wrapped
+            // connection is addressable). This is a fully wired connection (ring buffers via the creator),
+            // so the session's activate has real buffers to work with.
             ((conn + CONN_IFACE_OFF) as *mut usize).write_volatile(iface);
             if peer_for_conn != 0 {
                 ((conn + CONN_PEER_OFF) as *mut u64).write_volatile(peer_for_conn);
@@ -1447,8 +1465,8 @@ impl Feature for TransportStandupDriver {
             let iface_field = ((conn + 0x8) as *const usize).read_volatile();
             let peer_field = ((conn + 0x128) as *const usize).read_volatile();
             log::info!(
-                "session-probe: transport-standup — SteamConnection constructed @ {conn:#x} vtable={conn_vtable:#x} \
-                 [+0x8 iface={iface_field:#x} +0x128 peer={peer_field:#x}] (static vtable = 0x143278370; scan-vtable.py to confirm)",
+                "session-probe: transport-standup — wired SteamConnection @ {conn:#x} (manager array slot 0) \
+                 vtable={conn_vtable:#x} [+0x8 iface={iface_field:#x} +0x128 peer={peer_field:#x}]",
             );
         }));
         self.iface = resolved_iface;
