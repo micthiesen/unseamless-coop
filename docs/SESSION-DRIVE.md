@@ -2,7 +2,20 @@
 
 > ## STATUS (2026-07-04 pm, updated) — read this first
 >
-> **NEW: the `SteamServiceImpl` standup WORKS OFFLINE — the "native-builder dead end" was a misdiagnosis.**
+> **★ HOST REACHED AND STICKS — solo `lobby_state=Host`, `protocol=Ingame`, warped into the co-op world.** The
+> full host path now works offline: stand up the socket-manager wrapper at `[container+0x708]`, drive its own
+> init (the `SteamServiceImpl` standup works offline — see below), drive create → `TryToCreateSession`, and
+> **force host-setup's final online-availability gate `0x140de2620` true** (patch to `mov al,1; ret` — bypassing
+> the item-grey online signal, legitimate for offline co-op). Rig-confirmed: `None → TryToCreateSession → Host`,
+> `players=1` (`player[0] host=true local=true`), the warp into map `1800001` COMPLETES, and the session HOLDS
+> (no teardown, game running, `in_gameplay=true`). Config: `stand_up_transport`+`land_socket_holder`+`drive_create`
+> +`drive_session_established`+`suppress_leave` on, `drive_establish_handler` off. **► The remaining goal — TWO
+> sessions connected — needs a JOINER driver:** the join wrapper `0x140cae640` is peer-directed and its payload
+> (`a`/`b`/stack5) is uncharted (SESSION-RE-FINDINGS.md defers it to a two-player test). Build a join driver
+> (bypassing the same gates), feed it the rung-4 host SteamID64, run rig-hosts / Deck-joins. See "HOST-SETUP
+> DRIVE (2026-07-04 pm)" below for the full chain.
+>
+> **The `SteamServiceImpl` standup WORKS OFFLINE — the "native-builder dead end" was a misdiagnosis.**
 > Driving the socket-manager's own init `0x14263a9d0` stood up a real service offline (`init returned 1`,
 > `[socketmgr+0x38]` non-null); the service-init check `0x14263f450` always returns true, so the standup
 > `0x142638b40` only nulls on `owner==0`. We landed the CORRECT object at `[container+0x708]` (a 0x10-byte
