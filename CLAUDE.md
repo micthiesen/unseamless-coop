@@ -34,11 +34,15 @@ how to build, structure, load, or safely hook the game, read that repo first —
 > 30**; the joiner sends a real **14-byte DLNW3D SYN** on channel 30 → it **reaches the host admit helper
 > `0x142640e30`** (passes size + SYN-shape gates) but is **rejected at gate c** (`0x142640ecd`): the context
 > member-lookup `[socketmgr+0x40]`→`0x142639d00`→`[context+0x168]` is a **stub `0x1423fdf00` (`mov eax,1; ret`)**
-> that always rejects, so no host-side connection is created and the **roster stays 1**. **► Next: make the host
-> context recognize the joiner as a member** (drive a fuller service/context init that installs a real
-> `[context+0x168]` lookup, or register the joiner's SteamID64 in the context member collection `[context+0x170]`
-> via the register thunk `0x14263b7c0`) so gate c accepts + populates the connection descriptor → admit succeeds
-> (`0x142640ee4`) → roster-add `0x140cb31b0` (no offline gate) grows to 2. Plan:
+> that always rejects, so no host-side connection is created and the **roster stays 1**. RE-verified: the context's
+> member machinery (a real `[context+0x168]` lookup + find-or-create `0x142639950` + the member object
+> `0x14263d060` consumes) is **populated only by the online/matchmaker flow** — offline our synthesized context
+> permanently has the reject stub (the context ctors zero `+0x168`; no real lookup exists as a static fn; the
+> `[socketmgr+0x48]` writer is callback-driven and never fires offline; `0x14263b7c0` is a generic insert, NOT a
+> SteamID register). **► Next: reimplement the per-peer member construction offline** (avenue a — synthesize the
+> member + native `[context+0x168]`/`0x142639950` stand-ins + finish the SYN handshake), or first **live
+> `watch-write.py` `[socketmgr+0x48]`/`+0x168` during a REAL online host start** to capture the real closure to
+> reproduce. Then admit succeeds (`0x142640ee4`) → roster-add `0x140cb31b0` (no offline gate) grows to 2. Plan:
 > [`docs/SESSION-DRIVE.md`](docs/SESSION-DRIVE.md) > "STATUS (2026-07-04 night)"; map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)

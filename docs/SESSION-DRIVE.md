@@ -23,15 +23,32 @@
 >    member collection is `[context+0x170]`. The online flow installs a real lookup + registered members here;
 >    our offline standup left the stub.
 >
-> **⇒ THE remaining piece for host roster → 2:** make the host's socket-manager context recognize the joiner as
-> a member so gate c's `[context+0x168]` lookup returns 0 **and** populates the out-struct connection
-> descriptor. Two avenues to chart next: **(a)** drive a *more complete* service/context init so `[context+0x168]`
-> gets a real lookup (does a fuller `0x14263a9d0`/service standup populate it?); or **(b)** find the host-side
-> **member-register** call (the counterpart to the joiner's connect — likely the register thunk `0x14263b7c0`
-> from FROMNET-LINK-FINDINGS §1a, "hooks a connection into the service collection") and register the joiner's
-> SteamID64 in `[context+0x170]` before the SYN arrives. Then admit should reach `0x142640ee4`, create a
-> host-side connection, and the update task's roster-add `0x140cb31b0` (charted: **no offline gate** — appends a
-> new `players` entry when the peer is unmatched + `lobby_state==Host` + not-local) grows the roster to 2.
+> **⇒ THE remaining piece for host roster → 2 — and why it's a reimplementation, not a wire (RE-verified):**
+> gate c's accept needs the host context to hold real per-peer **member** state. Re-read of `0x142639d00`: it
+> runs **two** member producers that must both succeed — the lookup `[context+0x168]` (must return ≠1 and set
+> the local) **and** the find-or-create `0x142639950(context, sender, &local)` (must return a non-null member) —
+> then `0x14263d060` builds the connection descriptor from that member object (a rich struct: sub-graph
+> `[[[member+0x18]+0x18]+0xa0]` vtable, fields `+0x40..0x68/+0x100..0x110`; the descriptor's init-callback is
+> `0x142639830`, sender stored at `out+0x68`). A focused RE pass (agent, 2026-07-04 night) established: the two
+> ctors of the context class (vtable `0x1432770b0`; ctors `0x142639870`/`0x1426398c0`) **zero** `+0x168/+0x170`;
+> the only *static* installer of that slot (`0x142639b70` via `0x1423fe030`) belongs to an **unrelated
+> lobby/session-info cache** and always writes the same reject-stub `0x1423fdf00`; **no real member-lookup
+> exists as a static function** (it's a runtime closure, plausibly over live Steam lobby-member enumeration);
+> and the actual writer of `[socketmgr+0x48]` (the context itself) is **vtable/callback-driven and never fires
+> offline**. So the member machinery is populated only by the **online/matchmaker session flow** — offline our
+> synthesized context permanently has the reject stub. **The register thunk `0x14263b7c0` is a generic
+> container-insert, not a SteamID membership register**, and `[context+0x170]` is opaque closure-capture data,
+> not a peer collection you register into. ⇒ Passing gate c offline is **avenue (a): synthesize the member
+> ourselves** — write a native replacement at `[context+0x168]` **and** stand in for `0x142639950` **and**
+> fabricate the member object `0x14263d060` consumes (then still complete the SYN handshake + session promotion
+> so the connection yields a roster *message*). That's reimplementing the matchmaker's per-peer member
+> construction — a substantial multi-function build, not a single field-wire. Roster-add itself
+> (`0x140cb31b0`) has **no offline gate**, so once a real member/connection exists the roster grows to 2.
+>
+> **Cheaper disambiguation before building (agent's recommendation):** a live `watch-write.py` on
+> `[socketmgr+0x48]` and its `+0x168` during a **real online** host start (matchmaker up) to capture the actual
+> install site + the real closure fn-ptr — that pins exactly what to reproduce, instead of fabricating the
+> member blind.
 >
 > Levers/code (this session): read-only host instrumentation under `[debug.probes] instrument_host_accept`
 > (`host-admit`/`gate-c`/`success`/`roster-add`/`worker-drain` hooks in `session_probe.rs`); the joiner's
