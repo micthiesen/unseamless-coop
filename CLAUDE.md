@@ -24,11 +24,14 @@ The proven scaffolding, toolchain, and runtime patterns come from the sibling pr
 how to build, structure, load, or safely hook the game, read that repo first — its
 `docs/DEVELOPMENT.md` and `src/patch.rs` module docs are the reference for everything below.
 
-> Status: **framework in place.** Cargo workspace (host-tested `unseamless-core` + the
-> `unseamless-coop` cdylib). Config parsing and scaling math are done and unit-tested on the
-> host; the cdylib loads config, registers `Feature`s as frame tasks, and ships a read-only
-> session observer. The co-op core (Layer 2) is RE-gated and waits on a rig observation run —
-> see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/RIG-RUNBOOK.md`](docs/RIG-RUNBOOK.md).
+> Status: **connection stack shipped; rung-3 transport SOLVED, session-seam next.** Rungs 1/2/4 (identity,
+> the password-authed Steam side-channel, lobby discovery) ship and are confirmed two-machine. Rung 3
+> (drive the game's own session so players share a world) had one hard unknown — the transport — which is
+> now **solved (2026-07-04):** we stand up the game's own DLNW3D transport ourselves offline and
+> rig-proved its legacy Steam P2P works two-machine (rig + Deck). What remains is the **seam**: wire that
+> transport into a connection object at `[container+0x708]` → drive create → `Host`, then the seamless
+> teardown gate. Current plan: [`docs/COOP-CONNECTION.md`](docs/COOP-CONNECTION.md) > rung 3 "THE PLAN";
+> map: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Clean-room hygiene (one hard rule)
 
