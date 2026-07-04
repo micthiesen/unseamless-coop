@@ -297,6 +297,29 @@ static SESSION_ESTABLISHED_FN: AtomicUsize = AtomicUsize::new(0);
 /// `0x1423f4870` = `ManagerImplSteam@DLNR3D`'s session-established handler (vtable slot +0x68).
 const SESSION_ESTABLISHED_OFFSET: usize = 0x1_423f_4870 - 0x1_4000_0000;
 
+/// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
+/// `SocketManagerHolder@DLNR3D` around the standup connection and land it at `[container+0x708]` — the
+/// refcounted DLNR3D wrapper the driven create's `ConnectionRefInfo` loop reads + addrefs. Supersedes the
+/// hollow `+0x708` fabrication. See docs/SESSION-DRIVE.md > "SEAM CHARTED".
+static LAND_SOCKET_HOLDER: AtomicBool = AtomicBool::new(false);
+/// The live `SteamConnection@DLNW3D` the transport-standup built (0 until phase 1 runs). The seam wraps
+/// exactly this connection in the holder, so `land_socket_holder` needs `stand_up_transport` on too.
+static STANDUP_CONNECTION: AtomicUsize = AtomicUsize::new(0);
+/// Resolved absolute address of the `SocketManagerHolder@DLNR3D` ctor `0x1423f7180` (set at install).
+static HOLDER_CTOR_FN: AtomicUsize = AtomicUsize::new(0);
+/// Resolved absolute address of the game allocator `0x141eb9ed0` (set at install; reused by the seam).
+static GAME_ALLOC_FN: AtomicUsize = AtomicUsize::new(0);
+/// `SocketManagerHolder@DLNR3D` ctor (`fn(buf, conn) -> holder`; installs vtable `0x1431f9280`, sets the
+/// refcount `+0x8 = 0` and stores the wrapped connection at `+0x10`). A 5-instruction leaf.
+const HOLDER_CTOR_OFFSET: usize = 0x1_423f_7180 - 0x1_4000_0000;
+/// The container heap pointer field (`[container+0x48]`) the game's establish handler allocates the
+/// 0x18-byte holder from — use the same heap so the game's own deleter matches on teardown.
+const CONTAINER_HEAP_OFF: usize = 0x48;
+/// The `SteamConnection@DLNW3D` field offsets the transport rides on: iface at `+0x8`, peer SteamID64 at
+/// `+0x128` (docs/FROMNET-LINK-FINDINGS.md §1b) — bound on the standup connection before it's wrapped.
+const CONN_IFACE_OFF: usize = 0x8;
+const CONN_PEER_OFF: usize = 0x128;
+
 /// Charted first bytes of the leg-B entry (`0x1423f5c00`): `40 57` = `push rdi` (redundant REX),
 /// `48 83 EC 40` = `sub rsp,0x40`, `48 C7 44 24` = the start of `mov qword [rsp+0x20], -2`. Verified at
 /// the resolved address before the fabrication lever is armed — the same anti-drift role
@@ -378,6 +401,12 @@ fn install_create_gate_trace(config: &Config) {
     SET_CREATE_VETO_BIT.store(config.debug.probes.set_create_veto_bit, Ordering::Relaxed);
     DRIVE_SESSION_ESTABLISHED.store(config.debug.probes.drive_session_established, Ordering::Relaxed);
     SESSION_ESTABLISHED_FN.store(exe_base + SESSION_ESTABLISHED_OFFSET, Ordering::Relaxed);
+    // Seam (land_socket_holder): resolve the holder ctor + game allocator so the veto-vmethod hook can
+    // build a real SocketManagerHolder at [container+0x708]. The connection it wraps comes from the
+    // separate `stand_up_transport` feature (STANDUP_CONNECTION), so both must be enabled together.
+    LAND_SOCKET_HOLDER.store(config.debug.probes.land_socket_holder, Ordering::Relaxed);
+    HOLDER_CTOR_FN.store(exe_base + HOLDER_CTOR_OFFSET, Ordering::Relaxed);
+    GAME_ALLOC_FN.store(exe_base + GAME_ALLOC_OFFSET, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
     if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
         install_offset_hook("veto-field", vv, log_veto_field);
@@ -741,6 +770,14 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
                 );
             }
         }
+        // SEAM: build a real SocketManagerHolder@DLNR3D around our standup connection and land it at
+        // [container+0x708], so the driven create's ConnectionRefInfo loop reads a valid refcountable
+        // object (refcount at +8) instead of null. This is the charted replacement for the hollow
+        // fabrication below. We're at the veto vmethod entry (rcx=container) — the same container create
+        // uses ([SessionSteam+0x58]) — and this fires before the +0x708 read in the gate4 helper.
+        if LAND_SOCKET_HOLDER.load(Ordering::Relaxed) {
+            land_socket_holder(container);
+        }
         // L3 lever: set bit 2 before the vmethod reads it (a few instructions ahead at 0x1423f434b),
         // so its `test bit2; je return-false` first predicate passes. Only writes when armed + clear.
         if SET_CREATE_VETO_BIT.load(Ordering::Relaxed) {
@@ -777,6 +814,63 @@ fn log_veto_field(_name: &'static str, regs: *mut Registers) {
             );
         }
     }));
+}
+
+/// Build a real `SocketManagerHolder@DLNR3D` around the transport-standup connection and write it to
+/// `[container+0x708]` if that slot is still null — the seam that lets the driven create's
+/// `ConnectionRefInfo` loop wrap a valid refcountable object instead of null-derefing (see the
+/// "SEAM CHARTED" section of docs/SESSION-DRIVE.md). Called from the veto-vmethod hook with the live
+/// container. No-op unless armed and the standup connection exists; never clobbers a `+0x708` a real
+/// session set up.
+fn land_socket_holder(container: usize) {
+    // SAFETY: `container` is the veto vmethod's `rcx` — the live `ManagerImpl@DLNR3D`; `+0x708` is an
+    // in-bounds qword field (the object is ~0x820+ bytes). Read-then-maybe-write of that one slot.
+    let slot = (container + 0x708) as *mut usize;
+    if unsafe { slot.read_volatile() } != 0 {
+        return; // a real session already populated it — never clobber
+    }
+    let conn = STANDUP_CONNECTION.load(Ordering::Relaxed);
+    if conn == 0 {
+        log::warn!(
+            "session-probe: land-socket-holder — no standup connection yet (need stand_up_transport built \
+             first); leaving [container+0x708] null",
+        );
+        return;
+    }
+    let ctor_fn = HOLDER_CTOR_FN.load(Ordering::Relaxed);
+    let alloc_fn = GAME_ALLOC_FN.load(Ordering::Relaxed);
+    if ctor_fn == 0 || alloc_fn == 0 {
+        return;
+    }
+    // Allocate the 0x18-byte holder off the container's own heap ([container+0x48]) — the heap the game's
+    // establish handler (0x1423f2820) uses for exactly this wrapper — so the game's own deleter matches on
+    // teardown rather than freeing a foreign pointer.
+    // SAFETY: `container+0x48` is the in-bounds heap-pointer field; read-only.
+    let heap = unsafe { ((container + CONTAINER_HEAP_OFF) as *const usize).read_volatile() };
+    if heap == 0 {
+        log::warn!("session-probe: land-socket-holder — container heap [+0x48] null; skipping");
+        return;
+    }
+    // SAFETY: win64 ABI game fns resolved from the live exe base at install. `alloc(size, align, heap)` is
+    // the game allocator; `ctor(buf, conn)` is the 5-instruction holder ctor (installs vtable, +8=0,
+    // +0x10=conn). A hard fault surfaces via the crashdump SEH handler; the caller is unwind-firewalled.
+    let alloc: extern "win64" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(alloc_fn) };
+    let buf = alloc(0x18, 8, heap);
+    if buf == 0 {
+        log::warn!("session-probe: land-socket-holder — 0x18B alloc off container heap returned null; skipping");
+        return;
+    }
+    let ctor: extern "win64" fn(usize, usize) -> usize = unsafe { std::mem::transmute(ctor_fn) };
+    let holder = ctor(buf, conn);
+    // refcount (+8) = 1: the game's establish handler addrefs 0->1 right after building the holder, so
+    // mirror it — the driven create's ConnectionRefInfo ctor then addrefs onto a live 1, not a stale 0.
+    unsafe { ((holder + 8) as *mut u32).write_volatile(1) };
+    unsafe { slot.write_volatile(holder) };
+    log::info!(
+        "session-probe: land-socket-holder — built SocketManagerHolder @ {holder:#x} \
+         (wraps SteamConnection {conn:#x}, refcount=1) and wrote [container+0x708] on container={container:#x} \
+         (create's ConnectionRefInfo loop now has a real refcountable object; drive create to test Host)",
+    );
 }
 
 /// `jmp-back` detour body for a session create/join initiation call, shared by both entries (they
@@ -1246,6 +1340,11 @@ impl Feature for TransportStandupDriver {
         };
         // Captured out of the build closure so phase 2 (drive_p2p) can drive the resolved interface.
         let mut resolved_iface = 0usize;
+        // Captured for the SEAM: the built SteamConnection, and the peer we bind onto it (+0x128) so a
+        // SocketManagerHolder wrapping it carries a real {iface,peer}. Peer resolved before the closure
+        // (config override or rung-2 link) so the borrow-checker stays happy with the non-move closure.
+        let mut conn_out = 0usize;
+        let peer_for_conn = self.target_peer().unwrap_or(0);
         // SAFETY: each address is exe base + a charted `.text`/`.data` offset (win64 ABI). A Rust panic
         // is caught here; a hard fault inside a game call surfaces via the crashdump SEH handler
         // (catch_unwind can't catch SIGSEGV). Each step logs before/after so a crash localizes to the
@@ -1335,6 +1434,15 @@ impl Feature for TransportStandupDriver {
             let conn_ctor: extern "win64" fn(usize, usize, usize) -> usize =
                 std::mem::transmute(exe_base + CONN_CTOR_OFFSET);
             let conn = conn_ctor(conn_buf, mgr, CONN_RING_SIZE);
+            // Bind the transport fields the send/accept path reads (FROMNET §1b): iface at +0x8, peer
+            // SteamID64 at +0x128. The ctor zero-inits both (Accept setup normally writes them, which we
+            // skip), so bind them here — this is what makes the connection a real, addressable one the
+            // SocketManagerHolder can wrap for the seam.
+            ((conn + CONN_IFACE_OFF) as *mut usize).write_volatile(iface);
+            if peer_for_conn != 0 {
+                ((conn + CONN_PEER_OFF) as *mut u64).write_volatile(peer_for_conn);
+            }
+            conn_out = conn;
             let conn_vtable = (conn as *const usize).read_volatile();
             let iface_field = ((conn + 0x8) as *const usize).read_volatile();
             let peer_field = ((conn + 0x128) as *const usize).read_volatile();
@@ -1344,6 +1452,15 @@ impl Feature for TransportStandupDriver {
             );
         }));
         self.iface = resolved_iface;
+        // Publish the built connection for the seam (`land_socket_holder` wraps it into a
+        // SocketManagerHolder at [container+0x708]). 0 if a build step bailed before the connection.
+        if conn_out != 0 {
+            STANDUP_CONNECTION.store(conn_out, Ordering::Relaxed);
+            log::info!(
+                "session-probe: transport-standup — published standup connection {conn_out:#x} for the seam \
+                 (land_socket_holder will wrap it at [container+0x708])",
+            );
+        }
         if self.iface != 0 {
             log::info!(
                 "session-probe: transport-standup — phase 2 armed: will drive game ISteamNetworking006 P2P \

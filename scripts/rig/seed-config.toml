@@ -111,11 +111,9 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
                            # Its question is settled (ER pumps RunCallbacks; CreateLobby works), and the
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
-drive_create = false       # EXPERIMENTAL rung-3 direct-drive: once in-game with lobby_state=None, CALL the
-                           # charted create-session fn on [G] (no item, no peer) and log whether lobby_state
-                           # moves to TryToCreateSession. OFF for the transport-standup run (stand_up_transport
-                           # below) so create doesn't fire+crash on the null +0x708 and muddy the log; flip back
-                           # on for a create-drive run. Pair with gameplay.enable_offline_multiplayer = true.
+drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
+                           # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
+                           # gameplay.enable_offline_multiplayer = true.
 stand_up_transport = true  # rung-3 transport-leg standup (ERSC path C): one-shot in-world resolve of
                            # ISteamNetworking006 + construct a DLNW3D SteamServiceImpl offline. Confirm with
                            # scripts/re/scan-vtable.py 0x143277270 (expect a live SteamServiceImpl after). First
@@ -132,11 +130,16 @@ fabricate_slot_array = true # rung-3 slot-array fabrication (pairs with drive_cr
 drive_fire_solo = true     # drive timing: false = hold the driven create until the rung-2 link (+settle) — the
                            # two-machine runs; true = fire solo once in-game (a peerless fabricate proof).
 set_create_veto_bit = false # rung-3 L3 lever: write bit 2 of [container+0x7c0] set before the veto vmethod
-drive_session_established = false # rung-3 real-init lever: drive 0x1423f4870 to populate the container for real. See docs/SESSION-DRIVE.md VERDICT.
-                           # (0x1423f4330) reads it. RIG RESULT 2026-07-03: flips the vmethod to pass (al 0->1)
-                           # but create then null-derefs (crash at eldenring.exe+0x1eba1c5) — bit 2 is a
-                           # CONSEQUENCE of real session setup, not a standalone switch. OFF (it crashes). See
-                           # docs/SESSION-DRIVE.md > "L3 RESOLVED".
+drive_session_established = true # SEAM TEST: drive 0x1423f4870 for real init (sets [container+0x7c0] bit 2,
+                           # identity at +0x7f8). Prior runs crashed at eldenring.exe+0x1eba1c5 because +0x708
+                           # was still null (the create ConnectionRefInfo addref on null); land_socket_holder
+                           # below now fills +0x708 with a real refcountable object first. See SESSION-DRIVE.md
+                           # > "SEAM CHARTED".
+land_socket_holder = true  # SEAM TEST (2026-07-04): build a real SocketManagerHolder@DLNR3D wrapping the
+                           # stand_up_transport connection and land it at [container+0x708] (refcount=1) at the
+                           # veto-vmethod hook, so the driven create's ConnectionRefInfo loop reads a valid
+                           # object instead of null-derefing. Needs stand_up_transport + drive_create on. The
+                           # charted finish of rung-3 create — see docs/SESSION-DRIVE.md > "SEAM CHARTED".
 force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create): write NetworkSession+0x10
                            # nonzero before the driven create to satisfy leg B's first reject. RIG-PROVEN
                            # INSUFFICIENT (the blocker is deeper — leg B's finalize registry/init lookup, which

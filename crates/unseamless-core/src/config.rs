@@ -286,6 +286,17 @@ pub struct DebugProbes {
     /// charted the handler; see docs/SESSION-DRIVE.md > VERDICT).
     pub drive_session_established: bool,
 
+    /// **EXPERIMENTAL rung-3 SEAM lever** (pairs with `stand_up_transport` + `drive_create`): land a real
+    /// **`SocketManagerHolder@DLNR3D`** at `[container+0x708]` at the veto-vmethod hook, wrapping the
+    /// connection the `stand_up_transport` probe built. `+0x708` is the refcounted DLNR3D wrapper the
+    /// driven create's `ConnectionRefInfo` loop reads + addrefs (`lock xadd [+0x708+8]`); null offline →
+    /// the create crash. The holder is a 0x18-byte object `{ vtable 0x1431f9280, refcount@+8,
+    /// SteamConnection*@+0x10 }` (ctor `0x1423f7180`); we alloc it off the container heap `[container+0x48]`,
+    /// wrap our standup `SteamConnection`, set refcount=1, and write it to `+0x708` if still null. Supersedes
+    /// the hollow `+0x708` fabrication under `set_create_veto_bit`. Off by default. See docs/SESSION-DRIVE.md
+    /// > "SEAM CHARTED".
+    pub land_socket_holder: bool,
+
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
     /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
     /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is
