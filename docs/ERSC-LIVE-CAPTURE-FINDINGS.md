@@ -19,6 +19,83 @@ it corrects two load-bearing wrong beliefs that drove months of offline work.
 > `SessionSteam`" when there was one. A chunked full-region scan found everything. `scan-vtable.py` now
 > chunks large regions (don't trust an old "0 objects" result from before this fix).
 
+## ★ Writer-trace capture (task #16, 2026-07-04) — the member-add chain + reproduction target
+
+A **second** live 2-player session (same setup) ran the aim sheet
+([WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md)): read the four anchors' live values, enumerated the
+graph, then armed a HW watchpoint on a member slot's identity field during a fresh Deck **leave → rejoin**
+to catch the member being built. **The game survived the watchpoint** (max-hits 3, ptrace detached clean).
+This is the highest-value result of the whole rung-3 effort — it pins the reproduction target and kills two
+more red herrings.
+
+### Known-good graph (host side, `lobby_state = 3 Host`)
+
+`scan-vtable` live counts: **1** `SteamServiceImpl` (`0x143277270`, owner = config `0x143d87750`), **2**
+`SteamConnectionManager` (`0x143278020`), **2** socket-managers (`0x143276cb8`), **1** `SessionSteam`
+(`0x1431fa248`), **6** `SessionMemberSteam` (`0x1431fa978`). The 6 members are a **pre-allocated pool**;
+active slots were **[4] = Deck**, **[5] = rig (the host is a member of its own session)**; [0]–[3] empty.
+
+### ★ A populated member = a raw SteamID64 (corrects the aim sheet)
+
+The peer identity is a **direct scalar `SteamID64` at `member+0x80`** — NOT buried in the `+0x78` handle as
+the aim sheet (SESSION-DRIVE Lane A) predicted. Verified: member[4]+0x80 = the Deck's `76561198681631498`,
+member[5]+0x80 = the rig's `76561198004789432`. Full member layout (live):
+
+| off | value | meaning |
+|---|---|---|
+| `+0x58` | `0x143dcd570` (container+0x1a0) | `S` (owning `ManagerImplSteam` sub-object) |
+| `+0x60` | `0x7ffe938f0990` | the owning `SessionSteam` |
+| `+0x70` | per-member heap obj | handle (arg1 — the `SocketManagerHolder` ref) |
+| `+0x78` | per-member heap obj | handle (arg2 — identity) |
+| **`+0x80`** | **peer `SteamID64`** | **the identity, a direct scalar** |
+| `+0xa4` | `0x10002` | flags (same on all) |
+
+### ★ Member registry root = container+0x388, not +0x1e8 (corrects the aim sheet)
+
+SessionSteam and all 6 members carry `+0x8 = +0x10 = 0x143dcd758` = **container+0x388** (vtable
+`0x142bbce18`, exactly the registry vtable the aim sheet predicted — just at the wrong offset). The aim
+sheet's `container+0x1e8` (`0x143dcd5b8`) is a *different* embedded object (holds the config ptr + a
+UTF-16 `"SessionMember…"` string). **Use `0x143dcd758` as the member-registry anchor.**
+
+### ★ The member-add writer chain (LIVE-CONFIRMED)
+
+Watchpoint on the cleared Deck slot's `+0x80` caught the rejoin write. Writer ≈ `0x141eba123` (a generic
+copy routine — the SteamID is `memcpy`'d in), call chain bottom-up:
+
+```
+task system / main loop
+  → update_step 0x140cafd10            (CSSessionManager per-frame update; frames 0x140caab0e / 0x140cafd81)
+  → establish handler 0x1423f2820      (frame 0x1423f2d56)
+  → session-create 0x1423f7070 region  (frame 0x1423f6c9c)
+  → registry-link 0x1423ff7c0 region   (frame 0x1423ff5f7)
+  → add-member 0x1423fdf20 region      (frames 0x1423fde2a / 0x1423fe3dc)
+  → member base ctor 0x142400210       (frame 0x14240049c)
+  → +0x80 SteamID write via copy 0x141eba123
+```
+
+This **confirms the aim sheet's static chain** (`0x1423fdf20` add-member → member ctors → registry) and
+adds the load-bearing new fact: **the member is added SYNCHRONOUSLY inside the establish handler
+`0x1423f2820`, driven by `update_step`** — *not* by an async Steam callback. Reaching `0x1423f2820` is
+something our driven attempts already do, so this reframes rung-3 toward "drive the establish handler with
+a live connection + peer present, let it add the member" rather than hand-synthesizing members.
+
+### ★ Two more red herrings killed
+
+- **B1 availability field reversed.** `[[0x143d855c8]+0x10]` reads **`0` LIVE** in a fully working session
+  (it was `1` offline), with the gate-FALSE diag `[obj+0x9c]=0xf4241` stamped. So this field is NOT
+  "nonzero when online," and the availability gate `0x140de2620` is **not on ERSC's establishment path** —
+  ERSC forms the session via the establish-handler chain above, not the host-setup `0x140cb2ae0` gate we
+  were force-patching (`suppress_leave`). B2 singleton = `0x144844020` (vtable `0x1430c7d30`).
+- **Standup owner is the config, as charted.** The 1 live `SteamServiceImpl` carries owner `0x143d87750`
+  (the config), confirming STANDUP-NULL: the factory is satisfiable, the standup was never the wall.
+
+### Slot lifecycle (for re-running the trace)
+
+Leaving **clears the member's `+0x80` to 0** but keeps the slot allocated at a **stable address** while the
+host stays up; rejoin repopulates it (a full rejoin may realloc the member objects, so re-scan after). So
+the trace recipe is: get 2-player, have the joiner leave (host stays), re-scan to find the cleared slot,
+`watch-bt --addr <slot>+0x80`, joiner rejoins, catch the chain. Worked first try; game survived.
+
 ## The two corrections (both load-bearing)
 
 ### 1. `[context+0x168]` is the reject-stub EVEN in a working session — the gate-c theory is dead

@@ -22,50 +22,49 @@ Last updated: **2026-07-04**.
   two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the
   side-channel, and exchange game-P2P packets by SteamID64 alone (no matchmaking). Solo host reaches
   and *sticks* (`Host`/`Ingame`, warped into the co-op map).
-- **The rung-3 headline** (two players in each other's world) rides on the game's own session
-  establishment. Direction (2026-07-04): **"let the game establish it"** — drive the game's own
-  establishment machinery fed our rung-4 peer, don't hand-synthesize the object graph. Validated by a
-  **live capture of a real 2-player ERSC session** (all the native DLNR3D/DLNW3D objects present +
-  enumerated).
-- **The "`SteamServiceImpl` standup returns null offline" wall is DEAD as a framing** — it was a
-  red herring. Charted statically ([STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md)) and
-  rig-confirmed this session: the factory `0x142638b40` is *satisfiable offline* (its one content
-  gate is unconditionally true; the sub-init guarantees a non-null owner), and driving it offline
-  builds real transport objects (rig read: 2/2/1 live under our drivers, 0/0/0 undriven). The only
-  genuine offline≠live delta on the chain is the **runtime online-availability signal** (the
-  singleton `0x144842d40` availability query, read below the standup by gate `0x140de2620`) — which
-  we already bypass for the solo host via the `suppress_leave` gate-force.
+- **★ TASK #16 LIVE WRITER-TRACE DONE (2026-07-04) — the member-add chain is captured.** In a real
+  2-player ERSC session we watch-traced how a member is built and pinned the reproduction target
+  ([ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture"):
+  - **A member is a raw `SteamID64` at `member+0x80`** (a direct scalar, not a handle — corrects the
+    aim sheet). Members are a **6-slot pre-alloc pool**; the host is a member of its own session.
+  - **The member is added SYNCHRONOUSLY inside the establish handler `0x1423f2820`**, driven by
+    `update_step 0x140cafd10`: `…→ 0x1423f2820 → session-create 0x1423f7070 → add-member 0x1423fdf20
+    → member ctor 0x142400210 → +0x80 SteamID write`. **Not an async Steam callback.** This confirms
+    the aim sheet's static chain and reframes rung-3: **drive `0x1423f2820` with a live connection +
+    peer present and let it add the member.**
+  - **Member registry root = `0x143dcd758` (container+0x388)**, not the aim sheet's +0x1e8.
+- **Both remaining "walls" are now confirmed red herrings.** The `SteamServiceImpl` standup owner is
+  the config as charted (factory satisfiable — [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md)),
+  AND the availability field `[[0x143d855c8]+0x10]` reads **0 in a working session** (was 1 offline) —
+  so the host-setup gate `0x140de2620` we force via `suppress_leave` is **not on ERSC's establishment
+  path**. ERSC forms the session through the establish-handler chain above, not that gate.
 
 ## Next
 
-**Task #16 — the live writer-trace, AIMED and ready to run.** The static path is exhausted; the one
-field that differs offline-vs-live is a *runtime* value, so it can only be pinned live. The aim sheet
-[WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) charts **four watchpoints to arm in one live ERSC
-host+join** (Deck as peer 2) — the live session is now a fast confirm, not discovery:
+**Reproduce the member-add: drive the establish handler `0x1423f2820` with a live connection + the
+rung-4 peer present, and let it build the member (raw SteamID64 at `member+0x80`).** The live trace
+proved the member is added synchronously in that handler's chain (`0x1423f2820 → 0x1423f7070 add-member
+→ 0x1423fdf20 → 0x142400210 → +0x80`), driven by `update_step`, and that neither the standup nor the
+availability gate is the wall. So the next concrete step is to re-examine our own driven-establish
+attempts against this known-good chain:
 
-- **A1 (member registry):** `watch-bt.py --addr 0x143dcd5b8` (container+0x1e8). Fires on the host as
-  the joiner is admitted; backtrace should show `0x1423ff7c0 ← 0x142400210 ← 0x142402bf0 ←
-  0x1423fdf20` (SessionSteam vt[26] add-member). **The value to nail down: which inline offset is the
-  member count/head** (so a future offline reproduction knows what to write).
-- **A2 (session-create, secondary):** `watch-bt.py --addr 0x143dcdb04` (SessionManagerSteam count) —
-  count `0→1`.
-- **B2 (availability singleton):** `watch-bt.py --addr 0x144842d40` — catches get-or-create and hands
-  over the **live singleton ptr**; then follow `[vt+0x18]`'s returned container and watch a field
-  inside it (the real, statically-unpinnable differ — a live two-step).
-- **B1 (confirm-only):** deref `[0x143d855c8]`, watch `+0x10` — already RIG-OBSERVED `=1` offline, so
-  the differ is *below* it at the singleton query; arm just to confirm the online value.
+1. **Re-open driving `0x1423f2820` (establish handler)** with `stand_up_transport` + `land_socket_holder`
+   giving it a real connection, and the rung-4 peer SteamID64 available — the trace says the member-add
+   is *inside* this call, so if the connection is real enough, it should reach `0x1423fdf20` and write
+   `+0x80`. Watch the member registry `0x143dcd758` / a slot's `+0x80` on our side to see how far it gets.
+2. **Chart the gap** between what our stood-up connection provides and what `0x1423f7070`/`0x1423fdf20`
+   deref to build the member (the two handle objects at member `+0x70`/`+0x78`, and the peer SteamID
+   source). This is where our prior driven attempts bailed — now we know exactly what "success" writes.
 
-- **Why this / why now:** the standup red herring is closed and offline synthesis is a proven dead
-  end, so the only way forward is to observe a working establishment and reproduce its sequence. The
-  offline side of the diff is already captured (0/0/0 transport objects undriven; `[[0x143d855c8]+0x10]`
-  `=1` at menu), and the writers are statically charted, so the live pass is a quick aimed grab.
-- **Plan:** [WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) (the four arm recipes + re-derive
-  rules) is the primary; [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Re-running
-  this capture" (rig/Deck setup); [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md) §2/§3
-  (the availability gate).
-- **Serial + Michael-gated:** needs a live 2-player ERSC session (rig on real ERSC + Deck as ERSC
-  peer); orchestrator drives the watchers. This is the next thing to do the moment Michael is at the
-  machine.
+- **Why this / why now:** the capture killed the standup and availability-gate rabbit holes and showed
+  the member-add is a synchronous, reachable call chain we already partially drive. The reproduction
+  target is fully concrete (member layout + the writer chain), so this is drive-and-diff, not discovery.
+- **Plan:** [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture"
+  (the chain + member layout + reproduction target); [SESSION-DRIVE.md](SESSION-DRIVE.md) (the
+  establish-handler drive scaffolding, `drive_establish_handler` — previously "ruled out" on the
+  standup-null misdiagnosis, now re-open it against the real chain).
+- **Serial:** rig-owned (drive our mod + watch); the two-machine confirmation (roster → 2) needs the
+  Deck as peer 2, but the initial drive-and-chart is solo on the rig.
 
 ## Candidates Not Chosen
 

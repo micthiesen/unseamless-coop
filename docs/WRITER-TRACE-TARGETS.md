@@ -1,5 +1,14 @@
 # Writer-Trace Targets — Static Aim Sheet for the Task-#16 Live Capture (2026-07-04)
 
+> **★ EXECUTED 2026-07-04 — see [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) >
+> "Writer-trace capture" for the results.** This aim sheet did its job (the A1 chain confirmed live),
+> with two corrections from the live run: (1) the member registry root is **container+0x388
+> (`0x143dcd758`)**, not +0x1e8 (`0x143dcd5b8`) — the latter is a different embedded object; (2) the
+> peer identity is a **raw `SteamID64` at `member+0x80`** (a direct scalar), not "inside the `+0x78`
+> handle" as guessed below. Also: the availability field B1 `[[0x143d855c8]+0x10]` reads **0 in a
+> working session** (not the differ), and the whole member-add runs synchronously inside the establish
+> handler `0x1423f2820`. Read the findings doc for the confirmed chain.
+
 The rung-3 headline needs a **live** watch-write capture of a real ERSC host+join (task #16) to see
 how the game builds a session member and what the online-availability signal reads. That live session
 is scarce (needs Michael + the Deck as an ERSC peer, serialized through the orchestrator). This doc
