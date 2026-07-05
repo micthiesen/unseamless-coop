@@ -76,10 +76,14 @@ use crate::feature::{Feature, Tick};
 // large 0x3c0 stack frame.
 //
 // Resolution is by FIXED OFFSET from the live GetModuleHandle(NULL) base, exactly like the gate
-// tracers + SessionCreateDriver below: a static AOB is not derivable here (the exe's on-disk .text
-// is Arxan/Steam-encrypted, and the shared `88 54 24 10` prologue is too common to be unique
-// anyway), so we keep the charted offsets and guard drift by verifying the entry's charted prologue
-// bytes before patching — after a game update the check fails safe (warn + no hook), never hooks
+// tracers + SessionCreateDriver below. (Correction 2026-07-05: a static AOB IS derivable for these
+// sites — the on-disk bytes at all the session-lifecycle entries are plain, not Arxan-encrypted,
+// and extending the shared `88 54 24 10 57 48 83 ec ..` prologue through the `mov qword [rsp+..],-2`
+// + first spill makes each wrapper unique in the whole exe; proven by the upstream fromsoftware-rs
+// mapper-profile patterns we contributed, which binary-mapper resolves to exactly these offsets.
+// We keep fixed offsets + prologue guards here anyway: equally drift-safe and already wired.)
+// The guard verifies the entry's charted prologue bytes before patching — after a game update the
+// check fails safe (warn + no hook), never hooks
 // garbage. Re-derive the offsets per docs/SESSION-RE-FINDINGS.md > "Re-derivation recipe" (scan the
 // CSSessionManager method block 0x140cad000..0x140cb3000 for the `mov [reg+0xc], imm` setter family;
 // the →1/→4 functions are the inners, their sole callers the wrappers).
