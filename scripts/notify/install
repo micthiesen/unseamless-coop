@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# install
+#
+# Install (or update) the away-notification decider on this machine
+# (docs/ORCHESTRATION.md > "Away Notifications"). Idempotent -- re-run after
+# changing quiet-check/pushover to roll the update out.
+#
+# Run this from the MAIN repo clone (orchestrator or Michael), not a rift
+# worker workspace: it copies the decider scripts to a stable path
+# ($FLEET_DIR/bin) precisely because worker workspaces get torn down, and the
+# systemd unit must not point into one.
+#
+# What it does:
+#   1. copies pushover + quiet-check -> $FLEET_DIR/bin/
+#   2. writes ~/.config/systemd/user/unseamless-quiet-check.{service,timer}
+#   3. systemctl --user daemon-reload && enable --now the timer
+#
+# The hook sensors need NO install -- they run from the repo via
+# .claude/settings.json ($CLAUDE_PROJECT_DIR). Pushover keys go in
+# ~/.config/unseamless-notify/pushover.env (PUSHOVER_TOKEN/PUSHOVER_USER);
+# everything fails soft without them.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+BIN="$FLEET_DIR/bin"
+UNIT_DIR="$HOME/.config/systemd/user"
+
+mkdir -p "$BIN" "$UNIT_DIR"
+install -m 755 "$SELF/pushover" "$SELF/quiet-check" "$BIN/"
+
+cat > "$UNIT_DIR/unseamless-quiet-check.service" <<EOF
+[Unit]
+Description=unseamless-coop fleet quiet-check (away notifications)
+
+[Service]
+Type=oneshot
+Environment=UNSEAMLESS_FLEET_DIR=$FLEET_DIR
+ExecStart=$BIN/quiet-check
+EOF
+
+cat > "$UNIT_DIR/unseamless-quiet-check.timer" <<EOF
+[Unit]
+Description=Run the unseamless-coop fleet quiet-check every 30s
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30s
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now unseamless-quiet-check.timer
+# enable --now is a no-op on an already-running timer, so changed timer
+# parameters wouldn't apply on re-install without this.
+systemctl --user restart unseamless-quiet-check.timer
+
+echo "installed: $BIN/{pushover,quiet-check} + unseamless-quiet-check.timer (30s)"
+echo "keys:      ~/.config/unseamless-notify/pushover.env (PUSHOVER_TOKEN/PUSHOVER_USER)"
+systemctl --user status unseamless-quiet-check.timer --no-pager | head -5 || true

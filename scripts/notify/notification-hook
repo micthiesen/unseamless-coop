@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# notification-hook
+#
+# Claude Code `Notification` hook for the away-notification system
+# (docs/ORCHESTRATION.md > "Away Notifications"). A permission request means a
+# session is blocked on Michael RIGHT NOW, so this pushes immediately (no
+# quiet-period debounce), rate-limited to one push per session per 10 minutes.
+#
+# Only permission-style notifications push. The "Claude is waiting for your
+# input" 60s idle nag is deliberately ignored -- turn-idleness is aggregated
+# fleet-wide by quiet-check instead, so per-session idle nags would just be
+# noise ahead of the real "fleet quiet" signal.
+#
+# Like activity-hook: fast, silent, ALWAYS exit 0.
+
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+DIR="$FLEET_DIR/state/activity"
+mkdir -p "$DIR" 2>/dev/null || exit 0
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+
+input="$(cat 2>/dev/null || true)"
+
+# WORDING COUPLING: there is no structured "permission vs idle" discriminator
+# in the Notification payload -- this matches Claude Code's current prompt text
+# ("Claude needs your permission to use X"). If a Claude Code update rewords it
+# away from permission/approval, this filter goes silently dark; re-check after
+# harness updates. This hook is also the only LOW-LATENCY signal for a blocked
+# session (a permission-blocked turn stays `busy` until the stale cutoff), so
+# keep the filter generous.
+msg=""
+if command -v jq >/dev/null 2>&1; then
+  msg="$(printf '%s' "$input" | jq -r '.message // empty' 2>/dev/null || true)"
+fi
+case "$msg" in
+  *permission*|*Permission*|*approval*|*Approval*) ;;
+  *) exit 0 ;;
+esac
+
+# Same key chain as activity-hook: tmux session name, else the hook payload's
+# session_id -- so concurrent non-tmux sessions get their own rate-limit bucket.
+key=""
+if [ -n "${TMUX:-}" ]; then
+  key="$(tmux display-message -p '#S' 2>/dev/null || true)"
+fi
+if [ -z "$key" ] && command -v jq >/dev/null 2>&1; then
+  key="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+[ -n "$key" ] || key="session"
+key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9_.-' '_')"
+
+# Rate limit: one push per session per 10 minutes, via marker-file mtime.
+marker="$DIR/.notif-$key"
+now="$(date +%s)"
+if [ -f "$marker" ]; then
+  last="$(stat -c %Y "$marker" 2>/dev/null || echo 0)"
+  [ $((now - last)) -lt 600 ] && exit 0
+fi
+touch "$marker" 2>/dev/null
+
+[ -x "$SELF/pushover" ] && "$SELF/pushover" "$key blocked: $msg" "unseamless: approval needed" 0 >/dev/null 2>&1
+exit 0

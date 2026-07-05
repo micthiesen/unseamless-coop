@@ -181,6 +181,9 @@ is [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The always-on rules:
 - **Review split:** a worker `/ultracheck`s its own lane before handoff; the orchestrator doesn't
   re-deep-review each lane and spends its heaviest pass *holistically* on the integrated,
   cross-lane result (`fleet` skill > "Offload The Review To Workers").
+- **Orchestrator only — ping Michael's phone when stopping:** run
+  `scripts/fleet/notify-human "<one-line reason>"` once when you're done, giving up, or blocked on
+  something only he can do; never for progress updates or per-worker milestones.
 
 **The fleet runs on either Claude Code or Codex** (Michael toggles the default; the orchestrator
 always runs it, and individual workers can be spawned on the other harness or a specific model via

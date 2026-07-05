@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# pushover <message> [title] [priority]
+#
+# Low-level Pushover sender for the away-notification system (docs/ORCHESTRATION.md
+# > "Away Notifications"). Keys live OUTSIDE the repo in
+# ~/.config/unseamless-notify/pushover.env (PUSHOVER_TOKEN / PUSHOVER_USER).
+#
+# Exit code contract: 0 = sent, or intentionally skipped (no keys / dry run) --
+# so hooks and callers on machines without keys never error. 1 = a real send
+# FAILURE (curl error after retries), so quiet-check can hold its .notified
+# marker and retry on the next tick. PUSHOVER_DRY_RUN=1 prints instead of
+# sending (used by tests).
+set -u
+
+msg="${1:?usage: pushover <message> [title] [priority]}"
+title="${2:-unseamless-coop}"
+prio="${3:-0}"
+
+# Clamp to the API limits (message 1024, title 250) so an over-long body is
+# truncated instead of bounced with HTTP 400 (which would lose the whole ping).
+[ ${#msg} -gt 1024 ] && msg="${msg:0:1021}..."
+[ ${#title} -gt 250 ] && title="${title:0:250}"
+
+ENV_FILE="${PUSHOVER_ENV:-$HOME/.config/unseamless-notify/pushover.env}"
+
+if [ -n "${PUSHOVER_DRY_RUN:-}" ]; then
+  echo "pushover DRY [prio=$prio] $title: $msg"
+  exit 0
+fi
+
+if [ ! -f "$ENV_FILE" ]; then
+  echo "pushover: $ENV_FILE not found; skipping" >&2
+  exit 0
+fi
+# shellcheck source=/dev/null
+. "$ENV_FILE"
+if [ -z "${PUSHOVER_TOKEN:-}" ] || [ -z "${PUSHOVER_USER:-}" ]; then
+  echo "pushover: PUSHOVER_TOKEN/PUSHOVER_USER empty in $ENV_FILE; skipping" >&2
+  exit 0
+fi
+
+# --form-string, never -F: -F gives a leading @/< in the VALUE curl's
+# read-local-file semantics, so a message that happens to start with @ (an LLM
+# summary, a permission prompt) would upload a file or fail the send.
+if curl -fsS --connect-timeout 5 --max-time 15 --retry 2 --retry-delay 2 \
+    https://api.pushover.net/1/messages.json \
+    --form-string "token=$PUSHOVER_TOKEN" \
+    --form-string "user=$PUSHOVER_USER" \
+    --form-string "title=$title" \
+    --form-string "message=$msg" \
+    --form-string "priority=$prio" >/dev/null; then
+  exit 0
+fi
+echo "pushover: send failed" >&2
+exit 1

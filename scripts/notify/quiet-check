@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# quiet-check
+#
+# The DECIDER of the away-notification system (docs/ORCHESTRATION.md > "Away
+# Notifications"). Run every ~30s by the `unseamless-quiet-check` systemd user
+# timer (see scripts/notify/install). Reads the per-session state files the
+# activity-hook sensors write and pushes ONE Pushover message when the whole
+# fleet transitions working -> quiet:
+#
+#   notify once when every tracked session is idle, the newest activity is at
+#   least QUIET_SECS old (debounce -- covers the normal orchestrator<->worker
+#   msg-wake gaps), and we haven't already notified for this quiet period.
+#
+# Reliability details:
+#   - tmux liveness: a state file whose key is a fleet tmux session (usc-*) with
+#     no live tmux session is a dead session -> pruned, along with its
+#     .transcript stash and .notif marker (orch-stop/worker-rm kill tmux without
+#     a SessionEnd hook, so this sweep is the only cleanup they get). This is
+#     why the decider is a poller and not a pure hook chain: a session killed
+#     mid-turn never fires Stop, and only a liveness cross-check can clear its
+#     stale `busy`.
+#   - stale busy: a `busy` state whose ts is older than STALE_SECS counts as
+#     idle (crashed non-tmux session, or a turn wedged on a permission prompt --
+#     PreToolUse refreshes ts on every tool call, so a genuinely working session
+#     never goes stale).
+#   - `new` sessions (SessionStart fired, no turn yet) are tracked but not
+#     counted -- an opened-and-abandoned session alone never produces a "work
+#     stopped" push. Stale `new` files are swept.
+#   - once per quiet period: the quiet EPOCH is a monotonic high-water mark of
+#     the newest activity ts ever observed (persisted in .last-activity), so it
+#     survives the max-holding session being torn down (which would otherwise
+#     lower a max-of-survivors epoch and re-ping the same stop) and still
+#     advances when an interloper works and leaves (which would otherwise
+#     reproduce an already-notified epoch and swallow a real new stop). A push
+#     fires only when epoch > the recorded .notified value.
+#   - same-stop dedup: notify-human's explicit push covers a stop when the
+#     fleet's last activity falls within HUMAN_GRACE_SECS of the .human-notified
+#     marker -- a grace band that absorbs the pinging turn's own tail (its
+#     remaining tool calls, wrap-up commits, the Stop hook). Deliberately
+#     honest: a short work burst that starts AND settles inside the grace is
+#     also absorbed; work that settles later pings normally.
+#   - delivery: .notified is written only when the send SUCCEEDS (pushover
+#     exits nonzero on curl failure), so a transient Pushover outage is retried
+#     on the next tick instead of silently dropping the stop's ping.
+#
+# Exit is always 0 (a oneshot service unit shouldn't flap on transient errors).
+
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+DIR="$FLEET_DIR/state/activity"
+QUIET_SECS="${QUIET_SECS:-120}"
+STALE_SECS="${STALE_SECS:-900}"
+HUMAN_GRACE_SECS="${HUMAN_GRACE_SECS:-300}"
+# A non-numeric override would silently break every comparison below; fall
+# back to the defaults instead.
+case "$QUIET_SECS"       in ''|*[!0-9]*) QUIET_SECS=120 ;; esac
+case "$STALE_SECS"       in ''|*[!0-9]*) STALE_SECS=900 ;; esac
+case "$HUMAN_GRACE_SECS" in ''|*[!0-9]*) HUMAN_GRACE_SECS=300 ;; esac
+# Push-body enrichment (all best-effort; see the body-building block below).
+LLM_URL="${QUIET_LLM_URL:-http://127.0.0.1:1234}"       # LM Studio OpenAI-compatible server
+LLM_MODEL="${QUIET_LLM_MODEL:-}"                        # empty -> auto-pick first gemma from /v1/models
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+
+[ -d "$DIR" ] || exit 0
+now="$(date +%s)"
+
+shopt -s nullglob
+any_busy=0
+count=0
+run_max=0        # newest activity ts seen THIS run (busy included)
+idle_max=0       # newest idle ts (for the lead-transcript pick)
+idle_key=""
+orch_live=0
+names=""
+for f in "$DIR"/*.state; do
+  read -r state ts key 2>/dev/null < "$f" || continue
+  case "$ts" in ''|*[!0-9]*) rm -f "$f"; continue ;; esac
+
+  # Liveness: fleet sessions live in tmux; no session -> dead, prune the state
+  # file AND its transcript stash + rate-limit marker (a stale usc-orch
+  # transcript would otherwise feed a dead orchestrator's sign-off into a later
+  # push body).
+  case "$key" in
+    usc-*)
+      if ! tmux has-session -t "$key" 2>/dev/null; then
+        rm -f "$f" "$DIR/$key.transcript" "$DIR/.notif-$key"
+        continue
+      fi
+      ;;
+  esac
+
+  # `new` = registered but never ran a turn: tracked, never counted. Sweep once
+  # stale so a crashed never-used session doesn't linger forever.
+  if [ "$state" = "new" ]; then
+    [ $((now - ts)) -ge "$STALE_SECS" ] && rm -f "$f"
+    continue
+  fi
+
+  # Stale busy = crashed/wedged, counts as idle (see header).
+  if [ "$state" = "busy" ] && [ $((now - ts)) -ge "$STALE_SECS" ]; then
+    state="idle"
+  fi
+
+  [ "$ts" -gt "$run_max" ] && run_max="$ts"
+
+  if [ "$state" = "busy" ]; then
+    any_busy=1
+    continue
+  fi
+
+  count=$((count + 1))
+  if [ "$ts" -gt "$idle_max" ]; then idle_max="$ts"; idle_key="$key"; fi
+  [ "$key" = "usc-orch" ] && orch_live=1
+  names="$names $key"
+done
+
+# Advance the persistent high-water mark (the quiet epoch; see header). Busy
+# sessions contribute, so work observed by any poll re-arms the next quiet even
+# if that session later dies without a Stop.
+hw="$(cat "$DIR/.last-activity" 2>/dev/null || true)"
+case "$hw" in ''|*[!0-9]*) hw=0 ;; esac
+if [ "$run_max" -gt "$hw" ]; then
+  hw="$run_max"
+  printf '%s\n' "$hw" > "$DIR/.last-activity" 2>/dev/null
+fi
+
+[ "$any_busy" -eq 0 ] || exit 0   # someone is working; nothing to do
+[ "$count" -gt 0 ] || exit 0
+[ "$hw" -gt 0 ] || exit 0
+[ $((now - hw)) -ge "$QUIET_SECS" ] || exit 0
+
+epoch="$hw"
+notified="$(cat "$DIR/.notified" 2>/dev/null || true)"
+case "$notified" in ''|*[!0-9]*) notified=0 ;; esac
+[ "$epoch" -le "$notified" ] && exit 0
+
+# Same-stop dedup vs notify-human (see header: a grace band around the marker,
+# absorbing the pinging turn's tail; negative diff = marker after last activity
+# = certainly the same stop).
+if [ -f "$DIR/.human-notified" ]; then
+  human="$(stat -c %Y "$DIR/.human-notified" 2>/dev/null || echo 0)"
+  if [ "$human" -gt 0 ] && [ $((epoch - human)) -lt "$HUMAN_GRACE_SECS" ]; then
+    printf '%s\n' "$epoch" > "$DIR/.notified" 2>/dev/null
+    exit 0
+  fi
+fi
+
+mins=$(( (now - epoch) / 60 ))
+
+# Build the push body, best-effort at each step (the ping itself is the
+# guarantee; the content is garnish):
+#   1. last assistant message of the lead session (usc-orch if live this run --
+#      the orchestrator narrates the fleet -- else the most recently idle),
+#      summarized by a local LM Studio model (OpenAI-compatible API, model
+#      auto-picked as the first gemma in /v1/models unless QUIET_LLM_MODEL set)
+#   2. LM Studio down/slow/empty -> raw truncated snippet of that message
+#   3. no transcript/jq -> the generic "fleet quiet" line
+body="fleet quiet: $count session(s) idle ${mins}m --${names}"
+
+snippet=""
+lead="$DIR/$idle_key.transcript"
+[ "$orch_live" -eq 1 ] && [ -f "$DIR/usc-orch.transcript" ] && lead="$DIR/usc-orch.transcript"
+tp="$(cat "$lead" 2>/dev/null || true)"
+if [ -n "$tp" ] && [ -f "$tp" ] && command -v jq >/dev/null 2>&1; then
+  # Transcript is JSONL; the last assistant text block is the session's
+  # sign-off. tail bounds the parse cost on huge transcripts.
+  snippet="$(tail -n 400 "$tp" 2>/dev/null \
+    | jq -rs '[.[] | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text] | last // empty' 2>/dev/null \
+    | tr -s ' \t\n' ' ' || true)"
+fi
+
+summary=""
+if [ -n "$snippet" ] && [ -z "${QUIET_LLM_DISABLE:-}" ]; then
+  model="$LLM_MODEL"
+  if [ -z "$model" ]; then
+    model="$(curl -fsS --max-time 2 "$LLM_URL/v1/models" 2>/dev/null \
+      | jq -r '[.data[].id | select(test("gemma"; "i"))] | first // empty' 2>/dev/null || true)"
+  fi
+  if [ -n "$model" ]; then
+    tail_snippet="$snippet"
+    [ ${#tail_snippet} -gt 3000 ] && tail_snippet="${tail_snippet: -3000}"
+    payload="$(jq -n --arg m "$model" --arg s "$tail_snippet" '{
+      model: $m,
+      messages: [
+        {role: "system", content: "You summarize the final status message of an AI dev-fleet session into a phone push notification body. One or two short sentences, max 180 characters total. State what was accomplished/decided and what (if anything) the human is needed for. No preamble, no markdown, no quotes."},
+        {role: "user", content: $s}
+      ],
+      max_tokens: 100,
+      temperature: 0.2
+    }' 2>/dev/null || true)"
+    if [ -n "$payload" ]; then
+      summary="$(curl -fsS --max-time 12 "$LLM_URL/v1/chat/completions" \
+        -H 'Content-Type: application/json' -d "$payload" 2>/dev/null \
+        | jq -r '.choices[0].message.content // empty' 2>/dev/null \
+        | tr -s ' \t\n' ' ' || true)"
+    fi
+  fi
+fi
+
+if [ -n "$summary" ]; then
+  body="$summary [$count idle ${mins}m]"
+elif [ -n "$snippet" ]; then
+  body="[$count idle ${mins}m] last: ${snippet:0:280}"
+fi
+
+# Record the epoch only on a successful (or intentionally skipped) send, so a
+# transient delivery failure retries next tick rather than dropping the ping.
+if [ -x "$SELF/pushover" ]; then
+  "$SELF/pushover" "$body" "unseamless: work stopped" 0 || exit 0
+fi
+printf '%s\n' "$epoch" > "$DIR/.notified" 2>/dev/null
+exit 0

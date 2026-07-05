@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# activity-hook <start|busy|idle|end>
+#
+# Claude Code hook sensor for the away-notification system (docs/ORCHESTRATION.md
+# > "Away Notifications"). Wired in .claude/settings.json:
+#   SessionStart      -> start   (register the session as `new` -- tracked but
+#                                 not yet participating, so an opened-and-never-
+#                                 used session can't trigger a "work stopped"
+#                                 push; never clobbers existing state, since
+#                                 SessionStart also fires on resume/compact
+#                                 mid-session)
+#   UserPromptSubmit  -> busy    (a turn began)
+#   PreToolUse        -> busy    (refreshes ts during long turns; freshness feeds
+#                                 quiet-check's stale-busy crash detection)
+#   Stop              -> idle    (turn ended, waiting for input)
+#   SessionEnd        -> end     (remove the session's files)
+#
+# Writes one line -- "<state> <ts> <key>" -- to
+# $UNSEAMLESS_FLEET_DIR/state/activity/<key>.state. The key is the tmux session
+# name when inside tmux (usc-orch / usc-worker-*, which lets quiet-check verify
+# liveness with `tmux has-session`), else the hook's session_id from stdin, else
+# a pid fallback.
+#
+# HARD RULE: this runs on every prompt/tool call in every session. It must be
+# fast, silent, and ALWAYS exit 0 -- a nonzero PreToolUse hook would block the
+# tool call itself. No set -e; every step is best-effort.
+
+event="${1:-}"
+case "$event" in start|busy|idle|end) ;; *) exit 0 ;; esac
+
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+DIR="$FLEET_DIR/state/activity"
+mkdir -p "$DIR" 2>/dev/null || exit 0
+
+# Stdin is the hook's JSON payload; only needed for the non-tmux key fallback.
+input="$(cat 2>/dev/null || true)"
+
+key=""
+if [ -n "${TMUX:-}" ]; then
+  key="$(tmux display-message -p '#S' 2>/dev/null || true)"
+fi
+if [ -z "$key" ] && command -v jq >/dev/null 2>&1; then
+  key="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+[ -n "$key" ] || key="pid$PPID"
+# Sanitize: the key becomes a filename.
+key="$(printf '%s' "$key" | tr -c 'A-Za-z0-9_.-' '_')"
+[ -n "$key" ] || exit 0
+
+file="$DIR/$key.state"
+
+if [ "$event" = "end" ]; then
+  rm -f "$file" "$DIR/$key.transcript" "$DIR/.notif-$key" 2>/dev/null
+  exit 0
+fi
+
+# `start` registers the session as `new` (not counted by quiet-check until its
+# first real turn) and must not clobber live state: SessionStart also fires on
+# resume/compact, where an existing busy/idle state is the truth.
+if [ "$event" = "start" ]; then
+  [ -f "$file" ] && exit 0
+fi
+
+# On turn-end (Stop) stash the session's transcript path: quiet-check reads the
+# last assistant message from it to enrich the "fleet quiet" push (LM Studio
+# summary / raw snippet). Not on `busy` -- that's the per-tool-call hot path.
+if [ "$event" = "idle" ] && command -v jq >/dev/null 2>&1; then
+  tp="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+  [ -n "$tp" ] && printf '%s\n' "$tp" > "$DIR/$key.transcript" 2>/dev/null
+fi
+
+case "$event" in
+  busy)  state="busy" ;;
+  start) state="new" ;;
+  *)     state="idle" ;;
+esac
+
+# Atomic-ish write (rename) so quiet-check never reads a half-written line.
+tmp="$file.tmp.$$"
+if printf '%s %s %s\n' "$state" "$(date +%s)" "$key" > "$tmp" 2>/dev/null; then
+  mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+fi
+exit 0

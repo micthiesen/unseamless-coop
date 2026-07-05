@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# notify-human "<one-line reason>"
+#
+# The orchestrator's explicit "I need Michael" signal (docs/ORCHESTRATION.md >
+# "Away Notifications"). Run it ONCE when you are STOPPING -- work is done,
+# you're giving up, or you're blocked on something only Michael can do
+# (rig/Deck/in-game validation, a judgment call). Never for progress updates.
+# High-priority Pushover push to his phone.
+#
+# The .human-notified marker it writes lets the quiet-check backstop recognize
+# "this stop was already announced" and skip its generic "fleet quiet" push for
+# the SAME stop (same-stop dedup, not a blanket window -- see quiet-check).
+# Multiple explicit pings are allowed (Michael doesn't mind concurrent pushes);
+# set NOTIFY_HUMAN_RATE_SECS > 0 to opt into a minimum gap between pushes.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
+DIR="$FLEET_DIR/state/activity"
+RATE_SECS="${NOTIFY_HUMAN_RATE_SECS:-0}"
+case "$RATE_SECS" in ''|*[!0-9]*) RATE_SECS=0 ;; esac
+marker="$DIR/.human-notified"
+
+msg="${1:?usage: notify-human \"<one-line reason>\"}"
+
+mkdir -p "$DIR"
+if [ "$RATE_SECS" -gt 0 ] && [ -f "$marker" ]; then
+  now="$(date +%s)"
+  last="$(stat -c %Y "$marker" 2>/dev/null || echo 0)"
+  if [ $((now - last)) -lt "$RATE_SECS" ]; then
+    echo "notify-human: rate-limited (last push $((now - last))s ago); dropped: $msg" >&2
+    exit 0
+  fi
+fi
+
+# pushover exits nonzero on a real send failure; under set -e that skips the
+# marker touch -- correct, since a FAILED explicit ping must not suppress the
+# quiet-check backstop (which is then the delivery of record for this stop).
+"$SELF/../notify/pushover" "$msg" "unseamless: needs you" 1
+touch "$marker"

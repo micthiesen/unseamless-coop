@@ -306,6 +306,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
 | `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read STATE → brief Michael and wait, no auto-start and no machine-state audit; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
 | `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
+| `notify-human "<reason>"` | high-priority Pushover push to Michael's phone — run once when *stopping*: done, giving up, or blocked on something only he can do (see "Away Notifications" below). Same-stop dedup vs the fleet-quiet backstop ping; fails soft without keys. |
 
 Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
 it" true: closing the Alacritty window detaches but does not kill the session, and the CC session
@@ -373,6 +374,64 @@ makes stop-and-restart cheap:
   up). It never auto-starts work — Michael may continue Next, run `/next`, or do something else
   entirely. Restarting the orchestrator is therefore three motions: `/wrap` → kill the session →
   `orch-start`, with the new session landing oriented but idle.
+
+## Away Notifications (Pushover)
+
+Michael gets a push on his phone when the fleet **stops needing to run without him** — the
+orchestrator finished or gave up, a session is blocked on a permission prompt, or everything has
+gone quiet. Three layers, from precise to guaranteed (all in `scripts/notify/`, plus
+`scripts/fleet/notify-human`):
+
+1. **Explicit — `scripts/fleet/notify-human "<one-line reason>"`.** The orchestrator runs this
+   once when it's *stopping* — work done, giving up, or blocked on something only Michael can do
+   (rig/Deck/in-game validation, a judgment call) — never for progress updates. High-priority push
+   with a real reason — this is the message you *want* to receive. Its `.human-notified` marker
+   gives layer 3 **same-stop dedup**: the generic "fleet quiet" ping is skipped when the fleet's
+   last activity falls within `HUMAN_GRACE_SECS` (default 5 min) of the marker — a grace band
+   that absorbs the pinging turn's own tail (remaining tool calls, wrap-up commits, the Stop
+   hook). Honestly stated: a short work burst that starts *and* settles inside that band is also
+   absorbed; work that settles later pings normally. Concurrent explicit pings are allowed (set
+   `NOTIFY_HUMAN_RATE_SECS` > 0 to opt into a minimum gap), and a *failed* explicit push doesn't
+   write the marker, so the backstop still covers that stop. Model-dependent, hence layers 2–3.
+   Deliberately the ONLY layer agents are told about (one CLAUDE.md bullet); layers 2–3 are pure
+   infrastructure and stay agent-invisible.
+2. **Blocked-on-approval — the `Notification` hook** (`scripts/notify/notification-hook`). A
+   permission request means a session is stuck on Michael right now → immediate push, rate-limited
+   to one per session per 10 minutes. The per-session 60s idle nag is deliberately ignored (that
+   signal is aggregated fleet-wide by layer 3 instead).
+3. **Fleet-quiet backstop — hook sensors + a polling decider.** Claude Code hooks in
+   `.claude/settings.json` (inherited by every session launched in the repo or a rift workspace:
+   orchestrator, workers, solo workers) write per-session `busy`/`idle` state files to
+   `$UNSEAMLESS_FLEET_DIR/state/activity/` via `scripts/notify/activity-hook`. The
+   `unseamless-quiet-check` systemd **user timer** runs `scripts/notify/quiet-check` every 30s and
+   pushes **once** when every tracked session is idle and has been for ≥2 minutes (debounce covers
+   normal worker→orchestrator `msg` wake gaps; new work re-arms it). The quiet epoch is a
+   **monotonic high-water mark** of observed activity (persisted), so tearing down a worker after
+   a ping can't re-ping the same stop, and work by a session that later dies without a `Stop`
+   still re-arms the next one. A freshly opened session that never ran a turn is tracked but not
+   counted, so it can't trigger a "work stopped" push by itself, and a failed Pushover send is
+   retried on the next tick rather than dropped. The decider is a poller, not a pure hook chain,
+   for one reliability reason: a session killed mid-turn never fires its `Stop` hook, so stale
+   `busy` state must be cleared by cross-checking tmux liveness (`usc-*` keys, which also sweeps
+   the dead session's transcript stash) and by a 15-minute staleness cutoff (`PreToolUse`
+   refreshes the timestamp on every tool call, so a genuinely working session never goes stale).
+
+   The push **body** is enriched best-effort (the ping itself never depends on it): the `Stop`
+   hook stashes each session's `transcript_path`, and at push time quiet-check takes the last
+   assistant message of the lead session (`usc-orch` if tracked — the orchestrator narrates the
+   fleet — else the most recently active) and summarizes it to a one-liner via the local
+   **LM Studio** OpenAI-compatible server (`QUIET_LLM_URL`, default `127.0.0.1:1234`; model =
+   `QUIET_LLM_MODEL` or auto-picked as the first gemma in `/v1/models`; `QUIET_LLM_DISABLE=1`
+   turns it off). LM Studio down/slow → a raw truncated snippet of that message; no transcript →
+   the generic "fleet quiet: N sessions idle" line.
+
+**Setup (once per machine):** put keys in `~/.config/unseamless-notify/pushover.env`
+(`PUSHOVER_TOKEN`/`PUSHOVER_USER`, never committed), then run `scripts/notify/install` **from the
+main clone** (it copies the decider to `$UNSEAMLESS_FLEET_DIR/bin` — a stable path outside any
+worker workspace — and enables the timer; re-run it to roll out changes to `quiet-check`/
+`pushover`). Everything fails soft without keys, so hooks are inert on machines that don't want
+pushes. Claude Code only for now; a Codex sensor adapter can later hang off Codex's native
+`notify` config hook writing the same state files.
 
 ## Open Items
 
