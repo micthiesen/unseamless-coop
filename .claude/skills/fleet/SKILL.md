@@ -34,7 +34,7 @@ a branch you'd integrate) is always a `worker-new`, even if it's a single lane. 
 `worker-ls`, watchable by Michael, and integrate cleanly; a subagent is an invisible black box that
 can't be reviewed, watched, or merged. **Subagents remain valid only for *supporting* tasks that feed
 your own work and return findings, not a deliverable:** running tests, locating code (`Explore`),
-grep-and-summarize research, review swarms (`/ultracheck`, `check`). Litmus test: *would the result be a
+grep-and-summarize research, review agents (`/check`, `/tricheck`). Litmus test: *would the result be a
 branch you merge to `main`?* → worker; *just informing your own work?* → subagent is fine. (This is the
 orchestrator-specific override of the global "be aggressive about spawning subagents" guidance — here
 the aggression goes to workers for chunks, subagents only for support.)
@@ -84,11 +84,12 @@ prompt tells it to read first.
 - **What's serial** is already covered by the overlay (the worker knows to ask you for any
   rig/RE/validation), so you don't need to repeat it, but flag anything you already know it will
   need from the rig.
-- **The review depth** — say it explicitly if you want to override the default. By default a worker
-  **`/ultracheck`s its own lane before handoff** (see [Offload the review](#offload-the-review-to-workers)),
-  so you usually don't need to write anything; only add a line when you want to *downgrade* a trivial
-  lane to a single `check`, or up-front-flag a dimension to review hard (e.g. "ultracheck with a focus
-  on the FFI-unwind boundary").
+- **The review depth** — say it explicitly. Review here is light (see
+  [Review is light](#review-is-light-and-the-worker-owns-its-lane)): an **experiment** lane gets none, and a lane
+  landing something **solid** gets a light `/check` or `/tricheck`. If the lane is a plain experiment,
+  say "no review needed — experiment"; if it's solid, say `/check` or `/tricheck` and optionally name a
+  lens to weight (e.g. "`/tricheck`, one lens on the FFI-unwind boundary"). When you say nothing, the
+  worker judges by its lane per the default rule.
 
 Keep workers in genuinely independent lanes when you can. They *may* touch the same files (that's
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
@@ -192,29 +193,30 @@ scripts/fleet/msg usc-worker-<name> "/rc"
   busy → queued).
 - **Claude workers only.** A codex worker has no `/rc`; tell Michael that instead of sending it.
 
-## Offload The Review To Workers
+## Review Is Light, And The Worker Owns Its Lane
 
-**The deep per-lane review is the worker's job, not yours.** A worker `/ultracheck`s its own branch
-before handoff (its overlay makes that the default), applies the surviving findings, and tells you
-which review it ran in its done message. So you inherit a lane that's *already* been through a heavy
-fresh-context pass while its author still had full context — the best time to run one. Don't re-run a
-full `/ultracheck` on each incoming lane yourself; that's duplicated spend on work already reviewed.
+**Review here is light and rare — don't turn integration into a review gate.** Most lanes are
+experiments (RE probes, rig instrumentation, diagnostic levers) and get **no formal review**: the
+worker keeps the build green, eyeballs its diff, and says "no review — experiment" in its done message.
+You integrate those on the diff and the rig result, not a review.
 
-Choose intelligently, and lean on the workers:
-- **Trust the worker's `/ultracheck`** as the lane's deep review. At integration, glance at its diff
-  for fit and the done-message's review summary; only escalate to your own focused review if something
-  looks off, the lane is unusually load-bearing, or the worker says it ran only a light `check`.
-- **Downgrade in the brief when a lane is trivial** — a one-file mechanical change doesn't need the
-  swarm; tell that worker "a single `check` is enough" so it doesn't over-spend.
-- **Your heaviest pass is best spent *holistically*, after integration** — once several lanes are
-  merged, run one `/ultracheck` (or a rig validation) over the *combined* result to catch **cross-lane**
-  issues (interacting changes, duplicated helpers, contract drift) that no single-lane review could see.
-  That's the review only you can do; do it when the integrated surface is nontrivial, skip it when it's
-  a clean single lane.
+For a lane that lands **something solid**, the worker runs a light `/check` or `/tricheck` on its own
+lane before handoff — while it still has full context, the best time — and names which it ran. So:
 
-Net: workers cover *within-lane* depth in parallel; you cover *cross-lane* integration review once, and
-only when it's worth it. (Subagent reviewers — `check` / `/ultracheck`'s swarm — are still fine as your
-*own* support when you do review; see the litmus test in the intro.)
+- **Trust the worker's own review** of a solid lane. At integration, glance at its diff for fit and read
+  the done-message's review note; only run your own `/check`/`/tricheck` on that lane if something looks
+  off or it's unusually load-bearing. Don't re-review a lane the worker already reviewed.
+- **Set the depth in the brief** (see [Writing a worker assignment](#writing-a-worker-assignment)): "no
+  review — experiment" for a probe lane, `/check` or `/tricheck` for a solid one.
+- **The review only *you* can do is the cross-lane one** — once several *solid* lanes are merged and
+  touch shared files (`diag.rs` / `features/mod.rs` / `config.rs`) or a refactor meets another lane's
+  additions, run **one `/tricheck` over the combined result** (or a rig validation) to catch interacting
+  changes, duplicated helpers, contract drift. Skip it when the integrated surface is trivial or
+  all-experiment.
+
+Net: workers eyeball or lightly review their own lanes; you spend a `/tricheck` only on a nontrivial
+integrated surface, in the background. (Subagent reviewers — `check` / `check-focused`, as `/tricheck`
+uses — are fine as your *own* support when you do review; see the litmus test in the intro.)
 
 ## Integrate A Worker's Branch
 
@@ -228,10 +230,11 @@ Fetches `worker/<name>` into `refs/fleet/<name>` and squash-merges it into your 
 **staged but uncommitted** so you write one clean commit. If your own tree is dirty it fetches only
 and prints the command to run after you commit/stash. On a genuine conflict it stops (exit 1) and
 tells you to resolve, `git add`, and `git commit` (`rerere` replays repeats; `git reset --merge`
-abandons). Then commit to `main` per the repo's commit conventions. The worker already deep-reviewed
-its own lane (see [Offload the review](#offload-the-review-to-workers)), so here just sanity-check the
-diff for fit; save a full `/ultracheck` for a *holistic* pass once multiple lanes are integrated, and
-(if appropriate) run the rig to validate the combined result.
+abandons). Then commit to `main` per the repo's commit conventions. Review is light here (see
+[Review is light](#review-is-light-and-the-worker-owns-its-lane)): for an experiment lane, just
+sanity-check the diff for fit; for a solid lane the worker already reviewed, glance at its diff and
+review note. Save a `/tricheck` for a *holistic* pass once multiple solid lanes are integrated, and (if
+appropriate) run the rig to validate the combined result.
 
 ## Tear A Worker Down
 
@@ -285,9 +288,9 @@ to continue Next, run `/next`, or do something else. (`--no-seed` skips it; a re
 1. You + Michael pick a lane -> `worker-new <name> "<guidance>"`.
 2. Worker builds, WIP-commits to `worker/<name>`, messages you for anything serial.
 3. You serve rig/RE requests in order and reply.
-4. Worker `/ultracheck`s its own lane, consolidates to one commit, signals done (naming the review it ran).
+4. Worker eyeballs an experiment lane (or lightly `/check`/`/tricheck`s a solid one), consolidates to one commit, signals done (naming the review it ran, or "none").
 5. `worker-integrate <name>` -> sanity-check the diff for fit -> commit to `main`.
-6. Once several lanes are in, run one *holistic* `/ultracheck` / rig validation over the combined result if warranted.
+6. Once several solid lanes are in, run one *holistic* `/tricheck` / rig validation over the combined result if warranted.
 7. `worker-rm <name>`.
 
 ## Gotchas

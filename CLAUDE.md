@@ -126,12 +126,18 @@ ones). A fresh orchestrator started via `scripts/fleet/orch-start` is auto-seede
 that reads STATE.md and **briefs Michael, then waits** — it never auto-starts work or audits machine
 state first. Full contract: [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) > "Session Continuity".
 
-**Ultracheck after each holistic chunk.** When a meaningful, self-contained chunk of work is done
-(a feature wired end to end, a subsystem, a refactor), run `/ultracheck` on it before moving on,
-then apply the surviving findings. Do **not** carve work into smaller pieces to fit this cadence —
-larger holistic chunks review better than a trickle of fragments, so build the whole coherent thing
-first, then ultracheck the lot. (Unlike the global stacking workflow, we ship one chunk per commit
-to `main`, so the ultracheck happens per-chunk, not per-PR.)
+**Review is light here — match it to the work.** Most of what happens in this repo is *experiments*:
+RE probes, rig instrumentation, throwaway drivers, diagnostic levers. **Experiments get no formal
+review** — keep the build green (`cargo build`, `scripts/test-core.sh`, `cargo clippy --release -- -D
+warnings`), eyeball the diff, ship. Minor bugs and rough edges are fine; they get corrected when
+noticed, and a broken experiment costs a rig cycle, not a user. Don't slow the iteration loop with
+review ceremony. When you land something **solid into the mod** (a real feature or subsystem, wired end
+to end), run a *light* review before moving on: **`/check`** (one agent) for a small, localized change,
+or **`/tricheck`** (three agents — general + two focused lenses) for something larger or logic-heavy.
+Run it in the background so you keep working, and apply the surviving findings. That's the whole ladder:
+**eyeball → `/check` → `/tricheck`**. Build the whole coherent thing first, then review the lot — don't
+carve work up to fit a review cadence. (We ship one chunk per commit to `main`, so the review, when
+warranted, happens per-chunk.)
 
 **Ship a capability, then sweep its usage + align docs.** A recurring pattern Michael wants: when you
 land a new capability (a guide engine, a choice modal, an overlay surface), follow up by *sweeping where
@@ -176,11 +182,13 @@ is [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The always-on rules:
 - **Chunks go to fleet workers, never `Agent`/`Task` subagents.** The litmus test: *would the
   result be a branch you'd merge to `main`?* → fleet worker (visible, watchable, integrable —
   even for a single lane). *Just informing your own work* (running tests, `Explore`, research,
-  review swarms)? → a subagent is fine. (This overrides the global "be aggressive about spawning
+  review agents)? → a subagent is fine. (This overrides the global "be aggressive about spawning
   subagents" for chunks; that aggression goes to workers here.)
-- **Review split:** a worker `/ultracheck`s its own lane before handoff; the orchestrator doesn't
-  re-deep-review each lane and spends its heaviest pass *holistically* on the integrated,
-  cross-lane result (`fleet` skill > "Offload The Review To Workers").
+- **Review split:** review is light here (see "Review is light here" above). An experiment lane
+  needs no review — the worker eyeballs it and says so. A worker landing something *solid* runs a
+  light `/check` or `/tricheck` on its own lane before handoff and names which (or "none — experiment");
+  the orchestrator doesn't re-review each lane, and for a nontrivial *integrated* cross-lane surface it
+  runs one `/tricheck` over the combined result (`fleet` skill > "Review Is Light, And The Worker Owns Its Lane").
 - **Orchestrator only — ping Michael's phone when stopping:** run
   `scripts/fleet/notify-human "<one-line reason>"` once when you're done, giving up, or blocked on
   something only he can do; never for progress updates or per-worker milestones.

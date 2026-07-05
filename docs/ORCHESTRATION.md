@@ -96,8 +96,8 @@ worker, never an `Agent`-tool subagent, even for a single lane. A worker is visi
 watchable by the human, branch-isolated, and integrated through the normal review path; a subagent is an
 invisible black box that produces no integrable branch and can't be watched or reviewed. Subagents stay
 valid only for **supporting** tasks that feed the orchestrator's own work and return *findings, not a
-deliverable*: running tests, locating code (`Explore`), grep-and-summarize research, review swarms
-(`/ultracheck`, `check`). Litmus: *would the result be a branch merged to `main`?* → worker; *just
+deliverable*: running tests, locating code (`Explore`), grep-and-summarize research, review agents
+(`/check`, `/tricheck`). Litmus: *would the result be a branch merged to `main`?* → worker; *just
 informing your own work?* → subagent. This is the orchestrator-specific override of the global "spawn
 subagents aggressively" guidance.
 
@@ -218,27 +218,27 @@ The only path code reaches `main`:
 This is why "workers never commit" is really "workers never commit **to `main`**": git's 3-way
 merge and `rerere` need commits to operate on, so workers must commit to their own branch.
 
-### Ultracheck happens here, per lane
+### Review happens here — light, and only when warranted
 
-`CLAUDE.md`'s "ultracheck after each holistic chunk" maps onto the fleet as **one ultracheck per
-lane, run by the orchestrator at integration** — each lane *is* the holistic chunk and lands as its
-own squashed commit. **Workers do not run `/ultracheck`** (a full swarm nested in a rift workspace is
-wasteful and reviews a stale base); they run a *lighter* one-shot `check` self-review before
-reporting done (see [roles/worker.md](roles/worker.md)). The orchestrator then:
+Review in this project is deliberately light (CLAUDE.md > "Review is light here"). Most lanes are
+*experiments* — RE probes, rig instrumentation, diagnostic levers — and get **no formal review**: the
+worker keeps the build green, eyeballs its diff, and says "no review — experiment" in its done message.
+The orchestrator integrates those on the strength of the diff and the rig result.
 
-- Reviews each lane **rebased onto current `main`** (so it sees interactions with already-landed
-  lanes), not the worker's original fork point.
-- Scales depth to the lane: a full `/ultracheck` swarm for logic-heavy lanes; a single `check` agent
-  is enough for trivial or already-rig-verified ones. Apply surviving findings before the commit.
-- After the whole wave lands, runs **one final seam pass** focused on the cross-lane integration
-  points (shared files like `diag.rs` / `features/mod.rs` / `config.rs`, and any refactor that meets
-  another lane's additions) — the class of bug per-lane review structurally can't catch.
+For a lane that lands **something solid** (a real feature or subsystem), the worker runs a light
+`/check` or `/tricheck` on its own lane before handoff and names which. The orchestrator then:
 
-**Always run review agents in the background** (`Agent` with `run_in_background: true`) — every
-`/ultracheck` swarm and every standalone `check`. A review can take minutes; blocking on it stalls
-the whole fleet. Kick it off, keep serving workers and rig requests, and collect the findings when
-the task notifies you. The squash-merge stays staged-not-committed meanwhile, so nothing lands until
-you've read the review.
+- Glances at each lane's diff **rebased onto current `main`** (so it sees interactions with
+  already-landed lanes) for fit; it does **not** re-review a lane the worker already reviewed.
+- For a nontrivial *integrated* surface — several solid lanes touching shared files (`diag.rs` /
+  `features/mod.rs` / `config.rs`) or a refactor meeting another lane's additions — runs **one
+  `/tricheck` over the combined result**. That cross-lane pass is the review only the orchestrator can
+  do; skip it when the integrated surface is trivial or all-experiment.
+
+**Run any review in the background** (`Agent` with `run_in_background: true`, or `/tricheck` which
+backgrounds its agents). A review can take minutes; blocking on it stalls the fleet. Kick it off, keep
+serving workers and rig requests, collect the findings when it notifies you. A squash-merge you want to
+gate on a review stays staged-not-committed meanwhile, so nothing lands until you've read it.
 
 ### Follow-up deltas, lockfiles, and acks
 

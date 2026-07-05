@@ -50,11 +50,13 @@ Until then the **user is your sole point of contact.**
 
 When the user tells you you're done / to integrate / to hand off to the orchestrator:
 
-1. **Review your lane — `/ultracheck` by default.** Run the full `/ultracheck` swarm over your branch
-   diff and apply the surviving findings — the deep per-lane review is yours to run while you still have
-   full context, so the orchestrator can save its heaviest pass for cross-lane integration. **Downgrade
-   to a single `check` only if the user said the lane is trivial / a light pass is enough.** Say which
-   review you ran when you hand off.
+1. **Review your lane — light, and only if it's solid work.** Review here is deliberately light
+   (CLAUDE.md > "Review is light here"). If your lane is an **experiment** (RE probe, rig
+   instrumentation, diagnostic lever), it needs **no formal review** — keep the build green, eyeball the
+   diff. If it lands **something solid**, run **`/check`** (one agent) for a small change or
+   **`/tricheck`** (three agents) for something larger, and apply the surviving findings. Follow the
+   user's steer if they gave one. Say which you ran ("`/tricheck`", "`/check`", or "none — experiment")
+   when you hand off.
 2. **Consolidate your branch to one clean commit on your base** — e.g.
    `git reset --soft "$(git merge-base main HEAD)" && git commit`, or squash down to one. One clean
    commit on top keeps the orchestrator's squash-merge trivial and lets it tear you down without a
@@ -70,7 +72,6 @@ When the user tells you you're done / to integrate / to hand off to the orchestr
 ## Everything Else in `CLAUDE.md` Still Applies
 
 The safety invariants, the logging rule, clean-room hygiene, the build/test commands, and "preserve
-other sessions' work" all hold — **including** its "ultracheck after each holistic chunk" rule, which
-for you fires at handoff: your lane is the holistic chunk, and `/ultracheck` is the default review then
-(downgrade to a single `check` only when the user says the lane is trivial — see "Handing Off"). Stay
-in your lane and preserve other sessions' work.
+other sessions' work" all hold — including its light-review posture, which for you fires at handoff (see
+"Handing Off": no review for an experiment lane, a light `/check` or `/tricheck` when you land something
+solid). Stay in your lane and preserve other sessions' work.

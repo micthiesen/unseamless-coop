@@ -56,18 +56,19 @@ cleaner the recipe, the sooner your values come back.
 
 ## When You Finish Or Get Blocked
 
-**Before you report done, `/ultracheck` your lane.** Run the full `/ultracheck` swarm over your branch
-diff and apply the surviving findings — this deep pass is yours to run, while you still have full
-context on the lane (the orchestrator won't repeat it per-lane; it saves its heaviest review for
-cross-lane integration). **Only downgrade to a single `check` if your assignment explicitly said one is
-enough** (a trivial lane). Either way, **state in your done message which review you ran** so the
-orchestrator knows the depth it's inheriting.
+**Review is light — match it to your lane (CLAUDE.md > "Review is light here").** If your lane is an
+**experiment** (an RE probe, rig instrumentation, a diagnostic lever — most lanes are), it needs **no
+formal review**: keep the build green, eyeball your diff, done. If your lane lands **something solid**
+(a real feature or subsystem), run a light review on it before handoff — **`/check`** (one agent) for a
+small change, **`/tricheck`** (three agents) for something larger or logic-heavy — and apply the
+surviving findings while you still have full context. Follow whatever your assignment's review line
+says; if it says nothing, use this rule. **State in your done message which you ran** ("`/tricheck`",
+"`/check`", or "none — experiment") so the orchestrator knows what it's inheriting; it won't re-review
+your lane, only the cross-lane integration.
 
 Then **consolidate your branch to one clean commit on your base** (above) and message the
 orchestrator: done (with a one-line summary + which review you ran) or blocked (with why). Do **not**
 tear yourself down; the orchestrator manages your lifecycle and integrates your branch.
 
 Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
-hygiene, the build/test commands, **including** its "ultracheck after each holistic chunk" rule: your
-lane *is* that holistic chunk, so `/ultracheck` it before handoff (downgrade to `check` only when the
-brief says the lane is trivial). Stay in your lane and preserve other sessions' work.
+hygiene, the build/test commands. Stay in your lane and preserve other sessions' work.
