@@ -41,23 +41,29 @@ Last updated: **2026-07-05** (★★★ CLIENT EMITTER CONNECTION BUILT two-mach
 host `player=2`.** The emitter connection is built and both machines are stable — the last gap is that the
 client's emitter phase machine doesn't advance past the initial wait and the host never answers with init-data.
 
-- **What to do:** instrument the client phase machine (phase-step `0x1423ffc60`, endpoint-build `0x142401110`
-  → `member+0x130`, type-5 send `0x142400df0`, `GetAuthSessionTicket` slot 14) to find WHERE it parks; and work
-  out how the two *real* connection objects exchange the connect handshake — the synthetic 14B SYN probe
-  (`game-p2p`) was only a diagnostic to trip admit, it is **not** the emitter's real handshake, and the host
-  rejects it at admit gate-c. Full stall-B/C instrument map: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★
-  CLIENT-JOIN AIM SHEET" (stall modes + addresses).
-- **Why this / why now:** the emitter — the months-long blocker — now exists and is crash-free; the only thing
-  between us and a real 2-player session is getting the two connections to actually run the handshake to the
-  type-5. Confirm: phase reaches the type-5 send → host `BeginAuthSession` validates → `member+0x152=1` →
-  `players=2` → client visible in-world.
-- **Shape (decided by /next, 2026-07-05):** two parallel tracks. (1) A **delegable static charting lane**
-  (spawned): chart the client emitter phase machine's advancement mechanics, the host's init-data send path
-  (what the host sends a pending member and what triggers it), and which of the 8 DLNW3D message types form
-  the real connect handshake — output = a "STALL-B HANDSHAKE AIM SHEET" section in SESSION-DRIVE.md. (2) The
-  **serial orchestrator track**: wire the stall-B instrument map into `session_probe.rs` and run the
-  two-machine confirm (no human needed). Watch the client's self-identity `container+0x7f8` (stays `0` with
-  the bit-2-OR lever — fine for reaching `Client`, but the type-5 remote-peer branch may read it).
+- **★ Static charting DONE (2026-07-05, integrated `ec411a6`) — the stall-B picture is CORRECTED:** there are
+  **TWO phase machines** sharing one per-tick driver (`0x1423fb684`), and `WaitInitData` is the **SESSION**
+  machine (state `SessionSteam+0x3cc`) parking on the host's init-data at INIT gate `0x1423fbe10` — one level
+  ABOVE the member endpoint/type-5 machine the old map targeted (that machine is gated on `session+0x3cc==2`
+  and cannot fire first). **The host moves first**, but its session send phases (type-6 `0x1423ff2e0` +
+  enumerate/push) need a real joiner `SteamConnection` created by the **3 P2P socket callbacks**
+  (`0x1423f84a0`/`8420`/`8620`) — `drive_add_peer` only builds the identity handle. Real sequence: transport
+  connect → types 1/2/6 (session establish, host-first) → type-5 (member auth). Full map:
+  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE AIM SHEET".
+- **What to do (serial, orchestrator):** wire the aim sheet's **B0** probes (client `session+0x3cc` state, INIT
+  gate `0x1423fbe10`, wait handler `0x1423fb900`, pending-conn span `session+0x4f0..4f8`) + **B1** probes (host:
+  do the 3 P2P socket callbacks fire when the Deck connects? does the pending-conn span grow?) into
+  `session_probe.rs`, then run the two-machine confirm. **B1 is the decision fork:** callbacks never fire ⇒ the
+  Deck's transport connect isn't reaching the host's DLNW3D socket (transport problem, upstream of the
+  session); callbacks fire but no send ⇒ chase the host send phases (B2).
+- **Why this / why now:** the emitter — the months-long blocker — exists and is crash-free; the only thing
+  between us and a real 2-player session is the session-establish exchange (init-data), now precisely charted.
+  Confirm chain: joiner connection lands on the host → host sends init-data → client `session+0x3cc==2` →
+  member machines run → type-5 both ways → `players=2` → client visible in-world.
+- **Watch item (latent, not the stall):** client self-identity `[[member+0x58]+0x7f8]==0` under the bit-2-OR
+  lever misroutes the client's **self** member (classified remote) once the session establishes — routes fine
+  for the remote/host member. Fix candidates: set `+0x7f8` directly alongside the bit-2 OR (not the crashing
+  handler), or special-case the self member. See aim sheet Task 5.
 
 ## Candidates Not Chosen
 
