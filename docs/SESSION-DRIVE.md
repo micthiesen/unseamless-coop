@@ -3156,3 +3156,40 @@ even run?) and **B4-c** (where does the host's tag-0 handler bail?).
   (`fc400→faa00→fcfc0→fcdd0→fce00`) and pins the connect call `0x142401e80` + the `+0x5a8/+0x12` flag.
 - Connection objects live in `session+0x4f0..+0x4f8` (looked up by `0x1423fbd80`); the event ring is a
   separate structure at `session+0x578..+0x590`. Do not conflate the two queues.
+
+### ▶ RIG RESULT (2026-07-05 night, run 5) — ★★★ THE CLIENT CONNECT RUNS; the wall is the connect's TARGET
+
+B4 wired + run two-machine. **The B4-a fork resolved to the DOWNSTREAM branch on the client:** the state-4
+phase chain walks all the way through (`phase-fcfc0` #0 → `phase-fcdd0` #1 → **`★ CLIENT-CONNECT-INIT #0`
+0x142401e80** fires), so the client DOES reach and run its transport-connect. And on the host, **`★
+TAG1-CONNSTATUS 0x1423fe350` FIRES** (the real connection-creator: host-accept + add-peer) — farther than
+any prior run. Yet `players` stays 1, the client's `pending_conn_span` stays 0, and it still times out.
+
+**So both walls are past their entry gates; the remaining fault is the connect's ARGUMENT/target, charted
+statically from the connect-init body `0x142401e80`:**
+```
+push rbx; sub rsp,0x20; mov rbx,rcx            ; rcx = session+0x5a8 (the embedded connect object)
+lea rcx,[0x143b48a00]; call SteamInternal_ContextInit   ; resolve the Steam user context
+mov rcx,[rax]; mov rax,[rcx]; call [rax+0x40]  ; iface = ctx[0]; call iface_vtable[0x40] (the "connect")
+call 0x1423f4fa0
+xor edx,edx; lea rcx,[rax+0x3c]; call 0x141eba0f0
+mov byte [rbx+0x12], 0                          ; clear the completion flag UNCONDITIONALLY
+```
+Two load-bearing facts this pins:
+1. **The completion flag lives at `session+0x5ba`** (the connect object is embedded at `session+0x5a8`, not
+   a pointer — the poll now reads it inline, and dumps `+0x5a8..+0x5c8`). It's cleared unconditionally at
+   the END of connect-init regardless of whether the connect succeeded, so `flag==0` only means
+   "connect-init ran," NOT "connected" — **it is not a success signal.** (Run 5 read `0xaa`/`0x??` because
+   the old deref-based read was wrong; fixed.)
+2. **`iface_vtable[0x40]` takes NO peer argument in this frame** — the connect target must already live in
+   the context/iface or in the embedded `+0x5a8` object. The likely fault: our synthesized/joined session
+   never populated the host's identity where `[rax+0x40]` reads it, so the client "connects" to nothing and
+   emits no DLNW3D frames, so the host's tag-1 handler (which DID fire, from our own probe's earlier
+   traffic) finds no real inbound connection to promote.
+
+**NEXT:** dump `connect_obj[+0x5a8..+0x5c8]` on the client (added to the poll) — if the host SteamID64 /
+target is absent or zero there, that's the missing wire. Chart what WRITES `session+0x5a8` on a real joiner
+(who populates the connect target from the join blob) and whether `0x143b48a00`'s iface is even the P2P
+transport vs a stubbed offline context. Also: `iface_vtable[0x40]` — resolve which ISteamNetworking* method
+that slot is, to know what "connect" is actually attempting. (tag0-bail hook: the on-disk `je` is NEAR
+`0F 84`, not rel8 — prologue guard corrected; it was refused, not mis-hooked, in run 5.)

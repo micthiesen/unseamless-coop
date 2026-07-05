@@ -1053,9 +1053,10 @@ const TAG1_HANDLER_OFFSET: usize = 0x1_423f_e350 - 0x1_4000_0000;
 /// connection lookup `0x1423fbd80`). Mid-function — hooked only under the prologue guard below.
 /// rax==0 here = d560 bailed on "no existing connection for this peer" (B4-c).
 const TAG0_BAIL_OFFSET: usize = 0x1_423f_e52a - 0x1_4000_0000;
-/// Charted bytes at [`TAG0_BAIL_OFFSET`]: `48 85 C0` = `test rax,rax`, `74` = the `je` opcode (rel8
-/// target left unpinned). Mid-function hook ⇒ guard or skip, per the legb-finalize precedent.
-const TAG0_BAIL_PROLOGUE: [u8; 4] = [0x48, 0x85, 0xC0, 0x74];
+/// Charted bytes at [`TAG0_BAIL_OFFSET`]: `48 85 C0` = `test rax,rax`, `0F 84` = the NEAR `je`
+/// (rel32 target left unpinned; run 5's guard refusal showed the on-disk form is near, not rel8).
+/// Mid-function hook ⇒ guard or skip, per the legb-finalize precedent.
+const TAG0_BAIL_PROLOGUE: [u8; 5] = [0x48, 0x85, 0xC0, 0x0F, 0x84];
 
 /// One-shot latches for the B4 entry tracers (log the first few fires each, then quiet).
 static CONNECT_INIT_LOGS: AtomicU32 = AtomicU32::new(0);
@@ -1172,15 +1173,12 @@ fn poll_stall_b_session(session_alive: bool) {
         )
     };
     let span = end.saturating_sub(begin);
-    // B4-a: the connect-completion flag `[(session+0x5a8)+0x12]` — cleared by the connect-init
-    // 0x142401e80 when the transport connect completes. 0xff = the +0x5a8 object is absent.
-    // SAFETY: same live-session guard as above; one guarded pointer chase then a byte read.
-    let conn_obj = unsafe { ((session + 0x5a8) as *const usize).read_volatile() };
-    let connect_flag: u32 = if conn_obj != 0 {
-        u32::from(unsafe { ((conn_obj + 0x12) as *const u8).read_volatile() })
-    } else {
-        0xff
-    };
+    // B4-a (corrected run 5): the `+0x5a8` connect object is EMBEDDED in the SessionSteam (the
+    // connect-init's rcx was literally session+0x5a8), so the completion flag is the byte at
+    // session+0x5ba — no deref. The connect-init body clears it unconditionally (`mov byte
+    // [rbx+0x12],0` at 0x142401eaf).
+    // SAFETY: same live-session guard as above; in-bounds byte reads on the embedded object.
+    let connect_flag = u32::from(unsafe { ((session + 0x5a8 + 0x12) as *const u8).read_volatile() });
     let packed = (state as u64) | ((state2 as u64) << 32);
     let prev_state = LAST_SESSION_STATE.swap(packed, Ordering::Relaxed);
     let prev_span = LAST_PENDING_SPAN.swap(span, Ordering::Relaxed);
@@ -1188,11 +1186,16 @@ fn poll_stall_b_session(session_alive: bool) {
     if prev_state == packed && prev_span == span && prev_flag == connect_flag {
         return;
     }
+    // Dump the embedded connect object on change — if a per-peer connect target (e.g. the host's
+    // SteamID64) is supposed to live here and it's all zero, the vt[0x40] connect had no target.
+    // SAFETY: 0x20 in-bounds bytes of the live SessionSteam.
+    let obj: Vec<u8> =
+        (0..0x20).map(|i| unsafe { ((session + 0x5a8 + i) as *const u8).read_volatile() }).collect();
     log::info!(
         "session-probe: stall-B poll — session={session:#x} state(+0x3cc)={state} state2(+0x3d0)={state2} \
-         pending_conn_span={span:#x}B (~{} ptrs) connect_flag(+0x5a8.+0x12)={connect_flag:#x} — state 2 = \
-         ESTABLISHED; span 0 = no connection ever landed; connect_flag 0 = the transport connect COMPLETED \
-         (0xff = no +0x5a8 object)",
+         pending_conn_span={span:#x}B (~{} ptrs) connect_flag(+0x5ba)={connect_flag:#x} \
+         connect_obj[+0x5a8..+0x5c8]={obj:02x?} — state 2 = ESTABLISHED; span 0 = no connection ever \
+         landed; connect_flag 0 = connect-init ran to completion",
         span / 8,
     );
 }
