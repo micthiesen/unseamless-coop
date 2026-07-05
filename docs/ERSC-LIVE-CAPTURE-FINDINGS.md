@@ -55,6 +55,15 @@ Messages are read from `conn+0x130` (the endpoint) via the holder API `0x14203f2
 sequence of these types culminating in **type 5**, all produced by the peer's own connect flow. Re-dump
 anytime with `dump-session-ref.py` (host-local) / push it to the Deck (needs `scan-vtable.py` next to it).
 
+**Resolved handler methods** (types 3-8 = `SessionMemberSteam` vtable `0x1431fa978` slots; types 1-2 =
+`[member+0x60]` session-back vtable slots `0x20`/`0x28`): t3=`0x142400dd0`, t4=`0x142400de0`, **t5 token
+validator=`0x142402ee0` (slot 17)**, t6=`0x142402ec0`, t7=`0x142400da0`, t8=`0x142400db0`. **Type-5 payload
+shape** (from the validator `0x142402ee0`): the pump first reads the **8-byte token** (→ `member+0x148`),
+then the validator reads a **4-byte length (must be 1..0x400)** + that many **blob** bytes and processes them
+against the member identity (`member+0x80`). So a type-5 message = `{8B token, 4B len, len·blob}` — a real
+peer-produced handshake payload, not a trivially-forgeable packet. This is the concrete thing a driven
+joiner's connect flow must emit (or that we'd relay) to complete the host's member.
+
 ## Method
 
 - **Rig** ran the user's real ERSC stack (restored via `rig.sh restore`), hosting, password `salmon`.
