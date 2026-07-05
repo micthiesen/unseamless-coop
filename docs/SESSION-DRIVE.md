@@ -2657,5 +2657,245 @@ offsets `+0x18/+0x20/+0x24` off that object.
   `crates/eldenring/src/cs/network_session.rs`, `crates/eldenring/src/cs/net_man.rs`,
   `crates/eldenring/src/rva/bundle.rs` (the full callable-RVA list).
 - Probe scaffold: [`coop/session_probe.rs`](../crates/unseamless-coop/src/session_probe.rs).
-</content>
-</invoke>
+
+## ★ STALL-B HANDSHAKE AIM SHEET (2026-07-05, static)
+
+Static RE (clean `eldenring.exe`, capstone/PyGhidra; behavioral notes in our own words) charting the
+DLNW3D connect handshake so the orchestrator can complete stall B on the rig. Cross-checked against the
+two reference dumps (`~/Documents/ersc-session-ref-{host,client}.txt`) and the 8-type protocol in
+[ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "★★ REFERENCE DUMP #2". Load-bearing
+conclusions first.
+
+### ▶ TL;DR — the single biggest correction
+
+**There are TWO phase machines sharing one driver, and stall B (`WaitInitData`) is the SESSION machine
+parking — one level ABOVE the per-member endpoint/type-5 machine the previous stall-B map targeted.** The
+old map (phase-step `0x1423ffc60`, endpoint-build `0x142401110`, type-5 `0x142400df0`) is all *member*
+machine; the client never gets there because the *session* machine hasn't reached "established". So the
+instrument focus moves up a level.
+
+1. **One per-tick driver, two machines.** The session update fn **`0x1423fb684`** (rcx=`SessionSteam`,
+   rdx=frame-arg) does, every tick, in order:
+   - `if [session+0x3cc]==5: skip` (5 = tearing down);
+   - **`0x1423ffd00(session)`** — run the **SESSION** phase machine one step;
+   - iterate the **pending-conn queue** `[session+0x4f0 .. +0x4f8]` and for each entry call
+     **`0x1424007e0([entry])`** — the per-connection **pump**, which drains received DLNW3D messages then
+     tail-calls `0x1423ffd00(member)` to run that **MEMBER** phase machine one step.
+
+   Both machines use the same store/runner pair: **store `0x1423ffc60`** writes the next phase fn into the
+   object's embedded phase-holder (`[[[obj+0x18]]+0x10]+8`) and sets `obj+0x50=1` (the "re-run now" bit);
+   **runner `0x1423ffd00`** calls the current phase fn in a loop *while* `obj+0x50` low byte is set. A phase
+   that tail-calls the store chains synchronously to the next; a phase that just `ret`s (no store) leaves
+   `obj+0x50` clear ⇒ the loop exits and the machine **PARKS** on that phase, re-entered next tick. This is
+   why "waiting" phases look like plain `ret`s.
+
+2. **The park is the SESSION machine, gated on the host's init-data.** The session phases run on
+   `SessionSteam` (state at **`+0x3cc`**, secondary at **`+0x3d0`**; dumps show `+0x3cc=2 +0x3d0=2` on a
+   live session). The initial session phase **`0x1423fc9a0`** gates on **`session_vtable[0x120]`
+   (`0x1423fbe10`)**, which returns `session+0x48 > [phaseblock+0x10]` — i.e. "have we received past the
+   expected stream position yet?" While that's true it forwards to the **wait handler
+   `session_vtable[0x118]` (`0x1423fb900`)**, which latches a status code at the phase-block and drops into
+   waiting phases (`0x1423fc400` / `0x1423fc8e0` / `0x1423fc920`) that spin on `session+0x3d0` and the
+   phase-block state until more bytes arrive. **The bytes are the host's session init-data.** No host
+   init-data ⇒ session stays `+0x3cc != 2` ⇒ `WaitInitData` forever, exactly the observed stall.
+
+3. **The member/type-5 machine is downstream of session-established and cannot even start first.** The
+   member phase **`0x142400f40`** and the type-2 receive handler **`0x1423fb590`/`0x1423fb5e0`** both gate on
+   **`session+0x3cc == 2`**. Until the SESSION machine reaches state 2, the member machine bails its
+   forward phases (to `0x142400ef0`) and never builds `member+0x130` or sends the type-5. So on the current
+   two-machine baseline, aiming probes at `0x142401110`/`0x142400df0` will show *nothing firing* — correct,
+   but it's a symptom, not the wall. **Instrument the SESSION machine first.**
+
+4. **Who moves first: the HOST.** The joiner's session machine only *waits*; the host's session machine
+   *sends* the init-data over the connection once it has one. The type-5 is the LAST step (a Steam-ticket
+   auth), never the first. So stall B is not "the client fails to send type-5" — it's "the host never sends
+   the joiner its init-data, because the host has no real joiner connection object to send over" (our
+   synthetic 14B SYN was rejected at admit gate-c, which is the wrong door — see "★ JOINER-ADMIT" above).
+
+### Task 1 — the client emitter/member phase machine, charted
+
+The per-member machine runs on the `SessionMemberSteam` (vtable `0x1431fa978`; the pump reads/writes
+`member+0x148`/`+0x152` = the completion token/flag). Phase graph (each phase tail-calls the store with its
+NEXT, or `ret`s to PARK). Verified transitions from the on-disk phase bodies:
+
+- **`0x142401110` EP_BUILD** — builds the transport endpoint into **`member+0x130`**: sets `member+0x144=1`,
+  calls `member_vtable[0x68]` (`0x142402e10`) to construct an `MTInternalThreadSteamConnection` (the
+  `0x142400a20/a40/a30/a50` method table matches the live endpoint dump), stores it at `member+0x130` via
+  `0x14203ef70`. Then: **built (`member+0x130 != 0`) → phase `0x142401280`**; **failed → `member+0x144=0`,
+  phase `0x142400ef0`**.
+- **`0x142401280` EP_CHECK** — `member+0x144==2 → phase 0x1424003a4` (terminal via `member_vtable[0x38]`);
+  else if `member+0x141==0 && member+0x144!=0` and `member_vtable[0x60]()` (`0x142400b90`, an
+  endpoint-ready predicate) returns true → phase `0x142400ef0`; **else `ret` = PARK** (re-checks readiness
+  each tick).
+- **`0x142400ef0` SELF_CHECK** — the self-vs-remote branch (see task 5): derives an id from `member+0x80`
+  (peer SteamID64, via `0x141eba220`) and compares it to the self-identity read by **`0x1423faf20`
+  (`= [[member+0x58]+0x7f8]`)**. **equal (self) → phase `0x142401430`** (self-member roster path);
+  **not equal (remote) → phase `0x1424003bc`** (`jmp member_vtable[0x50]` = `0x142401840`, the remote path
+  that ultimately drives EP_BUILD→SEND_T5).
+- **`0x142401400` SEND_T5** — calls the type-5 builder **`0x142400df0`**; **sent → phase `0x1424013a0`**;
+  **not → phase `0x142400ef0`** (retry).
+- **`0x1424013a0` POST_T5** — `member+0x152 != 0` (completion latched by an incoming validated type-5) →
+  phase `0x1424003ac` (terminal); else re-arm via `member_vtable[0x60]` or **`ret` = PARK** waiting for the
+  peer's type-5 to be validated.
+
+**The type-5 send (`0x142400df0`), confirmed:** writes `[5]`, then the 8-byte token from
+**`[member+0x60]+0x548`** (= `SessionSteam+0x548`, the per-session nonce set by the readiness deep-check
+`0x1423faf60` at `[sess+0x548] = sess+0x48 / divisor`), then calls `member_vtable[0x70]` which serializes a
+`GetAuthSessionTicket` blob, and sends via `0x1424006a0`. Wire = `[5][8B token][4B len][ticket]`, matching
+REFERENCE DUMP #2.
+
+**So the answer to "what advances the member machine":** received DLNW3D messages on `member+0x130`
+(drained by the pump before each member step) plus the local readiness predicates
+(`member_vtable[0x60]`/`[0x68]`). But **all of that is downstream of `session+0x3cc==2`** — the member
+forward phases (`0x142400f40`) refuse to proceed until the session is established. **What the client is
+waiting for at `WaitInitData` is not a member-level packet at all; it is the SESSION machine's init-data
+from the host.**
+
+### Task 2 — the SESSION machine + the host's init-data send path
+
+The SESSION machine (state `SessionSteam+0x3cc`) walks: **`0x1423fc9a0`** (INIT, gate `0x1423fbe10`) →
+`0x1423fc870` → `0x1423fc8e0` → `0x1423fc920` → the vtable-dispatched steps `0x1423fa9dc`(=`vt[0x80]`
+`0x1423fc870`), `0x1423ff0e0`(=`vt[0x90]`), `0x1423ff360`(=`vt[0xa8]`), etc., with the wait handler
+`0x1423fb900` (`vt[0x118]`) as the park target. Milestones along the walk:
+
+- **`0x1423fc400`** sets `session+0x3cc = 4` and arms a timeout (`session+0x48 + 0x1388`) — a "connecting,
+  waiting for peer" state.
+- **`0x1423ff0e0`** requires the phase-block state `== 8`, then reads a config double and writes the
+  **`session+0x568` resolver** (dumps: `resolver[+0x568]=0x18600003cc1b569`) — session-key material derived
+  once enough handshake data has arrived.
+- **`0x1423fc8e0`/`0x1423fc920`** gate on `session+0x3d0` reaching `2` and `session_vtable[0x120]`
+  (`0x1423fbe10`) going false — the "init-data fully received" condition. Passing them is what lets the
+  session reach `+0x3cc==2` (established), which unblocks every member's `0x142400f40`.
+
+**The host's SEND side.** The same session machine, on the host, drives the *send* phases (they read the
+Steam interface singletons `0x143b489d0`/`0x143b489e8` and the resolver `session+0x568`):
+
+- **`0x1423ff2e0`** — looks up the connection via `0x1423fbd80` and, if present, **sends a type-6 message**
+  (`byte=6` → `0x1424006a0`), then advances to `0x1423fca80`. If no connection, it aborts via
+  `session_vtable[0x110]`. This is the shape of "host pushes a session control message to the joiner over
+  the joiner's connection."
+- **`0x1423fe640` / `0x1423fecb0`** — enumerate peers via the Steam networking interface
+  (`vt[0x88]` = count, `vt[0x90]` = get-nth, keyed by `session+0x568`) and push per-peer data. These are the
+  host's "send init-data to each member" phases.
+
+**The trigger:** the host's session machine only enters these send phases once it *has a connection object
+for the joiner*. The host holds a pending member from `drive_add_peer 0x1423fdc80`, but `add_peer` builds
+the member's *identity handle* (it formats `member+0x80` into a name string via `0x14012cbd0`, using the
+Steam-friends interface `0x143b489d0`) — it does **not** by itself create the transport `SteamConnection`
+the session send needs. That connection is created by the DLNW3D socket receive path (the 3 Steam P2P
+callbacks `0x1423f84a0`/`0x1423f8420`/`0x1423f8620` registered during readiness), when the joiner's *real*
+connect arrives. **So the host moves first only after a real joiner P2P connection lands and populates the
+pending-conn queue; then its session machine's send phases push init-data, and the joiner's session machine
+consumes it and leaves `WaitInitData`.**
+
+### Task 3 — the real connect handshake sequence (both connection objects → type-5)
+
+Reconstructed from the two machines + the 8-type protocol. "First move" is the transport/session layer, NOT
+the member type-5:
+
+1. **Transport connect.** Joiner's DLNW3D socket (built by the join's readiness alloc) opens a Steam P2P
+   connection to the host by SteamID64. The host's registered P2P callbacks accept it, create a
+   `SteamConnection` (`+0x138 = peer SteamID64`) under the live `SteamConnectionManager`, and enqueue a
+   pending entry on **`session+0x4f0..+0x4f8`**. **This is the door the synthetic 14B SYN could not open**
+   (it hit admit gate-c `0x142640ecd`, which the live capture shows rejects even in real ERSC — wrong
+   path). The right path is the socket-callback connection creation, not `0x142640e30`.
+2. **Session init-data (host → joiner).** With the connection present, the host's SESSION machine runs its
+   send phases (`0x1423ff2e0` type-6, then the enumerate/push phases) to stream session config + member
+   list + the resolver seed to the joiner. On the joiner, these arrive and advance the joiner's SESSION
+   machine past the `0x1423fbe10` gate → `session+0x3d0→2` → `session+0x3cc→2` (**established**). This is the
+   step whose absence == `WaitInitData`.
+3. **Member endpoints (both sides).** Now `session+0x3cc==2` unblocks `0x142400f40`; each side's member
+   machine runs EP_BUILD `0x142401110` (fills `member+0x130`), EP_CHECK, SELF_CHECK (`0x142400ef0`).
+4. **Type-5 auth exchange.** Each side's *remote* member reaches SEND_T5 `0x142401400`→`0x142400df0` and
+   sends `[5][8B nonce][4B len][GetAuthSessionTicket]`. The peer's pump case-5 (`0x142400924`) calls
+   `member_vtable[0x88]` = **`0x142402ee0` (`BeginAuthSession`)** validating against `member+0x80`; on
+   accept it sets `member+0x148=token`, `member+0x152=1` (**complete**), and POST_T5 `0x1424013a0` promotes
+   the member into the `players` roster. The dumps confirm the symmetry: each side's remote member ends
+   `(+0x130=endpoint, +0x148=token set, +0x152=1)`, each side's self member `(+0x130=0, +0x152=0)`.
+
+**Which receive path consumes what:** session control (init-data) is delivered by the pump's **type-1**
+(`0x1424008bb` → `[member+0x60]->vt[0x20]` = `SessionSteam` `0x1423fab30`) and **type-2**
+(`0x1424008ca` → `[member+0x60]->vt[0x28]` = `SessionSteam` `0x1423fb590`, an 8-byte value → connection
+lookup `0x1423fbd80`) handlers — these feed the SESSION machine. The **type-5** (`0x142400924`) feeds the
+member auth. So the handshake is: **types 1/2/6 (session establish, host-first) → then type-5 (member auth,
+each side)**. The previous work jumped straight to type-5; the missing middle is the session-establish
+exchange.
+
+### Task 4 — extended stall-B instrument map (what the orchestrator should wire)
+
+All probes read-only, latched (`AtomicBool`), panic-firewalled, like the existing `session_probe.rs`
+probes. Ordered by decision value; the first block replaces the old "Stall B" block, which pointed at the
+wrong (member) machine.
+
+**B0 — SESSION machine state (the actual park). Wire these FIRST:**
+- **`session+0x3cc`** (dword) polled once/sec on the client's `SessionSteam`: the session state. `!= 2`
+  confirms the session never established (expected). Watch it walk `1 → 4 → 2`; if it sticks at 4, the
+  client is in "connecting, awaiting init-data".
+- **`0x1423fbe10` entry** (session `vt[0x120]`, the INIT gate): read `rcx+0x48` (`session+0x48`, the
+  receive/position counter) and the compared threshold `[[[rcx+0x18]]+0x10]+0x10`. **counter <= threshold
+  (returns 0) ⇒ would advance; counter > threshold (returns 1) ⇒ still waiting.** On the stalled client the
+  gate should keep returning 1 (or never be re-driven) → confirms no init-data received.
+- **`0x1423fb900` entry** (session `vt[0x118]`, wait handler): log the status `rdx` (the packed code, e.g.
+  `0x8104020200000000` / `0x8100000400000000`) — tells you *which* wait the session is stuck in.
+- **`0x1423fb684` entry** (the session tick): confirm it fires each frame on the client's session AND log
+  the pending-conn queue span `[session+0x4f0]==[session+0x4f8]`. **Empty span ⇒ no connection ever
+  arrived** (the host-first transport connect never landed) — this is the likeliest true wall.
+
+**B1 — does the host produce a real joiner connection? (host side):**
+- **`0x1423fdc80` (`drive_add_peer`) exit**: confirm the pending member is created and read its
+  `member+0x80` (must == the joiner's real SteamID64). But note add_peer only builds the *identity handle*,
+  not the transport connection.
+- **The 3 P2P socket callbacks `0x1423f84a0` / `0x1423f8420` / `0x1423f8620` entry** (registered by the
+  host's session readiness): **did any fire on the host when the Deck connected?** If none fire, the Deck's
+  transport connect isn't reaching the host's DLNW3D socket at all (a transport-layer problem upstream of
+  the session), and no `SteamConnection`/pending entry is created → the host's session send phases never
+  run → the joiner waits forever. This is the highest-value host probe.
+- **Host `session+0x4f0..+0x4f8`** span growing to 1 entry == the joiner connection landed; then watch the
+  host session enter the send phases below.
+
+**B2 — host send phases (only meaningful once B1 shows a connection):**
+- **`0x1423ff2e0` at `0x1423ff333`** (just before the `byte=6` `0x1424006a0` send): the host is pushing a
+  type-6 session message to the joiner. Latch to confirm the host actually sends.
+- **`0x1423fe640` / `0x1423fecb0` entry**: the host's enumerate-and-push init-data phases running.
+
+**B3 — member/type-5 (only after `session+0x3cc==2`; keep from the old map but gate expectations):**
+- **`0x142401110` (EP_BUILD)**: read `member+0x130` after — nonzero == endpoint built. Expect NOTHING here
+  until B0 shows `session+0x3cc==2`.
+- **`0x142400df0` (SEND_T5) entry** + **`member_vtable[0x70]`/slot-14 `GetAuthSessionTicket` return**
+  (`conn+0x158` handle; 0 ⇒ Steam auth not ready).
+- **`0x142402ee0` (host `BeginAuthSession`) entry/exit**: 4-byte len in `1..0x400`, result 0 or 2 =
+  accept; and the client-member `member+0x80` must equal the joiner's real SteamID64.
+
+### Task 5 — watch item: client self-identity `[[member+0x58]+0x7f8] == 0`
+
+**Confirmed the self-identity is read on the handshake path, and the 0 is a latent (not stall-B) bug.** The
+self-vs-remote branch **`0x142400ef0` (SELF_CHECK)** reads self-identity via **`0x1423faf20`**, which is
+literally `mov rax,[rcx+0x7f8]; mov [rdx],rax` — it returns `[[member+0x58]+0x7f8]` (`member+0x58` = the
+container's `ManagerImplSteam` sub-object `S`). It compares that to the id derived from `member+0x80`:
+
+- For the **remote** member (host, `member+0x80` = host SteamID → nonzero derived id): `nonzero != 0` ⇒
+  **remote branch**, which is CORRECT even with `+0x7f8==0`. So the bit-2-OR lever's `+0x7f8==0` does **not**
+  misroute the remote peer, and is **not** the cause of stall B.
+- For the client's **own self** member (Deck, `member+0x80` = Deck SteamID → nonzero derived id): with
+  `+0x7f8==0`, `nonzero != 0` ⇒ the self member is **misclassified as remote** → it would run EP_BUILD +
+  SEND_T5 toward itself instead of the self-roster path `0x142401430`. This is a **real** bug the bit-2-OR
+  lever introduces, but it only bites *after* `session+0x3cc==2` (SELF_CHECK is downstream of
+  session-established, same gate as `0x142400f40`), so it is **latent behind stall B**, not its cause.
+
+**⇒ Recommendation:** clearing stall B needs the session-establish exchange (tasks 2/3), independent of
+`+0x7f8`. But before relying on the member machine post-establish, the client's self-identity
+`[[member+0x58]+0x7f8]` must be set (the establish handler `0x1423f4870` sets it — but that handler is the
+one that crashes the joiner ~30s later; see the RIG RESULT above). So either (a) set `+0x7f8` directly
+alongside the bit-2 OR without the full handler, or (b) accept that with `+0x7f8==0` the client's self
+member will misroute and plan to special-case it. Probe: read `[[member+0x58]+0x7f8]` at `0x142400ef0`
+entry on the client's self member to confirm it's 0 and that the branch takes the remote path.
+
+### Cross-references
+
+- Member phase machine + type-5 send side: "★ CLIENT-JOIN AIM SHEET" (above) — this section *corrects* its
+  framing that the whole `0x1423fc9a0…0x142401400` walk is one machine (it is two: session `0x1423fc9a0…`,
+  member `0x142401110…`) and moves the stall-B focus up to the session machine.
+- 8-type protocol + type-5 completion: [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) >
+  "★★ REFERENCE DUMP #2"; live graphs `~/Documents/ersc-session-ref-{host,client}.txt`.
+- Wrong-door admit: "★ JOINER-ADMIT" (above) — the transport admit `0x142640e30`/gate-c is not the joiner
+  path; the socket-callback connection creation is.
