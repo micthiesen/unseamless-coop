@@ -342,6 +342,17 @@ pub struct DebugProbes {
     /// slot). Fires only on the host. Off by default.
     pub force_gatec_accept: bool,
 
+    /// **EXPERIMENTAL rung-3 accept-unmask** (2026-07-05, run-3 lever). On the HOST role, skip the
+    /// transport-standup probe's own `AcceptP2PSessionWithUser` so an inbound peer's first P2P packet
+    /// raises the game's `P2PSessionRequest` event instead of being silently pre-accepted by us. The
+    /// run-2 two-machine result showed the game registers its real P2P callbacks
+    /// (`0x1423fd550/560/570`, observed via the registrar hooks) but they NEVER fire — the leading
+    /// suspect is that our probe's early Accept eats the session request the game's callback dispatch
+    /// needs. With this on, watch `p2p-evt-*` on the host: a fire = the game's own accept door works
+    /// (and may create the joiner connection itself); still nothing = those callbacks aren't
+    /// session-request handlers. Joiner-inert. Off by default.
+    pub host_skip_p2p_accept: bool,
+
     /// **EXPERIMENTAL rung-3 joiner-member driver** (2026-07-05). Drive the session-layer add-peer entry
     /// `0x1423fdc80` directly on the host, for the two-machine peer's SteamID64, once the host session is
     /// established. The 2026-07-05 chart + two-machine run proved the joiner-member is added by the session

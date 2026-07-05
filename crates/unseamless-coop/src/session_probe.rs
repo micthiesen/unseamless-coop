@@ -2623,9 +2623,14 @@ pub struct TransportStandupDriver {
     /// Symmetric-peer mode: send the DLNW3D SYN even as host role (both peers send, so both worker threads
     /// receive and both pumps build the other's endpoint). See `symmetric_peer` in config.
     symmetric: bool,
+    /// Host-side accept-unmask: skip our own `AcceptP2PSessionWithUser` on the host role so the peer's
+    /// first packet raises the game's `P2PSessionRequest` event for its registered callbacks
+    /// (`0x1423fd550/560/570`) instead of being pre-accepted by us. See `host_skip_p2p_accept` in config.
+    skip_accept: bool,
 }
 
 impl TransportStandupDriver {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         peer_a: u64,
         peer_b: u64,
@@ -2633,6 +2638,7 @@ impl TransportStandupDriver {
         suppress_drain: bool,
         drive_add_peer: bool,
         symmetric: bool,
+        skip_accept: bool,
     ) -> Self {
         Self {
             built: false,
@@ -2647,6 +2653,7 @@ impl TransportStandupDriver {
             add_peer_throttle: FrameThrottle::every(60),
             add_peer_logged: false,
             symmetric,
+            skip_accept,
         }
     }
 
@@ -2939,6 +2946,17 @@ impl TransportStandupDriver {
             return; // no linked peer and no usable override yet
         };
         let iface = self.iface;
+        // Accept-unmask: the host role leaves the inbound session un-accepted so the game's own
+        // P2PSessionRequest callback dispatch (the registered 0x1423fd5xx callbacks) sees the request.
+        let unmask = self.skip_accept && self.is_host;
+        if unmask && !self.accepted {
+            self.accepted = true; // never accept on this machine
+            log::info!(
+                "session-probe: game-p2p — host accept-unmask ON: NOT calling AcceptP2PSessionWithUser; \
+                 the peer's first packet should raise P2PSessionRequest for the game's registered \
+                 callbacks (watch p2p-evt-*)"
+            );
+        }
         let do_accept = !self.accepted;
         let do_ping = self.ping_throttle.tick();
         let seq = self.ping_seq.wrapping_add(1);
@@ -3124,6 +3142,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.instrument_host_accept,
             config.debug.probes.drive_add_peer,
             config.debug.probes.symmetric_peer,
+            config.debug.probes.host_skip_p2p_accept,
         )));
     }
     if config.debug.probes.session_probe {
