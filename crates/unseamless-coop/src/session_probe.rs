@@ -433,6 +433,11 @@ static FABRICATE_SLOT_ARRAY: AtomicBool = AtomicBool::new(false);
 /// drives the rung-3 role too, exactly as it drives the rung-2 side-channel role. `off` (solo / manual)
 /// falls back to the explicit flags so the solo host workflow (seed `drive_create=true`) is unchanged.
 fn rung3_role(config: &Config) -> (bool, bool) {
+    // Symmetric-peer mode: BOTH machines take the host role (create+establish, no join). The asymmetric
+    // join path conflicts with the establish-built session and crashes the joiner (docs/SESSION-DRIVE.md).
+    if config.debug.probes.symmetric_peer {
+        return (true, false);
+    }
     match config.debug.auto_session {
         AutoSession::Host => (true, false),
         AutoSession::Join => (false, true),
@@ -2306,10 +2311,20 @@ pub struct TransportStandupDriver {
     add_peer_throttle: FrameThrottle,
     /// Log the drive only on the first fire + on result changes (avoid spamming the re-fire throttle).
     add_peer_logged: bool,
+    /// Symmetric-peer mode: send the DLNW3D SYN even as host role (both peers send, so both worker threads
+    /// receive and both pumps build the other's endpoint). See `symmetric_peer` in config.
+    symmetric: bool,
 }
 
 impl TransportStandupDriver {
-    fn new(peer_a: u64, peer_b: u64, is_host: bool, suppress_drain: bool, drive_add_peer: bool) -> Self {
+    fn new(
+        peer_a: u64,
+        peer_b: u64,
+        is_host: bool,
+        suppress_drain: bool,
+        drive_add_peer: bool,
+        symmetric: bool,
+    ) -> Self {
         Self {
             built: false,
             iface: 0,
@@ -2322,6 +2337,7 @@ impl TransportStandupDriver {
             drive_add_peer,
             add_peer_throttle: FrameThrottle::every(60),
             add_peer_logged: false,
+            symmetric,
         }
     }
 
@@ -2619,6 +2635,7 @@ impl TransportStandupDriver {
         let seq = self.ping_seq.wrapping_add(1);
         let suppress_drain = self.suppress_drain;
         let is_host = self.is_host;
+        let symmetric = self.symmetric;
         let mut accepted_ok = false;
         // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
         // each slot below is a documented method with the win64 signature transmuted here. Buffers are
@@ -2677,14 +2694,16 @@ impl TransportStandupDriver {
             // one-shot: the first reaches the host's admit path 0x142640e30; if the host creates a
             // connection, later ones match it and feed it (0x142643db0) instead. Send on channel 30 (the
             // channel the host worker drains), never our probe channel 0.
-            if !is_host && do_ping {
+            // In symmetric-peer mode BOTH peers send the SYN (each worker receives, each pump builds the
+            // other's endpoint); otherwise only the non-host (joiner) sends.
+            if (!is_host || symmetric) && do_ping {
                 let mut syn = [0u8; 14];
                 syn[0] = 0x0e;
                 syn[1] = 0x40;
                 let ok = send(iface, peer, syn.as_ptr(), syn.len() as u32, P2P_SEND_RELIABLE, GAME_WORKER_CHANNEL);
                 log::info!(
-                    "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to host {} on channel {GAME_WORKER_CHANNEL} = {ok} \
-                     (trips host-admit 0x142640e30 — the channel the host worker drains)",
+                    "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to peer {} on channel {GAME_WORKER_CHANNEL} = {ok} \
+                     (trips the peer's host-admit 0x142640e30 + feeds its pump — the channel the worker drains)",
                     unseamless_core::diagnostics::peer_tag(peer),
                 );
             }
@@ -2795,6 +2814,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             do_create, // host role = the create driver's machine
             config.debug.probes.instrument_host_accept,
             config.debug.probes.drive_add_peer,
+            config.debug.probes.symmetric_peer,
         )));
     }
     if config.debug.probes.session_probe {

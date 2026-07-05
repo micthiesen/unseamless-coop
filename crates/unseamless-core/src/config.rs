@@ -353,6 +353,17 @@ pub struct DebugProbes {
     /// docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
     pub drive_add_peer: bool,
 
+    /// **EXPERIMENTAL rung-3 symmetric-peer mode** (2026-07-05). Both machines act as host-style peers:
+    /// each builds its own session graph via the establish path (`drive_establish_handler`), each
+    /// `drive_add_peer`s the *other*, and each SENDS the DLNW3D SYN so both worker threads receive and both
+    /// per-frame pumps build the other's member endpoint (`member+0x130`). This replaces the asymmetric
+    /// `drive_join` path, which conflicts with the establish-built session (rig-observed 2026-07-05: the
+    /// joiner ran both establish AND join, tore its session down, then crashed on the null session object at
+    /// `eldenring.exe+0x3f4860`). With this on, `rung3_role` forces both machines to the host role
+    /// (create+establish, no join) and the transport sends the SYN regardless of `is_host`. Set on BOTH
+    /// machines. Off by default. See docs/SESSION-DRIVE.md > "Next" (joiner side).
+    pub symmetric_peer: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

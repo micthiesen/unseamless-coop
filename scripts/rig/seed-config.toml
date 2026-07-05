@@ -191,6 +191,12 @@ drive_add_peer = true      # rung-3 JOINER-MEMBER driver (2026-07-05): host-side
                            # so we post it ourselves: pop an empty member, set member+0x80 = Deck SteamID, enqueue on
                            # the pending-conn queue; the game's per-frame pump drives its handshake. Host-only; watch
                            # `drive-add-peer` + member+0x80. See docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
+symmetric_peer = true      # rung-3 SYMMETRIC-PEER mode (2026-07-05): both machines are host-style peers — each
+                           # builds its session via establish, each drive_add_peers the OTHER, and each SENDS the
+                           # DLNW3D SYN so both worker threads receive and both pumps build the other's endpoint.
+                           # Replaces the asymmetric drive_join (which conflicts with the establish-built session and
+                           # crashes the joiner at eldenring.exe+0x3f4860). Set on BOTH machines (forces host role,
+                           # no join). See docs/SESSION-DRIVE.md > "Next" (joiner side).
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether
