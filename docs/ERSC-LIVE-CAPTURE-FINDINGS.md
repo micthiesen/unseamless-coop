@@ -4,6 +4,57 @@ What a **real, working 2-player ERSC co-op session** looks like in memory, captu
 first time we've observed a *successful* session establishment (rather than our offline attempts), and
 it corrects two load-bearing wrong beliefs that drove months of offline work.
 
+## ★★ REFERENCE DUMP #2 (2026-07-05) — both sides, mirrored graph + the full handshake protocol
+
+A second capture dumped the **entire transitive session graph on BOTH machines** (host + client) with
+`scripts/re/dump-session-ref.py`. Raw dumps (persistent, uncommitted):
+`~/Documents/ersc-session-ref-{host,client}.txt`. The load-bearing facts (ground truth for driving the
+joiner):
+
+**Roles = FSM state only; the member graph is symmetric + mirrored.** Host `lobby_state=3`, client
+`lobby_state=6`, both `protocol=6`, both `players=2`. BOTH machines have the full graph (1 `SessionSteam`,
+6 `SessionMemberSteam`, 2 `SteamConnectionManager`, 1 `SteamServiceImpl`, 3 `ManagerImplSteam`). The graphs
+**mirror**: each side's **remote-peer** member holds the built endpoint; each side's **self** member has
+`+0x130=0`:
+- Host: `member[5]`=host self (`+0x130`=0, flags `(1,1,0,0)`), `member[4]`=Deck (`+0x130`=endpoint, token
+  `+0x148` set, flags `(0,0,1,0)`).
+- Client: `member[4]`=Deck self (`+0x130`=0, flags `(0,1,0,0)`), `member[5]`=host (`+0x130`=endpoint, token
+  `+0x148` set, flags `(1,1,1,0)`).
+
+**`players` roster (`CSSessionManager`):** `[G+0x78]..[G+0x80]`, **0x100-byte entries**, the peer's
+SteamID64 at **`player+0x10`**. Both machines: player[0]=host, player[1]=Deck. (This roster is what a
+completed member gets promoted into.)
+
+**Endpoint (`member+0x130`) = `MTInternalThreadSteamConnection` (vtable `0x143277750`), wiring:**
+`+0x8`=peer index, `+0x18`=**the transport context** (`MTInternalThreadSteamSocket`), `+0x20`/`+0x28`=method
+callbacks (`0x142400a20`/`0x142400a40`), `+0x50`=back-ptr to its member. The endpoint's `+0x18` context ==
+the live **`SteamConnectionManager`'s `context` (`connmgr+0x48`)**, and that connmgr's connection span
+(`+0xb8..+0xc0`, 1 entry) holds a **`SteamConnection`** whose **`+0x138` = the peer SteamID64**. So:
+`member+0x130` endpoint → `+0x18` context → connmgr → `SteamConnection(+0x138 peer id)`. That's the full
+session↔transport link.
+
+**★ The completion token (`member+0x148`) is a per-connection NONCE, not static.** It changed across
+rejoins (`0xc36620a9908` → `0xc36620ea430`) and differs per side. It arrives **in the type-5 message** — so
+a fabricated type-5 needs the peer's live token; you can't precompute it. (⇒ the completion must come from
+the real peer handshake, not a synthesized packet.)
+
+**★ The DLNW3D connect protocol — the per-connection pump's 8 message types** (pump `0x1424007e0`,
+`buf[0]`=type, jump table `0x1424009f8`; `conn`=rdi, `conn+0x60`=session-back sub-object). Charted from the
+case bodies (behavioral, our own words):
+| type | case | effect |
+|---|---|---|
+| 1 | `0x1424008bb` | `conn->[+0x60]->vtable[0x20]()` — notify session-back |
+| 2 | `0x1424008ca` | read 8B; `conn->[+0x60]->vtable[0x28](&val)` — deliver an 8B value to session-back |
+| 3 | `0x142400908` | `conn->vtable[0x78]()` |
+| 4 | `0x142400916` | `conn->vtable[0x80]()` |
+| **5** | `0x142400924` | read 8B token; `conn->vtable[0x88](&token)` validate → **`conn+0x148`=token, `conn+0x152`=1 (COMPLETE)** |
+| 6 | `0x14240096a` | `conn->vtable[0x90]()` |
+| 7 | `0x142400978` | `conn->vtable[0x98](&reader)` |
+| 8 | `0x14240098b` | `conn->vtable[0xa0]()` (adjacent `0x142400a0`) |
+Messages are read from `conn+0x130` (the endpoint) via the holder API `0x14203f250`. So a real connect is a
+sequence of these types culminating in **type 5**, all produced by the peer's own connect flow. Re-dump
+anytime with `dump-session-ref.py` (host-local) / push it to the Deck (needs `scan-vtable.py` next to it).
+
 ## Method
 
 - **Rig** ran the user's real ERSC stack (restored via `rig.sh restore`), hosting, password `salmon`.

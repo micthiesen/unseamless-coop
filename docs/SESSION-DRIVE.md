@@ -273,6 +273,50 @@ long enough to finish); (b) chart the real DLNW3D connect message sequence (the 
 dispatches, esp. the type that sets `+0x152`) and drive/relay it. This is the final mile: everything up to a
 persistent, roster-promoted joiner member now works.
 
+### ★★★ ERSC CAPTURE #2 (2026-07-05) — both sides build the graph (mirrored); asymmetry = FSM state only
+
+A second live ERSC capture (rig host + Deck client, standalone ptrace, verified on BOTH machines) answered
+the host/client design question and root-caused both the crash and the handshake completion. **Verified
+facts (the member graph read on both machines directly, not just one):**
+
+- **The roles are asymmetric in FSM state ONLY:** host = `lobby_state=3` (Host), client = **`lobby_state=6`**
+  (a distinct client-in-session state), both `protocol=6` `players=2`.
+- **★ BOTH sides build the full DLNR3D session graph — it is SYMMETRIC at the member/transport layer.** Each
+  machine has 1 `SessionSteam`, 6 `SessionMemberSteam`, 2 `SteamConnectionManager`, 1 `SteamServiceImpl`, 3
+  `ManagerImplSteam`. (An earlier "client has no `SessionSteam`" reading was a **tooling bug** — `capture-
+  endpoint.py` shells out to `scan-vtable.py`, which was pushed to the Deck under a different filename, so its
+  scan silently returned empty. Re-scanned with the right path: the client has the whole graph.)
+- **★ The graphs are MIRRORED.** On each side, the **remote-peer** member carries the fully-built endpoint and
+  the **self** member does not:
+  - Host graph: `member[5]` = host self (`+0x130`=0, flags `(1,1,0,0)`), `member[4]` = the Deck with `+0x130`
+    = a live `MTInternalThreadSteamConnection`, flags `(0,0,1,0)`.
+  - Client graph: `member[4]` = client self (Deck; `+0x130`=0, flags `(0,1,0,0)`), `member[5]` = the RIG/host
+    with `+0x130` = a live `MTInternalThreadSteamConnection` (vtable `0x143277750`, `+0x8` idx=5, `+0x50`
+    back-ptr set), flags `(1,1,1,0)`, and the **8-byte token at member+0x148** = `0xc36620a9908`.
+  So the endpoint machinery (add-member, the pump, `member+0x130`) runs on BOTH sides — `symmetric_peer` was
+  right that both build endpoints.
+- **★ Completion = a type-5 DLNW3D message carrying the 8-byte token.** `watch-bt` on the member flags during
+  a rejoin caught `+0x152` set at the pump `0x142400961`, via `per-session update 0x1423fb690 → pump
+  0x1424007e0 → type-5 case 0x142400924`. The jump table (`0x1424009f8`) maps `buf[0]` type 1..8 to cases;
+  **type 5** reads an 8-byte token, validates it via `conn vtable[0x88]`, stores it at `member+0x148`, and
+  sets `+0x152=1`. Our 14-byte SYN (`buf[0]=0x0e`=14) is out of range → ignored, so it never completes. The
+  type-5 message is produced by the peer's **real connect handshake**.
+
+**⇒ CORRECTED read of the crash + plan.** The member graph is legitimately built on BOTH sides, so
+`symmetric_peer` building it on each machine is *correct*; the divergence is the **FSM state** — real ERSC is
+host `lobby_state=3` + client `lobby_state=6`, whereas `symmetric_peer` makes both `3`. The joiner crash was
+an **FSM conflict**: our joiner drove `drive_establish_handler` (pushing toward Host/3) AND `drive_join`
+(pushing toward Client/6) at once → teardown → null-session crash. The real client builds the *same* graph
+but **through the join flow**, landing at `lobby_state=6` and emitting the type-5 handshake as it goes.
+
+So the endgame is: **host = establish → `lobby_state=3` + `drive_add_peer` (builds the client member);
+client = join → `lobby_state=6` (builds the host member + emits the type-5 that completes the host's member,
+and vice-versa).** Both members complete when each receives the other's type-5. The open question is whether
+the client's join (`drive_join`, no `drive_establish` so the FSM doesn't fight) can reach `lobby_state=6`
+against our `drive_add_peer` host and emit that handshake — specifically whether it needs the host connection
+blob we previously bypassed (the blob-parse). `symmetric_peer` stays a proven diagnostic (both build endpoints
++ both stable) but isn't the shipping shape (it leaves both at `lobby_state=3` and sends no type-5).
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's

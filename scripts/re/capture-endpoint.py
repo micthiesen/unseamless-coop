@@ -54,10 +54,21 @@ def find_pid():
     return pids[0]
 
 
+def _scan_tool():
+    """Locate the scan-vtable helper next to us — accept scan-vtable.py OR sv.py (the name it's sometimes
+    pushed under to the Deck). Missing it silently returned empty and once caused a WRONG 'no SessionSteam'
+    reading — so fail loudly instead."""
+    for name in ("scan-vtable.py", "sv.py"):
+        p = os.path.join(HERE, name)
+        if os.path.exists(p):
+            return p
+    sys.exit(f"scan helper not found next to {HERE} (need scan-vtable.py or sv.py) — push it alongside")
+
+
 def scan_objects(vt):
     """Enumerate live objects with the given vtable via the committed scan-vtable.py (chunks the high heap)."""
     out = subprocess.run(
-        [sys.executable, os.path.join(HERE, "scan-vtable.py"), hex(vt)],
+        [sys.executable, _scan_tool(), hex(vt)],
         capture_output=True, text=True,
     ).stdout
     addrs = []
