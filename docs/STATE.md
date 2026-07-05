@@ -41,30 +41,25 @@ Last updated: **2026-07-04**.
 
 ## Next
 
-**Reproduce the member-add: drive the establish handler `0x1423f2820` with a live connection + the
-rung-4 peer present, and let it build the member (raw SteamID64 at `member+0x80`).** The live trace
-proved the member is added synchronously in that handler's chain (`0x1423f2820 → 0x1423f7070 add-member
-→ 0x1423fdf20 → 0x142400210 → +0x80`), driven by `update_step`, and that neither the standup nor the
-availability gate is the wall. So the next concrete step is to re-examine our own driven-establish
-attempts against this known-good chain:
+**Make the establish handler's builder pass — it's one descriptor field.** The 2026-07-05 rig run
+([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ REPRODUCTION") proved the driven establish handler
+`0x1423f2820` now passes every gate and **reaches the builder `0x142637440`**; the builder fails only
+because its socketmgr sub-init bails at **gate 3 (`[descriptor+8]==0`)** — the establish handler's local
+descriptor has `[+8]=0` offline where the real flow needs the `.text` fn-ptr **`0x1423f2d70`** (the value
+`land_socket_holder` hardcodes in its own *working* descriptor). `ADD-MEMBER` (new reach-hook) hasn't
+fired yet because the builder gates the `establish → session-create 0x1423f7070 → add-member 0x1423fdf20`
+chain.
 
-1. **Re-open driving `0x1423f2820` (establish handler)** with `stand_up_transport` + `land_socket_holder`
-   giving it a real connection, and the rung-4 peer SteamID64 available — the trace says the member-add
-   is *inside* this call, so if the connection is real enough, it should reach `0x1423fdf20` and write
-   `+0x80`. Watch the member registry `0x143dcd758` / a slot's `+0x80` on our side to see how far it gets.
-2. **Chart the gap** between what our stood-up connection provides and what `0x1423f7070`/`0x1423fdf20`
-   deref to build the member (the two handle objects at member `+0x70`/`+0x78`, and the peer SteamID
-   source). This is where our prior driven attempts bailed — now we know exactly what "success" writes.
+1. **Chart where `0x1423f2820` builds `&local`** (the builder's descriptor) — does `[+8]` copy from the
+   descriptor we hand it, or get set conditionally? Then seed/fix-up so `[&local+8]=0x1423f2d70`.
+2. **Run it:** the builder's sub-init should pass gate 3 → builder succeeds → the handler proceeds to
+   session-create → add-member. Watch the **`ADD-MEMBER` hook** + member registry `0x143dcd758` fire.
+3. **Fallback (path B):** if seeding `&local[+8]` is awkward, drive `session-create 0x1423f7070` +
+   `add-member 0x1423fdf20` directly on the `land_socket_holder` connection (the capture charted the chain).
 
-- **Why this / why now:** the capture killed the standup and availability-gate rabbit holes and showed
-  the member-add is a synchronous, reachable call chain we already partially drive. The reproduction
-  target is fully concrete (member layout + the writer chain), so this is drive-and-diff, not discovery.
-- **Plan:** [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture"
-  (the chain + member layout + reproduction target); [SESSION-DRIVE.md](SESSION-DRIVE.md) (the
-  establish-handler drive scaffolding, `drive_establish_handler` — previously "ruled out" on the
-  standup-null misdiagnosis, now re-open it against the real chain).
-- **Serial:** rig-owned (drive our mod + watch); the two-machine confirmation (roster → 2) needs the
-  Deck as peer 2, but the initial drive-and-chart is solo on the rig.
+- **Why this / why now:** we turned "the builder fails (Arxan mystery)" into "the builder's sub-init bails
+  on one null descriptor field, and we know the exact value it wants." That's a precise, testable wall.
+- **Serial:** rig-owned (drive + watch the `ADD-MEMBER` hook); two-machine roster→2 confirmation later.
 
 ## Candidates Not Chosen
 

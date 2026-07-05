@@ -359,6 +359,12 @@ static ESTABLISH_HANDLER_FN: AtomicUsize = AtomicUsize::new(0);
 /// `0x1423f2820` = `ManagerImpl@DLNR3D`'s connection-establish handler: `container->vtable[0x80]` builds
 /// the raw connection, `0x1423f7180` wraps it, it's stored at `[container+0x708]` + addref'd.
 const ESTABLISH_HANDLER_OFFSET: usize = 0x1_423f_2820 - 0x1_4000_0000;
+/// `0x1423fdf20` = `SessionSteam@DLNR3D` vtable slot 26, the **member-add**. The live writer-trace
+/// (ERSC-LIVE-CAPTURE-FINDINGS > "Writer-trace capture") proved a real join reaches this synchronously
+/// inside the establish-handler chain (`0x1423f2820 → 0x1423f7070 → 0x1423fdf20 → member ctor
+/// 0x142400210 → member+0x80 = peer SteamID64`). Hooked read-only so a DRIVEN establish shows whether it
+/// reaches the member-add — the reproduction milestone.
+const ADD_MEMBER_OFFSET: usize = 0x1_423f_df20 - 0x1_4000_0000;
 
 /// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
 /// `SocketManagerHolder@DLNR3D` around the standup connection and land it at `[container+0x708]` — the
@@ -491,6 +497,11 @@ fn install_create_gate_trace(config: &Config) {
     if prologue_ok("builder-entry", be, &BUILDER_ENTRY_PROLOGUE) {
         install_offset_hook("builder-entry", be, log_builder_entry);
     }
+    // add-member reach hook (the live-capture reproduction milestone): fires iff a driven establish
+    // reaches SessionSteam vt[26] 0x1423fdf20 — the synchronous member-add the writer-trace confirmed.
+    // Solo/offline it can only fire if our drivers reproduced the establish chain, so it's the "did we
+    // get there" signal. Read-only jmp-back (like leave-session/host-admit — no prologue guard).
+    install_offset_hook("add-member", exe_base + ADD_MEMBER_OFFSET, log_add_member);
     // Joiner connection-establish localizers (only meaningful with drive_join): the joiner's [G+0x28]
     // handle comes from the registry's connection-from-blob 0x1423f62e0; it returns 0 for our synthesized
     // host, stranding the joiner at TryToJoinSession. join-conn-entry confirms it's called + logs the blob;
@@ -625,6 +636,27 @@ fn log_leave_session(_name: &'static str, regs: *mut Registers) {
         log::info!(
             "session-probe: leave-session — 0x140cae730(this={this:#x}) lobby_state={lobby} caller={caller:#x} \
              (the game is ending the session; caller-ImageBase offset = caller-0x140000000)",
+        );
+    }));
+}
+
+/// add-member reach hook: `0x1423fdf20` = `SessionSteam@DLNR3D` vt[26]. Fires iff a driven establish
+/// reaches the member-add (the live-capture milestone). Logs the session (rcx), the two handle args
+/// (rdx/r8 = the future `member+0x70`/`+0x78`), and the caller so we can confirm it came via the
+/// establish-handler chain. Read-only.
+fn log_add_member(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: entry registers from ilhook; rcx = the SessionSteam, rdx/r8 = the two handle args,
+        // [rsp] = the return address. All reads bounded/null-guarded.
+        let r = unsafe { &*regs };
+        let session = r.rcx as usize;
+        let arg1 = r.rdx as usize;
+        let arg2 = r.r8 as usize;
+        let caller = if r.rsp != 0 { unsafe { (r.rsp as *const usize).read_volatile() } } else { 0 };
+        log::info!(
+            "session-probe: ★ ADD-MEMBER REACHED — 0x1423fdf20(session={session:#x}, arg1={arg1:#x}, \
+             arg2={arg2:#x}) caller={caller:#x} — a driven establish reached SessionSteam vt[26]; the \
+             member's +0x80 gets the peer SteamID64 (live-capture chain reproduced this far)",
         );
     }));
 }

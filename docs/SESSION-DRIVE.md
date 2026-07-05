@@ -65,7 +65,36 @@
 >    players in one another's world.
 >
 > ---
->
+
+## ★ REPRODUCTION (2026-07-05) — establish handler reaches the builder; wall = one descriptor field
+
+Post-capture, `drive_establish_handler` was re-opened (the "standup null" that shelved it was a probe
+artifact — ERSC-LIVE-CAPTURE-FINDINGS). Rig result (`drive_establish_handler` on,
+`drive_session_established` **off** so the handler owns the first `0x1423f4870` call, transport-standup +
+`land_socket_holder` on):
+
+- **The establish handler `0x1423f2820` now passes EVERY gate offline** — readiness gate `0x1423f5190`=1,
+  session-established gate2 `0x1423f4870`=1 — and **reaches the builder** (`vtable[0x80]` thunk `0x1423f46b0`
+  → `0x142637440`), with the config `0x143d87750` in hand. The gates we suspected are not the wall.
+- **The builder `0x142637440` fails at one spot.** Its body ≈ what `land_socket_holder` does by hand:
+  alloc `0x150` socketmgr → ctor `0x142638140` → **call socketmgr `vtable[8]` (the sub-init) with the
+  descriptor**, bail if it returns 0. The thunk `0x1423f46b0` tail-calls the builder with `rcx = &local`
+  (a stack local: `[&local+0] = config`), and the builder passes `&local` as the sub-init's descriptor.
+- **The sub-init bails at gate 3: `[descriptor+8]==0`** (STANDUP-NULL §1c). So `[&local+8]` is **0 offline**;
+  the real flow needs it = **`0x1423f2d70`** (a `.text` fn-ptr, the value `land_socket_holder` hardcodes in
+  its own *working* descriptor — which is exactly why the standalone socketmgr-init succeeds and the
+  builder's doesn't). Confirmed `0x1423f2d70` is a live `.text` target.
+- `ADD-MEMBER` (`0x1423fdf20`, the new reach-hook) did **not** fire — expected: the builder gates the whole
+  `establish → session-create 0x1423f7070 → add-member` chain, so a builder bail stops it before the member.
+
+**⇒ The wall is one field: the establish handler's local descriptor has `[+8]=0` offline instead of
+`0x1423f2d70`.** Next: chart where `0x1423f2820` builds `&local` (does it copy `[+8]` from the descriptor we
+hand it, or set it conditionally?), then either seed our descriptor so `[&local+8]=0x1423f2d70` or fix it up
+at the thunk — so the builder's sub-init passes gate 3 → builder succeeds → the handler proceeds to
+`session-create → add-member` (watch the `ADD-MEMBER` hook + member registry `0x143dcd758` fire). If the
+`&local[+8]` setup is awkward to seed, fall back to path B: drive `session-create 0x1423f7070 + add-member
+0x1423fdf20` directly on the `land_socket_holder` connection (the capture charted that chain).
+
 > ## STATUS (2026-07-04, DLNR3D reframe) — read this FIRST, it corrects the block below
 >
 > **The "member machinery is a runtime closure with no static function" conclusion below was partly wrong.**
