@@ -11,7 +11,7 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (host builds joiner endpoint; symmetric-peer crash fix; ERSC #2 architecture).
+Last updated: **2026-07-05** (/next: client-join confirmed as Next; static type-5-send/blob aim-sheet lane drafted).
 
 ## Now
 
@@ -67,6 +67,14 @@ Client/6) at once → teardown → null-session crash. Fix:
    `drive_add_peer` host — i.e. does it need the host connection blob we previously bypassed (the blob-parse)?
    That bypass is likely why the earlier join left the session incomplete. Two-machine verify: client join →
    host `member[4]` completes (`flags (0,0,1,0)`, `+0x148` token) → `players=2` → client visible.
+
+**Two-track (/next 2026-07-05):** the rig test above stays the serial headline; in parallel, a **static
+aim-sheet worker** (delegable) charts (a) the **type-5 SEND side** — capture #2 resolved only the receive/
+validate path (`0x1424007e0` → `0x142402ee0`); where the client's connect flow *builds and emits* the type-5,
+and what gates emission — and (b) the **minimal blob** the join inner `0x1423f62e0` → parser `0x1423fb260`
+accepts (SESSION-DRIVE #11–12 charted the fail branches), so the client can feed a real SteamID-only blob
+instead of `bypass_session_join_blob_gate`. Output = an aim sheet in SESSION-DRIVE.md: what to pre-wire
+before the rig run, where to instrument if the join stalls.
 
 - **Ground-truth reference (banked):** full both-sides transitive dumps at
   `~/Documents/ersc-session-ref-{host,client}.txt`; the mirror structure, endpoint→context→connmgr→
