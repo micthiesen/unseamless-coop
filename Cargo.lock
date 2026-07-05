@@ -156,7 +156,7 @@ dependencies = [
 [[package]]
 name = "eldenring"
 version = "0.14.0"
-source = "git+https://github.com/vswarte/fromsoftware-rs?rev=8c67a84f394bd58efdb06a5be47f988e0c1a9995#8c67a84f394bd58efdb06a5be47f988e0c1a9995"
+source = "git+https://github.com/micthiesen/fromsoftware-rs?branch=validation-on-pin#fdef87e1c32680a1509cc0ca7aa23cf843a7accc"
 dependencies = [
  "bitfield",
  "bitflags 2.13.0",
@@ -208,7 +208,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared"
 version = "0.14.0"
-source = "git+https://github.com/vswarte/fromsoftware-rs?rev=8c67a84f394bd58efdb06a5be47f988e0c1a9995#8c67a84f394bd58efdb06a5be47f988e0c1a9995"
+source = "git+https://github.com/micthiesen/fromsoftware-rs?branch=validation-on-pin#fdef87e1c32680a1509cc0ca7aa23cf843a7accc"
 dependencies = [
  "bitflags 2.13.0",
  "from-singleton",
@@ -224,7 +224,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared-macros"
 version = "0.14.0"
-source = "git+https://github.com/vswarte/fromsoftware-rs?rev=8c67a84f394bd58efdb06a5be47f988e0c1a9995#8c67a84f394bd58efdb06a5be47f988e0c1a9995"
+source = "git+https://github.com/micthiesen/fromsoftware-rs?branch=validation-on-pin#fdef87e1c32680a1509cc0ca7aa23cf843a7accc"
 dependencies = [
  "inflections",
  "proc-macro2",
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "fromsoftware-shared-stl"
 version = "0.14.0"
-source = "git+https://github.com/vswarte/fromsoftware-rs?rev=8c67a84f394bd58efdb06a5be47f988e0c1a9995#8c67a84f394bd58efdb06a5be47f988e0c1a9995"
+source = "git+https://github.com/micthiesen/fromsoftware-rs?branch=validation-on-pin#fdef87e1c32680a1509cc0ca7aa23cf843a7accc"
 
 [[package]]
 name = "fxhash"

@@ -20,8 +20,14 @@ unseamless-core = { path = "../unseamless-core" }
 
 # FromSoftware reverse-engineering SDK (vswarte/fromsoftware-rs). Pin both crates to the
 # EXACT SAME commit the struct layouts were read against — mixing revisions is silent UB.
-eldenring = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
-fromsoftware-shared = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
+# TEMPORARY (sdk-fork-validation branch): pointed at our fork's validation-on-pin branch,
+# which is our upstream pin 8c67a84 + the two session-lifecycle contribution commits (no
+# layout change vs the pin — verified only dltx.rs differs main..pin). Revert to the two
+# rev= lines below before merging anything.
+eldenring = { git = "https://github.com/micthiesen/fromsoftware-rs", branch = "validation-on-pin" }
+fromsoftware-shared = { git = "https://github.com/micthiesen/fromsoftware-rs", branch = "validation-on-pin" }
+# eldenring = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
+# fromsoftware-shared = { git = "https://github.com/vswarte/fromsoftware-rs", rev = "8c67a84f394bd58efdb06a5be47f988e0c1a9995" }
 
 windows = { version = "0.62", features = [
     "Win32_Foundation",

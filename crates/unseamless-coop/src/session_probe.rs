@@ -46,7 +46,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
+use eldenring::cs::{
+    CSSessionCreateSettings, CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState,
+};
 use ilhook::x64::{CallbackOption, HookFlags, Registers, hook_closure_jmp_back};
 use unseamless_core::config::{AutoSession, Config};
 use unseamless_core::util::{FrameThrottle, Latch};
@@ -1933,11 +1935,11 @@ impl Feature for SessionCreateDriver {
             }
         };
         let fn_addr = exe_base + CREATE_WRAPPER_OFFSET;
-        // SAFETY: `fn_addr` is the create wrapper resolved from the live exe base + its charted offset;
-        // we call it with this=[G] (the live, non-null singleton just read) and the constant args the
-        // natural host path uses, on the main thread, with lobby_state == None (its precondition).
-        let create: CreateFn = unsafe { std::mem::transmute::<usize, CreateFn>(fn_addr) };
-        let settings = CreateSettings { a: 0, b: 2 };
+        // VALIDATION (sdk-fork-validation): drive create via the new SDK method
+        // `CSSessionManager::create_session` instead of our local transmute, to prove the
+        // upstream binding resolves the RVA + calls the wrapper with the right ABI. Same
+        // args, same site; the SDK resolves the address itself via Program.
+        let settings = CSSessionCreateSettings { unk0: 0, unk4: 2 };
 
         // Reject #1 (rung-3): leg B (the network-create vmethod 0x1423f5c00) fails offline iff the dword
         // at NetworkSession+0x10 is 0. Log its pre-call value for confirmation, and — when the
@@ -1961,7 +1963,12 @@ impl Feature for SessionCreateDriver {
             "session-probe: drive-create @frame {} — calling create wrapper {:#x}(this={:#x}, flag={}, mode={}, settings={{0,2}}); lobby was None",
             tick.frame, fn_addr, base, DRIVE_FLAG, DRIVE_MODE,
         );
-        let ret = unsafe { create(base as *mut CSSessionManager, DRIVE_FLAG, DRIVE_MODE, &settings) };
+        // SAFETY: `base` is the live, non-null CSSessionManager singleton just read; we call on the
+        // main thread with lobby_state == None (the wrapper's precondition) and the constant args the
+        // natural host path uses. `settings` outlives the synchronous call.
+        let ret = unsafe {
+            (*(base as *mut CSSessionManager)).create_session(DRIVE_FLAG, DRIVE_MODE, &settings)
+        };
         let after = crate::sdk::with_instance::<CSSessionManager, _>(|s| {
             crate::session::read(s).lobby_state
         });
@@ -1979,14 +1986,14 @@ impl Feature for SessionCreateDriver {
         // runs the host setup, so the update task then takes the host-maintenance branch instead of the
         // crashing connection-activation branch. Only meaningful once create built the session object.
         if self.force_host && after == Some(LobbyState::TryToCreateSession) {
-            let host_fn = exe_base + HOST_TRANSITION_OFFSET;
-            // SAFETY: `host_fn` is the charted Host-transition entry resolved from the live exe base; called
-            // with this=[G] (the live singleton) on the main thread, right after create set TryToCreateSession.
-            let host: HostTransitionFn = unsafe { std::mem::transmute::<usize, HostTransitionFn>(host_fn) };
+            // VALIDATION (sdk-fork-validation): force the Host transition via the new SDK method
+            // `CSSessionManager::host_transition` instead of our transmute.
             log::info!(
-                "session-probe: drive-create — forcing Host transition via {host_fn:#x}(this={base:#x})",
+                "session-probe: drive-create — forcing Host transition via SDK host_transition() (this={base:#x})",
             );
-            unsafe { host(base as *mut CSSessionManager) };
+            // SAFETY: `base` is the live singleton; called on the main thread right after create set
+            // TryToCreateSession (the transition's precondition).
+            unsafe { (*(base as *mut CSSessionManager)).host_transition() };
             let after_host =
                 crate::sdk::with_instance::<CSSessionManager, _>(|s| crate::session::read(s).lobby_state);
             log::info!(
