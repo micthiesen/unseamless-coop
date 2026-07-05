@@ -3193,3 +3193,36 @@ target is absent or zero there, that's the missing wire. Chart what WRITES `sess
 transport vs a stubbed offline context. Also: `iface_vtable[0x40]` — resolve which ISteamNetworking* method
 that slot is, to know what "connect" is actually attempting. (tag0-bail hook: the on-disk `je` is NEAR
 `0F 84`, not rel8 — prologue guard corrected; it was refused, not mis-hooked, in run 5.)
+
+### ▶ RIG RESULT (2026-07-05 night, run 6) — the client's connect object carries NO peer identity
+
+The corrected inline poll dumped `connect_obj[session+0x5a8..+0x5c8]` on the stalled client:
+```
++0x5a8: 18 a9 1f 43 01 00 00 00   = 0x1431fa918   (the connection object's vtable)
++0x5b0: 90 e2 dc 43 01 00 00 00   = 0x143dce290   (heap ptr, adjacent to the container 0x143dce2b0 /
+                                                    registry 0x143dce9c0 this run — the join graph)
++0x5b8: fb 01 00 00 00 00 00 00   = 0x1fb         (a small state/flag word; the connect-init's
+                                                    "clear [rbx+0x12]" lands in this field's high bytes,
+                                                    so flag==0 is NOT a distinct success signal)
++0x5c0: d0 a9 76 93 fe 7f 00 00   = 0x7ffe9376a9d0 (back-pointer into the live session region)
+```
+**No peer SteamID64 anywhere in the object** (nothing of the `0x11000010…` shape). Combined with the
+connect-init body — `call [iface_vtable+0x40]` is invoked with **only `this`=iface set, no peer argument in
+frame** — this reframes the two "walls" once more:
+
+- **`0x142401e80` (vt[0xf8]) is a per-frame PUMP/STATUS step, not a peer-directed "open connection to host
+  X".** It pings the Steam context's iface method 8 and clears a local state byte; it has no peer to dial.
+  So "the client's connect runs" (run 5) is true but doesn't mean "the client dials the host" — the actual
+  outbound-connect-to-a-peer call is elsewhere (or never issued).
+- **The missing wire is the peer identity in the client's connection object.** On a real joiner, the host's
+  identity from the join blob must land in this `+0x5a8` object (or drive a distinct connect call) so the
+  DLNW3D layer opens a P2P connection to the host and enqueues a `+0x4f0` pending entry. Our join path
+  (bit-2 OR + `drive_join`, no establish handler) builds the object shell but never populates its peer.
+
+**NEXT (static lane): decode the `+0x5a8` connection object (vtable `0x1431fa918`)** — its layout, where a
+peer SteamID64 belongs, and which function WRITES it on a genuine joiner (start from the join-blob parser
+`0x1423fb260`, which had `[conn+0x58]` populated, and follow where the host identity from the 8-byte blob
+flows). Separately resolve `iface_vtable[0x40]` (context `0x143b48a00`) to name method 8, and find the
+joiner's real "connect to peer" call (the one that DOES take a SteamID64) — that, not `0x142401e80`, is the
+one to drive. When the peer lands in the client's connection object and it dials the host, the host's tag-1
+handler (already firing) should promote a real inbound connection → `players=2`.
