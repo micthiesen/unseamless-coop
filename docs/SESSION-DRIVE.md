@@ -66,6 +66,123 @@
 >
 > ---
 
+## ★★ MEMBER PIPELINE CHARTED (2026-07-05, static) — how a connected peer becomes a member
+
+Static RE over `eldenring.exe` (clean binary; behavioral notes in our own words) charted the **entire
+consumer side** of the joiner-member: what turns "a peer is here" into "a `SessionMemberSteam` with the
+peer's SteamID64 at `+0x80`". This is the pipeline our host-repro already runs every frame — we just
+need to feed the Deck into its front.
+
+**The per-frame chain (host side), all in the DLNR3D session layer:**
+
+```
+update_step 0x140cafd10                         (CSSessionManager per-frame)
+ → 0x1423f2cfa                                   (per-frame tick; computes elapsed ms)
+   → 0x1423f6bf0   SessionManagerSteam.update    (mgr = container+0x710)
+       • ticks the SocketManagerHolder [container+0x708] via 0x14203f1f0  (drains Steam P2P)
+       • for each live session in mgr's array [mgr+0x18][0..[mgr+0x24]]:
+         → 0x1423fb690   session.update(session, elapsed)         ← THE per-session pipeline
+             • loop the PENDING-CONN queue [session+0x4f0 .. +0x4f8]:
+                 → 0x1424007e0  conn.pump  — reads DLNW3D handshake msgs from the conn's transport
+                    endpoint [conn+0x130] (holder API 0x14203f250) and runs an 8-case jump-table
+                    handshake state machine; on completion flips conn+0x150..0x153, then the conn is
+                    moved into the member registry ([session+0x508]/+0x528/+0x538 via 0x1423fa2a0)
+             • [session_vt+0xe0] = slot 28 = 0x1423ff440   session.drainEvents
+                 → drains a lock-free MPSC event queue [session+0x578 buf / +0x580 / +0x588 idx]
+                 → dispatch on event.type (first dword of each 0x28-byte record):
+                     type 1 (ADD) → 0x1423fe350 → 0x1423fdc80   ADD-PEER:
+                         · resolve the peer key via [session+0x568] resolver vt[0x118]
+                         · 0x1423fbd80 lookup-by-key (dedup) — skip if the peer already has a conn
+                         · 0x1423fb980 alloc a new session-peer conn
+                         · 0x142402d70 init the conn from peerInfo → this is where the peer SteamID64
+                            is written to the member's +0x80 (leaf copy 0x142400480: src[0]=SteamID64,
+                            src+8=name UTF-16, src+0xb0..=flags)
+                         · 0x1424004e0 finalize; on success ENQUEUE the conn onto [session+0x4f0..+0x4f8]
+                     type 0 → 0x1423fe4e0 ;  type 2 → lookup + 0x1424005c0 (update existing)
+```
+
+**So a member is born when a type-1 "add-peer" event carrying the peer's identity is posted to the
+session's event queue; the running per-frame drain does the rest** (alloc conn → init identity → enqueue
+→ pump handshake → register member). The host's OWN member (`member[5]` in host-repro) is added by this
+exact path — something posts a type-1 self add-peer event during establishment, which is why our solo
+host-repro already shows `member[5]+0x80 = host SteamID`.
+
+**Two ancillary corrections to the older notes:**
+- The pre-alloc `0x1423faf60` (`SessionSteam` vt[26] `0x1423fdf20`, our existing `add-member` hook) builds
+  the **6 empty member slots** with an *empty* identity handle (`0x142400170`, vtable `0x1431fa4a8`) — it
+  does NOT write any SteamID. The SteamID is written later, on the per-peer path above. So the "7× add-member"
+  in host-repro is the pool pre-alloc, not the identity population; **`0x1423fdc80` (add-peer) is the hook
+  that actually signals a peer being brought in.** (New read-only hook `add-peer`, under `instrument_host_accept`.)
+- The writer-trace's function labels were skewed by the `static.py` `.pdata`-spill; the true leaf chain is
+  `0x1423fb690 → … → 0x1423ff440(drain) → 0x1423fe350 → 0x1423fdc80(add-peer) → 0x142402d70(init) →
+  0x142400480(+0x80 write)`.
+
+**The ONE remaining unknown = the PRODUCER.** What posts the type-1 add-peer event (with the peer's
+identity) is invoked via a runtime/vtable path the static image doesn't pin (the internal event enqueue
+helpers `0x1423fda40/b00/bc0` have no static callers; the identity domain is the `[session+0x568]`
+resolver + a `[event+8]` peer handle, both runtime objects). This matches Lane B's standing caveat that the
+real installer is a runtime Steam callback. **This is now an empirical question**, and the two ways to
+resolve it map cleanly to a two-machine experiment:
+1. **Observe:** with the `add-peer` hook live on a two-machine run, does `0x1423fdc80` fire for the Deck's
+   SteamID? If YES → the natural producer works and the only gap is the handshake pump getting the Deck's
+   packets (transport already proven). If NO → the event is never posted for the Deck.
+2. **If NO, post it ourselves:** build a type-1 event / drive `0x1423fdc80` for the Deck's rung-4-known
+   SteamID64, and let the running per-frame pipeline do the rest — provided the conn's `+0x130` transport
+   endpoint binds to the Deck's live P2P packets (which `0x142402d70` wires from the peer identity + holder).
+
+### ★ EMPIRICAL RESULTS (2026-07-05, solo + two-machine) — model validated, drive built, one gap left
+
+The pipeline was **validated live** and a **direct-drive lever built** (`[debug.probes] drive_add_peer`,
+`session_probe.rs::try_drive_add_peer`). What we learned, in order:
+
+1. **Live-validated the model (solo host-repro).** Read off the live `SessionSteam` (reached
+   `[[[G+0x48]…]]`→ actually `container+0x710`→`+0x18`→`[0]`): vtable `0x1431fa248`, member count
+   `[+0x68]=6`, and the graph is **exactly** as charted — `member[5]+0x80` = the host's own SteamID64,
+   `member[0-4]` empty, and the host self-member sits in the **pending-conn queue** `[session+0x4f0..+0x4f8]`
+   (1 entry) with `+0x130=0`, flags `(1,1,0,0)`. The event queue `[+0x580/+0x588/+0x590]` had already
+   advanced (0x20 events drained) during establishment.
+2. **`add-peer` (`0x1423fdc80`) does NOT fire for the host's own member** — the self-member is populated by
+   the establishment directly, not the event-driven add-peer. So `add-peer` firing is specifically the
+   *remote-peer* signal.
+3. **Two-machine: no natural producer.** The Deck's 14-byte DLNW3D SYN reaches host-admit `0x142640e30`
+   ~11× (sender `peer-cf17b9f9`), gate-c rejects each time, and **`add-peer` NEVER fires** — then the Deck
+   crashes ~30s in. So nothing in our setup posts the add-peer event for the Deck.
+4. **`drive_add_peer` works mechanically.** Driving `0x1423fdc80(session, &DeckSteamID, &hostSteamID, 1)`
+   host-side returns 1, **pops an empty member from the pool** (`[session+0x538]` head moves) and **enqueues
+   a conn** on the pending queue (`[+0x4f8]` grows +8) — `member+0x80` = Deck SteamID, via the game's own
+   function. Confirmed `member+0x80 = peerInfo[0]` (the SteamID goes straight in).
+   - **Timing matters:** firing during `TryToCreateSession` disrupted the create→Host transition (session
+     tore down to `None` ~30s later). Gating the drive on **`lobby_state == Host`** fixed it — the host
+     then stays stable.
+5. **The one gap: the driven member has a null transport endpoint (`+0x130=0`), so the per-frame pump
+   (`0x1424007e0`, which reads handshake msgs from `conn+0x130`) can't advance it, and the session update
+   **drops the member** (solo: pending queue returns to 1, `member[0-4]` empty again — the session
+   survives, the member is just discarded).** `+0x130` is a **transient handshake endpoint** — the live
+   ERSC capture confirms even a *working* remote member reads `+0x130=0` in steady state (it's set only
+   while handshaking in the pending queue, then cleared once the member moves to the active registry
+   `[+0x528]`).
+6. **The transport admit is a confirmed dead end (again, at the instruction level).** gate-c's identity
+   callback `0x142639810→0x142639d00` calls `[context+0x168]` (the reject stub, returns 1) and
+   **`cmp eax,1; je reject` short-circuits before the find-or-create** — so pre-creating the member can't
+   unblock gate-c. The stub is present in real ERSC too. The connection+member+**endpoint** are all built
+   by the session-layer producer path, not the transport admit.
+
+**⇒ The remaining work is to WIRE THE ENDPOINT.** The driven member is correct except for `+0x130`. In a
+real join, the producer (unreached in our setup; enqueue helpers `0x1423fda40/b00/bc0` + the identity
+callback have **no static refs at all** → runtime/Steam-callback-installed, matching Lane B) builds the
+member *with* a transport endpoint bound to the peer, so the handshake pump can consume the peer's DLNW3D
+packets. Two ways in for next time:
+- **(a) New ERSC capture, watching the writers:** arm `watch-write.py` on a fresh remote member's `+0x130`
+  (and the event queue `[+0x578]`) during a live Deck **join** on real ERSC — catch the RIP that sets
+  `+0x130` and what posts the add-peer event. This pins the endpoint source directly (Michael-gated, ~10
+  min, the Deck is still set up). This is the highest-leverage next step.
+- **(b) Build the endpoint ourselves:** after `drive_add_peer` pops the member, bind its `+0x130` to a
+  transport endpoint on the stood-up holder keyed by the Deck SteamID (the holder API `0x14203f2xx` family
+  the pump uses), so the Deck's real P2P packets feed the pump. Needs charting the endpoint-open call.
+
+`drive_add_peer` (host-side, gated on `lobby_state==Host`) is the foundation both build on: it creates a
+correct member for the Deck; only the endpoint bind is missing.
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's

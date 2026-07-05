@@ -342,6 +342,17 @@ pub struct DebugProbes {
     /// slot). Fires only on the host. Off by default.
     pub force_gatec_accept: bool,
 
+    /// **EXPERIMENTAL rung-3 joiner-member driver** (2026-07-05). Drive the session-layer add-peer entry
+    /// `0x1423fdc80` directly on the host, for the two-machine peer's SteamID64, once the host session is
+    /// established. The 2026-07-05 chart + two-machine run proved the joiner-member is added by the session
+    /// event-drain (`SessionSteam` vt[28] → type-1 event → `0x1423fdc80`), NOT the transport admit — but no
+    /// natural producer posts that event for the Deck (the Deck's SYN reaches admit and is rejected, and
+    /// add-peer never fires). This lever posts it ourselves: pop an empty member from the pool, set
+    /// `member+0x80` = the peer SteamID64, and enqueue it on the session's pending-conn queue; the game's
+    /// running per-frame pump then drives its handshake. Fires only on the host. Off by default. See
+    /// docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
+    pub drive_add_peer: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

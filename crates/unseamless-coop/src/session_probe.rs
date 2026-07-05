@@ -356,6 +356,12 @@ const HOST_VALIDITY_GATE_OFFSET: usize = 0x1_40de_2620 - 0x1_4000_0000;
 static DRIVE_ESTABLISH_HANDLER: AtomicBool = AtomicBool::new(false);
 /// Resolved absolute address of the connection-establish handler `0x1423f2820` (set at install).
 static ESTABLISH_HANDLER_FN: AtomicUsize = AtomicUsize::new(0);
+/// The live `SessionSteam@DLNR3D` pointer, captured off the `ADD-MEMBER` hook (`rcx`) the first time the
+/// driven establishment builds the member pool. Stable while the host stays up; the add-peer driver reads
+/// it to drive `0x1423fdc80` without re-deriving the container→session chain. 0 until establishment runs.
+static LIVE_SESSION: AtomicUsize = AtomicUsize::new(0);
+/// Resolved absolute address of the add-peer entry `0x1423fdc80` (set at install).
+static ADD_PEER_FN: AtomicUsize = AtomicUsize::new(0);
 /// `0x1423f2820` = `ManagerImpl@DLNR3D`'s connection-establish handler: `container->vtable[0x80]` builds
 /// the raw connection, `0x1423f7180` wraps it, it's stored at `[container+0x708]` + addref'd.
 const ESTABLISH_HANDLER_OFFSET: usize = 0x1_423f_2820 - 0x1_4000_0000;
@@ -365,6 +371,17 @@ const ESTABLISH_HANDLER_OFFSET: usize = 0x1_423f_2820 - 0x1_4000_0000;
 /// 0x142400210 → member+0x80 = peer SteamID64`). Hooked read-only so a DRIVEN establish shows whether it
 /// reaches the member-add — the reproduction milestone.
 const ADD_MEMBER_OFFSET: usize = 0x1_423f_df20 - 0x1_4000_0000;
+/// `0x1423fdc80` = the **add-peer** entry (charted 2026-07-05, docs/SESSION-DRIVE.md > "★★ MEMBER
+/// PIPELINE CHARTED"). Distinct from the pre-alloc `0x1423fdf20`: this is the per-peer path, reached
+/// from the session's per-frame event drain (`SessionSteam` vt[28] `0x1423ff440` → type-1 event →
+/// `0x1423fe350` → here). Given `(rcx=session, rdx=peerInfo, r8=key, r9b=flag)` it looks the peer up by
+/// key (dedup `0x1423fbd80`), allocates a session-peer conn (`0x1423fb980`), inits it from `peerInfo`
+/// (`0x142402d70`, which writes the peer SteamID64 to the member's `+0x80` via `0x142400480`), and
+/// enqueues it on the session's pending-conn queue `[session+0x4f0..+0x4f8]`. Hooking it read-only tells
+/// us — on a two-machine run — whether the host ever tries to add the Deck as a peer, and with what
+/// identity: if it fires with the Deck's key, the natural producer works and only the handshake pump
+/// remains; if it never fires for the Deck, the add-peer *event* was never posted (post it ourselves).
+const ADD_PEER_OFFSET: usize = 0x1_423f_dc80 - 0x1_4000_0000;
 
 /// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
 /// `SocketManagerHolder@DLNR3D` around the standup connection and land it at `[container+0x708]` — the
@@ -556,6 +573,7 @@ fn install_create_gate_trace(config: &Config) {
     GAME_ALLOC_FN.store(exe_base + GAME_ALLOC_OFFSET, Ordering::Relaxed);
     DRIVE_ESTABLISH_HANDLER.store(config.debug.probes.drive_establish_handler, Ordering::Relaxed);
     ESTABLISH_HANDLER_FN.store(exe_base + ESTABLISH_HANDLER_OFFSET, Ordering::Relaxed);
+    ADD_PEER_FN.store(exe_base + ADD_PEER_OFFSET, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
     if prologue_ok("veto-field", vv, &VETO_VMETHOD_PROLOGUE) {
         install_offset_hook("veto-field", vv, log_veto_field);
@@ -652,11 +670,44 @@ fn log_add_member(_name: &'static str, regs: *mut Registers) {
         let session = r.rcx as usize;
         let arg1 = r.rdx as usize;
         let arg2 = r.r8 as usize;
+        // Capture the live SessionSteam so the add-peer driver can reach it without the container chain.
+        if session != 0 {
+            LIVE_SESSION.store(session, Ordering::Relaxed);
+        }
         let caller = if r.rsp != 0 { unsafe { (r.rsp as *const usize).read_volatile() } } else { 0 };
         log::info!(
             "session-probe: ★ ADD-MEMBER REACHED — 0x1423fdf20(session={session:#x}, arg1={arg1:#x}, \
              arg2={arg2:#x}) caller={caller:#x} — a driven establish reached SessionSteam vt[26]; the \
              member's +0x80 gets the peer SteamID64 (live-capture chain reproduced this far)",
+        );
+    }));
+}
+
+/// add-peer reach hook: `0x1423fdc80(rcx=session, rdx=peerInfo, r8=key, r9b=flag)`. Fires when the session
+/// event-drain dispatches a type-1 (add-peer) event — i.e. the game decided to bring a peer into the
+/// session. Logs the session, the peer key it read from `[peerInfo]` and `[key]` (formatted both raw and as
+/// a SteamID64 tag, so we can see which field carries the identity), the flag, and the caller. Read-only.
+/// On the host, this firing for the Deck's SteamID means the producer works and the remaining gap is the
+/// handshake pump; its NOT firing for the Deck means the add-peer event was never posted for it.
+fn log_add_peer(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers. rcx=session, rdx=peerInfo (a small stack struct), r8=key (ptr to a
+        // resolved key), r9b=flag, [rsp]=return addr. peerInfo[0]/key[0] are single bounded qword reads,
+        // null-guarded; we only read scalars and log them, never deref deeper.
+        let r = unsafe { &*regs };
+        let session = r.rcx as usize;
+        let peer_info = r.rdx as usize;
+        let key = r.r8 as usize;
+        let pi0 = if peer_info != 0 { unsafe { (peer_info as *const u64).read_volatile() } } else { 0 };
+        let key0 = if key != 0 { unsafe { (key as *const u64).read_volatile() } } else { 0 };
+        let flag = r.r9 as u8;
+        let caller = if r.rsp != 0 { unsafe { (r.rsp as *const usize).read_volatile() } } else { 0 };
+        log::info!(
+            "session-probe: ★ ADD-PEER — 0x1423fdc80(session={session:#x}, peerInfo={peer_info:#x}, key={key:#x}, \
+             flag={flag}) [peerInfo]={pi0:#x} ({}) [key]={key0:#x} ({}) caller={caller:#x} — the session is \
+             bringing a peer in; if the id is the Deck's, the natural producer works",
+            unseamless_core::diagnostics::peer_tag(pi0),
+            unseamless_core::diagnostics::peer_tag(key0),
         );
     }));
 }
@@ -877,9 +928,10 @@ fn install_host_accept_trace(config: &Config) {
     install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);
     install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
     install_offset_hook("host-worker-drain", exe_base + HOST_WORKER_DRAIN_OFFSET, log_host_worker_drain);
+    install_offset_hook("add-peer", exe_base + ADD_PEER_OFFSET, log_add_peer);
     log::info!(
         "session-probe: host-accept trace installed (host-admit 0x142640e30 + gate-c 0x142640ecd + success \
-         0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0)"
+         0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0 + add-peer 0x1423fdc80)"
     );
 }
 
@@ -2243,10 +2295,15 @@ pub struct TransportStandupDriver {
     /// otherwise steals every channel-0 datagram before the worker sees it). On when host-accept
     /// instrumentation is armed — the worker-drain / host-admit hooks are the signal then, not our RECV log.
     suppress_drain: bool,
+    /// Host-side: drive the session-layer add-peer entry `0x1423fdc80` for the two-machine peer once the
+    /// host session is up (`drive_add_peer` config). Off = leave the joiner-member to a natural producer.
+    drive_add_peer: bool,
+    /// One-shot latch: the host add-peer drive has fired (whether it succeeded or not).
+    add_peer_done: bool,
 }
 
 impl TransportStandupDriver {
-    fn new(peer_a: u64, peer_b: u64, is_host: bool, suppress_drain: bool) -> Self {
+    fn new(peer_a: u64, peer_b: u64, is_host: bool, suppress_drain: bool, drive_add_peer: bool) -> Self {
         Self {
             built: false,
             iface: 0,
@@ -2256,6 +2313,8 @@ impl TransportStandupDriver {
             peer_override: [peer_a, peer_b],
             is_host,
             suppress_drain,
+            drive_add_peer,
+            add_peer_done: false,
         }
     }
 
@@ -2645,6 +2704,67 @@ impl TransportStandupDriver {
         if do_ping {
             self.ping_seq = seq;
         }
+        // Host-side joiner-member drive (one-shot): once the establishment has built the session (LIVE_SESSION
+        // captured) and we know the peer, post an add-peer for it directly. Runs after Accept so the P2P
+        // session is open when the member's handshake pump starts.
+        if self.is_host && self.drive_add_peer && !self.add_peer_done {
+            self.try_drive_add_peer(peer);
+        }
+    }
+
+    /// Drive the session-layer add-peer entry `0x1423fdc80(session, &peerSteamID, &selfSteamID, flag)` for the
+    /// two-machine peer, host-side. This pops an empty member from the session's pool, sets `member+0x80` =
+    /// the peer SteamID64, initialises it, and enqueues it on the session's pending-conn queue — the exact
+    /// thing the game's own event-drain does for a natural join, which never fires for our driven Deck. The
+    /// game's running per-frame session update then pumps the new member's handshake. One-shot; logs the member
+    /// pool + pending-conn queue before and after so a new populated slot is visible. Firewalled; a hard fault
+    /// surfaces via crashdump (we're calling a game function on the main thread with a live session).
+    fn try_drive_add_peer(&mut self, peer: u64) {
+        let session = LIVE_SESSION.load(Ordering::Relaxed);
+        let add_peer = ADD_PEER_FN.load(Ordering::Relaxed);
+        if session == 0 || add_peer == 0 || peer == 0 {
+            return; // establishment hasn't built the session yet, or no peer — try again next frame
+        }
+        // Only drive once the host is FULLY established (lobby_state == Host). Firing during
+        // TryToCreateSession disrupts the create→Host transition (rig-observed 2026-07-05: the session
+        // tore down to None ~30s after an add-peer fired mid-create). Wait for a stable host.
+        let lobby = crate::sdk::with_instance::<CSSessionManager, _>(|s| crate::session::read(s).lobby_state);
+        if lobby != Some(LobbyState::Host) {
+            return; // not a stable host yet — try again next frame (still latched off until it fires)
+        }
+        let self_id = crate::steam::self_steam_id().unwrap_or(0);
+        if self_id == 0 {
+            return;
+        }
+        self.add_peer_done = true; // latch before the call so a fault can't re-fire it
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            // Read the member pool head/tail (+0x528/+0x538) and the pending-conn queue (+0x4f0/+0x4f8) so the
+            // before/after shows a slot consumed + a conn enqueued. All in-bounds session fields.
+            let rq = |a: usize| (a as *const usize).read_volatile();
+            let (pool_before, pend_b0, pend_b1) =
+                (rq(session + 0x538), rq(session + 0x4f0), rq(session + 0x4f8));
+            log::info!(
+                "session-probe: drive-add-peer — calling 0x1423fdc80(session={session:#x}, peer={}, self={}) \
+                 [pre: pool_head={pool_before:#x} pending_queue={pend_b0:#x}..{pend_b1:#x}]",
+                unseamless_core::diagnostics::peer_tag(peer),
+                unseamless_core::diagnostics::peer_tag(self_id),
+            );
+            // peerInfo = &{peer SteamID64}; key = &{self SteamID64}. 0x1423fdc80 reads [peerInfo] as the
+            // member identity (→ member+0x80) and [key] for the is-self compare (peer != self ⇒ remote).
+            // Both are single-qword structs on our stack; the callee only reads [+0]. flag=1 (announce).
+            let peer_info: u64 = peer;
+            let key: u64 = self_id;
+            let add: extern "win64" fn(usize, *const u64, *const u64, u8) -> u8 =
+                std::mem::transmute(add_peer);
+            let ret = add(session, &peer_info, &key, 1);
+            let (pool_after, pend_a0, pend_a1) =
+                (rq(session + 0x538), rq(session + 0x4f0), rq(session + 0x4f8));
+            log::info!(
+                "session-probe: drive-add-peer — 0x1423fdc80 returned {ret} \
+                 [post: pool_head={pool_after:#x} pending_queue={pend_a0:#x}..{pend_a1:#x}] \
+                 (ret=1 + a grown pending queue ⇒ a member was popped + enqueued for the peer; watch member+0x80)",
+            );
+        }));
     }
 }
 
@@ -2662,6 +2782,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.p2p_test_peer_b,
             do_create, // host role = the create driver's machine
             config.debug.probes.instrument_host_accept,
+            config.debug.probes.drive_add_peer,
         )));
     }
     if config.debug.probes.session_probe {

@@ -184,6 +184,13 @@ force_gatec_accept = false # rung-3 joiner-admit lever (2026-07-05): force host 
                            # players count + lobby_state). Two-machine: does the joiner's game-P2P reach the
                            # host admit path, and does the roster grow 1->2? Fires only on the receiving (host)
                            # machine; inert on the joiner. See docs/SESSION-DRIVE.md > "HOST-SIDE ADMIT/ROSTER".
+drive_add_peer = true      # rung-3 JOINER-MEMBER driver (2026-07-05): host-side, drive the session-layer add-peer
+                           # entry 0x1423fdc80 for the two-machine peer's SteamID once the host session is up. The
+                           # member pipeline is charted + the two-machine run proved no natural producer posts the
+                           # add-peer event for the Deck (its SYN reaches admit + is rejected; add-peer never fires),
+                           # so we post it ourselves: pop an empty member, set member+0x80 = Deck SteamID, enqueue on
+                           # the pending-conn queue; the game's per-frame pump drives its handshake. Host-only; watch
+                           # `drive-add-peer` + member+0x80. See docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether
