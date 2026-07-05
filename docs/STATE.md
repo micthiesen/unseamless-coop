@@ -29,37 +29,39 @@ Last updated: **2026-07-05** (member-pipeline chart + drive_add_peer).
   pool, sets `member+0x80` = the peer SteamID64 (`peerInfo[0]`, via `0x142402d70`→`0x142400480`), and
   enqueues it. Validated against the live object. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ MEMBER
   PIPELINE CHARTED".
-- **★ `drive_add_peer` lever built + working (mechanically).** `[debug.probes] drive_add_peer` drives
-  `0x1423fdc80` host-side (gated on `lobby_state==Host`) for the two-machine peer: it **creates a correct
-  member for the Deck's SteamID** (ret=1, pool popped, queue grown, `member+0x80` = Deck ID). Two-machine
-  confirmed **no natural producer** posts the add-peer event for the Deck (its SYN reaches host-admit + is
-  rejected; `add-peer` never fires). Transport admit re-confirmed a dead end at the instruction level
-  (gate-c's `[context+0x168]` stub short-circuits `cmp eax,1; je reject` before find-or-create).
+- **★★★ HOST-SIDE JOINER-MEMBER + ENDPOINT SOLVED — two-machine (2026-07-05).** `[debug.probes]
+  drive_add_peer` (throttled re-fire, gated on `lobby_state==Host`) keeps a Deck member in the session's
+  pending-conn queue; with the Deck connected two-machine, **the host's own per-frame pump built the Deck
+  member's transport endpoint** — `member[4]+0x130` = a live `MTInternalThreadSteamConnection` (vtable
+  `0x143277750`), the member persisted, and a handshake flag advanced (`+0x151 0→1`). This is the piece that
+  blocked rung-3 for months. Mechanism (ERSC-capture-confirmed): the game's pump `0x1424007e0 → 0x1423ffd00
+  → 0x142401110` builds the endpoint once the peer's packets arrive — no endpoint-bind driver needed, just a
+  member in the queue. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★★ HOST BUILDS THE JOINER ENDPOINT" and
+  "★★ ENDPOINT CAPTURED".
 
 ## Next
 
-**Wire the driven member's transport endpoint (`+0x130`) so its handshake completes.** `drive_add_peer`
-builds a correct member except for `+0x130` (the transient handshake endpoint) — so the per-frame pump
-`0x1424007e0` reads nothing and the session **drops the member** (solo; session survives). `+0x130` is set
-only while handshaking (the live ERSC capture shows even a working remote member reads `+0x130=0` in steady
-state). Two ways in:
+**Complete + stabilise the JOINER (Deck) side — its mirror of the host solution.** The host now builds the
+Deck member+endpoint; the full 2-player session is blocked only by the joiner: **the Deck crashes ~90s in**
+(`eldenring.exe+0x3f4860`, a null-`this` getter reading `[rcx+0x1c5]`; the null is `[r14+0x1e508]`), before
+the host-side handshake completes. Root cause: the joiner's session is incompletely built — `drive_join`
+bypasses the blob-parse, so the joiner never fully reaches `Client` and leaves game session/network
+sub-objects null that the per-frame update later dereferences.
 
-1. **★ New ERSC capture, watching the writers (highest-leverage, Michael-gated ~10 min, Deck still set up):**
-   on real ERSC, arm `scripts/re/watch-write.py` on a fresh remote member's `+0x130` **and** the session
-   event queue `[session+0x578]` during a live Deck **join** — catch the RIP that sets `+0x130` (the endpoint
-   source) and what posts the add-peer event (the producer). This pins both unknowns directly.
-2. **Build the endpoint ourselves (static-first, then rig):** chart the holder endpoint-open call (the
-   `0x14203f2xx` family the pump uses on `conn+0x130`), then after `drive_add_peer` pops the member, bind its
-   `+0x130` to a transport endpoint on the stood-up holder keyed by the Deck SteamID, so the Deck's real P2P
-   packets feed the pump. Two-machine verify: a Deck SteamID persists in a `member+0x80` slot past the
-   handshake (roster → 2).
-3. **Stabilize the Deck joiner** — crashes ~30–60s into the join drive (limits two-machine windows).
+1. **Mirror the host fix on the joiner:** instead of the fragile `drive_join` + bypasses, have the joiner
+   drive the establish path (like the host) and `drive_add_peer` for the **host's** SteamID, so the joiner's
+   own pump builds the host-member endpoint from the host's packets (symmetric). This likely also builds the
+   sub-objects whose absence crashes it.
+2. **Or fix the crash directly:** chart what builds `[r14+0x1e508]` on a real ERSC joiner (identify `r14`'s
+   system + the null sub-object) and ensure the joiner's driven session builds it, so the getter has a valid
+   `this`.
+3. **Then verify roster → 2:** with both sides stable, the host handshake completes → `member[4]` endpoint
+   fully wired (`+0x8`/`+0x50` populated, flags → `(0,0,1,0)`) → both players in each other's world.
 
-- **Why this / why now:** the whole consumer pipeline is charted + validated and the member is driveable;
-  the *only* missing piece is the peer's transport endpoint. The capture (1) is the fast way to source it;
-  (2) is the offline build if the capture stalls.
-- **Serial + Michael-gated:** the capture and the two-machine verify need the rig host + Deck; the endpoint
-  charting is solo/delegable.
+- **Why this / why now:** the host side of the joiner-member is done; the only thing between us and a real
+  2-player session is the joiner completing its side without crashing.
+- **Serial + Michael-gated:** two-machine (rig host + Deck joiner); the crash/joiner charting is solo/delegable.
+  Both machines are currently on our mod (ERSC not restored, per Michael).
 
 ## Candidates Not Chosen
 
