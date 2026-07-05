@@ -85,7 +85,8 @@ before the rig run, where to instrument if the join stalls.
 - **Why this / why now:** the host side of the joiner-member is solved and the crash is fixed; the only thing
   between us and a real 2-player session is the client completing its side (reaching `Client(6)` + emitting
   the type-5) without the establish/join FSM conflict.
-- **Serial + Michael-gated:** two-machine (rig + Deck). Both machines were on ERSC for capture #2 at wrap;
+- **Serial (orchestrator-driven, both machines):** two-machine (rig + Deck), no human needed — the
+  orchestrator applies/launches/auto-sessions both sides itself. Both machines were on ERSC for capture #2 at wrap;
   rig/Deck state is cheap to re-derive (re-apply our mod with `symmetric_peer` off + `drive_join` on the
   client, or the corrected client-join config, for the next test).
 

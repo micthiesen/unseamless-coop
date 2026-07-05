@@ -82,6 +82,12 @@ The only split is build-vs-run, both on this one machine:
 > ERSC capture, a bad rig state), never routine ceremony between cycles. Full rig policy: the
 > `/test-loop` skill, layer 4.
 >
+> **Drive the rig — and the Deck — yourself by default.** Build, apply, launch, auto-session
+> in-world, read logs/memory, kill: all of it is yours to run without asking or waiting, on both
+> machines (`rig.sh`, `deck.sh`). Pull Michael in only when a test genuinely needs a human playing —
+> something auto-sessions + getting-in-world can't cover (real gameplay, a judgment call on feel,
+> hardware he must touch). "Serial" work is orchestrator-serial, not Michael-gated.
+>
 > **But NEVER apply/launch/kill while the game is already running** — a running ELDEN RING you didn't
 > launch means Michael is playing: applying would overwrite the process's mapped `dinput8.dll` in
 > place. `rig.sh apply`/`cycle` refuse on their own when the game is up (`--force` overrides); treat
@@ -164,8 +170,9 @@ is [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The always-on rules:
   concurrent-sessions guidance above).
 - **Delegate by default (orchestrator):** any chunk of buildable work that doesn't need the rig
   goes to a worker; do it yourself only when it's serial (rig/RE/validation/integration), under
-  ~15 minutes, or *is* the decision itself. Core/live RE is serial by nature (rig-coupled,
-  Michael-in-the-loop); only a genuinely independent *static* RE search is delegable.
+  ~15 minutes, or *is* the decision itself. Core/live RE is serial by nature (rig-coupled; the
+  orchestrator drives the rig/Deck itself — see "Where things run"); only a genuinely independent
+  *static* RE search is delegable.
 - **Chunks go to fleet workers, never `Agent`/`Task` subagents.** The litmus test: *would the
   result be a branch you'd merge to `main`?* → fleet worker (visible, watchable, integrable —
   even for a single lane). *Just informing your own work* (running tests, `Explore`, research,

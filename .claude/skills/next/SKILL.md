@@ -4,7 +4,7 @@ description: >
   Decide what the project's next step should be. Reads docs/STATE.md, docs/ROADMAP.md, and recent
   git history, enumerates 2-4 candidate next steps with a gating analysis (what each unblocks,
   rig-serial vs delegable, size, risk), recommends one, and records the decision + runners-up in
-  docs/STATE.md — drafting ready-to-spawn worker briefs for the delegable ones. Use when unsure
+  docs/STATE.md — spawning workers for the delegable ones once the direction is set. Use when unsure
   what to work on next, when the previous Next step completed, or from /wrap when concluding a
   session. TRIGGER on "what's next", "what should we do next", "pick the next step", "/next".
 user_invocable: true
@@ -39,8 +39,10 @@ For each candidate, one tight block:
   (currently rung 3) outranks polish.
 - **Serial or delegable** — needs the rig / a real session / integration → orchestrator-only.
   Pure code/docs/host-testable → delegable to a worker. **Core/live RE is serial even when big**
-  (rig-coupled, Michael-in-the-loop); only a genuinely independent *static* RE search (offline
-  triage, decompile sweeps, call-site charting) is delegable.
+  (rig-coupled); only a genuinely independent *static* RE search (offline triage, decompile
+  sweeps, call-site charting) is delegable. **Serial ≠ Michael-gated:** the orchestrator drives
+  the rig and the Deck itself (apply, launch, auto-session in-world, read logs/memory) — tag a
+  step Michael-gated only when it needs a human actually playing beyond what auto-sessions reach.
 - **Size + risk** — rough effort, and the biggest unknown that could sink it.
 
 ## 3. Recommend One
@@ -70,13 +72,15 @@ Rewrite `docs/STATE.md`:
 
 Commit if you're the orchestrator mid-session; leave it for `/wrap` if wrapping anyway.
 
-## 5. Draft Briefs For The Delegable
+## 5. Spawn The Delegable
 
-For each delegable candidate that should start now, draft the `worker-new` heredoc brief per
-ORCHESTRATION.md > "Writing a worker assignment" (lane + boundary, where to look, collision map,
-review depth). Print it ready to paste — removing the activation energy of spawning is the point;
-the delegate-by-default posture (CLAUDE.md > "Orchestrator / worker fleet") only works if briefs
-are cheap.
+In the proposal itself, keep each delegable candidate to a one-line "what the lane would do" —
+don't print full worker briefs before the direction is chosen (they bloat the decision and
+usually get revised anyway). Once the recommendation is confirmed (or you're proceeding
+autonomously), write the `worker-new` heredoc brief per ORCHESTRATION.md > "Writing a worker
+assignment" (lane + boundary, where to look, collision map, review depth) and **spawn it
+directly** — the delegate-by-default posture (CLAUDE.md > "Orchestrator / worker fleet") means
+spawning, not pasting instructions for Michael to relay.
 
 ## If You're A Worker
 
