@@ -3379,3 +3379,32 @@ preferred (matches "who moves first: the HOST", STALL-B aim sheet Task 2/Task 4)
   [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "the member-add writer chain"; this section
   pins its queue-enqueue (`session+0x4f0` via `0x1423fa2a0`) and its role as the peer-identity write for the
   send path.
+
+### ▶ RIG RESULT (2026-07-05 night, run 7) — ★★ the HOST now emits REAL game SYNs to the joiner; wall = handshake completion
+
+B5 send-phase probes run two-machine. **The `drive_add_peer` lever works farther than thought:** with the
+joiner member queued, the HOST's own game emits **real DLNW3D packets** — `★ GAME-SENDP2P 0x142640b20 to
+<joiner> (len=14)`, repeatedly (~every 3s) — i.e. the host's socket manager is genuinely sending 14-byte
+connection SYNs to the joiner (NOT our probe's synthetic send; `0x142640b20` is the game's own
+`SendP2PPacket` wrapper, which our probe never calls). This is the first time the host tries to connect to
+the joiner at the game transport level. **But:**
+- **The host's type-6 init-data send phase `0x1423ff2e0` NEVER fires** — the 14-byte sends are connection
+  SYNs (the socket-manager's connect retry), not init-data. The session send phase is downstream of a
+  *completed* connection, which never happens; so init-data is never sent and the joiner times out.
+- **On the JOINER, the host's real SYNs produce nothing:** the Deck's socket-manager worker `0x142640bc0`
+  drains **channel 30 with `connections_span=0`** and its find-or-create / host-admit `0x142640e30`
+  **never fires** — the host's packets aren't creating a connection on the Deck. The Deck's session stays
+  `Client/WaitInitData` → times out.
+- **So both machines emit 14-byte SYNs at each other and neither completes a connection.** The new (and
+  now clearly-isolated) wall is the **DLNW3D connection handshake completion**: SYN→established across the
+  two socket managers.
+
+**Prime suspect: the `host_skip_p2p_accept` asymmetry.** Legacy `ISteamNetworking006` needs the RECEIVER to
+have accepted the sender's P2P session for packets to be delivered. Run 7's host had `host_skip_p2p_accept`
+ON — it neither accepts the Deck nor pings — so the Deck→host return leg of the handshake is dropped, and
+the host-side connection can never complete even though the host is sending. The unmask was only needed to
+surface the game's event callbacks (run 4); now that `drive_add_peer` drives the host send directly, the
+unmask is likely net-harmful. **NEXT: re-run with `host_skip_p2p_accept = false`** (host accepts + pings
+again) + `drive_add_peer` — so both sides accept each other and the SYN handshake can complete both ways.
+Watch: host `0x142640e30` find-or-create firing for the joiner (a real host-side connection), the Deck's
+`host-admit`/worker `connections_span` growing, and `0x1423ff2e0` finally firing → init-data → `players=2`.
