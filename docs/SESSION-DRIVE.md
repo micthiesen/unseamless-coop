@@ -317,6 +317,205 @@ against our `drive_add_peer` host and emit that handshake — specifically wheth
 blob we previously bypassed (the blob-parse). `symmetric_peer` stays a proven diagnostic (both build endpoints
 + both stable) but isn't the shipping shape (it leaves both at `lobby_state=3` and sends no type-5).
 
+## ★ CLIENT-JOIN AIM SHEET (2026-07-05, static) — the type-5 SEND side + the minimal join blob
+
+Static RE (clean `eldenring.exe`, PyGhidra/capstone; behavioral notes in our own words) charting the two
+open pieces for the client-join rig test: (1) where the client's join flow BUILDS + SENDS the completion
+type-5, and what gates it, and (2) the minimal join blob. Cross-checked against the orchestrator's
+2026-07-05 two-machine baseline (bypass ON). Load-bearing conclusions first.
+
+### ▶ TL;DR (what to wire before the run)
+
+1. **The type-5 emitter is the connection the JOIN builds — no join, no emitter.** Emission is strictly
+   downstream of the blob-parse. With `bypass_session_join_blob_gate` ON, `0x1423f62e0` returns 0,
+   `[G+0x28]=0`, and **no connection object exists to send anything** — reaching `Client(6)` via a forced
+   poll can't manufacture the emitter. So: **drop the bypass, let the join build the connection.**
+2. **The current wall is NOT the blob or the descriptor — it's the SessionSteam readiness gate**
+   `0x1423fd7a0`, and specifically its container sub-predicate `0x1423f4330`, which needs **`container+0x7c0`
+   bit 2 (the session-established bit)**. The join creates a fresh `SessionSteam` and gates on readiness
+   *before* the blob-parse; a join-only client never set that container bit, so readiness fails and the parse
+   never runs (matches the baseline: `0x1423fb260` never fires). **Fix: set the session-established bit on the
+   client before `drive_join`** (enable `drive_session_established`, or OR-in `container+0x7c0` bit 2) — NOT
+   the establish handler (that's the crash). Details + fallback below.
+3. **The blob is opaque and any non-empty bytes pass** — the 8-byte host `SteamID64` is fine. The blob
+   parser copies it verbatim and no code path reads its *content*; identity/endpoint/type-5 all come from
+   elsewhere. So task-2's answer is: **SteamID-only (indeed any non-empty) blob suffices** once past the
+   readiness wall.
+4. **The type-5 payload is a Steam auth ticket** (client's own, via `GetAuthSessionTicket`) — genuine,
+   Steam-issued, not derived from the host blob, and validated host-side by `BeginAuthSession` against the
+   client's SteamID64. Confirms it can't be synthesized (banked) and confirms it doesn't depend on the blob.
+
+### The join → emitter pipeline (charted)
+
+CS join wrapper `0x140cae640` → inner `0x140cb2470` → the DLNR3D join = `SessionManagerSteam` (registry at
+`container+0x710`, `== *(G+0x60)+0x710`, vtable `0x1431f9140`) **vtable slot 2** (off `0x10`) = **`0x1423f62e0`**
+`(registry, descriptor, blob_begin, blob_len, flag)`. Its body, gate by gate (this is the same shape as the
+host-create slot 1 `0x1423f5c00` — they differ only in one flag arg (`0` join / `1` create) and the post
+step (join = blob-parse; create = `0x1423fab40`)):
+
+1. **registry-ready** — `0x141eba210` on `[registry+0x10]` (item #12 inits this: `[+0x10]=1`, array
+   `[+0x18]`, cap `[+0x20]`, count `[+0x24]`). Baseline: PASSES.
+2. **descriptor-validate** — `registry->vtable[0xe8]` = `0x1423f6fb0` = literally `return 1`. **Never rejects
+   → the descriptor `0x10f520` CONTENT is not a wall.**
+3. **create-session** — `registry->vtable[0x108]` = `0x1423f7070`: allocates a fresh **0x5f8-byte
+   `SessionSteam`** (vtable `0x1431fa248`) from the container allocator `[[registry+8]+0x48]` (`= container+0x48`
+   config). Returns the new session `plVar3`.
+4. **readiness** — `plVar3->vtable[1]` (`SessionSteam` slot 1) = **`0x1423fd7a0`** (== the mod's
+   `CREATE_GATE4`). **If it returns 0, `0x1423f62e0` DESTROYS the session and bails — before the blob-parse.**
+5. **blob-parse** — only if readiness passed: `0x1423fb260(plVar3, blob_begin, blob_len, flag)` (below).
+6. **register** — if the parse returns nonzero and `count<cap`: `array[count++]=plVar3`, return the handle to
+   `[G+0x28]`.
+
+### ▶ THE WALL — readiness gate `0x1423fd7a0` (task-2 refined by the baseline)
+
+The baseline showed `0x1423f62e0` fires but `0x1423fb260` never does, i.e. it bails at step 2–4. Step 2 is a
+constant `return 1`; step 3 allocates unconditionally from the real container config (so it returns non-null
+barring a null container). ⇒ **the bail is the readiness gate (step 4), `0x1423fd7a0`, returning 0 on the
+join-created session.** This is the SAME gate the host-create passes; the host passes it because its
+establish flow set the container's session-established bit, while a join-only client creates a bare
+`SessionSteam` against a container that never got that bit. What `0x1423fd7a0` requires (behaviorally):
+
+- a first sub-gate (deep check `0x1423faf60`) with TWO parts:
+  - **(i) session config fields** `[sess+0x68..0x78]` (dwords) nonzero — these are populated at construction by
+    the ctor's sub-init `0x1424019f0(sess+0x5a8, container, 0xfb, descriptor)` **from the descriptor**. The
+    game's own join descriptor (`0x10f520`) should carry them, so this part is expected to pass on the client.
+  - **(ii) the container-readiness predicate** `[[sess+0x58]+8]()` = `container->vtable[1]` = **`0x1423f4330`**,
+    which **`return false` UNLESS `container+0x7c0` bit 2 is set** — this is the **session-established veto
+    bit** (the same `[+0x7c0]` bit 2 the establish handler `0x1423f4870` / `drive_session_established` sets;
+    with it set, `0x1423f4330` reads a Steam real-time value via `SteamUtils`-style interface `0x143b489e8` and
+    returns a nonzero date token). **This is the actual missing piece on a join-only client: bit 2 is unset.**
+- then (only if the sub-gate passes) it allocates a **0x528-byte listen-slot pool** from the container
+  allocator (`container+0x48`, which is STATIC and already present — not the wall), **registers 3 Steam P2P
+  callbacks** (`0x1423f84a0` / `0x1423f8420` / `0x1423f8620`), and `0x1424020a0` allocates a **~22000-byte recv
+  buffer** and binds (the socket layer).
+
+**⇒ Concrete fix (A) — set `container+0x7c0` bit 2 on the CLIENT before `drive_join`.** The join-created
+session is fresh (ctor `0x1423fd300(session, container, id, descriptor)`, cfg copied from the descriptor); it
+passes readiness iff **(i)** the descriptor carries the cfg (the game's `0x10f520` does) **and (ii)** the
+container has the session-established bit. So the pre-wire is: **enable the session-established bit on the
+client** — either turn on **`drive_session_established`** for the client (it drives `0x1423f4870`, which sets
+`container+0x7c0` bit 2 + identity `+0x7f8`), or directly OR-in bit 2 at `container+0x7c0` before the join
+fires. This is NOT `drive_establish_handler` (the establish HANDLER that caused the FSM-conflict crash) — it's
+the lighter session-established bit the mod already drives for host-create. `container+0x48` is static, so
+`stand_up_transport` is not what unblocks readiness (it's needed later for the endpoint build, but readiness
+gates on bit 2, not on the holder).
+
+- **(B) Fallback probe — force readiness for the join** — force `0x1423fd7a0`→1 on the slot-2 join path (the
+  `CREATE_GATE4` treatment already applied to host-create). Cheaper to test which gate is the wall, but it
+  skips the listen-pool/callback setup readiness normally does, so the endpoint build downstream may still
+  fail — treat (B) as a diagnostic, (A) as the fix.
+
+### The minimal blob (task-2): opaque, non-empty, content unread
+
+Once past the wall, the blob-parse `0x1423fb260(session, begin, len, flag)`:
+
+- **requires only `begin != 0 && len != 0`** — no structural/length gate beyond that (the parse-result gate
+  `bypass_session_join_blob_gate` patched, `41 FF 52 10 …`, is on the *return value*, which is nonzero on
+  success);
+- allocates a `len`-byte buffer from the session's member-registry allocator (`[session+0x58]+0x1e8`, alloc
+  slot `+0x48`), creates the per-peer connection via `0x1423fa1b0(session, initial-phase 0x1423fc9a0, flag)`
+  (links the net-session `[session+0x58]+0x670`), **memcpy's the blob VERBATIM** into the buffer (the copy is
+  `0x14251be90`, a plain memmove — it decodes nothing), and stores **buffer ptr @ conn+0x40, len @ conn+0x48**;
+- returns the handle.
+
+**No code path reads the blob BUFFER content.** Across the connection's identity, endpoint-build,
+message-send, and type-5 paths, the blob buffer (`conn+0x40`) is never dereferenced for content; the only
+reference to the blob anywhere is its **length** (`conn+0x48`) used as a send-progress gate (`0x1424017b0`,
+`0x142400b90`). The connection's *identity/addressing* comes from `member+0x80` (the peer `SteamID64`, sourced
+from the descriptor/add-member, not the blob); the endpoint is built from the session transport fields; the
+type-5 payload is a Steam ticket (below). So the blob is an **opaque, length-counted payload** streamed to the
+host during connect — and our own-mod host does not validate it (host admit is the session-layer add-peer +
+the type-5 auth check, neither of which inspects this blob).
+
+⇒ **Task-2 deliverable: the minimal synthesizable blob is any non-empty byte string; the 8-byte host
+`SteamID64` the join driver already feeds is sufficient and semantically appropriate.** No field "kills" it —
+the blob is not the gate. (Item #12 already proved this empirically: a raw 8-byte blob created the connection
+once the registry was inited. The remaining wall is readiness, above, not the blob.)
+
+### The type-5 SEND side (task-1): who builds/sends it + preconditions
+
+The completion type-5 is built + sent by **`0x142400df0`** (reached from the connection phase machine via
+phase `0x142401400`, which is set by connection-vtable slot 7 `0x142401360`). It:
+
+- opens a message writer, writes **type byte `5`**, then writes the **8-byte token** read from
+  **`[conn+0x60]+0x548`** (a locally-generated per-connection nonce on the owning session-back object — this is
+  the send-side counterpart of the `member+0x148` the receiver stores);
+- calls **connection-vtable slot 14 `0x1424030f0`**, which calls **`ISteamUser::GetAuthSessionTicket`**
+  (`SteamUser021`, interface getter `0x140e73310`, vtable slot `0x68`) into a 0x400 buffer, stores the ticket
+  handle at `conn+0x158`, and serializes **`[4-byte len][ticket bytes]`** into the writer;
+- sends via `0x1424006a0` (→ `0x1423f3cb0` on `conn+0x130`, keyed by `member+0x80`).
+
+So the type-5 wire is `[5][8B token][4B len][auth-ticket]`, and **its contents come entirely from the client's
+own Steam session + a local nonce — NOT from the join blob.** Host-side this is validated by the banked
+receiver: pump `0x1424007e0` case 5 (`0x142400924`) → connection-vtable slot 17 **`0x142402ee0`** =
+**`ISteamUser::BeginAuthSession(ticket, len, member+0x80)`** (accepts result `0` or `2`), which sets
+`member+0x148=token` and `member+0x152=1` (complete).
+
+**Preconditions gating emission (in order):**
+
+1. **The emitter connection must exist** — i.e. the join must pass readiness (the wall) + blob-parse so the
+   connection object is created and its phase machine runs. *This is the hard prerequisite; the blob is part
+   of it (non-empty), but the wall in front of the blob is readiness.*
+2. **The phase machine must reach the type-5 phase** (`0x142401400`) — this is driven by the per-frame pump
+   (`0x1424007e0` → `0x1423ffd00` → the current phase step) advancing through endpoint-build (`0x142401110`,
+   sets `member+0x130`) and the remote-peer branch (`0x142400ef0` sends the client to the remote path when
+   `member+0x80 != self` identity `[[conn+0x58]+0x7f8]`). Reaching it requires the peer's packets arriving so
+   the handshake advances.
+3. **Steam auth must be live** — `GetAuthSessionTicket` (slot 14) must return a nonzero handle; if it returns 0
+   the type-5 body is empty and the send aborts.
+
+Note there is **no `lobby_state==Client(6)` precondition inside the send** — the send is gated by the
+connection phase machine, not the CS-level FSM state. `Client(6)` and the type-5 send are two consequences of
+the same thing (a live join-built connection), not one gating the other.
+
+### Where-to-instrument map (per stall mode)
+
+**Stall A — join never reaches `Client(6)` / no emitter built (the current baseline):**
+- `0x1423f6369` (right after `call [rax+0x108]`, the create): read **rax** = created session ptr. null ⇒
+  create failed; nonzero ⇒ check readiness next.
+- `0x1423f637a` (the `test al,al` right after `call [rdx+8]` at `0x1423f6377`): read **al** = readiness
+  result. **0 ⇒ the readiness gate `0x1423fd7a0` is the wall** (expected).
+- `0x1423fd7a0` entry + its sub-gate `0x1423faf60`: log which required part is failing — the session cfg
+  (`[sess+0x68..0x78]`, from the descriptor) or the container predicate `0x1423f4330` (i.e. `container+0x7c0`
+  bit 2). Expectation: cfg passes, container bit 2 is the miss.
+- FSM context: update task `0x140cafd10` joiner branch polls `[G+0x28]` (`0x140caff11`); Client transition is
+  `0x140cb2f80` / `0x140cb0076`. `[G+0x28]` staying 0 == emitter never built.
+
+**Stall B — reaches `Client(6)` but no type-5 sent:**
+- `0x142400df0` entry: did the type-5 builder even run? (log `member+0x60+0x548` token + the `member+0x152`
+  state).
+- slot 14 `0x1424030f0`: log the `GetAuthSessionTicket` return (`conn+0x158` handle; 0 ⇒ Steam auth not ready
+  ⇒ empty ticket ⇒ no valid type-5).
+- endpoint build `0x142401110`: log `member+0x130` after (0 ⇒ endpoint never built ⇒ phase machine stuck
+  before the send; the pump can't advance without the peer's packets).
+- phase-step store `0x1423ffc60`: log each phase transition to see where the machine parks (it should walk
+  `…→0x142401110→0x142401280→0x142400ef0→remote branch→…→0x142401400`).
+
+**Stall C — type-5 sent but host validator rejects (host side):**
+- host `0x142402ee0` entry/exit: log the 4-byte len (must be `1..0x400`), and the `BeginAuthSession` result
+  (accept iff `0` or `2`).
+- host `member+0x80` on the client-member: **must equal the CLIENT's real `SteamID64`** — `BeginAuthSession`
+  validates the ticket against exactly this identity, so a wrong/zero `member+0x80` (e.g. a mis-set
+  `drive_add_peer` peer id) rejects every ticket.
+- host `0x142400961` (where `member+0x152` is set on success): if `0x142402ee0` returned true but `+0x152`
+  isn't set, the failure is after validation (the case-5 body's token store `member+0x148`).
+
+### Proposed pre-wiring (session_probe.rs / app.rs — orchestrator wires; out of scope here)
+
+- **Client config:** `drive_join` ON, `drive_establish_handler` OFF (the FSM-conflict crash), **`bypass_
+  session_join_blob_gate` OFF** (replaced by a fed blob), keep the item-#12 registry init, feed the 8-byte host
+  `SteamID64` blob. **Set the session-established bit on the client** — `drive_session_established` ON (drives
+  `0x1423f4870` → `container+0x7c0` bit 2 + identity `+0x7f8`), or OR-in bit 2 directly — so the join's
+  readiness gate `0x1423fd7a0` passes its container-predicate sub-gate `0x1423f4330` (fix A). Keep
+  `stand_up_transport` for the downstream endpoint build. Optional fallback: a `force_join_readiness` lever
+  (`0x1423fd7a0`→1 on the slot-2 join path) as a probe (fix B).
+- **Host config unchanged:** `drive_establish` + `drive_add_peer` (gated on `lobby_state==Host`); ensure the
+  `drive_add_peer` peer id == the client's real `SteamID64` (stall C).
+- **Read-only instrumentation** for the three stall modes above, all latched + panic-firewalled like the
+  existing probes. The two highest-value ones to confirm the wall next run: **`0x1423f6369`** (read `rax` =
+  created session; null ⇒ create failed) and **`0x1423f637a`** (read `al` = readiness result; 0 ⇒ readiness is
+  the wall, as expected).
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's

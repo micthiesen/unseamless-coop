@@ -378,11 +378,15 @@ pub struct DebugProbes {
     /// sub-predicate `0x1423f4330` returns false unless **`container+0x7c0` bit 2 (the session-established
     /// bit)** is set. The host sets that bit during its create/establish flow; a join-only client never does,
     /// so readiness fails and the join bails *before* building the emitter connection (charted in
-    /// docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM SHEET"). When on, the join driver sets the bit on the
-    /// client's container (`*(G+0x60)`) before `drive_join` fires — by driving the lighter session-established
-    /// handler `0x1423f4870` (also sets the self-identity `+0x7f8`, needed for the type-5 remote-peer branch)
-    /// and OR-ing in bit 2 as a guarantee. This is **not** [`drive_establish_handler`] (the full establish
-    /// handler, which caused the FSM-conflict crash). Off by default; set on the JOINER for a two-machine run.
+    /// docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM SHEET"). When on, the join driver **OR-s bit 2 directly**
+    /// into `container+0x7c0` (`*(G+0x60)`) before `drive_join` fires — exactly what the predicate tests,
+    /// nothing else. It does **not** call the session-established handler `0x1423f4870`: the 2026-07-05 run
+    /// proved that passes readiness + builds the emitter but also builds a real `+0x708` establish-session
+    /// connection, crashing the joiner ~30s later at `eldenring.exe+0x3f4860` (the null-session signature of
+    /// the establish-vs-join conflict). The socket layer readiness allocs after the bit comes from
+    /// `stand_up_transport` + `land_socket_holder` (keep both on), which already land `[container+0x708]` on
+    /// the client. This is **not** [`drive_establish_handler`] / [`drive_session_established`] (both build the
+    /// crash artifact). Off by default; set on the JOINER for a two-machine run.
     pub join_set_established_bit: bool,
 
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot

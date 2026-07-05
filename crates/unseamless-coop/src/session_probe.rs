@@ -2161,33 +2161,30 @@ impl Feature for SessionJoinDriver {
                 // IS that container (the registry above is netman+0x710, and create allocs the fresh session
                 // from [[registry+8]+0x48] = container+0x48, so [registry+8]==container==netman). A join-only
                 // client never set the bit → readiness fails → 0x1423f62e0 destroys the session and bails
-                // before the blob-parse ([G+0x28]=0, no emitter). Set it: drive the lighter session-established
-                // handler 0x1423f4870(container) (sets bit 2 + self-identity +0x7f8, which the type-5
-                // remote-peer branch reads), then OR-in bit 2 as a guarantee. NOT drive_establish_handler (the
-                // full establish handler that FSM-conflict-crashed the joiner). See docs/SESSION-DRIVE.md >
-                // "★ CLIENT-JOIN AIM SHEET".
+                // before the blob-parse ([G+0x28]=0, no emitter).
+                //
+                // SET IT WITH A DIRECT OR — NOT by calling the session-established handler 0x1423f4870. The
+                // 2026-07-05 run PROVED calling that handler passes readiness + builds the emitter + reaches
+                // Client/JoinCheck, but it ALSO builds a real +0x708 establish-session connection, and ~30s
+                // later the joiner crashed at eldenring.exe+0x3f4860 reading 0x1c5 — the exact null-session
+                // signature of the establish-vs-join FSM conflict (config.rs `symmetric_peer` / drive_join
+                // notes). The readiness socket-service step doesn't need the handler: `land_socket_holder`
+                // already lands a real holder at [container+0x708] on the client (rig-confirmed same run,
+                // "socketmgr init returned 1 … wrote [container+0x708]"). So OR-in bit 2 alone — exactly what
+                // the container predicate 0x1423f4330 tests, nothing else — and let stand_up_transport +
+                // land_socket_holder (already on) provide the socket layer readiness allocs after the bit.
+                // (join-aim /ultracheck correction, 2026-07-05.)
                 if self.set_established_bit {
                     let field_ptr = (netman + 0x7c0) as *mut usize;
                     let before = field_ptr.read_volatile();
-                    let handler_addr = SESSION_ESTABLISHED_FN.load(Ordering::Relaxed);
-                    if handler_addr != 0 {
-                        // SAFETY: 0x1423f4870 is ManagerImplSteam's session-established handler; win64 ABI,
-                        // rcx = container (the live DLNR3D container). It self-inits its Steam contexts and
-                        // returns; a fault inside surfaces via the crashdump SEH handler.
-                        let handler: extern "win64" fn(usize) =
-                            std::mem::transmute::<usize, extern "win64" fn(usize)>(handler_addr);
-                        handler(netman);
-                    }
-                    let after_handler = field_ptr.read_volatile();
-                    // Guarantee bit 2 regardless of whether the handler set it (it may bail if its own
-                    // preconditions aren't met on the client's bare container).
-                    field_ptr.write_volatile(after_handler | 0b100);
+                    field_ptr.write_volatile(before | 0b100);
                     let identity = ((netman + 0x7f8) as *const usize).read_volatile();
                     log::info!(
-                        "session-probe: drive-join — session-established bit pre-wire on container={netman:#x}: \
-                         [+0x7c0] {before:#x} -> (handler) {after_handler:#x} -> (or bit2) {:#x}; +0x7f8 identity={identity:#x} \
-                         (bit2 set => readiness 0x1423fd7a0 container-predicate 0x1423f4330 should now pass)",
-                        after_handler | 0b100,
+                        "session-probe: drive-join — session-established bit OR-in on container={netman:#x}: \
+                         [+0x7c0] {before:#x} -> {:#x} (bit2); +0x7f8 identity={identity:#x} \
+                         (bit2 set => readiness 0x1423fd7a0 container-predicate 0x1423f4330 should pass; \
+                         no handler call => no +0x708 establish artifact / +0x3f4860 crash)",
+                        before | 0b100,
                     );
                 }
             }
