@@ -3226,3 +3226,156 @@ flows). Separately resolve `iface_vtable[0x40]` (context `0x143b48a00`) to name 
 joiner's real "connect to peer" call (the one that DOES take a SteamID64) — that, not `0x142401e80`, is the
 one to drive. When the peer lands in the client's connection object and it dials the host, the host's tag-1
 handler (already firing) should promote a real inbound connection → `players=2`.
+
+## ★ JOINER PEER-WIRE AIM SHEET (2026-07-05, static)
+
+Static RE (clean on-disk `eldenring.exe`, capstone via `scripts/re/static.py` + PyGhidra reads; behavioral
+notes in our own words, exact addresses). Charts the `session+0x5a8` object the last six runs chased, the
+real game-data transport, and where the joiner's peer identity is actually written — to reframe stall B and
+give the orchestrator a concrete lever. **Load-bearing conclusions first.**
+
+### ▶ TL;DR — the three corrections that rewrite stall B
+
+1. **`session+0x5a8` (vtable `0x1431fa918`) is `DLNR3D::VoiceChatSteam` — NOT a game-data connection object.
+   The whole "client-connect chain" the last six runs chased is VOICE CHAT.** RTTI on the vtable resolves to
+   `.?AVVoiceChatSteam@DLNR3D@@` (ctor/dtor `0x142401c70`, which writes `DLNR3D::VoiceChatSteam::vftable`; the
+   vtable is a single slot). The state-4 phase chain's `vt[0xf8]=0x1423fe0f0` (`add rcx,0x5a8; jmp
+   0x142401e80`) and `vt[0x108]=0x1423fdf10` both run on this voice sub-object. `0x142401e80` fetches
+   `ISteamUser` (context `0x143b48a00` → `SteamInternal_FindOrCreateUserInterface(hUser,"SteamUser021")`) and
+   calls `iface_vtable[0x40]` = **ISteamUser slot 8 = a voice-recording control call (Stop/StartVoiceRecording),
+   which takes no peer**, then clears the voice "armed" byte at `(+0x5a8)+0x12` (= `session+0x5ba`). So run-6's
+   finding "the connect object has no peer SteamID64" is expected: **it was never a connection object.** There
+   is no peer to write there. **Stop instrumenting or driving `session+0x5a8`** — and the `+0x5ba` byte is a
+   voice flag, not a game-connect success signal.
+
+2. **The real game transport is CONNECTIONLESS legacy Steam P2P (`ISteamNetworking006`), not
+   SteamNetworkingSockets.** The only networking interface string in the DLNW3D layer is `"SteamNetworking006"`
+   (accessor `0x142640b90` → SteamInternal ctx `0x143c602b0`). There is **no `ConnectP2P` / socket dial**.
+   `SteamConnection` objects are created **inbound-only**, when a packet arrives from a peer:
+   `ReadP2PPacket` reports the sender's SteamID64 → find-or-create `0x142640e30` builds the `SteamConnection`
+   and writes **`conn+0x138` = that SteamID64**. Nothing dials outbound; a connection is born from a received
+   packet. So the joiner's "connect to peer" is simply **its first outbound `SendP2PPacket(hostSteamID64)`** —
+   there is no separate connect call to find.
+
+3. **Someone must send the first game packet, and neither side does on our driven join.** The join builds the
+   emitter + voice shell but never enqueues a peer member in the joiner's session pending-conn queue
+   (`session+0x4f0`, span stays 0) and never runs a session send toward the host id, so no first
+   `SendP2PPacket` leaves → no `SteamConnection` is ever created (inbound-only) → no member to promote on
+   either side. **The missing step is not a peer-identity write into `+0x5a8`; it is priming the session
+   pending-conn queue with the peer's SteamID64 so the game's own send phase emits the first packet.**
+
+### Task 1 — the `+0x5a8` object decoded (vtable `0x1431fa918` = VoiceChatSteam)
+
+- **Class:** `DLNR3D::VoiceChatSteam`, embedded directly at `session+0x5a8` (not a pointer). COL `0x1433e8040`,
+  TypeDescriptor `0x143d50718`. Its vtable has one slot: `0x142401c70` (the deleting dtor; it stores the
+  vftable, tears down an owned sub-object at `[obj+0x28..+0x38]`, and frees on `flag&1`). Ctor helpers seen at
+  `0x1424019f0` / `0x142401b40`.
+- **Run-6 field map, re-read as voice:** `[+0x5a8]=vtable`, `[+0x5b0]=0x143dce290` (a join-graph heap ptr, the
+  voice object's owned sub-object), `[+0x5b8]=0x1fb` (a small state word whose high bytes hold the
+  `+0x12`/`+0x5ba` armed byte), `[+0x5c0]` = session back-pointer. There is **no SteamID64 field here and none
+  belongs here** — voice is keyed off the established session, not a peer address.
+- **The phase chain is voice setup, not a dial.** `vt[0xf8]=0x1423fe0f0` → `0x142401e80` = per-frame voice
+  pump (calls `ISteamUser` slot 8, pokes the DLNW3D socket-service global `0x144852dc0` via `0x1423f4fa0`,
+  clears `+0x5ba`). `vt[0x108]=0x1423fdf10` → `0x142402130` = `return byte[session+0x5ba]==0` (voice "pump has
+  run" poll). Both are voice; the ~30s park the rig saw is the session-machine timeout, unrelated to this.
+
+### Task 2 — the real peer-identity WRITE site (member+0x80 / conn+0x138)
+
+The SteamID64 is a **direct scalar** at two places (both confirmed live in the ERSC reference dumps):
+`SessionMemberSteam+0x80` (session-layer identity) and `SteamConnection+0x138` (transport-layer identity).
+
+- **Transport write — `0x142640e30` (find-or-create, inbound only).** Called from the receive tick
+  `0x142640bc0` with `param_2 = the SteamID64 that ReadP2PPacket just reported`. It fills a ~0x70-byte identity
+  struct from that id (`[mgr+0x40]` callback), allocates the `SteamConnection` (`[mgr]+8` factory), and the new
+  object's **`+0x138` = the peer SteamID64**. Gated on `len <= [mgr+0x5c]` and (if `[mgr+0x61]` set) a blob
+  validator `0x142642830`. **This is the sole `+0x138` writer, and it only runs on a received packet.**
+- **Session write — `drive_add_peer 0x1423fdc80`.** Signature `(session, &peerID, &connHandle, flag)`. It
+  calls `ISteamFriends` (`SteamInternal ctx 0x143b489d0` = `SteamFriends017`) slot `0x38` =
+  `GetFriendPersonaName(peerID)`; dup-checks the queue via `0x1423fbd80`; allocates a member (`0x1423fb980`);
+  writes the identity (peerID → **member+0x80**, name, and a self-flag = `*peerID==*connHandle`) via
+  `0x142400480`; validates via `0x1424004e0` (teardown `0x1423fbd00` on fail); then **appends the member ptr to
+  `session+0x4f0..+0x4f8`** (`0x1423fa2a0`) and sets `session+0x598 = *connHandle`. **This is the write that
+  puts a peer into the session's pending-conn queue** — the queue the host's send phase searches.
+- **The lookup that consumes it — `0x1423fbd80`.** Walks `session+0x4f0..+0x4f8`, derives each entry's id via
+  `0x1423faf40` (= `hash(entry+0x80)`), returns the entry whose id matches the target. The host's type-6 send
+  phase `0x1423ff2e0` uses it to find the joiner member before sending init-data.
+
+**What our join skips:** the join-blob parser `0x1423fb260` stores the raw host blob into a conn-info entry
+(`0x14251be90` memcpy) and seeds a 0x60-byte phase object (`0x1423fa1b0`, alloc via `vt[0xd8]=0x1423fdfa0`)
+with the SESSION-machine start `0x1423fc9a0`, linking the blob at `phase+0x40`. It does **not** call
+`drive_add_peer` and does **not** send — it only kicks the session machine. So on our path the host's identity
+sits in a conn-info blob but is never turned into a queued member (`session+0x4f0` stays empty) and never
+drives a send. **The skipped step is `drive_add_peer 0x1423fdc80` for the peer** (on a genuine join the session
+machine reaches it as it walks; the bit-2-OR + `drive_join` shortcut bypasses that walk).
+
+### Task 3 — `iface_vtable[0x40]` resolved + the real connect call
+
+- **`iface_vtable[0x40]` (the voice pump's call) = `ISteamUser` (SteamUser021) slot 8 = a voice-recording
+  control method, no peer argument.** Not a connect. (context `0x143b48a00`, accessor `0x140e73310`.)
+- **The real "connect to peer" is `SendP2PPacket(hostSteamID64, …)`** — connectionless. Transport map
+  (all in the socket-manager region, `ISteamNetworking006` via ctx `0x143c602b0`):
+  - **send:** `0x142640b20` = `SendP2PPacket(steamID, data, len, sendtype=0, chan=[mgr+0x50])` (iface slot 0);
+    reached from a `SteamConnection`'s send `0x142643dd0` (target id read from `conn+0x128`), which the
+    endpoint send `0x1424006a0`/`0x1423f3cb0` drives for types 5/6/etc.
+  - **recv tick:** `0x142640bc0` = `ReadP2PPacket` loop (iface slot 2); remote id → search `[mgr+0xb8..0xc0]`
+    for `conn+0x138==id` → deliver `0x142643db0`, else find-or-create `0x142640e30`.
+  - **accept:** `0x1426408b0` = `AcceptP2PSessionWithUser(steamID)` (iface slot 3), the P2PSessionRequest path.
+  - **pool/listen:** `0x142640560` pre-allocates `N` empty `SteamConnection` slots (each 0x140 bytes) and
+    registers the status callbacks; peer ids are filled later by `0x142640e30`.
+- **Every gate on the first send:** the sender needs (a) a stood-up socket manager (`[mgr+0x70]` and
+  `[mgr+0xa8]` set by the pool builder), and (b) a queued peer member so a session send phase targets it. There
+  is no per-call peer gate on `SendP2PPacket` itself — legacy P2P sends to any SteamID64 the caller supplies.
+
+### Task 4 — "B5" instrument + lever recommendation
+
+**The reframed goal: get the first real DLNW3D `SendP2PPacket` to leave, addressed to the peer's SteamID64.**
+Connections then materialize on their own (inbound find-or-create), and the already-charted machinery
+(host add-peer, type-6 init-data, session establish, member type-5) runs to `players=2`. Two levers, host-first
+preferred (matches "who moves first: the HOST", STALL-B aim sheet Task 2/Task 4):
+
+- **B5-primary (host-first).** On the HOST, drive `drive_add_peer 0x1423fdc80(host_session, &joiner_steamid64,
+  &conn_handle, 0)` with the joiner's SteamID64 (known via the rung-4 side-channel) and a distinct synthetic
+  `conn_handle` (must differ from the id so the self-flag reads "remote"). This enqueues the joiner as a pending
+  member in `host session+0x4f0`. The host's session send phase `0x1423ff2e0` then finds it (`0x1423fbd80`) and
+  calls `0x1424006a0` → `SendP2PPacket(joinerID)` — the first real game packet. The joiner's recv tick
+  `0x142640bc0` reads it → find-or-create `0x142640e30` builds the host `SteamConnection` (`conn+0x138=hostID`)
+  → delivers init-data to the joiner's session machine → `session+0x3cc→2` (established) → members build →
+  type-5 → `players=2`.
+  - **Gates to clear:** `drive_add_peer` bails if the peer is already queued (`0x1423fbd80` dup-check), if
+    `0x1423fb980` alloc returns 0, or if member validation `0x1424004e0` fails; and the host must not be
+    suppressed on **outbound** legacy P2P — verify `[debug.probes] host_skip_p2p_accept` only skips
+    `AcceptP2PSessionWithUser` + our pings and does **not** block the game's own `SendP2PPacket` (if it does,
+    gate it host-inbound-only for this test).
+  - **Also nudge the send phase:** if the host session machine is parked, it may need a tick to reach
+    `0x1423ff2e0` after the member is queued; confirm via the B5 probes below.
+- **B5-alt (joiner-first / symmetric).** On the JOINER, drive `drive_add_peer 0x1423fdc80(joiner_session,
+  &host_steamid64, &conn_handle, flag)` with the host id (from the join blob / side-channel). This queues the
+  host member in the joiner's `session+0x4f0`, giving the joiner's pump a target so it emits the first packet to
+  the host; the host's recv-tick then creates the joiner conn and replies. Use this if B5-primary shows the
+  host's send suppressed.
+
+**B5 read-only probes (latched, panic-firewalled, `session_probe.rs` style), ordered by decision value:**
+- **`0x142640b20` (SendP2PPacket) entry — read `param_2` (the target SteamID64).** THE decisive probe: fires
+  ⇒ the first real game packet left, and to whom. Never fires ⇒ no send (the lever didn't produce one).
+- **`0x142640e30` (find-or-create) entry on the RECEIVER — read `param_2`.** Fires ⇒ a packet arrived from that
+  SteamID64 and its `SteamConnection` (`conn+0x138=param_2`) was created. This is the inbound bootstrap landing.
+- **Session pending-conn span `[session+0x4f0]==[session+0x4f8]`** (already the `stall-B poll`): grows to 1
+  entry after `drive_add_peer` — confirms the member enqueued.
+- **`session+0x3cc` walk to 2 on the joiner** — the real "established" success signal (replaces the misleading
+  voice `+0x5ba` byte). `1 → 4 → 2` = success; sticking at 4 = still no init-data.
+- **`[conn+0x138]` on the new socket-mgr conn** (`[mgr+0xb8..0xc0]`) == the peer SteamID64 — confirms the
+  transport identity landed.
+
+### Cross-references
+
+- Supersedes the framing in "★ P2P-EVENT + CLIENT-CONNECT AIM SHEET" > Task 3 and both its RIG RESULT addenda
+  (runs 5/6): the `session+0x5a8` "connect object" is voice; `0x142401e80` is the voice pump, not a dial;
+  `+0x5ba` is a voice flag. The two "walls" collapse into one missing step: prime `session+0x4f0` so the
+  game's own `SendP2PPacket` fires.
+- The transport being connectionless `ISteamNetworking006` matches the earlier legacy-P2P findings (the
+  `game-p2p` probe using `AcceptP2PSessionWithUser`, the d560 legacy-packet event) — the DLNW3D "connection"
+  is a logical object over connectionless P2P, born from received packets.
+- `drive_add_peer 0x1423fdc80` and the member layout (member+0x80 = peer SteamID64) are the same charted in
+  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "the member-add writer chain"; this section
+  pins its queue-enqueue (`session+0x4f0` via `0x1423fa2a0`) and its role as the peer-identity write for the
+  send path.
