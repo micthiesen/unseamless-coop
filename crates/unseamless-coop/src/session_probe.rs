@@ -776,22 +776,33 @@ fn log_host_roster_add(_name: &'static str, regs: *mut Registers) {
 
 /// Throttle for [`log_host_admit_gatec`] — a rejected SYN retries every ~2s, so cap the verdict logging.
 static ADMIT_GATEC_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Armed by `[debug.probes] force_gatec_accept`: force the host admit gate-c verdict to ACCEPT (rax=0) so an
+/// inbound not-yet-a-member peer's SYN passes the gate that otherwise rejects it. Set at install.
+static FORCE_GATEC_ACCEPT: AtomicBool = AtomicBool::new(false);
 
 /// host-admit-gate-c tracer: `0x142640ecd` (`test eax,eax` after the identity callback). `eax==0` => the
-/// gate ACCEPTS and admit proceeds; non-zero => REJECT (the identity-keyed offline wall, if any). Throttled.
+/// gate ACCEPTS and admit proceeds; non-zero => REJECT (the identity-keyed offline wall, if any). When
+/// `force_gatec_accept` is armed it also **writes `rax=0`** (every call, ahead of the log throttle) so the
+/// following `test eax,eax; jne reject` falls through to ACCEPT — the joiner-admit lever. Throttled logging.
 fn log_host_admit_gatec(_name: &'static str, regs: *mut Registers) {
+    // SAFETY: ilhook entry registers; capture the callback's real verdict (low 32 of rax) before any force.
+    let orig = unsafe { (*regs).rax as u32 };
+    let forced = FORCE_GATEC_ACCEPT.load(Ordering::Relaxed);
+    if forced {
+        // SAFETY: writing rax=0 into the saved context; ilhook restores it before the stolen `test eax,eax`,
+        // so the gate sees ACCEPT. Done on every call (not throttled) so every retried SYN is accepted.
+        unsafe { (*regs).rax = 0 };
+    }
     let n = ADMIT_GATEC_LOGS.fetch_add(1, Ordering::Relaxed);
     if n >= 6 {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: ilhook entry registers; eax = the callback's return (low 32 bits of rax).
-        let r = unsafe { &*regs };
-        let verdict = r.rax as u32;
         log::info!(
-            "session-probe: host-admit-gate-c #{n} — identity callback [socketmgr+0x40] returned {verdict} \
-             ({}) — 0 ACCEPTS (admit proceeds), non-zero REJECTS the new peer",
-            if verdict == 0 { "ACCEPT" } else { "REJECT" },
+            "session-probe: host-admit-gate-c #{n} — identity callback [socketmgr+0x40] returned {orig} \
+             ({}){} — 0 ACCEPTS (admit proceeds), non-zero REJECTS the new peer",
+            if orig == 0 { "ACCEPT" } else { "REJECT" },
+            if forced { " -> FORCED to ACCEPT (rax=0)" } else { "" },
         );
     }));
 }
@@ -857,6 +868,10 @@ fn install_host_accept_trace(config: &Config) {
             return;
         }
     };
+    FORCE_GATEC_ACCEPT.store(config.debug.probes.force_gatec_accept, Ordering::Relaxed);
+    if config.debug.probes.force_gatec_accept {
+        log::info!("session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c");
+    }
     install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
     install_offset_hook("host-admit-gate-c", exe_base + HOST_ADMIT_GATEC_OFFSET, log_host_admit_gatec);
     install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);

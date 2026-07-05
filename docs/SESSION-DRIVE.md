@@ -66,6 +66,31 @@
 >
 > ---
 
+## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
+
+Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's
+SYN reaches the host admit path** `0x142640e30` (10–23×) and the side-channel links (`coop: linked`), but
+**no joiner member is added** — and forcing the transport admit is a dead end:
+
+- gate-c `0x142640ecd` (`test eax,eax; jne bail` after the identity callback) rejects — the callback is the
+  stub `0x1423fdf00` (`mov eax,1; ret`). **Forcing it to ACCEPT** (`force_gatec_accept`, writes `rax=0`)
+  **does NOT reach admit-success** `0x142640ee4`: there's a **SECOND gate at `0x142640ed5`
+  (`cmp [rsp+0x80],0; je bail`)** — `[rsp+0x80]` is the *existing* connection for the peer, null here (the
+  Deck has no host-side connection yet), so admit bails regardless.
+- And the **live capture already showed gate-c rejects even in a real working ERSC session** — so this
+  transport admit (`0x142640e30`) is **not** how a joiner becomes a member. Wrong door.
+
+**⇒ The joiner-member is added by the SESSION-LAYER establish flow** (the same `add-member 0x1423fdf20`
+that populated the host's own `member[5]`), using the joiner's **arg2 identity handle**, which is derived
+from the joiner's *connection*. So the real remaining work is: **chart how the host's establishment
+incorporates a connecting peer** — where the joiner's connection object + its identity handle come from,
+and what triggers `add-member` for it — then drive that with the rung-4/side-channel-known Deck SteamID.
+`force_gatec_accept` is charted but OFF (not the path). **Also: the Deck (joiner drive) crashes after
+~30–60s** — needs stabilizing for sustained two-machine testing.
+
+Confirmed two-machine wins: host reproduction (`member[5]`=rig), transport SYN reaches host-admit,
+side-channel link.
+
 ## ★★ HOST-SIDE ESTABLISHMENT REPRODUCED (2026-07-05) — the game builds the member graph offline
 
 **Path A worked on the first try.** With the input descriptor to `0x1423f2820` seeded from the stood-up

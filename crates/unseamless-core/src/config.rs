@@ -333,6 +333,15 @@ pub struct DebugProbes {
     /// joiner. See docs/SESSION-DRIVE.md > "HOST-SIDE ADMIT/ROSTER (2026-07-04)".
     pub instrument_host_accept: bool,
 
+    /// **EXPERIMENTAL rung-3 joiner-admit lever** (2026-07-05). At the host admit gate-c
+    /// (`0x142640ecd`, `test eax,eax` after the identity callback `[socketmgr+0x40]`), force the verdict
+    /// to ACCEPT (`rax=0`) so an inbound peer's SYN passes the gate that otherwise rejects a not-yet-a-member
+    /// peer. The two-machine test showed the Deck's SYN reaches admit but gate-c returns 1 (REJECT); this
+    /// tests whether forcing accept lets the host create the joiner's connection + roster member. Pairs with
+    /// `instrument_host_accept` (watch `admit-success 0x142640ee4` + roster-add + a Deck SteamID in a member
+    /// slot). Fires only on the host. Off by default.
+    pub force_gatec_accept: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

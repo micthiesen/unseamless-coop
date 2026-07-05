@@ -179,6 +179,7 @@ force_netsession_ready = true # rung-3 reject-#1 lever (pairs with drive_create)
                            # likely needs a real peer); kept as a charted probe. Logs the flag's pre-call value
                            # either way. See docs/SESSION-DRIVE.md > "Leg B charted".
 instrument_host_accept = true # READ-ONLY host-side observation (2026-07-04): hook the host's admit-new-peer
+force_gatec_accept = false # rung-3 joiner-admit lever (2026-07-05): force host admit gate-c to ACCEPT so the Deck SYN passes -> test whether admit-success + a Deck roster member follow.
                            # 0x142640e30 (logs sender SteamID + datagram size) + roster-add 0x140cb31b0 (logs
                            # players count + lobby_state). Two-machine: does the joiner's game-P2P reach the
                            # host admit path, and does the roster grow 1->2? Fires only on the receiving (host)

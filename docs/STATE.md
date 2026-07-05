@@ -39,26 +39,27 @@ Last updated: **2026-07-04**.
 
 ## Next
 
-**The two-machine JOINER test — needs Michael + the Deck.** Host-side establishment is reproduced solo
-(above). The remaining rung-3 step: a real Deck joiner over the DLNW3D Steam P2P transport (rig-proven
-two-machine) should make the host's establish/admit flow **populate one of the 5 empty member slots with
-the Deck's SteamID64** → `SessionManagerSteam` roster grows past 1 → both players in each other's world.
+**Chart how the host's establishment incorporates a CONNECTING PEER — the joiner-member add.** The
+2026-07-05 two-machine run ([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ JOINER-ADMIT") proved the transport
+admit path is the wrong door: the Deck's SYN reaches host-admit `0x142640e30` and the side-channel links,
+but gate-c rejects, and **forcing gate-c accept doesn't help** (a 2nd gate `0x142640ed5` bails on the null
+peer connection, and the capture shows gate-c rejects in real ERSC too). The joiner becomes a member via
+the **session layer** (`add-member 0x1423fdf20`, same as the host's `member[5]`), using the joiner's **arg2
+identity handle** derived from its connection.
 
-- **What to run — TURNKEY procedure:** [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ READY-TO-RUN".
-  Reproduction config is now the seed default (both machines get it). Deck: `deck.sh apply --auto-session
-  join` → `cycle`. Rig: `rig.sh cycle`. Verify (orchestrator, from memory): a Deck SteamID64 in a
-  previously-empty `member+0x80` slot = roster grew = joiner admitted. **Prep done 2026-07-05 (seed synced,
-  Deck artifacts built); blocked only on the Deck being awake** (it's asleep + won't wake over the network).
-- **Why this / why now:** the host graph is proven to build the game's way; the only untested leg is whether
-  an inbound peer gets added as a member (the joiner half of "let the game establish it").
-- **Serial + Michael-gated:** the actual in-world verification needs eyes on both machines; the orchestrator
-  can prep the Deck (apply our mod, seed) but the co-op confirmation is human.
+1. **Chart the joiner path in the live capture data** — how did real ERSC's `member[4]`=Deck get added?
+   Where did its `+0x70`/`+0x78` handles + `+0x80` SteamID come from (the joiner's connection object), and
+   what triggered `add-member` for the peer (vs the host's own)? Use ERSC-LIVE-CAPTURE + a fresh
+   writer-trace on the host during a Deck join if needed.
+2. **Reproduce it:** when the Deck connects (we know its SteamID from rung-4/`coop: linked`), drive/allow
+   the host to add it as a member — likely build the joiner's connection + identity handle, then
+   `add-member`. Verify a Deck SteamID64 lands in an empty `member+0x80` slot (roster → 2).
+3. **Stabilize the Deck joiner** — it crashes ~30–60s into the join drive; needs fixing for sustained tests.
 
-**Solo follow-ups (no Deck needed), if useful before the two-machine run:**
-- The `ADD-MEMBER` fired 7× solo — chart why (retry loop? one per slot?) and confirm only the host member
-  populates solo (it does: `member[5]` = rig, rest empty).
-- Confirm the reproduced session survives without `suppress_leave` (the capture showed that gate isn't on
-  the establishment path, so it may no longer be needed to hold `Host`).
+- **Why this / why now:** host-side is done; the joiner-member is the last rung-3 leg, now correctly scoped
+  to the session layer (not the transport admit rabbit hole we just ruled out).
+- **Serial + Michael-gated:** two-machine (rig host + Deck joiner); orchestrator drives, verifies from memory.
+- **Charted lever, OFF:** `force_gatec_accept` (forces host gate-c accept) — kept in code, not the path.
 
 ## Candidates Not Chosen
 
