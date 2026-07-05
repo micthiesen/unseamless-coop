@@ -11,33 +11,39 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (member-pipeline chart + drive_add_peer).
+Last updated: **2026-07-05** (host builds joiner endpoint; symmetric-peer crash fix; ERSC #2 architecture).
 
 ## Now
 
 - **Out-of-band connection stack (rungs 1/2/4 + the DLNW3D Steam P2P transport) is shipped and
-  two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the
-  side-channel, and exchange game-P2P packets by SteamID64 alone.
-- **★★ HOST-SIDE rung-3 ESTABLISHMENT IS REPRODUCED — solo AND two-machine** (stable `Host`/`Ingame`, full
-  member graph, `member[5]+0x80` = host SteamID64). Details: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★
-  HOST-SIDE ESTABLISHMENT REPRODUCED".
-- **★★ THE JOINER-MEMBER PIPELINE IS FULLY CHARTED + LIVE-VALIDATED.** Per frame the host runs
-  `update_step → 0x1423f6bf0 (SessionManagerSteam.update) → 0x1423fb690 (per-session update)`, which pumps
-  a **pending-conn queue** `[session+0x4f0..+0x4f8]` (handshake pump `0x1424007e0` reading DLNW3D msgs from
-  each conn's `+0x130` endpoint) and then **drains a lock-free event queue** (`SessionSteam` vt[28]
-  `0x1423ff440`); a **type-1 event → `0x1423fe350` → add-peer `0x1423fdc80`** pops an empty member from the
-  pool, sets `member+0x80` = the peer SteamID64 (`peerInfo[0]`, via `0x142402d70`→`0x142400480`), and
-  enqueues it. Validated against the live object. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ MEMBER
-  PIPELINE CHARTED".
-- **★★★ HOST-SIDE JOINER-MEMBER + ENDPOINT SOLVED — two-machine (2026-07-05).** `[debug.probes]
-  drive_add_peer` (throttled re-fire, gated on `lobby_state==Host`) keeps a Deck member in the session's
-  pending-conn queue; with the Deck connected two-machine, **the host's own per-frame pump built the Deck
-  member's transport endpoint** — `member[4]+0x130` = a live `MTInternalThreadSteamConnection` (vtable
-  `0x143277750`), the member persisted, and a handshake flag advanced (`+0x151 0→1`). This is the piece that
-  blocked rung-3 for months. Mechanism (ERSC-capture-confirmed): the game's pump `0x1424007e0 → 0x1423ffd00
-  → 0x142401110` builds the endpoint once the peer's packets arrive — no endpoint-bind driver needed, just a
-  member in the queue. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★★ HOST BUILDS THE JOINER ENDPOINT" and
-  "★★ ENDPOINT CAPTURED".
+  two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the side-channel,
+  and exchange game-P2P packets by SteamID64 alone.
+- **★★ HOST-SIDE rung-3 ESTABLISHMENT IS REPRODUCED** (solo + two-machine): stable `Host`/`Ingame`, full
+  member graph, `member[5]` = host SteamID64.
+- **★★ THE JOINER-MEMBER PIPELINE IS FULLY CHARTED + LIVE-VALIDATED.** Per frame: `update_step →
+  SessionManagerSteam.update 0x1423f6bf0 → per-session update 0x1423fb690`, which pumps a **pending-conn
+  queue** `[session+0x4f0..+0x4f8]` (handshake pump `0x1424007e0`) and drains a lock-free **event queue**
+  (`SessionSteam` vt[28] `0x1423ff440`); a **type-1 event → add-peer `0x1423fdc80`** pops an empty member and
+  sets `member+0x80` = the peer SteamID64. `[debug.probes] drive_add_peer` drives that directly.
+- **★★★ HOST BUILDS THE JOINER MEMBER + ENDPOINT — two-machine.** With `drive_add_peer` (throttled re-fire,
+  gated on `lobby_state==Host`) keeping a member in the pending queue and the peer connected, the host's own
+  per-frame pump (`0x1424007e0 → 0x1423ffd00 → 0x142401110`) builds `member+0x130` = a live
+  `MTInternalThreadSteamConnection` — no endpoint-bind driver needed. This is the piece that blocked rung-3
+  for months. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★★ HOST BUILDS THE JOINER ENDPOINT".
+- **★★ JOINER CRASH FIXED (`symmetric_peer`); BOTH machines stable + build each other's endpoint.** The
+  crash was an FSM conflict (our joiner drove establish→`Host` AND join→`Client` at once → teardown → null
+  crash). `symmetric_peer` makes both host-style peers (both send SYNs), and two-machine both build the
+  other's fully-initialised endpoint. But it leaves both at `Host(3)` and the handshake never *completes*
+  (member flags reach `(0,1,0,0)`, not the done `(0,0,1,0)`) because our 14-byte SYN isn't a real DLNW3D
+  message — so the member churns and `players` stays 1. (Behavioral proof it's a real session: the host
+  can't rest at a grace.) `symmetric_peer` is a proven diagnostic, not the shipping shape.
+- **★★★ ERSC CAPTURE #2 settled the architecture + banked the handshake protocol.** Verified on BOTH
+  machines: asymmetric in **FSM state only** (host `lobby_state=3` `Host`, client `=6` `Client`); the DLNR3D
+  graph is built on both sides and **mirrors** (each side's *remote* member holds the endpoint). Completion =
+  a **type-5 DLNW3D message** (`{8B token, 4B len, len·blob}`; token is a per-connection nonce) that the
+  pump validates (member vtable[0x88] `0x142402ee0`) and sets `member+0x152`=done. Full transitive dumps of
+  both machines at `~/Documents/ersc-session-ref-{host,client}.txt`. See
+  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "★★ REFERENCE DUMP #2".
 
 ## Next
 
@@ -67,34 +73,22 @@ Client/6) at once → teardown → null-session crash. Fix:
   `SteamConnection(+0x138 peer id)` wiring, the per-connection nonce token (`member+0x148`), and the full
   8-type protocol + handlers are in [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) >
   "★★ REFERENCE DUMP #2". Completion = pump `0x1424007e0` type-5 case `0x142400924` → member vtable[0x88]
-  validator `0x142402ee0`. The joiner
-crash is FIXED (`symmetric_peer` mode) and — two-machine — **both peers now build each other's
-fully-initialised `member+0x130` `MTInternalThreadSteamConnection`**, both machines stable. The *only*
-remaining gap is that the handshake never completes: member flags reach `(0,1,0,0)` (`+0x151`, set by the
-endpoint build) vs the working ERSC `(0,0,1,0)` (`+0x152`, set only by a real handshake message). So the
-member times out ~30s, is dropped + re-added (endpoint rebuilds transiently), and `players` stays 1.
-Root-caused: **our 14-byte SYN isn't a valid pump message** — the pump `0x1424007e0` dispatches `buf[0]` as a
-type 1..8 (jump table `0x1424009f8`); `0x0e`=14 is out of range → ignored. The type that sets `+0x152` is a
-real DLNW3D handshake message we don't send. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ SYMMETRIC PEER".
-
-1. **Let the built endpoints drive the handshake:** once `member+0x130` (`MTInternalThreadSteamConnection`)
-   exists it has its own send/recv (callbacks `endpoint+0x20/+0x28`). Try (a) **stop our SYN-spam once the
-   endpoint is built** (channel-30 collision may block the game's endpoint traffic), and (b) **extend the
-   ~30s member timeout** (`0x1424004e0` finalize) so the endpoint persists long enough to finish — the churn
-   drops it before the handshake can complete (a poke of `+0x152` mid-churn didn't stick).
-2. **Or chart + drive the real DLNW3D connect sequence:** the type-1..8 messages the pump dispatches (esp.
-   the type whose `conn vtable[0x88]` sets `+0x152`) — likely a quick **ERSC capture** watching what the pump
-   reads/writes on a member's `conn+0x130` during a live join (both machines still set up on our mod; ERSC
-   swap-in is `rig.sh restore` + the Deck ERSC files are aside).
-3. **Verify roster → 2:** completed member (`flags (0,0,1,0)`, persists) → promoted via `0x140cb31b0` →
-   `players=2` → both players see each other.
-
-- **Why this / why now:** everything up to a persistent, roster-promoted joiner member now works
-  (host+joiner build each other's endpoint, no crash). The final mile is the connect-handshake completion.
-- **Serial + Michael-gated:** two-machine; the handshake charting/capture is Michael-gated. Both machines are
-  on our mod with `symmetric_peer=true` (ERSC not restored, per Michael).
+  validator `0x142402ee0`.
+- **Why this / why now:** the host side of the joiner-member is solved and the crash is fixed; the only thing
+  between us and a real 2-player session is the client completing its side (reaching `Client(6)` + emitting
+  the type-5) without the establish/join FSM conflict.
+- **Serial + Michael-gated:** two-machine (rig + Deck). Both machines were on ERSC for capture #2 at wrap;
+  rig/Deck state is cheap to re-derive (re-apply our mod with `symmetric_peer` off + `drive_join` on the
+  client, or the corrected client-join config, for the next test).
 
 ## Candidates Not Chosen
+
+- **`symmetric_peer` as the shipping design** — proven diagnostic (both build endpoints, both stable) but
+  leaves both at `Host(3)` and can't complete the handshake (sends no real type-5). Keep as a lever; the
+  endgame is host `Host(3)` + client `Client(6)`.
+- **Fabricating the type-5 completion message** — the token (`member+0x148`) is a per-connection nonce (it
+  changes every rejoin) + a length-prefixed blob validated against the peer identity, so it can't be
+  precomputed. The type-5 must come from the peer's real connect flow, not a synthesized packet.
 
 - **Forcing / pre-seeding the transport admit** (`force_gatec_accept`, gate-c, `0x142640e30`) — **RULED OUT
   at the instruction level**: the identity callback `0x142639d00` rejects on the `[context+0x168]` stub
@@ -107,14 +101,18 @@ real DLNW3D handshake message we don't send. See [SESSION-DRIVE.md](SESSION-DRIV
 
 ## Learned Recently (Pointers Only)
 
-- [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ MEMBER PIPELINE CHARTED" — the full per-frame consumer pipeline
-  (event drain → add-peer → pool pop → identity populate → enqueue → handshake pump), the empirical results
-  (model validated live; `drive_add_peer` works; the `+0x130` endpoint gap), and the two ways to source the
-  endpoint. Also "★★ HOST-SIDE ESTABLISHMENT REPRODUCED" and "★ JOINER-ADMIT".
-- Code: `session_probe.rs` — new read-only `add-peer` hook (`0x1423fdc80`, under `instrument_host_accept`)
-  and the `drive_add_peer` lever (`try_drive_add_peer`, gated on `lobby_state==Host`); `LIVE_SESSION` global
-  captured off the `ADD-MEMBER` hook. Config: `[debug.probes] drive_add_peer` (seed default on for the rig).
-- [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture" — the member layout
-  (`+0x80` = SteamID64), the add-member chain, the registry root, both red herrings.
+- [SESSION-DRIVE.md](SESSION-DRIVE.md) — "★★ MEMBER PIPELINE CHARTED" (the per-frame consumer pipeline),
+  "★★★ HOST BUILDS THE JOINER ENDPOINT" (`drive_add_peer` + pump builds `member+0x130`), "★★ SYMMETRIC PEER"
+  (crash fix + both build endpoints; the handshake-completion gap), and "★★★ ERSC CAPTURE #2" (the corrected
+  architecture: FSM-only asymmetry, mirrored graph, the type-5 protocol).
+- [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "★★ REFERENCE DUMP #2" — the both-sides
+  transitive graph, endpoint→context→connmgr→`SteamConnection` wiring, the nonce token, and the full 8-type
+  DLNW3D protocol + resolved handler methods + the type-5 payload shape.
+- Ground-truth dumps (persistent, uncommitted): `~/Documents/ersc-session-ref-{host,client}.txt`. Re-dump
+  with `scripts/re/dump-session-ref.py` (host-local; push it + `scan-vtable.py` to the Deck for the client).
+- Code: `session_probe.rs` — the `drive_add_peer` lever (`try_drive_add_peer`, throttled re-fire, gated on
+  `lobby_state==Host`) + read-only `add-peer` hook; `symmetric_peer` mode (`rung3_role` forces host role,
+  both send the DLNW3D SYN). Config: `[debug.probes] drive_add_peer` + `symmetric_peer`.
 - [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ TWO-MACHINE HARNESS" — footgun-safe two-machine
-  procedure (pass `--auto-session` on `cycle`, not `apply`) + the Deck-crash gotcha.
+  procedure. ERSC capture recipe + the Deck ERSC swap (move our `dinput8.dll` aside, push the rig's ERSC
+  launcher) in `capture-endpoint.py` / `dump-session-ref.py` headers + ERSC-LIVE-CAPTURE-FINDINGS.
