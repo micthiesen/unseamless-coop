@@ -580,7 +580,15 @@ fn install_create_gate_trace(config: &Config) {
     LAND_SOCKET_HOLDER.store(config.debug.probes.land_socket_holder, Ordering::Relaxed);
     HOLDER_CTOR_FN.store(exe_base + HOLDER_CTOR_OFFSET, Ordering::Relaxed);
     GAME_ALLOC_FN.store(exe_base + GAME_ALLOC_OFFSET, Ordering::Relaxed);
-    DRIVE_ESTABLISH_HANDLER.store(config.debug.probes.drive_establish_handler, Ordering::Relaxed);
+    // Drive the establish handler on the HOST role only. It's the host's session-build path; on a joiner
+    // (do_join) driving `drive_join` toward Client(6), also driving establish toward Host(3) is the FSM
+    // conflict that teardown-crashes the joiner (docs/STATE.md > "Next"; the crash `symmetric_peer` sidestepped
+    // by making both hosts). The seed is SHARED across both machines, so a joiner would otherwise inherit the
+    // host's `drive_establish_handler = true`; gate it on `do_create` so the per-machine role (auto_session)
+    // governs — host establishes, client joins, no fight. `symmetric_peer` (both = host role) still drives it
+    // on both, as intended.
+    DRIVE_ESTABLISH_HANDLER
+        .store(do_create && config.debug.probes.drive_establish_handler, Ordering::Relaxed);
     ESTABLISH_HANDLER_FN.store(exe_base + ESTABLISH_HANDLER_OFFSET, Ordering::Relaxed);
     ADD_PEER_FN.store(exe_base + ADD_PEER_OFFSET, Ordering::Relaxed);
     let vv = exe_base + VETO_VMETHOD_OFFSET;
