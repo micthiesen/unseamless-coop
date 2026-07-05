@@ -373,6 +373,18 @@ pub struct DebugProbes {
     /// "HOST-SETUP DRIVE" > "JOIN DRIVER".
     pub drive_join: bool,
 
+    /// **EXPERIMENTAL rung-3 JOIN readiness pre-wire** (2026-07-05, pairs with [`drive_join`]). The join
+    /// creates a fresh `SessionSteam` and gates it on the readiness check `0x1423fd7a0`, whose container
+    /// sub-predicate `0x1423f4330` returns false unless **`container+0x7c0` bit 2 (the session-established
+    /// bit)** is set. The host sets that bit during its create/establish flow; a join-only client never does,
+    /// so readiness fails and the join bails *before* building the emitter connection (charted in
+    /// docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM SHEET"). When on, the join driver sets the bit on the
+    /// client's container (`*(G+0x60)`) before `drive_join` fires — by driving the lighter session-established
+    /// handler `0x1423f4870` (also sets the self-identity `+0x7f8`, needed for the type-5 remote-peer branch)
+    /// and OR-ing in bit 2 as a guarantee. This is **not** [`drive_establish_handler`] (the full establish
+    /// handler, which caused the FSM-conflict crash). Off by default; set on the JOINER for a two-machine run.
+    pub join_set_established_bit: bool,
+
     /// Rung-3 transport-leg standup (ERSC path C — docs/COOP-CONNECTION.md > "THE PLAN"). One-shot
     /// in-world: resolve `ISteamNetworking006` and construct a DLNW3D `SteamServiceImpl` offline,
     /// logging each step, so a `scripts/re/scan-vtable.py` run can confirm the transport is

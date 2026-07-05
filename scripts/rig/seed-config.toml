@@ -129,6 +129,13 @@ drive_join = true          # JOIN driver (joiner): drive 0x140cae640 -> TryToJoi
                            # auto_session=host); drives only on the client. See docs/STATE.md > "Next".
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
+join_set_established_bit = true # ★ CLIENT-JOIN FIX (2026-07-05): on the joiner, set container+0x7c0 bit 2
+                           # (session-established) before drive_join so the join-created session passes the
+                           # readiness gate 0x1423fd7a0 (container sub-predicate 0x1423f4330) and builds the
+                           # emitter connection → runs the handshake → sends the type-5. Charted in
+                           # docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM SHEET". Host-inert (only the join driver
+                           # reads it). NOT drive_establish_handler (the crash). Baseline (2026-07-05) showed the
+                           # join bails before the blob-parse without this.
 drive_establish_handler = true # ★ THE REPRODUCTION (2026-07-05): drive the game's own establish handler
                            # 0x1423f2820 → it builds the connection, session, AND member graph itself. WORKS
                            # OFFLINE now that drive_establish_handler seeds its input descriptor from the

@@ -2039,11 +2039,21 @@ pub struct SessionJoinDriver {
     fire_solo: bool,
     /// Two-machine host-id override (both machines' SteamID64s; the joiner picks whichever isn't its own).
     peer_override: [u64; 2],
+    /// Set the container's session-established bit (`container+0x7c0` bit 2) before the join, so the
+    /// join-created session passes the readiness gate `0x1423fd7a0` and builds the emitter connection.
+    /// See [`crate::config`] `join_set_established_bit` + docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM SHEET".
+    set_established_bit: bool,
 }
 
 impl SessionJoinDriver {
-    fn new(fire_solo: bool, peer_a: u64, peer_b: u64) -> Self {
-        Self { fired: false, linked_since: None, fire_solo, peer_override: [peer_a, peer_b] }
+    fn new(fire_solo: bool, peer_a: u64, peer_b: u64, set_established_bit: bool) -> Self {
+        Self {
+            fired: false,
+            linked_since: None,
+            fire_solo,
+            peer_override: [peer_a, peer_b],
+            set_established_bit,
+        }
     }
 
     /// The host SteamID64 to join: the rung-2-linked partner if present, else the config peer override
@@ -2142,6 +2152,42 @@ impl Feature for SessionJoinDriver {
                         "session-probe: drive-join — initialized empty registry {reg:#x} (ready[+0x10]=1, \
                          array[+0x18]={:#x} cap=16) so 0x1423f62e0 passes its ready check",
                         slots.as_ptr() as usize,
+                    );
+                }
+
+                // Readiness pre-wire (the CLIENT-JOIN AIM SHEET fix). The join creates a fresh SessionSteam
+                // and gates it on readiness 0x1423fd7a0, whose container sub-predicate 0x1423f4330 returns
+                // false unless container+0x7c0 bit 2 (the session-established bit) is set. `netman` (=*(G+0x60))
+                // IS that container (the registry above is netman+0x710, and create allocs the fresh session
+                // from [[registry+8]+0x48] = container+0x48, so [registry+8]==container==netman). A join-only
+                // client never set the bit → readiness fails → 0x1423f62e0 destroys the session and bails
+                // before the blob-parse ([G+0x28]=0, no emitter). Set it: drive the lighter session-established
+                // handler 0x1423f4870(container) (sets bit 2 + self-identity +0x7f8, which the type-5
+                // remote-peer branch reads), then OR-in bit 2 as a guarantee. NOT drive_establish_handler (the
+                // full establish handler that FSM-conflict-crashed the joiner). See docs/SESSION-DRIVE.md >
+                // "★ CLIENT-JOIN AIM SHEET".
+                if self.set_established_bit {
+                    let field_ptr = (netman + 0x7c0) as *mut usize;
+                    let before = field_ptr.read_volatile();
+                    let handler_addr = SESSION_ESTABLISHED_FN.load(Ordering::Relaxed);
+                    if handler_addr != 0 {
+                        // SAFETY: 0x1423f4870 is ManagerImplSteam's session-established handler; win64 ABI,
+                        // rcx = container (the live DLNR3D container). It self-inits its Steam contexts and
+                        // returns; a fault inside surfaces via the crashdump SEH handler.
+                        let handler: extern "win64" fn(usize) =
+                            std::mem::transmute::<usize, extern "win64" fn(usize)>(handler_addr);
+                        handler(netman);
+                    }
+                    let after_handler = field_ptr.read_volatile();
+                    // Guarantee bit 2 regardless of whether the handler set it (it may bail if its own
+                    // preconditions aren't met on the client's bare container).
+                    field_ptr.write_volatile(after_handler | 0b100);
+                    let identity = ((netman + 0x7f8) as *const usize).read_volatile();
+                    log::info!(
+                        "session-probe: drive-join — session-established bit pre-wire on container={netman:#x}: \
+                         [+0x7c0] {before:#x} -> (handler) {after_handler:#x} -> (or bit2) {:#x}; +0x7f8 identity={identity:#x} \
+                         (bit2 set => readiness 0x1423fd7a0 container-predicate 0x1423f4330 should now pass)",
+                        after_handler | 0b100,
                     );
                 }
             }
@@ -2844,6 +2890,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.drive_fire_solo,
             config.debug.probes.p2p_test_peer_a,
             config.debug.probes.p2p_test_peer_b,
+            config.debug.probes.join_set_established_bit,
         )));
     }
     features
