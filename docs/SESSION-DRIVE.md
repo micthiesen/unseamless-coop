@@ -183,6 +183,40 @@ packets. Two ways in for next time:
 `drive_add_peer` (host-side, gated on `lobby_state==Host`) is the foundation both build on: it creates a
 correct member for the Deck; only the endpoint bind is missing.
 
+### ★★ ENDPOINT CAPTURED (2026-07-05, live ERSC) — how `member+0x130` gets built + bound
+
+A live 2-player ERSC capture (rig host + Deck joiner, standalone ptrace via `scripts/re/capture-endpoint.py`
++ `watch-write.py`/`watch-bt.py` on a Deck leave→rejoin) pinned the endpoint mechanism completely:
+
+- **`member+0x130` is a `DLNW3D::MTInternalThreadSteamConnection`** (RTTI-confirmed, vtable `0x143277750`) —
+  the per-peer Steam P2P connection. In the working session the Deck member (`member[4]`) had `+0x130` SET
+  to a live connection with a back-ptr to the member at `endpoint+0x50`, an index `endpoint+0x8` = the peer
+  index, and callbacks at `endpoint+0x20/+0x28`. (Correcting the older dump: a *connected* remote member's
+  `+0x130` is **non-zero**; the host's own self-member keeps `+0x130=0`.)
+- **The SET writer is `0x14203ef70`** (a ref-counted pointer assign, `member+0x130 = src[0]`), called from
+  **`0x142401110`**: that function builds a descriptor from the session's transport fields
+  (`[session+0xc0]`, `[session+0xc8]`, `[session+0xd1]` + 4 local callbacks), calls the member's own
+  **vtable slot 13 (`[member+0x68]`)** to construct the `MTInternalThreadSteamConnection`, then binds it via
+  `0x14203ef70`. The CLEAR-on-leave writer is `0x14203f050` (release).
+- **The trigger (live backtrace):** `SessionManagerSteam.update 0x1423f6bf0 → per-session update
+  0x1423fb690 → the conn PUMP 0x1424007e0 → 0x1423ffd00 → 0x142401110 → 0x14203ef70`. So the endpoint is
+  built **automatically by the per-frame pump** as it advances a member in the pending-conn queue — there is
+  no separate "bind the endpoint" driver; the member just needs to be in the queue and its handshake to
+  progress (which needs the peer's DLNW3D messages arriving at the pump).
+
+**⇒ Reframes the fix — the payoff test is `drive_add_peer` two-machine (untested).** `drive_add_peer`
+already puts the Deck member in the pending-conn queue; the game's own per-frame pump should then build the
+endpoint (`0x142401110`) and complete the handshake **once the Deck's real packets reach the pump**. My
+earlier two-machine run predated the `drive_add_peer` lever, so the combination "member driven into the
+queue **while the Deck is connected**" was never run. That is the next test:
+1. Both machines on our mod (`rig.sh apply` host + `deck.sh apply --auto-session join`).
+2. Rig reaches `Host`/`Ingame`; `drive_add_peer` fires (gated on `lobby_state==Host`) → Deck member enqueued.
+3. Deck connected + sending → watch whether the per-frame pump builds `member[4]+0x130` and completes the
+   handshake → `member+0x80` = Deck ID persists, roster → 2. `capture-endpoint.py` reads `+0x130` on the
+   rig to confirm the endpoint got built.
+- If the pump still drops the member, the gap is narrower still: the Deck's handshake messages aren't
+  reaching the pump's read (`0x14203f250` on `conn+0x130`/the holder) — chart that read's source next.
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's
