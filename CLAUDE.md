@@ -78,9 +78,11 @@ The only split is build-vs-run, both on this one machine:
 >
 > **`apply`/`cycle` freely — re-applying is cheap and repeatable.** Apply and re-launch as often as a
 > work session needs; don't track or reason about "is the mod applied" — if in doubt, just apply. It
-> reaches in-game autonomously (`cycle` loads a save via the ydotool popup-dismiss). **Never restore
-> the rig, and don't think about it** — Michael puts his own stack back manually when he wants it
-> (`rig.sh restore` exists for him); it's not your concern and not a thing to remember or mention.
+> reaches in-game autonomously (`cycle` loads a save via the ydotool popup-dismiss). **`restore` is
+> fine to run when a task genuinely needs it** — swapping to the real ERSC stack for a live capture,
+> or resetting a bad rig state — you don't need to ask first. What Michael *doesn't* want is restore
+> as **routine ceremony**: it's not a step between normal mod-dev cycles, and rig-applied-state is not
+> a thing to track or remember (just re-apply). Michael also restores manually whenever he likes.
 >
 > **But NEVER apply/launch/kill while the game is already running** — a running ELDEN RING you didn't
 > launch means Michael is playing: applying would overwrite the process's mapped `dinput8.dll` in

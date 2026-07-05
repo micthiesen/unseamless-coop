@@ -131,9 +131,10 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
   original".
 - **`apply`** installs our `dinput8.dll` + `start_protected_game.exe` + a seed config over the stack.
   **Safe to run as often as you like; it never restores.** Auto-snapshots first if needed.
-- **`restore`** puts the original stack back. It's Michael's to run, manually, when he wants his own
-  ERSC setup back — **not something you drive, track, or need to think about.** Apply freely and
-  leave the rig however it ends up; re-applying is cheap, and Michael handles any restore himself.
+- **`restore`** puts the original stack back. **Run it when a task needs it** — swapping to the real
+  ERSC stack for a live capture, or resetting a bad rig state — no need to ask first. It's just not a
+  *routine* step: apply freely, don't track rig-applied-state between cycles, and re-apply rather than
+  fuss. Michael also restores manually whenever he likes.
 
 **Commands** (env overrides: `GAME_DIR`, `BACKUP_DIR`, `APPID`):
 - `rig.sh status` — snapshot state, what's installed (ours vs original), latest log.
