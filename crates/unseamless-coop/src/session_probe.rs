@@ -1332,12 +1332,30 @@ fn drive_establish_handler(container: usize) {
         p40.write_volatile(1);
         p41.write_volatile(0);
     }
-    // Leaked, mostly-zeroed descriptor (the handler reads dwords [desc..desc+0x34] + bytes at +0x3c/+0x3d
-    // and copies ~0x120 bytes to [container+0xb0]). 0x140 bytes is generous. Guess the connection-count
-    // field at desc+0 = 1 (see the doc comment); everything else defaults inside the builder.
+    // Leaked descriptor. The handler copies dwords [desc+0..0x34] into the builder's local[0x18..], which
+    // the socketmgr sub-init then copies into socketmgr[0x58..0xa0] — the config region a ZEROED input
+    // clobbers (2026-07-05 finding: the builder's socketmgr init fails for this reason while
+    // land_socket_holder's succeeds). PATH A: seed [desc+0..0x48] from the stood-up socketmgr's post-ctor
+    // defaults (socketmgr[0x58..0xa0]) so the builder builds a configured socketmgr. Caveat: the handler's
+    // input→local copy has GAPS (local[0x30/0x34/0x4c] aren't sourced from input → some defaults stay stack
+    // garbage), so this cycle tests empirically whether that's fatal (→ path B) or the build proceeds.
     let desc: &'static mut [u8] = vec![0u8; 0x140].leak();
     let desc_ptr = desc.as_mut_ptr() as usize;
-    unsafe { (desc_ptr as *mut u32).write_volatile(1) };
+    let standup = STANDUP_CONNECTION.load(Ordering::Relaxed);
+    if standup != 0 {
+        // SAFETY: `standup` is the published socket-manager wrapper; [+8] is its socketmgr, whose
+        // [0x58..0xa0] config region is in-bounds (the object is 0x150 bytes). Read-only copy into our buf.
+        let socketmgr = unsafe { ((standup + 8) as *const usize).read_volatile() };
+        if socketmgr != 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping((socketmgr + 0x58) as *const u8, desc_ptr as *mut u8, 0x48);
+            }
+            log::info!(
+                "session-probe: drive-establish — seeded input desc[0..0x48] from standup socketmgr \
+                 {socketmgr:#x}[0x58..0xa0] (path A: preserve config defaults through the builder sub-init copy)",
+            );
+        }
+    }
     // Instrument the DLNW3D singleton (0x144852dc0 ptr + 0x144852dc8 readiness byte) that the handler's
     // internal readiness gate (0x1423f5190 -> 0x1423f4fa0) reads, across the drive. The gate returns 0
     // offline because this singleton is a self-referential empty sentinel (0x144852dd0 = &cell+0x10),

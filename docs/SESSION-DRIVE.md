@@ -66,6 +66,30 @@
 >
 > ---
 
+## ★★ HOST-SIDE ESTABLISHMENT REPRODUCED (2026-07-05) — the game builds the member graph offline
+
+**Path A worked on the first try.** With the input descriptor to `0x1423f2820` seeded from the stood-up
+socketmgr's post-ctor defaults (`[desc+0..0x48]` ← `socketmgr[0x58..0xa0]`, so the config survives the
+handler's pipe into the builder's socketmgr config region — the local-copy GAPS turned out **non-fatal**),
+the driven establish handler **succeeds offline** and the game runs its own full establishment:
+
+- `0x1423f2820` **returns 1**, builds + wraps a connection at `[container+0x708]` (by the handler itself).
+- **★ `ADD-MEMBER` (`0x1423fdf20`) fires** (7×, caller `0x1423fb118`) — the game's own member-add runs.
+- Result, **solo + offline**, stable (`lobby_state=Host(3)`, `protocol=Ingame(6)` held): **1 `SessionSteam`
+  + 6 `SessionMemberSteam`** (the pre-alloc pool), **`member[5]+0x80` = the rig's own SteamID64**
+  `76561198004789432` (the host is a member of its own session — EXACTLY as the live ERSC capture),
+  `members[0-4]+0x80 = 0` (empty slots), `SessionManagerSteam` count=1 cap=16.
+
+This reproduces the live-captured **host-side** graph exactly, via the game's own establishment machinery.
+The "let the game establish it" model is proven. Config: `drive_establish_handler` on,
+`drive_session_established` off, `stand_up_transport` + `land_socket_holder` on, seed as above.
+
+**► NEXT (needs a 2nd machine): the JOINER.** A real Deck joiner over the (rig-proven) DLNW3D Steam P2P
+transport should make the host's establish/admit flow populate one of the empty slots (`member[0-4]`) with
+the Deck's SteamID64 → roster grows to 2 → both players in each other's world. That's the two-machine test.
+
+---
+
 ## ★ REPRODUCTION (2026-07-05) — establish handler reaches the builder; wall = one descriptor field
 
 Post-capture, `drive_establish_handler` was re-opened (the "standup null" that shelved it was a probe

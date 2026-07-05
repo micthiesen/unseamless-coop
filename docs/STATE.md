@@ -22,45 +22,41 @@ Last updated: **2026-07-04**.
   two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the
   side-channel, and exchange game-P2P packets by SteamID64 alone (no matchmaking). Solo host reaches
   and *sticks* (`Host`/`Ingame`, warped into the co-op map).
-- **★ TASK #16 LIVE WRITER-TRACE DONE (2026-07-04) — the member-add chain is captured.** In a real
-  2-player ERSC session we watch-traced how a member is built and pinned the reproduction target
-  ([ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture"):
-  - **A member is a raw `SteamID64` at `member+0x80`** (a direct scalar, not a handle — corrects the
-    aim sheet). Members are a **6-slot pre-alloc pool**; the host is a member of its own session.
-  - **The member is added SYNCHRONOUSLY inside the establish handler `0x1423f2820`**, driven by
-    `update_step 0x140cafd10`: `…→ 0x1423f2820 → session-create 0x1423f7070 → add-member 0x1423fdf20
-    → member ctor 0x142400210 → +0x80 SteamID write`. **Not an async Steam callback.** This confirms
-    the aim sheet's static chain and reframes rung-3: **drive `0x1423f2820` with a live connection +
-    peer present and let it add the member.**
-  - **Member registry root = `0x143dcd758` (container+0x388)**, not the aim sheet's +0x1e8.
-- **Both remaining "walls" are now confirmed red herrings.** The `SteamServiceImpl` standup owner is
-  the config as charted (factory satisfiable — [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md)),
-  AND the availability field `[[0x143d855c8]+0x10]` reads **0 in a working session** (was 1 offline) —
-  so the host-setup gate `0x140de2620` we force via `suppress_leave` is **not on ERSC's establishment
-  path**. ERSC forms the session through the establish-handler chain above, not that gate.
+- **★★ HOST-SIDE ESTABLISHMENT REPRODUCED (2026-07-05) — solo, offline, via the game's own flow.**
+  Seeding the establish handler's input descriptor from the stood-up socketmgr's config defaults made
+  `0x1423f2820` **succeed offline**: it builds the connection, its own `add-member 0x1423fdf20` fires,
+  and the result is a **stable `Host`/`Ingame` session with the full member graph** — 1 SessionSteam +
+  6 SessionMemberSteam, `member[5]+0x80` = the rig's own SteamID64 (host is a member of its own session),
+  5 empty slots. This EXACTLY matches the live ERSC host-side capture. The "let the game establish it"
+  model is proven. Details: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ HOST-SIDE ESTABLISHMENT REPRODUCED".
+- **Task #16 live capture (2026-07-04)** pinned the reproduction target that made this possible: a member
+  is a raw `SteamID64` at `member+0x80`; the member-add is synchronous inside `0x1423f2820` (`→
+  session-create 0x1423f7070 → add-member 0x1423fdf20 → member ctor 0x142400210 → +0x80`), not an async
+  callback ([ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture").
+- **Both prior "walls" were red herrings** (confirmed live): the `SteamServiceImpl` standup is satisfiable
+  (owner=config), and the availability field `[[0x143d855c8]+0x10]` reads **0 in a working session** — the
+  gate `0x140de2620` isn't on the establishment path.
 
 ## Next
 
-**Seed the establish handler's input descriptor so its builder builds a good socketmgr.** The 2026-07-05
-rig run ([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ REPRODUCTION") proved the driven establish handler
-`0x1423f2820` passes every gate and **reaches the builder `0x142637440`** — the builder fails only because
-the handler pipes **our zeroed input descriptor** (`[rbx+0..0x34]`) into the socketmgr config region
-(`socketmgr[0x58..0xa0]`), clobbering the base-ctor defaults that a real descriptor (and `land_socket_holder`)
-carry. (Charted: gate 3 always passes — `local[8]` is a hardcoded `0x1423f2d70`; the earlier "wall = `[+8]==0`"
-commit was **wrong** and is corrected in SESSION-DRIVE.) `ADD-MEMBER` (new reach-hook) hasn't fired because
-the builder gates the `establish → session-create 0x1423f7070 → add-member 0x1423fdf20` chain.
+**The two-machine JOINER test — needs Michael + the Deck.** Host-side establishment is reproduced solo
+(above). The remaining rung-3 step: a real Deck joiner over the DLNW3D Steam P2P transport (rig-proven
+two-machine) should make the host's establish/admit flow **populate one of the 5 empty member slots with
+the Deck's SteamID64** → `SessionManagerSteam` roster grows past 1 → both players in each other's world.
 
-1. **Path A (try first):** seed the descriptor we hand `0x1423f2820` (`[rbx+0..0x34]`) with the socketmgr
-   config defaults `land_socket_holder` already reads off a fresh socketmgr, so the establish-handler builder
-   builds a good socketmgr → succeeds → the handler proceeds to session-create → add-member. Watch the
-   **`ADD-MEMBER` hook** + member registry `0x143dcd758` fire.
-2. **Path B (fallback):** `land_socket_holder` already builds a *working* connection; drive
-   `session-create 0x1423f7070 → add-member 0x1423fdf20` directly on it, feeding the host SteamID. Avoids
-   reconstructing the descriptor.
+- **What to run:** our mod on BOTH machines (rig hosts with the current reproduction config; Deck applied
+  via `deck.sh` + `drive_join`), then verify a Deck join lands a member (watch `member[0-4]+0x80` get the
+  Deck SteamID + the `ADD-MEMBER`/host-admit hooks on the host). This is the layer-5 real-co-op test.
+- **Why this / why now:** the host graph is proven to build the game's way; the only untested leg is whether
+  an inbound peer gets added as a member (the joiner half of "let the game establish it").
+- **Serial + Michael-gated:** the actual in-world verification needs eyes on both machines; the orchestrator
+  can prep the Deck (apply our mod, seed) but the co-op confirmation is human.
 
-- **Why this / why now:** the establish handler is one good descriptor away from letting the game build the
-  member itself; `land_socket_holder` already knows the config bytes, so path A is a small seed change.
-- **Serial:** rig-owned (drive + watch the `ADD-MEMBER` hook); two-machine roster→2 confirmation later.
+**Solo follow-ups (no Deck needed), if useful before the two-machine run:**
+- The `ADD-MEMBER` fired 7× solo — chart why (retry loop? one per slot?) and confirm only the host member
+  populates solo (it does: `member[5]` = rig, rest empty).
+- Confirm the reproduced session survives without `suppress_leave` (the capture showed that gate isn't on
+  the establishment path, so it may no longer be needed to hold `Host`).
 
 ## Candidates Not Chosen
 
