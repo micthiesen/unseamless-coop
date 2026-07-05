@@ -11,7 +11,7 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (client-join baseline: asymmetric split is CRASH-FREE two-machine; whole gap = client's `0x1423f62e0` bails at the descriptor check → no emitter connection).
+Last updated: **2026-07-05** (★★★ CLIENT EMITTER CONNECTION BUILT two-machine, no crash — reaches `Client/WaitInitData`; remaining gap = stall B, the DLNW3D handshake doesn't complete so it times out to `None`).
 
 ## Now
 
@@ -47,9 +47,44 @@ Last updated: **2026-07-05** (client-join baseline: asymmetric split is CRASH-FR
 
 ## Next
 
-**★ Build the client's EMITTER CONNECTION: get `0x1423f62e0` past its descriptor check so it reaches the blob
-parser `0x1423fb260`.** The 2026-07-05 two-machine baseline (rig host + Deck joiner, corrected asymmetric config)
-localized the entire remaining gap to one function. Findings:
+**★ Stall B: complete the DLNW3D connect handshake so the client leaves `WaitInitData` — drive the emitter's
+phase machine to the type-5 send + get the host to answer with init-data.** The 2026-07-05 two-machine run
+(rig host + Deck joiner, safe bit-2-OR lever) **BUILT THE CLIENT EMITTER CONNECTION for the first time** and
+both machines stayed stable (no crash). What happens now:
+
+- **★★★ EMITTER BUILT.** With `join_set_established_bit` OR-ing `container+0x7c0` bit 2 (the readiness gate's
+  container predicate `0x1423f4330`), the join passes readiness `0x1423fd7a0` → `join-blob-parse 0x1423fb260`
+  REACHED → the per-peer connection is created → `[G+0x28]=1`, `count=1`. The Deck advances `None → Client`
+  (`protocol=WaitInitData`). This is the piece that blocked rung-3 for months — the emitter never existed
+  before this run. `land_socket_holder` already lands `[container+0x708]` on the client, so readiness's socket
+  step is covered without the crash-inducing handler.
+- **★ NO CRASH — the safe lever is validated.** The earlier handler version (calling `0x1423f4870`) built a
+  `+0x708` establish-session artifact and crashed the joiner ~30s later at `eldenring.exe+0x3f4860` (reading
+  `0x1c5`, the null-session establish-conflict signature). The corrected **direct bit-2 OR** (no handler,
+  join-aim /ultracheck) builds the emitter with **zero** `+0x708` artifact and **the Deck stays alive** — the
+  session ends by *graceful timeout*, not a crash.
+- **THE STALL (B):** the client parks at `Client/WaitInitData` waiting for the host's **init-data**, which
+  never arrives, so ~30s later it tears down gracefully (`WaitInitData → None`). The real DLNW3D handshake
+  between the client's emitter and the host's pending member isn't completing: the client's emitter phase
+  machine doesn't advance past the initial wait (no endpoint-build `member+0x130`, no type-5 send
+  `0x142400df0`), and the host — receiving only our **synthetic** 14B SYN probe (rejected at admit gate-c) and
+  holding the `drive_add_peer` member pending — never answers with init-data. The two local objects exist but
+  don't talk.
+- **NEXT ACTIONS (stall B, per the aim sheet's instrument map, docs/SESSION-DRIVE.md > "★ CLIENT-JOIN AIM
+  SHEET"):** instrument the client phase machine (phase-step `0x1423ffc60`, endpoint-build `0x142401110` →
+  `member+0x130`, type-5 send `0x142400df0`, `GetAuthSessionTicket` slot 14) to see WHERE it parks; and work
+  out how the two real connections exchange the handshake (the synthetic-SYN probe was a diagnostic to trip
+  admit — now that both sides have real connection objects, the real connect flow must carry it). Likely a
+  static charting lane (phase-advancement + what init-data the host must send) + a two-machine run. Confirm:
+  phase machine reaches the type-5 send → host `0x142402ee0` `BeginAuthSession` validates → `member+0x152=1` →
+  `players=2`.
+
+---
+
+**(Historical — the descriptor/readiness localization that led here.) Build the client's EMITTER CONNECTION:
+get `0x1423f62e0` past its descriptor check so it reaches the blob parser `0x1423fb260`.** The 2026-07-05
+two-machine baseline (rig host + Deck joiner, corrected asymmetric config) localized the entire remaining gap
+to one function. Findings:
 
 - **Asymmetric split is CRASH-FREE** (30s+ stable, no teardown). The joiner crash was the establish↔join FSM
   conflict; host-gating `drive_establish_handler` on `do_create` (commit `c0bf009`) fixes it for the asymmetric
