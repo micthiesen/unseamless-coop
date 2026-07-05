@@ -126,12 +126,14 @@ drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam
 drive_join = false         # JOIN driver (joiner): drive 0x140cae640 -> TryToJoinSession -> Client. Charting run.
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
-drive_establish_handler = false # RULED OUT (2026-07-04): driving the game's own establish handler
-                           # 0x1423f2820 reaches the game's builder (real builder = 0x1423f46b0 off the LIVE
-                           # derived vtable 0x1431f8780; the "Arxan 0x14251c480" was a wrong-vtable artifact),
-                           # but its SteamServiceImpl standup 0x142638b40 returns null — offline, two-machine,
-                           # AND with ISteamNetworking006 resolved. The standup's owner/config is online-flow-
-                           # only. Off. See docs/PATH2-TRANSPORT-STANDUP.md > "RULED OUT".
+drive_establish_handler = true # ★ THE REPRODUCTION (2026-07-05): drive the game's own establish handler
+                           # 0x1423f2820 → it builds the connection, session, AND member graph itself. WORKS
+                           # OFFLINE now that drive_establish_handler seeds its input descriptor from the
+                           # stood-up socketmgr's config defaults (in code) — the handler succeeds, add-member
+                           # 0x1423fdf20 fires, and the host reaches a stable Host/Ingame with member[5]=the
+                           # host's own SteamID64 (matches the live ERSC capture). Pair: drive_session_established
+                           # OFF (below), stand_up_transport + land_socket_holder ON. See docs/SESSION-DRIVE.md >
+                           # "★★ HOST-SIDE ESTABLISHMENT REPRODUCED (2026-07-05)".
 stand_up_transport = true  # SEAM WORK: builds the DLNW3D transport AND (2026-07-04 pm) the socket-manager
                            # WRAPPER that [container+0x708] actually holds (0x10-byte {vtable 0x143276a00,
                            # [+8]=MTInternalThreadSteamSocketManager}) — host-setup dispatches
@@ -154,14 +156,11 @@ drive_fire_solo = true     # drive timing: true = fire solo once in-game; false 
                            # linked peer does NOT unblock the native build — it fails at the SteamServiceImpl
                            # standup identically to solo — so this native-builder path is a dead end either way.
 set_create_veto_bit = false # rung-3 L3 lever: write bit 2 of [container+0x7c0] set before the veto vmethod
-drive_session_established = true # SEAM CHART (2026-07-04 pm): drive_establish_handler is OFF, so no double-drive — ON to set +0x7c0 bit2 (real, via 0x1423f4870) so create's veto passes → TryToCreateSession. # DISABLED (2026-07-04 test): the establish handler 0x1423f2820 calls
-                           # 0x1423f4870 ITSELF as gate2 (vtable[0x68]); pre-driving it made that internal
-                           # call return al=0 (idempotent "already established"), bailing before the builder.
-                           # Let the establish handler own the first call. (Was: drive 0x1423f4870 for real init (sets [container+0x7c0] bit 2,
-                           # identity at +0x7f8). Prior runs crashed at eldenring.exe+0x1eba1c5 because +0x708
-                           # was still null (the create ConnectionRefInfo addref on null); land_socket_holder
-                           # below now fills +0x708 with a real refcountable object first. See SESSION-DRIVE.md
-                           # > "SEAM CHARTED".
+drive_session_established = false # MUST stay OFF with drive_establish_handler ON: the establish handler
+                           # 0x1423f2820 calls 0x1423f4870 ITSELF as gate2 (vtable[0x68]); pre-driving it made
+                           # that internal call return al=0 (idempotent "already established"), bailing before
+                           # the builder. Let the establish handler own the first call. (Part of the working
+                           # reproduction — see drive_establish_handler above.)
 land_socket_holder = true  # SEAM WORK (next session): pairs with stand_up_transport to land our built
                            # connection at +0x708 → TryToCreateSession. Then chart what host-setup faults on.
                            # SEAM TEST (2026-07-04): build a real SocketManagerHolder@DLNR3D wrapping the

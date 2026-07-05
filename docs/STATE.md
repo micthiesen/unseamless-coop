@@ -44,9 +44,11 @@ Last updated: **2026-07-04**.
 two-machine) should make the host's establish/admit flow **populate one of the 5 empty member slots with
 the Deck's SteamID64** → `SessionManagerSteam` roster grows past 1 → both players in each other's world.
 
-- **What to run:** our mod on BOTH machines (rig hosts with the current reproduction config; Deck applied
-  via `deck.sh` + `drive_join`), then verify a Deck join lands a member (watch `member[0-4]+0x80` get the
-  Deck SteamID + the `ADD-MEMBER`/host-admit hooks on the host). This is the layer-5 real-co-op test.
+- **What to run — TURNKEY procedure:** [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ READY-TO-RUN".
+  Reproduction config is now the seed default (both machines get it). Deck: `deck.sh apply --auto-session
+  join` → `cycle`. Rig: `rig.sh cycle`. Verify (orchestrator, from memory): a Deck SteamID64 in a
+  previously-empty `member+0x80` slot = roster grew = joiner admitted. **Prep done 2026-07-05 (seed synced,
+  Deck artifacts built); blocked only on the Deck being awake** (it's asleep + won't wake over the network).
 - **Why this / why now:** the host graph is proven to build the game's way; the only untested leg is whether
   an inbound peer gets added as a member (the joiner half of "let the game establish it").
 - **Serial + Michael-gated:** the actual in-world verification needs eyes on both machines; the orchestrator

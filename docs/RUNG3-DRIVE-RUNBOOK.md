@@ -1,5 +1,39 @@
 # Rung-3 Two-Machine Create-Drive Runbook
 
+> ## ★ READY-TO-RUN: two-machine JOINER test (2026-07-05) — host-side is reproduced, this validates the joiner
+>
+> **Host-side establishment is reproduced solo** (SESSION-DRIVE > "★★ HOST-SIDE ESTABLISHMENT REPRODUCED"):
+> our mod drives the game's own establish handler to a stable `Host`/`Ingame` with the full member graph
+> (6 slots, `member[5]` = the host's own SteamID64, 5 empty). **This test checks the last leg: does a real
+> Deck joiner populate one of the 5 empty slots → roster > 1.** The reproduction config is now the seed
+> default, so both machines pick it up. Steps (Deck must be awake — it won't wake over the network):
+>
+> 1. **Deck (joiner):** from this repo —
+>    ```
+>    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh apply --auto-session join
+>    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh seed-save        # only if the Deck lacks the co-op save for the config's extension
+>    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh cycle            # launch + reach in-world + drive the join
+>    ```
+>    `--auto-session join` writes `[debug] auto_session="join"` so the Deck drives the join side; the shared
+>    seed carries `p2p_test_peer_a/_b` (rig/Deck SteamID64s) so the DLNW3D P2P transport links with no manual
+>    Open/Join. (This swaps the Deck off the capture's real-ERSC and onto our mod — expected.)
+> 2. **Rig (host):** `scripts/rig.sh cycle` — the seed config now hosts + establishes (drive_establish_handler
+>    + the descriptor seed + stand_up_transport + land_socket_holder + instrument_host_accept, all on).
+> 3. **Verify (orchestrator, from memory — no human eyeball needed for the core result):** on the rig, scan
+>    live `SessionMemberSteam` (`scripts/re/scan-vtable.py 0x1431fa978`) and read each `member+0x80`; a
+>    **Deck SteamID64 (`76561198681631498`) in a previously-empty slot = roster grew = JOINER ADMITTED.**
+>    Also watch the rig log for the `instrument_host_accept` admit hooks (`0x142640e30` / roster-add
+>    `0x140cb31b0`) and the `ADD-MEMBER` hook firing for the joiner. Visual co-op (seeing each other
+>    in-world) is the confirming cherry on top.
+>
+> **What's proven vs unknown:** the host graph + the transport (two-machine P2P) are proven; the UNKNOWN
+> this test resolves is whether an inbound peer's connection is admitted and added as a member by the
+> reproduced host (the joiner half of "let the game establish it"). If the Deck's SYN reaches the admit
+> path but no member is added, that localizes the remaining joiner-admit work.
+
+## The historical create-drive experiment (superseded framing below)
+
+
 > **SUPERSEDED (2026-07-04) — the create-drive/offline-synthesis framing is retired; rung-3 has PIVOTED to
 > "let the game establish it" (true ERSC model).** This experiment tested whether a real peer sizes leg B's
 > slot array; that (and the whole offline hand-synthesis avenue) is now a proven dead end (3-lane RE: array
