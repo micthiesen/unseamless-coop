@@ -2955,3 +2955,204 @@ entries, no roster growth, and the Deck (still receiving no init-data) times out
 silent on legacy P2P — no accept, no pings — so inbound raises the game's own event; seeded ON). All four
 runs: rig `cycle --auto-session host`, Deck `cycle --auto-session join`, ~35s window, logs
 `unseamless_coop-1783286517/1783287236/1783287683/1783287957-*.log` (+ Deck twins).
+
+## ★ P2P-EVENT + CLIENT-CONNECT AIM SHEET (2026-07-05, static)
+
+Static RE (clean on-disk `eldenring.exe`, capstone via `scripts/re/static.py`; behavioral notes in
+our own words, exact addresses/offsets) charting the three DLNW3D P2P event callbacks
+`0x1423fd550/560/570` and the client-side transport-connect initiation, to clear stall B's two walls.
+Explains the four-run rig results in "▶ RIG RESULTS" directly above. Load-bearing conclusions first.
+
+### ▶ TL;DR — the two biggest corrections
+
+1. **`0x1423fd550/560/570` are NOT three handlers — they are three tiny `rcx↔rdx` adapter thunks that
+   each ENQUEUE a differently-tagged event onto a lock-free ring on the `SessionSteam`, then a single
+   DRAIN pops the ring and dispatches by tag.** So none of the three "does" anything with the peer
+   directly; they just post. The tag→action mapping is what matters:
+   - **d560 = tag 0** → drain calls **`0x1423fe4e0`**, a **peer-info / display-name** handler that
+     **looks up an already-existing connection and BAILS immediately if there is none**
+     (`0x1423fe52a: test rax,rax; je <return>`). This is exactly why "d560 fires on the host but no
+     joiner connection results" — d560 is not a connection-creator; it decorates a connection that
+     must already exist.
+   - **d550 = tag 1** → drain calls **`0x1423fe350`**, the real **connection-lifecycle** handler (a
+     `SteamNetConnectionStatusChanged`-shaped dispatch). On a `Connecting/Connected` state it runs the
+     host-accept `0x1423fe190` + `drive_add_peer 0x1423fdc80`; on other states it looks the connection
+     up and pushes a state change. **This is the callback that creates the joiner connection — and on
+     the rig it NEVER FIRED**, because the Deck never opened a real SteamNetworkingSockets connection.
+   - **d570 = tag 2** → drain looks the connection up (`0x1423fbd80`) and forwards a per-connection
+     status/data notification (`0x1424005c0`); also lookup-based, never a creator.
+
+2. **The host's "wall #2" is a SYMPTOM of the client's "wall #1."** The host connection is created by
+   the ConnectionStatusChanged callback (d550/`0x1423fe350`), which only fires when a peer actually
+   opens a DLNW3D (SteamNetworkingSockets) connection to the host's listen socket. The client parks in
+   session state 4 **without ever running its connect-initiation phase**, so it opens no connection, so
+   d550 never fires on the host, so the host has no joiner connection to send init-data over. Fix the
+   client connect and the host wall dissolves on its own.
+
+### Task 1 — `0x1423fd560`'s body, charted (the tag-0 event that fired)
+
+**The thunk.** `0x1423fd560` is 4 instructions: `mov rax,rdx; mov rdx,rcx; mov rcx,rax; jmp 0x1423fdb00`
+— it swaps `rcx`/`rdx` (turning the Steam-dispatch `(this=ctx, pParam)` into `(session, event)`) and
+tail-jumps into the shared body `0x1423fdb00`. `0x1423fd550`→`0x1423fda40` and
+`0x1423fd570`→`0x1423fdbc0` are the same shape.
+
+**The body `0x1423fdb00` is a lock-free ring ENQUEUE, not a handler.** It builds a 32-byte event record
+`{ tag=0, [event+0] (qword), 0, [event+8] (dword) }` and pushes it onto the `SessionSteam`'s event
+ring using a CAS free-list:
+- **`SessionSteam+0x578`** = ring buffer base (0x28-byte slots), **`+0x580`** = free-list head
+  (packed `idx:gen`, `-1` = empty), **`+0x588`** = published-list head, **`+0x590`** = published tail.
+- It pops a free slot (`cmpxchg [session+0x580]`), writes the record into it, then tail-jumps to
+  `0x1423fd580` which links the slot into the published list at `+0x588`. That's the whole body.
+- So the **event object `rcx`** is only read for two fields: **`[event+0]`** (a qword — the Steam
+  connection/session handle or SteamID the event concerns) and **`[event+8]`** (a dword — a small
+  code/index). d550 additionally reads `[event+0x18]` (its connection-state dword). d560/d570 do not.
+
+**What `r8 = 0x546adb80` is.** The body never touches `r8`; the thunk discards it (only `rcx`/`rdx`
+survive the swap). `0x546adb80` is below the image base `0x140000000`, so it is not a code/data address
+— it is a **live Steam-supplied value** the callback dispatcher leaves in `r8` (a `CCallbackBase`
+param/struct pointer). The registrar `0x1423f84a0` wires each callback via `0x1423f7720` with a static
+descriptor at `0x1431f94a8` and context `0x144852dd0`; `r8` at dispatch time comes from Steam, not from
+what the registrar stored. **`r8` is not a gate and is irrelevant to the bail.**
+
+**Why the tag-0 route bails for the Deck (handler `0x1423fe4e0`).** The drain routes tag 0 to
+`0x1423fe4e0`, which:
+1. reads the record's payload (`[event+8]` handle), calls the connection lookup **`0x1423fbd80`**
+   (walks the pending-conn queue `[session+0x4f0..+0x4f8]`, deriving each entry's id via
+   `0x1423faf40`, returns the match or 0);
+2. **if the lookup returns 0 → returns immediately** (`0x1423fe52a`). No creation, no enqueue.
+3. only if a connection was found does it fetch the Steam **friends** interface (`0x143b489d0`),
+   read the persona name for the id, and store it into the connection's name field (`conn+0x88`).
+
+So tag-0/d560 is a **"update this peer's display name"** event. It requires the connection to already
+exist and does nothing else. The Deck's inbound legacy-P2P packets raise this event, it finds no
+connection (there is none — the real connect never happened), and it bails. **The gate that "stops
+connection-creation for an unknown peer" is simply that d560's handler is not a creator at all; the
+missing member-lookup is a red herring for this callback.**
+
+### Task 2 — the siblings `0x1423fd550` and `0x1423fd570`
+
+**`0x1423fd550` (tag 1, the connection-creator) → drain → `0x1423fe350`.** This is a
+`SteamNetConnectionStatusChangedCallback_t`-shaped handler. The record carries `[event+0]` (the socket
+handle, at record+0x10 after the enqueue), `[event+8]` (the connection handle), and `[event+0x18]` (the
+new connection **state**). The handler:
+- **gates on `[session+0x568] == [event socket handle]`** — process only status-changes on *our* listen
+  socket (`session+0x568` is the resolver/listen-socket handle set during readiness). Mismatch → skip.
+- reads the host/role bit from `[session+0x60]`; if host and state bit set, runs the host-side accept
+  `0x1423fe190` (which manages `session+0x598` = current-connection handle, `+0x550` = an armed
+  timer, and `+0x150` = the active-connection flag across the `+0x4f0` queue).
+- **dispatches on the state `[event+0x18]`:** `state & 1` (Connecting/Connected) →
+  **`drive_add_peer 0x1423fdc80`** (build the joiner member); `state & 0x1e` (FindingRoute / closed /
+  problem) → look the connection up (`0x1423fbd80`) and either forward the status to it
+  (`0x1424005c0`, set `conn+0x153=1`) or, if it is still only a half-built entry on the secondary list
+  `[session+0x510..+0x518]`, remove and tear it down (`0x1423fbd00`).
+
+**This is the true joiner-connection door.** It is the callback that, given a real incoming
+SteamNetworkingSockets connection, accepts it and adds the member. On the rig it never fired: the host
+saw only d560 (a legacy-P2P packet event), never a d550 status-change, because no real connection was
+ever opened to `session+0x568`.
+
+**`0x1423fd570` (tag 2) → drain → connection-lookup + `0x1424005c0`.** For tag 2 the drain reads
+`[event+8]` (a small code, `edi`); if it is nonzero and not 6 it looks up the connection by `[event+0]`
+(`0x1423fbd80`) and, if found, forwards a masked status word (`edi | 0x8114000100000000`) into the
+connection via `0x1424005c0`. It is a **per-connection data/status notification** — also strictly
+lookup-based, never a creator. (Codes 0 and 6 are filtered out as no-ops.)
+
+### Task 3 — the client-side connect initiation (the deeper wall)
+
+The client's real transport connect is a **session-phase chain in state 4**, driven off the
+`SessionSteam` FSM (`+0x3cc`), and it delegates to the socket sub-object at **`SessionSteam+0x5a8`**
+(vtable `0x1431fa918`). The chain, walked from `0x1423fc400`:
+
+1. **`0x1423fc400`** sets `session+0x3cc = 4`, arms a ~30s timeout (`session+0x48 + 0x1388`), and stores
+   the next phase `0x1423faa00`.
+2. **`0x1423faa00`** forwards to session `vtable[0xa0] = 0x1423fcfc0`.
+3. **`0x1423fcfc0`** stores the next phase `0x1423fcdd0` and chains.
+4. **`0x1423fcdd0`** calls session **`vtable[0xf8] = 0x1423fe0f0`** — *the connect initiation* — then
+   stores the poll phase `0x1423fce00`.
+5. **`0x1423fce00`** each tick calls **`vtable[0x108] = 0x1423fdf10`** ("connected yet?"); true →
+   advance; false → call the timeout gate `vtable[0x120]=0x1423fbe10`; not-expired → **`ret` = PARK**;
+   expired → give up. This is the ~30s `WaitInitData → None` park the rig observed.
+
+**The connect call itself (`vtable[0xf8]`).** `0x1423fe0f0` = `add rcx,0x5a8; jmp 0x142401e80`, i.e. it
+runs on the `+0x5a8` socket sub-object. **`0x142401e80`** fetches a Steam networking interface singleton
+(`0x143b48a00`, via accessor `0x144c0d0a4`), calls its `vtable[0x40]` (the actual open/connect), checks
+the DLNW3D socket-service global (`0x1423f4fa0` reads `0x144852dc0` — the same module-state block as the
+callback context `0x144852dd0`), and finally **clears `[(session+0x5a8)+0x12] = 0`** (the
+"connect-armed / no-longer-pending" flag).
+
+**The connected-predicate (`vtable[0x108]`).** `0x1423fdf10` = `add rcx,0x5a8; jmp 0x142402130`, and
+`0x142402130` is simply `return (byte[(session+0x5a8)+0x12] == 0)`. So the poll passes exactly when the
+connect-init has run and cleared `+0x12`.
+
+**⇒ Where the client is missing.** If the connect-init phase (`0x1423fcdd0`→`0x1423fe0f0`→`0x142401e80`)
+had executed, it would have (a) issued the Steam connect and (b) cleared `(session+0x5a8)+0x12`, and the
+poll would immediately pass — the client would leave the park. But the rig shows the client parked in
+state 4 sending **no** DLNW3D traffic with an empty `+0x4f0` span for the whole session. That means the
+**state-4 phase chain is not advancing past `0x1423fc400`** — the `SessionSteam`'s phase-holder is never
+re-run through `faa00→fcfc0→fcdd0`, so `0x142401e80` is never called and no connect is ever attempted.
+In a real join, the join-blob parser `0x1423fb260` (populating the member registry `container+0x1e8`
+from the host's response and wiring `[conn+0x58]`) and the session standup set up the phase-holder so the
+per-tick runner walks this chain; our driven join built the emitter handle (`[G+0x28]=1`) but left the
+`SessionSteam` phase machine parked at state 4. **The missing link is whatever advances the client's
+`SessionSteam` phase machine into `0x1423fcdd0` (equivalently: whatever makes `0x142401e80` run).** Two
+candidate causes to disambiguate live (see B4): the phase-holder is never marked re-run (`obj+0x50`
+never set on entry to state 4), or the connect target the `+0x5a8` sub-object needs (the host's identity)
+was never populated, so an *attempted* `vtable[0x40]` connect is a silent no-op.
+
+### Task 4 — "B4" instrument map (exact probes; extends the B0–B3 map above)
+
+All probes read-only, latched (`AtomicBool`) or on-change, panic-firewalled, in the `session_probe.rs`
+style. Ordered by decision value. The single highest-value pair is **B4-a** (does the client's connect
+even run?) and **B4-c** (where does the host's tag-0 handler bail?).
+
+**B4-a — is the client's connect-init ever called? (client side; THE decisive probe):**
+- **`0x142401e80` entry** — latch-once. **Fires ⇒ the client did attempt the transport connect**
+  (the wall is then downstream: the Steam `vtable[0x40]` connect or a missing host target). **Never
+  fires ⇒ the state-4 phase chain isn't advancing** (wall is upstream: the `SessionSteam` phase-holder
+  never re-runs). This single bit splits wall #1 cleanly in two.
+- **Poll `[(session+0x5a8)+0x12]` (byte) on the client**, once/sec: `1` (or nonzero) all session ⇒
+  connect-init never cleared it (never ran / didn't complete); flips to `0` ⇒ connect-init ran.
+- **`0x1423fcdd0` entry** and **`0x1423fcfc0` entry** (client) — latch each. Confirms exactly how far
+  the state-4 phase chain walks (`fc400`→`faa00`→`fcfc0`→`fcdd0`). The first one that never fires is the
+  stall point in the chain.
+
+**B4-b — does the client actually put bytes on the wire? (client side):**
+- **`0x142401e80` at `0x142401e9c`** (just before the interface `vtable[0x40]` connect call): read the
+  interface pointer (`rcx`) and, if cheap, its `[rcx]` vtable — confirms the Steam networking interface
+  is non-null and which method is being invoked. If the interface or its `[rcx+0x40]` slot is null, the
+  connect is a silent no-op.
+- Pair with an outbound-packet check: the client should begin emitting real DLNW3D frames after this;
+  if `0x142401e80` fires but no packets leave, the connect argument (host identity/target) is wrong.
+
+**B4-c — where does the host's tag-0 handler bail? (host side; explains the rig's d560 fire):**
+- **`0x1423fe4e0` at `0x1423fe52a`** — read `rax` (the `0x1423fbd80` lookup result) right at the
+  `test rax,rax`. **`rax == 0` ⇒ bailed: no connection to decorate** (expected on the current baseline).
+  Confirms d560 is a name-update event with nothing to update, i.e. NOT the creation wall.
+
+**B4-d — did the connection-creating callback (d550) ever fire on the host?**
+- **`0x1423fe350` entry** (host) — latch, and read the record's state field `[rdx+0x18]` (record+0x18).
+  **Fires ⇒ a real ConnectionStatusChanged arrived** (the client opened a real connection) — then watch
+  for `state & 1` → `drive_add_peer 0x1423fdc80`. **Never fires ⇒ no real connect reached the host**
+  (the expected current state; confirms the host wall is downstream of the client wall).
+- **`0x1423fe350` at `0x1423fe361`** — read `[session+0x568]` (the gate LHS) and `[rdx+0x10]` (the
+  event's socket handle, the gate RHS). If d550 fires but they mismatch, the status-change is being
+  dropped by the listen-socket gate (would mean the client connected to the wrong socket handle).
+
+**B4-e — the event ring is alive but the right event never lands (host side, diagnostic):**
+- **`0x1423ff446` entry** (the drain) — read `[session+0x588]` vs `[session+0x590]` (published head vs
+  tail) to confirm events are queued and drained, and log the **tag** it dispatches (`[rsp+0x40]` after
+  the pop, or hook each of `0x1423fe4e0`/`0x1423fe350`/the tag-2 branch entry). Expect **only tag 0**
+  on the current baseline; the appearance of **tag 1** is the signal that the client's connect finally
+  reached the host. This is the cleanest single "did stall B move" indicator on the host.
+
+### Cross-references
+
+- The tag-1 handler `0x1423fe350` calls `drive_add_peer 0x1423fdc80` — the same member-add charted in
+  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "the member-add writer chain" and in
+  "★★ MEMBER PIPELINE CHARTED" above. The new fact: its trigger is a real `ConnectionStatusChanged`
+  (d550), not the legacy-P2P packet event (d560) that the rig saw.
+- The session-machine park (`session+0x3cc==4`, the ~30s timeout) and the `0x1423fbe10` gate are the
+  same ones charted in "▶ RIG RESULTS" > correction 2; this section adds the state-4 **phase chain**
+  (`fc400→faa00→fcfc0→fcdd0→fce00`) and pins the connect call `0x142401e80` + the `+0x5a8/+0x12` flag.
+- Connection objects live in `session+0x4f0..+0x4f8` (looked up by `0x1423fbd80`); the event ring is a
+  separate structure at `session+0x578..+0x590`. Do not conflate the two queues.
