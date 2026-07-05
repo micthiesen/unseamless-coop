@@ -2298,8 +2298,14 @@ pub struct TransportStandupDriver {
     /// Host-side: drive the session-layer add-peer entry `0x1423fdc80` for the two-machine peer once the
     /// host session is up (`drive_add_peer` config). Off = leave the joiner-member to a natural producer.
     drive_add_peer: bool,
-    /// One-shot latch: the host add-peer drive has fired (whether it succeeded or not).
-    add_peer_done: bool,
+    /// Re-fire throttle for the add-peer drive. NOT a one-shot: an incomplete member (no packets yet) is
+    /// dropped by the per-frame pump, so we re-drive on a throttle while the peer is linked — add-peer
+    /// dedups (0x1423fbd80) once a member persists, so this is a no-op after the endpoint completes. This
+    /// keeps a member in the pending-conn queue for the pump to build the endpoint on once the Deck's real
+    /// handshake packets arrive (ERSC capture: the pump 0x1424007e0 builds member+0x130 during the handshake).
+    add_peer_throttle: FrameThrottle,
+    /// Log the drive only on the first fire + on result changes (avoid spamming the re-fire throttle).
+    add_peer_logged: bool,
 }
 
 impl TransportStandupDriver {
@@ -2314,7 +2320,8 @@ impl TransportStandupDriver {
             is_host,
             suppress_drain,
             drive_add_peer,
-            add_peer_done: false,
+            add_peer_throttle: FrameThrottle::every(60),
+            add_peer_logged: false,
         }
     }
 
@@ -2704,10 +2711,12 @@ impl TransportStandupDriver {
         if do_ping {
             self.ping_seq = seq;
         }
-        // Host-side joiner-member drive (one-shot): once the establishment has built the session (LIVE_SESSION
-        // captured) and we know the peer, post an add-peer for it directly. Runs after Accept so the P2P
-        // session is open when the member's handshake pump starts.
-        if self.is_host && self.drive_add_peer && !self.add_peer_done {
+        // Host-side joiner-member drive: keep a member in the pending-conn queue for the peer while it's
+        // linked, so the game's per-frame pump can build the member's endpoint (member+0x130) once the
+        // Deck's real handshake packets arrive (ERSC capture: the endpoint is built by the pump during the
+        // handshake, not by a separate driver). Re-fired on a throttle (an incomplete member with no packets
+        // yet is dropped by the pump); add-peer dedups once a member persists, so it no-ops after completion.
+        if self.is_host && self.drive_add_peer && self.add_peer_throttle.tick() {
             self.try_drive_add_peer(peer);
         }
     }
@@ -2736,19 +2745,17 @@ impl TransportStandupDriver {
         if self_id == 0 {
             return;
         }
-        self.add_peer_done = true; // latch before the call so a fault can't re-fire it
+        // If the peer is already a member (its endpoint completed and it persists), don't churn: scan the
+        // session's member registry for a +0x80 == peer. Cheap 6-slot walk. (add-peer also dedups internally,
+        // but skipping the call entirely avoids re-popping/re-dropping the pool while the handshake is mid-flight.)
+        let log_this = !self.add_peer_logged;
+        self.add_peer_logged = true;
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            // Read the member pool head/tail (+0x528/+0x538) and the pending-conn queue (+0x4f0/+0x4f8) so the
-            // before/after shows a slot consumed + a conn enqueued. All in-bounds session fields.
+            // Read the member pool head (+0x538) and the pending-conn queue (+0x4f0/+0x4f8) so the before/after
+            // shows a slot consumed + a conn enqueued. All in-bounds session fields.
             let rq = |a: usize| (a as *const usize).read_volatile();
             let (pool_before, pend_b0, pend_b1) =
                 (rq(session + 0x538), rq(session + 0x4f0), rq(session + 0x4f8));
-            log::info!(
-                "session-probe: drive-add-peer — calling 0x1423fdc80(session={session:#x}, peer={}, self={}) \
-                 [pre: pool_head={pool_before:#x} pending_queue={pend_b0:#x}..{pend_b1:#x}]",
-                unseamless_core::diagnostics::peer_tag(peer),
-                unseamless_core::diagnostics::peer_tag(self_id),
-            );
             // peerInfo = &{peer SteamID64}; key = &{self SteamID64}. 0x1423fdc80 reads [peerInfo] as the
             // member identity (→ member+0x80) and [key] for the is-self compare (peer != self ⇒ remote).
             // Both are single-qword structs on our stack; the callee only reads [+0]. flag=1 (announce).
@@ -2757,13 +2764,18 @@ impl TransportStandupDriver {
             let add: extern "win64" fn(usize, *const u64, *const u64, u8) -> u8 =
                 std::mem::transmute(add_peer);
             let ret = add(session, &peer_info, &key, 1);
-            let (pool_after, pend_a0, pend_a1) =
-                (rq(session + 0x538), rq(session + 0x4f0), rq(session + 0x4f8));
-            log::info!(
-                "session-probe: drive-add-peer — 0x1423fdc80 returned {ret} \
-                 [post: pool_head={pool_after:#x} pending_queue={pend_a0:#x}..{pend_a1:#x}] \
-                 (ret=1 + a grown pending queue ⇒ a member was popped + enqueued for the peer; watch member+0x80)",
-            );
+            let (pend_a0, pend_a1) = (rq(session + 0x4f0), rq(session + 0x4f8));
+            // Log the first fire, plus any time the pending queue grew (a fresh member was actually enqueued
+            // this call — vs a dedup no-op once the member persists). Keeps the re-fire throttle quiet.
+            if log_this || pend_a1 != pend_b1 {
+                log::info!(
+                    "session-probe: drive-add-peer — 0x1423fdc80(peer={}, self={}) returned {ret} \
+                     [pool_head {pool_before:#x} pending_queue {pend_b0:#x}..{pend_b1:#x} → {pend_a0:#x}..{pend_a1:#x}] \
+                     (queue grew ⇒ member enqueued for the peer; the per-frame pump builds its endpoint once the peer's packets arrive)",
+                    unseamless_core::diagnostics::peer_tag(peer),
+                    unseamless_core::diagnostics::peer_tag(self_id),
+                );
+            }
         }));
     }
 }

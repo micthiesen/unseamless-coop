@@ -217,6 +217,24 @@ queue **while the Deck is connected**" was never run. That is the next test:
 - If the pump still drops the member, the gap is narrower still: the Deck's handshake messages aren't
   reaching the pump's read (`0x14203f250` on `conn+0x130`/the holder) — chart that read's source next.
 
+### ★★★ HOST BUILDS THE JOINER ENDPOINT — two-machine (2026-07-05) — the payoff test WORKED
+
+Ran `drive_add_peer` (re-fire variant) on the host with the Deck connected two-machine. **The host's own
+per-frame pump built the Deck member's transport endpoint**, exactly as the capture predicted:
+- `member[4]` = the Deck (`+0x80` = Deck SteamID64), and **`+0x130` = a live `MTInternalThreadSteamConnection`**
+  (vtable `0x143277750` verified) — the first time a *driven* joiner member has a real endpoint. The member
+  **persisted** (not dropped) and a handshake flag advanced (`+0x151`: `0→1`, flags `(0,1,0,0)`), i.e. the
+  pump was processing the Deck's real DLNW3D packets.
+- **The fix generalises:** `drive_add_peer` only has to keep a member in the pending-conn queue for the
+  peer; the game's own pump (`0x1424007e0 → 0x1423ffd00 → 0x142401110`) does the rest once the peer's
+  packets arrive. No endpoint-bind driver needed. The lever is now a **throttled re-fire** (an incomplete
+  member is dropped by the pump every ~30s; re-adding keeps one present until the handshake completes).
+- **Remaining blocker: the Deck (joiner) crashes ~90s in** before the handshake fully completes (endpoint
+  sub-fields `+0x8`/`+0x50` still 0, flags only `(0,1,0,0)`). Crash: `eldenring.exe+0x3f4860` — a leaf getter
+  `bit1 of [rcx+0x1c5]` called with **`rcx=null`** (bt: `+0x50f901 → +0x29c86d0`(×) → `+0x3f4860`). So the
+  next task is **stabilise the joiner** so the host-side handshake can finish → roster → 2. The host side of
+  the joiner-member is now solved.
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's
