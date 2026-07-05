@@ -222,6 +222,18 @@ precise and the `+0x168`/gate-c rabbit hole is closed:
 Superseded by this doc: the "avenue (a) synthesize the member + real `+0x168`" plan and the "joiner SYN
 → gate-c admit" framing in SESSION-DRIVE.md / CLAUDE.md status (both kept as history).
 
+## ★ Endpoint capture (2026-07-05 follow-up) — catch the member's `+0x130` writer + the add-peer producer
+
+The current open piece (SESSION-DRIVE > "★★ MEMBER PIPELINE CHARTED"): the joiner-member's **transport
+endpoint `+0x130`** is set at runtime by the handshake path we can't reach offline. To source it, run the
+ready-made **`scripts/re/capture-endpoint.py`** on a real 2-player ERSC session — it enumerates the live
+`SessionSteam` + members (tagging each `+0x80` SteamID + reading `+0x130`), prints the event/pending queue
+pointers, and prints the exact `watch-write.py` commands to arm on a slot's `+0x130` (endpoint) and `+0x80`
+(identity), plus the event-queue produce index (the add-peer producer). The recipe (Deck 2-player → Deck
+leaves, host stays → arm on the stable cleared slot → Deck rejoins → catch the writer RIPs) is in that
+script's header. Disassemble each caught RIP with `static.py fn` to read where the endpoint comes from,
+then reproduce it after `drive_add_peer` pops the member.
+
 ## Re-running this capture (for the writer-trace follow-up, task #16)
 
 The exact setup, so a future session can stand up a live ERSC session and watch it fast:
