@@ -2829,6 +2829,9 @@ pub struct TransportStandupDriver {
     /// first packet raises the game's `P2PSessionRequest` event for its registered callbacks
     /// (`0x1423fd550/560/570`) instead of being pre-accepted by us. See `host_skip_p2p_accept` in config.
     skip_accept: bool,
+    /// Symmetric add-peer: the JOINER also drives add-peer (queuing the host in its Client session) so its
+    /// game emits real SYNs too and the handshake can close both ways. See `drive_add_peer_joiner` in config.
+    add_peer_joiner: bool,
 }
 
 impl TransportStandupDriver {
@@ -2841,6 +2844,7 @@ impl TransportStandupDriver {
         drive_add_peer: bool,
         symmetric: bool,
         skip_accept: bool,
+        add_peer_joiner: bool,
     ) -> Self {
         Self {
             built: false,
@@ -2856,6 +2860,7 @@ impl TransportStandupDriver {
             add_peer_logged: false,
             symmetric,
             skip_accept,
+            add_peer_joiner,
         }
     }
 
@@ -3267,30 +3272,43 @@ impl TransportStandupDriver {
         // Deck's real handshake packets arrive (ERSC capture: the endpoint is built by the pump during the
         // handshake, not by a separate driver). Re-fired on a throttle (an incomplete member with no packets
         // yet is dropped by the pump); add-peer dedups once a member persists, so it no-ops after completion.
-        if self.is_host && self.drive_add_peer && self.add_peer_throttle.tick() {
+        // Host always (drive_add_peer); joiner too when add_peer_joiner (symmetric — so both games emit
+        // real SYNs and the handshake closes both ways). try_drive_add_peer picks the right session +
+        // lobby-state gate per role.
+        let drive = (self.is_host && self.drive_add_peer) || (!self.is_host && self.add_peer_joiner);
+        if drive && self.add_peer_throttle.tick() {
             self.try_drive_add_peer(peer);
         }
     }
 
     /// Drive the session-layer add-peer entry `0x1423fdc80(session, &peerSteamID, &selfSteamID, flag)` for the
-    /// two-machine peer, host-side. This pops an empty member from the session's pool, sets `member+0x80` =
+    /// two-machine peer. Host queues the joiner in its Host session; with `add_peer_joiner` the joiner queues
+    /// the host in its Client session (symmetric — so both games emit real SYNs). This pops an empty member
+    /// from the session's pool, sets `member+0x80` =
     /// the peer SteamID64, initialises it, and enqueues it on the session's pending-conn queue — the exact
     /// thing the game's own event-drain does for a natural join, which never fires for our driven Deck. The
     /// game's running per-frame session update then pumps the new member's handshake. One-shot; logs the member
     /// pool + pending-conn queue before and after so a new populated slot is visible. Firewalled; a hard fault
     /// surfaces via crashdump (we're calling a game function on the main thread with a live session).
     fn try_drive_add_peer(&mut self, peer: u64) {
-        let session = LIVE_SESSION.load(Ordering::Relaxed);
         let add_peer = ADD_PEER_FN.load(Ordering::Relaxed);
+        // Host: LIVE_SESSION (captured at the establish add-member hook). Joiner: the establish hook
+        // never fires (no establish handler on the client), so use the poll-captured STALLB_SESSION.
+        let session = if self.is_host {
+            LIVE_SESSION.load(Ordering::Relaxed)
+        } else {
+            STALLB_SESSION.load(Ordering::Relaxed)
+        };
         if session == 0 || add_peer == 0 || peer == 0 {
-            return; // establishment hasn't built the session yet, or no peer — try again next frame
+            return; // session not built yet, or no peer — try again next frame
         }
-        // Only drive once the host is FULLY established (lobby_state == Host). Firing during
-        // TryToCreateSession disrupts the create→Host transition (rig-observed 2026-07-05: the session
-        // tore down to None ~30s after an add-peer fired mid-create). Wait for a stable host.
+        // Only drive once the session is stably in its role state (host = Host, joiner = Client). Firing
+        // during TryToCreate/TryToJoin disrupts the transition (rig-observed 2026-07-05: an add-peer
+        // mid-create tore the session down ~30s later). Wait for the settled role.
+        let want = if self.is_host { LobbyState::Host } else { LobbyState::Client };
         let lobby = crate::sdk::with_instance::<CSSessionManager, _>(|s| crate::session::read(s).lobby_state);
-        if lobby != Some(LobbyState::Host) {
-            return; // not a stable host yet — try again next frame (still latched off until it fires)
+        if lobby != Some(want) {
+            return; // not settled in-role yet — try again next frame (still latched until it fires)
         }
         let self_id = crate::steam::self_steam_id().unwrap_or(0);
         if self_id == 0 {
@@ -3348,6 +3366,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.drive_add_peer,
             config.debug.probes.symmetric_peer,
             config.debug.probes.host_skip_p2p_accept,
+            config.debug.probes.drive_add_peer_joiner,
         )));
     }
     if config.debug.probes.session_probe {

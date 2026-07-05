@@ -364,6 +364,18 @@ pub struct DebugProbes {
     /// docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
     pub drive_add_peer: bool,
 
+    /// **EXPERIMENTAL rung-3 SYMMETRIC add-peer** (2026-07-05 night, run 9). Also drive add-peer on the
+    /// JOINER (Client role), queuing the HOST as a pending member in the joiner's session. Runs 7-8 proved
+    /// the host-only `drive_add_peer` makes the HOST's game emit real DLNW3D connection SYNs to the joiner,
+    /// but the joiner (no add-peer) emits only our probe's synthetic SYNs, which the host's admit rejects —
+    /// so the SYN handshake never closes. With this on, BOTH games queue the other peer and both emit real
+    /// SYNs, so the connection can complete both ways → the host's type-6 init-data send phase runs → the
+    /// joiner leaves `WaitInitData` → `players=2`. Unlike `symmetric_peer` this keeps the asymmetric roles
+    /// (host stays Host, joiner stays Client); it only adds the joiner-side member enqueue. Uses the
+    /// poll-captured joiner `SessionSteam` and accepts the `Client` lobby state. Off by default. See
+    /// docs/SESSION-DRIVE.md > "RIG RESULT (run 8)".
+    pub drive_add_peer_joiner: bool,
+
     /// **EXPERIMENTAL rung-3 symmetric-peer mode** (2026-07-05). Both machines act as host-style peers:
     /// each builds its own session graph via the establish path (`drive_establish_handler`), each
     /// `drive_add_peer`s the *other*, and each SENDS the DLNW3D SYN so both worker threads receive and both

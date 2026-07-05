@@ -208,6 +208,12 @@ drive_add_peer = true      # rung-3 JOINER-MEMBER driver (2026-07-05): host-side
                            # so we post it ourselves: pop an empty member, set member+0x80 = Deck SteamID, enqueue on
                            # the pending-conn queue; the game's per-frame pump drives its handshake. Host-only; watch
                            # `drive-add-peer` + member+0x80. See docs/SESSION-DRIVE.md > "★★ MEMBER PIPELINE CHARTED".
+drive_add_peer_joiner = true # SYMMETRIC ADD-PEER (2026-07-05 night, run 9): the JOINER also drives add-peer
+                           # (queues the HOST in its Client session) so BOTH games emit real DLNW3D SYNs and the
+                           # connection handshake closes both ways. Runs 7-8: host-only add-peer makes the HOST
+                           # send real SYNs but the joiner sends only synthetic ones (host admit rejects) — the
+                           # handshake stalls. This is the joiner half. Keeps the asymmetric roles (host=Host,
+                           # joiner=Client), unlike symmetric_peer. See docs/SESSION-DRIVE.md > "RIG RESULT (run 8)".
 symmetric_peer = false     # rung-3 SYMMETRIC-PEER mode (2026-07-05): both machines are host-style peers — each
                            # builds its session via establish, each drive_add_peers the OTHER, and each SENDS the
                            # DLNW3D SYN so both worker threads receive and both pumps build the other's endpoint. A
