@@ -8,84 +8,77 @@ orchestrator to read it and brief from it. Durable knowledge does **not** live h
 their proper doc (CLAUDE.md > "Project knowledge lives in the repo"); this file holds the current
 picture, the chosen next step, and pointers.
 
-> **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls` — it's live and
-> can't drift), rig/Deck state (the mod is cheap and safe to re-apply, so we just do it; never a
-> thing to remember or restore), and uncommitted git state (workers integrate before a wrap). A
-> fresh orchestrator reads this file for *the work* and gets moving; it doesn't audit machine state
-> first.
+> **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
+> to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-04**.
+Last updated: **2026-07-05**.
 
 ## Now
 
 - **Out-of-band connection stack (rungs 1/2/4 + the DLNW3D Steam P2P transport) is shipped and
   two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the
-  side-channel, and exchange game-P2P packets by SteamID64 alone (no matchmaking). Solo host reaches
-  and *sticks* (`Host`/`Ingame`, warped into the co-op map).
-- **★★ HOST-SIDE ESTABLISHMENT REPRODUCED (2026-07-05) — solo, offline, via the game's own flow.**
-  Seeding the establish handler's input descriptor from the stood-up socketmgr's config defaults made
-  `0x1423f2820` **succeed offline**: it builds the connection, its own `add-member 0x1423fdf20` fires,
-  and the result is a **stable `Host`/`Ingame` session with the full member graph** — 1 SessionSteam +
-  6 SessionMemberSteam, `member[5]+0x80` = the rig's own SteamID64 (host is a member of its own session),
-  5 empty slots. This EXACTLY matches the live ERSC host-side capture. The "let the game establish it"
-  model is proven. Details: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ HOST-SIDE ESTABLISHMENT REPRODUCED".
-- **Task #16 live capture (2026-07-04)** pinned the reproduction target that made this possible: a member
-  is a raw `SteamID64` at `member+0x80`; the member-add is synchronous inside `0x1423f2820` (`→
-  session-create 0x1423f7070 → add-member 0x1423fdf20 → member ctor 0x142400210 → +0x80`), not an async
-  callback ([ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture").
-- **Both prior "walls" were red herrings** (confirmed live): the `SteamServiceImpl` standup is satisfiable
+  side-channel, and exchange game-P2P packets by SteamID64 alone.
+- **★★ HOST-SIDE rung-3 ESTABLISHMENT IS REPRODUCED — solo AND two-machine.** Our mod drives the
+  game's own establish handler `0x1423f2820` to a stable `Host`/`Ingame` with the **full member graph**
+  (1 SessionSteam + 6 SessionMemberSteam; `member[5]+0x80` = the host's own SteamID64; 5 empty slots) —
+  byte-for-byte how real ERSC does it. The unlock was seeding the handler's input descriptor from the
+  stood-up socketmgr's config defaults (in code). This solved the member machinery the whole
+  gate-c/`+0x168` saga was stuck on. Details: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ HOST-SIDE
+  ESTABLISHMENT REPRODUCED".
+- **The last rung-3 leg is the JOINER-MEMBER** (a connecting peer landing in an empty slot → roster > 1).
+  The 2026-07-05 two-machine run proved: the Deck's SYN reaches host-admit `0x142640e30` and the
+  side-channel links (`coop: linked`), but **no joiner member is added**, and the **transport admit path
+  is the wrong door** — forcing gate-c accept doesn't help (a 2nd gate `0x142640ed5` bails, and gate-c
+  rejects in real ERSC too). The joiner-member is added by the **session layer** (`add-member 0x1423fdf20`,
+  same as the host's own), using the joiner's **identity handle** derived from its connection. See
+  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ JOINER-ADMIT".
+- **Both prior "walls" are confirmed red herrings** (live): the `SteamServiceImpl` standup is satisfiable
   (owner=config), and the availability field `[[0x143d855c8]+0x10]` reads **0 in a working session** — the
   gate `0x140de2620` isn't on the establishment path.
 
 ## Next
 
-**Chart how the host's establishment incorporates a CONNECTING PEER — the joiner-member add.** The
-2026-07-05 two-machine run ([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ JOINER-ADMIT") proved the transport
-admit path is the wrong door: the Deck's SYN reaches host-admit `0x142640e30` and the side-channel links,
-but gate-c rejects, and **forcing gate-c accept doesn't help** (a 2nd gate `0x142640ed5` bails on the null
-peer connection, and the capture shows gate-c rejects in real ERSC too). The joiner becomes a member via
-the **session layer** (`add-member 0x1423fdf20`, same as the host's `member[5]`), using the joiner's **arg2
-identity handle** derived from its connection.
+**Chart how the host's establishment turns a connecting peer into a member — STATIC-first.** We do NOT
+need a new ERSC capture to start: the task-#16 writer-trace already caught the joiner's member-add chain
+(`update_step → 0x1423f2820 → session-create 0x1423f7070 → add-member 0x1423fdf20 → +0x80`), and the raw
+dumps (`~/Documents/ersc-live-capture*.txt`) hold the member layout incl. the `+0x70`/`+0x78` handle
+addresses.
 
-1. **Chart the joiner path in the live capture data** — how did real ERSC's `member[4]`=Deck get added?
-   Where did its `+0x70`/`+0x78` handles + `+0x80` SteamID come from (the joiner's connection object), and
-   what triggered `add-member` for the peer (vs the host's own)? Use ERSC-LIVE-CAPTURE + a fresh
-   writer-trace on the host during a Deck join if needed.
-2. **Reproduce it:** when the Deck connects (we know its SteamID from rung-4/`coop: linked`), drive/allow
-   the host to add it as a member — likely build the joiner's connection + identity handle, then
-   `add-member`. Verify a Deck SteamID64 lands in an empty `member+0x80` slot (roster → 2).
-3. **Stabilize the Deck joiner** — it crashes ~30–60s into the join drive; needs fixing for sustained tests.
+1. **Static RE (offline, no ERSC):** chart where the joiner's **connection object + `+0x78` identity
+   handle** come from (what feeds `add-member`'s `arg2`), and what makes the establishment add a member
+   for a *connecting peer* vs the host itself. Use the binary + the capture dumps as the known-good ref —
+   the same static-first path that cracked the host side.
+2. **Reproduce it two-machine:** when the Deck connects (its SteamID is known from rung-4 / `coop: linked`),
+   drive/allow the host to build the joiner's connection + handle and `add-member`. Verify a Deck SteamID64
+   lands in an empty `member+0x80` slot (roster → 2). Harness + footgun-safe commands:
+   [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ TWO-MACHINE HARNESS".
+3. **Stabilize the Deck joiner** — it crashes ~30–60s into the join drive, limiting test windows.
 
-- **Why this / why now:** host-side is done; the joiner-member is the last rung-3 leg, now correctly scoped
-  to the session layer (not the transport admit rabbit hole we just ruled out).
-- **Serial + Michael-gated:** two-machine (rig host + Deck joiner); orchestrator drives, verifies from memory.
-- **Charted lever, OFF:** `force_gatec_accept` (forces host gate-c accept) — kept in code, not the path.
+- **Why this / why now:** host-side is done; the joiner-member is the last leg, now correctly scoped to the
+  session layer (the transport-admit rabbit hole is ruled out). Static-first because we already hold most of
+  the data; a targeted ERSC re-capture (watch `member+0x78` / the connection during a Deck join — a 10-min
+  follow-up, Deck's still set up) is the **fallback** only if static stalls on a runtime-only piece.
+- **Serial + Michael-gated:** the reproduce/verify step is two-machine (rig host + Deck joiner); the static
+  charting is solo/delegable.
 
 ## Candidates Not Chosen
 
-- **Offline synthesis of the session graph** — dead end at the object level (runtime-built native
-  objects). Re-open only if the live capture shows establishment reduces to a small reproducible
-  field/call set.
-- **The gate-c / `+0x168` "real member-lookup"** avenue — **DEBUNKED** (stub even in a working
-  session); members come from the session layer, not the transport admit gate. Do not re-chase.
-- **stay-connected behavioral validation** (risks #1–#3: boss/area/death route through the gate +
-  stay playable) — needs a live 2-player session; install+arm is already rig-validated. Fold into the
-  next live co-op run, or just notice it in play.
-(Done this session, no longer candidates: **static-prep of the live-trace targets** — landed as
-[WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md), now folded into Next above; **task #13** — the
-duplicated `leave_session` offset is single-sourced from `stay_connected::LEAVE_SESSION_OFFSET`.)
+- **A fresh from-scratch ERSC live capture** — not needed first; we have the task-#16 trace + the dumps.
+  Re-open only as the targeted fallback (see Next) if static charting can't source the joiner's identity
+  handle / connection.
+- **Forcing the transport admit** (`force_gatec_accept` / gate-c / the `0x142640e30` path) — **RULED OUT**
+  this session: a 2nd gate bails and real ERSC rejects gate-c too. Lever kept in code but OFF. Don't
+  re-chase; the joiner-member is session-layer.
+- **Offline synthesis of the session graph** / the **`+0x168` "real member-lookup"** — long-dead ends.
 
 ## Learned Recently (Pointers Only)
 
-- [WRITER-TRACE-TARGETS.md](WRITER-TRACE-TARGETS.md) — the static aim sheet for the task-#16 live
-  capture: four watchpoints (member registry, session-create, availability singleton, gate input),
-  each with a backtrace-verified writer chain, arm recipes, and re-derive rules. Both writers sit
-  behind vtable dispatch, so the live pass uses `watch-bt` backtraces to prove the chain.
-- [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md) — the standup factory is satisfiable offline;
-  the offline wall is flow-non-entry + the downstream runtime availability signal, not the factory.
-  §4 has the ranked offline-vs-live dump list; §5 the minimal driven-standup recipe.
-- [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) — the live 2-player ERSC object
-  graph + offsets, the two corrections, and the re-run/writer-trace procedure.
-- [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md) — stay-connected install+arm
-  rig-validated; the site-A prologue was missing its leading REX `0x40` (now corrected + live-read),
-  and the probe leave-tracer is gated so it stops stealing the gate's site.
+- [SESSION-DRIVE.md](SESSION-DRIVE.md) — "★★ HOST-SIDE ESTABLISHMENT REPRODUCED" (the descriptor-seed fix +
+  the reproduced graph) and "★ JOINER-ADMIT" (transport admit ruled out; the 2-gate disassembly; joiner-member
+  is session-layer).
+- [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "Writer-trace capture" — the member layout
+  (`+0x80` = SteamID64), the add-member chain, the registry root, both red herrings.
+- [STANDUP-NULL-FINDINGS.md](STANDUP-NULL-FINDINGS.md) — the standup factory is satisfiable; the offline null
+  was a probe artifact.
+- [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ TWO-MACHINE HARNESS" — footgun-safe two-machine
+  procedure (pass `--auto-session` on `cycle`, not `apply`) + the Deck-crash gotcha.

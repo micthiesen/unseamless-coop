@@ -1,35 +1,36 @@
 # Rung-3 Two-Machine Create-Drive Runbook
 
-> ## ★ READY-TO-RUN: two-machine JOINER test (2026-07-05) — host-side is reproduced, this validates the joiner
+> ## ★ TWO-MACHINE HARNESS (2026-07-05) — host reproduced two-machine; joiner-member still open
 >
-> **Host-side establishment is reproduced solo** (SESSION-DRIVE > "★★ HOST-SIDE ESTABLISHMENT REPRODUCED"):
-> our mod drives the game's own establish handler to a stable `Host`/`Ingame` with the full member graph
-> (6 slots, `member[5]` = the host's own SteamID64, 5 empty). **This test checks the last leg: does a real
-> Deck joiner populate one of the 5 empty slots → roster > 1.** The reproduction config is now the seed
-> default, so both machines pick it up. Steps (Deck must be awake — it won't wake over the network):
+> **Host-side establishment is reproduced, confirmed two-machine** (SESSION-DRIVE > "★★ HOST-SIDE
+> ESTABLISHMENT REPRODUCED"): our mod drives the game's own establish handler to a stable `Host`/`Ingame`
+> with the full member graph (6 slots, `member[5]` = the host's own SteamID64, 5 empty). The 2026-07-05
+> two-machine run then showed the joiner's SYN reaches host-admit + the side-channel links, but **no joiner
+> member is added** — and the transport admit is the wrong door (SESSION-DRIVE > "★ JOINER-ADMIT"). This
+> harness is still how you run a two-machine test; the *verification* now is whether a Deck SteamID lands in
+> an empty `member+0x80` slot.
 >
-> 1. **Deck (joiner):** from this repo —
->    ```
->    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh apply --auto-session join
->    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh seed-save        # only if the Deck lacks the co-op save for the config's extension
->    DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh cycle            # launch + reach in-world + drive the join
->    ```
->    `--auto-session join` writes `[debug] auto_session="join"` so the Deck drives the join side; the shared
->    seed carries `p2p_test_peer_a/_b` (rig/Deck SteamID64s) so the DLNW3D P2P transport links with no manual
->    Open/Join. (This swaps the Deck off the capture's real-ERSC and onto our mod — expected.)
-> 2. **Rig (host):** `scripts/rig.sh cycle` — the seed config now hosts + establishes (drive_establish_handler
->    + the descriptor seed + stand_up_transport + land_socket_holder + instrument_host_accept, all on).
-> 3. **Verify (orchestrator, from memory — no human eyeball needed for the core result):** on the rig, scan
->    live `SessionMemberSteam` (`scripts/re/scan-vtable.py 0x1431fa978`) and read each `member+0x80`; a
->    **Deck SteamID64 (`76561198681631498`) in a previously-empty slot = roster grew = JOINER ADMITTED.**
->    Also watch the rig log for the `instrument_host_accept` admit hooks (`0x142640e30` / roster-add
->    `0x140cb31b0`) and the `ADD-MEMBER` hook firing for the joiner. Visual co-op (seeing each other
->    in-world) is the confirming cherry on top.
+> **⚠ FOOTGUN — pass `--auto-session` on `cycle`, not `apply`.** `deck.sh cycle` (and `rig.sh cycle`)
+> re-apply the config first, so a **bare** cycle **resets `auto_session` to off** → the seed's
+> `drive_create=true` makes BOTH machines host (the "both-hosted" bug, hit 2026-07-05). Always put the role
+> on the cycle itself. Steps (Deck must be awake — it won't wake over the network):
 >
-> **What's proven vs unknown:** the host graph + the transport (two-machine P2P) are proven; the UNKNOWN
-> this test resolves is whether an inbound peer's connection is admitted and added as a member by the
-> reproduced host (the joiner half of "let the game establish it"). If the Deck's SYN reaches the admit
-> path but no member is added, that localizes the remaining joiner-admit work.
+> 1. **Rig (host):** `scripts/rig.sh cycle --auto-session host` — wait for `Host`/`Ingame` + `ADD-MEMBER`
+>    (member graph built) before bringing the Deck in.
+> 2. **Deck (joiner):** `DECK_HOST=deck@10.10.1.57 DECK_PORT=2222 scripts/deck.sh cycle --auto-session join`
+>    (one command — role preserved through the re-apply). First-ever run also needs `deck.sh apply
+>    --auto-session join` once to swap the Deck onto our mod, and `deck.sh seed-save` if it lacks the
+>    config-extension co-op save. The shared seed carries `p2p_test_peer_a/_b` so the P2P transport links
+>    with no manual Open/Join.
+> 3. **Verify (orchestrator, from memory):** scan live `SessionMemberSteam`
+>    (`scripts/re/scan-vtable.py 0x1431fa978`), read each `member+0x80`; a **Deck SteamID64
+>    (`76561198681631498`) in a previously-empty slot = roster grew = JOINER ADMITTED.** Watch the rig log
+>    for `host-admit 0x142640e30`, gate-c, `admit-success 0x142640ee4`, roster-add `0x140cb31b0`, `ADD-MEMBER`.
+>
+> **Known gotchas:** the Deck joiner **crashes ~30–60s** into the drive (limits the window; stabilize it).
+> `force_gatec_accept` (force host gate-c ACCEPT) is charted but OFF — it does NOT admit the joiner (a 2nd
+> gate `0x142640ed5` bails; and gate-c rejects in real ERSC too). The joiner-member is a **session-layer**
+> problem, not this transport admit.
 
 ## The historical create-drive experiment (superseded framing below)
 
