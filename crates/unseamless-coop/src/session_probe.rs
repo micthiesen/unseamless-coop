@@ -971,10 +971,15 @@ fn install_host_accept_trace(config: &Config) {
 // All read-only, log-on-change / first-N throttled, panic-firewalled. Addresses re-derivable from the
 // aim sheet (each was verified by an independent static pass on the clean exe, 2026-07-05).
 
-/// The per-tick session update fn `0x1423fb684` (`rcx=SessionSteam`, rdx=frame-arg): skips on state 5,
-/// steps the SESSION phase machine (`0x1423ffd00`), then pumps each pending connection (`0x1424007e0`)
-/// which steps that MEMBER's machine. Hooked to watch the session state + pending-conn span on change.
-const SESSION_TICK_OFFSET: usize = 0x1_423f_b684 - 0x1_4000_0000;
+// ⚠ DO NOT HOOK `0x1423fb684` (the charted "per-tick session update"). It is a MID-FUNCTION label
+// inside the client-side update path, not a call boundary: hooking it (2026-07-05 run) crashed the
+// Deck client within ~2 frames of its join — the main thread died with no crashdump, exactly when the
+// joined session's pump first executed through the patched bytes — while the host, which never runs
+// that branch, stayed alive with the identical hook and its tracer logged NOTHING on either machine
+// (rcx there is not a SessionSteam). The session state + pending-conn span are watched by POLLING
+// instead: the init-gate/wait hooks (real vtable-dispatched entries) capture the live SessionSteam
+// pointer into [`STALLB_SESSION`], and [`SessionFsmProbe::on_frame`] reads `+0x3cc/+0x3d0/+0x4f0/
+// +0x4f8` from our own frame task, logging on change.
 /// The session INIT gate `0x1423fbe10` (`session_vtable[0x120]`): returns `session+0x48 > threshold`
 /// (threshold = `[phaseblock+0x10]`, phaseblock = `[[[session+0x18]]+0x10]`). Returning 1 = still
 /// waiting for the host's init-data (the stall-B park condition); flipping to 0 = init-data received.
@@ -982,18 +987,31 @@ const SESSION_INIT_GATE_OFFSET: usize = 0x1_423f_be10 - 0x1_4000_0000;
 /// The session wait handler `0x1423fb900` (`session_vtable[0x118]`): entered with a packed status code
 /// in rdx that names WHICH wait the session machine parked in (e.g. `0x8104020200000000`).
 const SESSION_WAIT_HANDLER_OFFSET: usize = 0x1_423f_b900 - 0x1_4000_0000;
-/// The three DLNW3D socket Steam P2P callbacks (registered during the session's readiness standup) —
-/// the REAL connection-creation door: on an inbound P2P connect they create the `SteamConnection` and
-/// enqueue it on the session's pending-conn queue. The door the synthetic SYN/admit path is not.
+/// The three DLNW3D socket P2P-callback REGISTRARS. The 2026-07-05 two-machine run corrected the aim
+/// sheet's reading: these fire once at the session's own standup (host establish / client join), each
+/// passed the REAL runtime callback target as a function pointer in rdx — `0x1423fd550/560/570`,
+/// identical on both machines. They are registration observers; the connect-event tracers are the
+/// `P2P_EVT_*` hooks on the observed targets below.
 const P2P_CB_A_OFFSET: usize = 0x1_423f_84a0 - 0x1_4000_0000;
-/// Second P2P socket callback (see [`P2P_CB_A_OFFSET`]).
+/// Second P2P callback registrar (see [`P2P_CB_A_OFFSET`]).
 const P2P_CB_B_OFFSET: usize = 0x1_423f_8420 - 0x1_4000_0000;
-/// Third P2P socket callback (see [`P2P_CB_A_OFFSET`]).
+/// Third P2P callback registrar (see [`P2P_CB_A_OFFSET`]).
 const P2P_CB_C_OFFSET: usize = 0x1_423f_8620 - 0x1_4000_0000;
+/// The REAL runtime P2P callbacks — the fn-pointer values the registrars were observed passing (rdx)
+/// live on both machines, 2026-07-05. Genuine function entries by construction (they're stored and
+/// invoked as pointers). ANY fire on the host after a joiner connects is the B1 money signal: an
+/// inbound P2P connect event reached the DLNW3D socket layer (the connection-creation door).
+const P2P_EVT_A_OFFSET: usize = 0x1_423f_d550 - 0x1_4000_0000;
+/// Second real P2P callback (see [`P2P_EVT_A_OFFSET`]).
+const P2P_EVT_B_OFFSET: usize = 0x1_423f_d560 - 0x1_4000_0000;
+/// Third real P2P callback (see [`P2P_EVT_A_OFFSET`]).
+const P2P_EVT_C_OFFSET: usize = 0x1_423f_d570 - 0x1_4000_0000;
 
-/// Last-seen `SessionSteam` pointer at the session tick (a session teardown/recreate shows as a change).
-static LAST_TICK_SESSION: AtomicUsize = AtomicUsize::new(usize::MAX);
-/// Last-seen packed session state at the tick: `+0x3cc | (+0x3d0 << 32)`. Sentinel = never seen.
+/// The live `SessionSteam` pointer, captured from rcx at the init-gate/wait hooks (real vtable
+/// entries), read by [`SessionFsmProbe::on_frame`]'s stall-B state poll. Cleared when the FSM
+/// returns to `None` (the object is torn down with the session — don't read a dangling pointer).
+static STALLB_SESSION: AtomicUsize = AtomicUsize::new(0);
+/// Last-seen packed session state at the poll: `+0x3cc | (+0x3d0 << 32)`. Sentinel = never seen.
 static LAST_SESSION_STATE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Last-seen pending-conn span (raw bytes between `+0x4f0` and `+0x4f8`). Sentinel = never seen.
 static LAST_PENDING_SPAN: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -1009,42 +1027,47 @@ static WAIT_STATUS_LOGS: AtomicU32 = AtomicU32::new(0);
 /// Shared log cap across the three P2P-callback tracers (each fire is a ★ event; cap the retries).
 static P2P_CB_LOGS: AtomicU32 = AtomicU32::new(0);
 
-/// session-tick tracer: `0x1423fb684(rcx=SessionSteam)`. Logs the session state (`+0x3cc`/`+0x3d0`)
-/// and the pending-conn span (`+0x4f0..+0x4f8`) — but only when one of them (or the session pointer)
-/// changes, so the per-frame tick stays silent while parked. The first fire doubles as the "the
-/// session tick RUNS on this machine" confirmation.
-fn log_session_tick(_name: &'static str, regs: *mut Registers) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: ilhook entry registers; rcx = the SessionSteam. `+0x3cc/+0x3d0` (states) and
-        // `+0x4f0/+0x4f8` (pending-conn vector begin/end) are in-bounds fields; all reads null-guarded.
-        let r = unsafe { &*regs };
-        let session = r.rcx as usize;
-        if session == 0 {
-            return;
-        }
-        let (state, state2, begin, end) = unsafe {
-            (
-                ((session + 0x3cc) as *const u32).read_volatile(),
-                ((session + 0x3d0) as *const u32).read_volatile(),
-                ((session + 0x4f0) as *const usize).read_volatile(),
-                ((session + 0x4f8) as *const usize).read_volatile(),
-            )
-        };
-        let span = end.saturating_sub(begin);
-        let packed = (state as u64) | ((state2 as u64) << 32);
-        let prev_session = LAST_TICK_SESSION.swap(session, Ordering::Relaxed);
-        let prev_state = LAST_SESSION_STATE.swap(packed, Ordering::Relaxed);
-        let prev_span = LAST_PENDING_SPAN.swap(span, Ordering::Relaxed);
-        if prev_session == session && prev_state == packed && prev_span == span {
-            return;
-        }
-        log::info!(
-            "session-probe: session-tick — session={session:#x} state(+0x3cc)={state} state2(+0x3d0)={state2} \
-             pending_conn_span={span:#x}B (~{} ptrs) — state 2 = ESTABLISHED (unblocks the member machines); \
-             span 0 = no connection has ever landed on the pending queue",
-            span / 8,
-        );
-    }));
+/// Stall-B session-state poll, called each frame from [`SessionFsmProbe::on_frame`] (our own task —
+/// no game-code patch; see the DO-NOT-HOOK note above [`SESSION_INIT_GATE_OFFSET`]). Reads the
+/// captured `SessionSteam`'s state (`+0x3cc`/`+0x3d0`) and pending-conn span (`+0x4f0..+0x4f8`),
+/// logging on change. `session_alive` = the FSM still reports a session (lobby != None); when it
+/// drops, the pointer is cleared instead of read (the object dies with the session).
+fn poll_stall_b_session(session_alive: bool) {
+    let session = STALLB_SESSION.load(Ordering::Relaxed);
+    if session == 0 {
+        return;
+    }
+    if !session_alive {
+        STALLB_SESSION.store(0, Ordering::Relaxed);
+        LAST_SESSION_STATE.store(u64::MAX, Ordering::Relaxed);
+        LAST_PENDING_SPAN.store(usize::MAX, Ordering::Relaxed);
+        log::info!("session-probe: stall-B poll — session gone (FSM back to None); pointer cleared");
+        return;
+    }
+    // SAFETY: `session` was rcx at a live init-gate/wait call this session (a real SessionSteam),
+    // and it's only read while the FSM still reports the session alive. `+0x3cc/+0x3d0` (states) and
+    // `+0x4f0/+0x4f8` (pending-conn vector begin/end) are in-bounds fields; bounded scalar reads.
+    let (state, state2, begin, end) = unsafe {
+        (
+            ((session + 0x3cc) as *const u32).read_volatile(),
+            ((session + 0x3d0) as *const u32).read_volatile(),
+            ((session + 0x4f0) as *const usize).read_volatile(),
+            ((session + 0x4f8) as *const usize).read_volatile(),
+        )
+    };
+    let span = end.saturating_sub(begin);
+    let packed = (state as u64) | ((state2 as u64) << 32);
+    let prev_state = LAST_SESSION_STATE.swap(packed, Ordering::Relaxed);
+    let prev_span = LAST_PENDING_SPAN.swap(span, Ordering::Relaxed);
+    if prev_state == packed && prev_span == span {
+        return;
+    }
+    log::info!(
+        "session-probe: stall-B poll — session={session:#x} state(+0x3cc)={state} state2(+0x3d0)={state2} \
+         pending_conn_span={span:#x}B (~{} ptrs) — state 2 = ESTABLISHED (unblocks the member machines); \
+         span 0 = no connection has ever landed on the pending queue",
+        span / 8,
+    );
 }
 
 /// session-init-gate tracer: `0x1423fbe10(rcx=session)` — the INIT gate the session machine parks on.
@@ -1059,6 +1082,8 @@ fn log_session_init_gate(_name: &'static str, regs: *mut Registers) {
         if session == 0 {
             return;
         }
+        // Capture the live SessionSteam for the frame-task stall-B poll (see poll_stall_b_session).
+        STALLB_SESSION.store(session, Ordering::Relaxed);
         let counter = unsafe { ((session + 0x48) as *const u64).read_volatile() };
         let p1 = unsafe { ((session + 0x18) as *const usize).read_volatile() };
         let p2 = if p1 != 0 { unsafe { (p1 as *const usize).read_volatile() } } else { 0 };
@@ -1084,6 +1109,9 @@ fn log_session_wait_handler(_name: &'static str, regs: *mut Registers) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: ilhook entry registers; rdx is a by-value packed status code, logged not derefed.
         let r = unsafe { &*regs };
+        if r.rcx != 0 {
+            STALLB_SESSION.store(r.rcx as usize, Ordering::Relaxed);
+        }
         let status = r.rdx;
         let prev = LAST_WAIT_STATUS.swap(status, Ordering::Relaxed);
         if prev == status || WAIT_STATUS_LOGS.fetch_add(1, Ordering::Relaxed) >= 8 {
@@ -1096,9 +1124,9 @@ fn log_session_wait_handler(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
-/// P2P socket-callback tracer (shared by all three callbacks; `name` disambiguates). ANY fire is the
-/// B1 money signal: a real inbound Steam P2P connect event reached the host's DLNW3D socket layer —
-/// the connection-creation door. Logs entry registers only; read-only.
+/// P2P callback-REGISTRAR tracer (shared by all three; `name` disambiguates). Fires once at the
+/// session's own standup with the REAL runtime callback target in rdx — the observation that pinned
+/// `0x1423fd550/560/570` as the actual connect-event callbacks (2026-07-05). Read-only.
 fn log_p2p_socket_callback(name: &'static str, regs: *mut Registers) {
     let n = P2P_CB_LOGS.fetch_add(1, Ordering::Relaxed);
     if n >= 12 {
@@ -1108,10 +1136,34 @@ fn log_p2p_socket_callback(name: &'static str, regs: *mut Registers) {
         // SAFETY: ilhook entry registers; rcx/rdx are logged as opaque values, never derefed.
         let r = unsafe { &*regs };
         log::info!(
-            "session-probe: ★ P2P-SOCKET-CALLBACK {name} #{n} — rcx={:#x} rdx={:#x} — a REAL inbound \
-             P2P connect event reached the DLNW3D socket layer (the connection-creation door; this \
-             firing on the host is what lets it build the joiner's connection + send init-data)",
+            "session-probe: P2P-CALLBACK-REGISTRAR {name} #{n} — ctx={:#x} callback_fn={:#x} — the \
+             session standup registering its P2P callback (the fn pointer is the REAL connect-event \
+             target; the p2p-evt-* hooks watch those)",
             r.rcx, r.rdx,
+        );
+    }));
+}
+
+/// Shared log cap across the three REAL P2P callback tracers.
+static P2P_EVT_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// Real P2P callback tracer (shared by the three observed targets; `name` disambiguates). ANY fire on
+/// the host after a joiner connects is the B1 money signal: an inbound P2P connect event reached the
+/// DLNW3D socket layer — the connection-creation door that builds the joiner's `SteamConnection` and
+/// lets the host's session send init-data. Read-only.
+fn log_p2p_event_callback(name: &'static str, regs: *mut Registers) {
+    let n = P2P_EVT_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 12 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx/rdx/r8 are logged as opaque values, never derefed.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: ★ P2P-EVENT {name} #{n} — rcx={:#x} rdx={:#x} r8={:#x} — a REAL P2P \
+             connect/session event reached the DLNW3D socket layer (the connection-creation door; \
+             on the host this is what builds the joiner's connection so init-data can be sent)",
+            r.rcx, r.rdx, r.r8,
         );
     }));
 }
@@ -1133,16 +1185,19 @@ fn install_stall_b_trace(config: &Config) {
             return;
         }
     };
-    install_offset_hook("session-tick", exe_base + SESSION_TICK_OFFSET, log_session_tick);
     install_offset_hook("session-init-gate", exe_base + SESSION_INIT_GATE_OFFSET, log_session_init_gate);
     install_offset_hook("session-wait", exe_base + SESSION_WAIT_HANDLER_OFFSET, log_session_wait_handler);
     install_offset_hook("p2p-cb-84a0", exe_base + P2P_CB_A_OFFSET, log_p2p_socket_callback);
     install_offset_hook("p2p-cb-8420", exe_base + P2P_CB_B_OFFSET, log_p2p_socket_callback);
     install_offset_hook("p2p-cb-8620", exe_base + P2P_CB_C_OFFSET, log_p2p_socket_callback);
+    install_offset_hook("p2p-evt-d550", exe_base + P2P_EVT_A_OFFSET, log_p2p_event_callback);
+    install_offset_hook("p2p-evt-d560", exe_base + P2P_EVT_B_OFFSET, log_p2p_event_callback);
+    install_offset_hook("p2p-evt-d570", exe_base + P2P_EVT_C_OFFSET, log_p2p_event_callback);
     log::info!(
-        "session-probe: stall-B trace installed (session tick 0x1423fb684 + init gate 0x1423fbe10 + \
-         wait handler 0x1423fb900 + P2P callbacks 0x1423f84a0/0x1423f8420/0x1423f8620) — B0/B1 of \
-         docs/SESSION-DRIVE.md > \"STALL-B HANDSHAKE AIM SHEET\""
+        "session-probe: stall-B trace installed (init gate 0x1423fbe10 + wait handler 0x1423fb900 + \
+         P2P registrars 0x1423f84a0/8420/8620 + REAL P2P callbacks 0x1423fd550/560/570; session state \
+         polled per-frame from the FSM probe) — B0/B1 of docs/SESSION-DRIVE.md > \"STALL-B HANDSHAKE \
+         AIM SHEET\""
     );
 }
 
@@ -1920,11 +1975,16 @@ impl Feature for SessionFsmProbe {
             // depends on — instead of a bare `lobby A->B` with no fresh base. Reconnect cycling is the
             // target scenario, so don't let a stale terminal pair suppress the re-baseline.
             self.state = Latch::new();
+            poll_stall_b_session(false);
             if self.heartbeat.tick() {
                 log::info!("session-probe: live, no CSSessionManager yet (frame {})", tick.frame);
             }
             return;
         };
+
+        // Stall-B: watch the captured SessionSteam's state/pending-conn span while a session exists
+        // (the SessionSteam dies with the lobby, so a None FSM clears the pointer instead of reading).
+        poll_stall_b_session(fsm.lobby != LobbyState::None);
 
         // Capture the prior pair before the latch overwrites it, so we can render old->new.
         let prev = self.state.last().copied();
