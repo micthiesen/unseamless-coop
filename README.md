@@ -1,12 +1,13 @@
 # unseamless-coop
 
-> ⚠️ **Not ready for use — framework in place, co-op core pending a play session.** A Cargo
-> workspace with a host-tested `unseamless-core` (config parsing + scaling math + the mod
-> side-channel protocol, all unit-tested) and the `unseamless-coop` cdylib (loads config, runs
-> `Feature`s as frame tasks, ships a read-only session observer). It installs as a self-owned
-> `dinput8.dll` proxy + launcher that also loads other DLL mods. The actual co-op layer is
-> reverse-engineering-gated and waits on a live observation run, so it does **not** connect you to
-> friends yet — don't install it expecting a working Seamless Co-op replacement.
+> ⚠️ **Not a working co-op replacement yet — the connection layer is real, in-world play is the
+> last gate.** Two players running the mod already find each other by shared password (a
+> password-keyed Steam lobby), link up over an authenticated private side-channel, sync the host's
+> settings, and see each other's presence in-game (toasts, overhead nameplates), with an overlay
+> menu for session actions. What's still missing is the game-session layer that places players in
+> each other's world; that's under active reverse-engineering (see the
+> [release notes](../../releases) for progress). Until it lands, don't install this expecting to
+> play co-op with friends.
 
 A from-scratch **Rust rewrite of the Elden Ring [Seamless Co-op](https://github.com/LukeYui/EldenRingSeamlessCoopRelease)
 mod** (ERSC), built on the [`fromsoftware-rs`](https://github.com/vswarte/fromsoftware-rs) SDK.
@@ -31,9 +32,10 @@ A drop-in, no-installer bundle — same on Windows, Linux/Proton, and Steam Deck
 See **[docs/USAGE.md](docs/USAGE.md)** for the full walkthrough: what's in the bundle, configuring
 (who sets what), uninstalling / playing vanilla online, and what to do after an ELDEN RING update.
 
-> Note: co-op itself isn't wired up yet (see the status note above), so today this installs the
-> framework, boots outside EAC, and creates/validates your config — it does **not** connect you to
-> friends. The flow above is the intended end-to-end experience and how to set up for it now.
+> Note: today this connects your group (same password → linked peers, synced settings, presence
+> toasts and nameplates) but does **not** yet place you in each other's world — the in-world
+> session layer is the last gate (see the status note above). The flow above is the full intended
+> experience and how to set up for it now.
 
 ## Build & Test
 
