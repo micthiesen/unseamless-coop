@@ -1027,6 +1027,122 @@ static WAIT_STATUS_LOGS: AtomicU32 = AtomicU32::new(0);
 /// Shared log cap across the three P2P-callback tracers (each fire is a ★ event; cap the retries).
 static P2P_CB_LOGS: AtomicU32 = AtomicU32::new(0);
 
+// --- B4: the client connect chain + the host tag-handlers (2026-07-05 evening chart) --------------
+// From SESSION-DRIVE.md > "★ P2P-EVENT + CLIENT-CONNECT AIM SHEET". The client's transport connect is
+// a state-4 session-phase chain (fc400 → faa00 → fcfc0 → fcdd0 → vt[0xf8] = 0x142401e80, the actual
+// Steam connect); the host's connection-creator is the tag-1 event handler 0x1423fe350. NB: the event
+// DRAIN 0x1423ff446 from B4-e is deliberately NOT hooked — another unaligned mid-region address in the
+// same update path where 0x1423fb684 crashed the client; the entry latches below decide the fork
+// without it.
+
+/// The client connect-init `0x142401e80` (`SessionSteam` vt[0xf8]): resolves the Steam networking
+/// interface `0x143b48a00` and calls its `vtable[0x40]` (the actual transport open/connect), clearing
+/// `[(session+0x5a8)+0x12]` on completion. THE decisive B4-a latch: fires = the client attempted the
+/// connect (wall downstream); never = the phase chain stalls upstream.
+const CLIENT_CONNECT_INIT_OFFSET: usize = 0x1_4240_1e80 - 0x1_4000_0000;
+/// State-4 phase-chain step `0x1423fcdd0` (the step that dispatches vt[0xf8]). Latch: how far the
+/// chain walks.
+const PHASE_FCDD0_OFFSET: usize = 0x1_423f_cdd0 - 0x1_4000_0000;
+/// State-4 phase-chain step `0x1423fcfc0` (vt[0xa0], upstream of fcdd0). Latch: chain progress.
+const PHASE_FCFC0_OFFSET: usize = 0x1_423f_cfc0 - 0x1_4000_0000;
+/// The host tag-1 event handler `0x1423fe350` (ConnectionStatusChanged — the REAL connection-creator:
+/// host-accept `0x1423fe190` + add-peer `0x1423fdc80`). B4-d latch: it firing on the host = the
+/// client's connect reached the host = stall B moved.
+const TAG1_HANDLER_OFFSET: usize = 0x1_423f_e350 - 0x1_4000_0000;
+/// The tag-0 handler's bail site `0x1423fe52a` (`test rax,rax; je <return>` right after the
+/// connection lookup `0x1423fbd80`). Mid-function — hooked only under the prologue guard below.
+/// rax==0 here = d560 bailed on "no existing connection for this peer" (B4-c).
+const TAG0_BAIL_OFFSET: usize = 0x1_423f_e52a - 0x1_4000_0000;
+/// Charted bytes at [`TAG0_BAIL_OFFSET`]: `48 85 C0` = `test rax,rax`, `74` = the `je` opcode (rel8
+/// target left unpinned). Mid-function hook ⇒ guard or skip, per the legb-finalize precedent.
+const TAG0_BAIL_PROLOGUE: [u8; 4] = [0x48, 0x85, 0xC0, 0x74];
+
+/// One-shot latches for the B4 entry tracers (log the first few fires each, then quiet).
+static CONNECT_INIT_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Latch for the fcdd0/fcfc0 phase-step tracers (shared cap; the name disambiguates).
+static PHASE_STEP_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Latch for the tag-1 handler tracer.
+static TAG1_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Throttle for the tag-0 bail tracer (a busy host can hit it per inbound event).
+static TAG0_BAIL_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Last-seen client connect-completion flag `[(session+0x5a8)+0x12]` (B4-a poll; 0xff = never seen).
+static LAST_CONNECT_FLAG: AtomicU32 = AtomicU32::new(0xff00);
+
+/// B4-a: client connect-init entry tracer. ★ Firing at all = the phase chain reached the actual
+/// transport connect.
+fn log_client_connect_init(_name: &'static str, regs: *mut Registers) {
+    let n = CONNECT_INIT_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 6 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx/rdx logged as opaque values.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: ★ CLIENT-CONNECT-INIT #{n} — 0x142401e80(rcx={:#x}, rdx={:#x}) — the \
+             state-4 phase chain REACHED the transport connect (wall is downstream: the Steam \
+             vtable[0x40] call or its target)",
+            r.rcx, r.rdx,
+        );
+    }));
+}
+
+/// B4-a: state-4 phase-chain step latches (how far the chain walks before stalling).
+fn log_phase_step(name: &'static str, regs: *mut Registers) {
+    let n = PHASE_STEP_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 10 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx logged as an opaque value.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: phase-step {name} #{n} — rcx={:#x} (state-4 connect chain progress: \
+             fc400 -> faa00 -> fcfc0 -> fcdd0 -> connect-init 0x142401e80)",
+            r.rcx,
+        );
+    }));
+}
+
+/// B4-d: host tag-1 (ConnectionStatusChanged) handler latch — the REAL connection-creator. ★ Firing
+/// on the host = the client's transport connect arrived = stall B has moved.
+fn log_tag1_handler(_name: &'static str, regs: *mut Registers) {
+    let n = TAG1_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 8 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx/rdx logged as opaque values.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: ★ TAG1-CONNSTATUS #{n} — 0x1423fe350(rcx={:#x}, rdx={:#x}) — the \
+             connection-creating event handler ran (host-accept 0x1423fe190 + add-peer follow); a \
+             peer's REAL transport connect reached the session",
+            r.rcx, r.rdx,
+        );
+    }));
+}
+
+/// B4-c: tag-0 handler bail-site tracer (`0x1423fe52a`, guarded mid-function). Reads rax = the
+/// connection-lookup result: 0 = d560 is bailing on "no existing connection" (the expected cause of
+/// "d560 fires but nothing happens").
+fn log_tag0_bail(_name: &'static str, regs: *mut Registers) {
+    let n = TAG0_BAIL_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 8 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook saved registers at the guarded test site; rax is a by-value scalar.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: tag0-lookup #{n} — 0x1423fe52a rax={:#x} ({}) — the tag-0 (peer-name) \
+             handler's connection lookup; 0 = bail (no connection exists for the peer, as charted)",
+            r.rax,
+            if r.rax == 0 { "BAIL" } else { "found" },
+        );
+    }));
+}
+
 /// Stall-B session-state poll, called each frame from [`SessionFsmProbe::on_frame`] (our own task —
 /// no game-code patch; see the DO-NOT-HOOK note above [`SESSION_INIT_GATE_OFFSET`]). Reads the
 /// captured `SessionSteam`'s state (`+0x3cc`/`+0x3d0`) and pending-conn span (`+0x4f0..+0x4f8`),
@@ -1056,16 +1172,27 @@ fn poll_stall_b_session(session_alive: bool) {
         )
     };
     let span = end.saturating_sub(begin);
+    // B4-a: the connect-completion flag `[(session+0x5a8)+0x12]` — cleared by the connect-init
+    // 0x142401e80 when the transport connect completes. 0xff = the +0x5a8 object is absent.
+    // SAFETY: same live-session guard as above; one guarded pointer chase then a byte read.
+    let conn_obj = unsafe { ((session + 0x5a8) as *const usize).read_volatile() };
+    let connect_flag: u32 = if conn_obj != 0 {
+        u32::from(unsafe { ((conn_obj + 0x12) as *const u8).read_volatile() })
+    } else {
+        0xff
+    };
     let packed = (state as u64) | ((state2 as u64) << 32);
     let prev_state = LAST_SESSION_STATE.swap(packed, Ordering::Relaxed);
     let prev_span = LAST_PENDING_SPAN.swap(span, Ordering::Relaxed);
-    if prev_state == packed && prev_span == span {
+    let prev_flag = LAST_CONNECT_FLAG.swap(connect_flag, Ordering::Relaxed);
+    if prev_state == packed && prev_span == span && prev_flag == connect_flag {
         return;
     }
     log::info!(
         "session-probe: stall-B poll — session={session:#x} state(+0x3cc)={state} state2(+0x3d0)={state2} \
-         pending_conn_span={span:#x}B (~{} ptrs) — state 2 = ESTABLISHED (unblocks the member machines); \
-         span 0 = no connection has ever landed on the pending queue",
+         pending_conn_span={span:#x}B (~{} ptrs) connect_flag(+0x5a8.+0x12)={connect_flag:#x} — state 2 = \
+         ESTABLISHED; span 0 = no connection ever landed; connect_flag 0 = the transport connect COMPLETED \
+         (0xff = no +0x5a8 object)",
         span / 8,
     );
 }
@@ -1193,6 +1320,16 @@ fn install_stall_b_trace(config: &Config) {
     install_offset_hook("p2p-evt-d550", exe_base + P2P_EVT_A_OFFSET, log_p2p_event_callback);
     install_offset_hook("p2p-evt-d560", exe_base + P2P_EVT_B_OFFSET, log_p2p_event_callback);
     install_offset_hook("p2p-evt-d570", exe_base + P2P_EVT_C_OFFSET, log_p2p_event_callback);
+    // B4 (the client connect chain + host tag-handlers; SESSION-DRIVE.md > "P2P-EVENT + CLIENT-CONNECT
+    // AIM SHEET"). All fn entries except tag0-bail, which is mid-function and prologue-guarded.
+    install_offset_hook("connect-init", exe_base + CLIENT_CONNECT_INIT_OFFSET, log_client_connect_init);
+    install_offset_hook("phase-fcdd0", exe_base + PHASE_FCDD0_OFFSET, log_phase_step);
+    install_offset_hook("phase-fcfc0", exe_base + PHASE_FCFC0_OFFSET, log_phase_step);
+    install_offset_hook("tag1-connstatus", exe_base + TAG1_HANDLER_OFFSET, log_tag1_handler);
+    let tb = exe_base + TAG0_BAIL_OFFSET;
+    if prologue_ok("tag0-bail", tb, &TAG0_BAIL_PROLOGUE) {
+        install_offset_hook("tag0-bail", tb, log_tag0_bail);
+    }
     log::info!(
         "session-probe: stall-B trace installed (init gate 0x1423fbe10 + wait handler 0x1423fb900 + \
          P2P registrars 0x1423f84a0/8420/8620 + REAL P2P callbacks 0x1423fd550/560/570; session state \
