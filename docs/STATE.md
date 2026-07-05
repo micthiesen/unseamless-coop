@@ -41,31 +41,33 @@ Last updated: **2026-07-05** (member-pipeline chart + drive_add_peer).
 
 ## Next
 
-**Make the client a THIN connector (pure join, no session graph) — the ERSC-capture-corrected design.**
-ERSC capture #2 (2026-07-05) proved the architecture is **asymmetric**: host = `lobby_state=3` with the full
-DLNR3D session graph (SessionSteam + members + endpoints); client = `lobby_state=6` with **ZERO SessionSteam**
-— the member/endpoint machinery is **host-side only**, and the client is a thin connector that tracks players
-via `CSSessionManager`. This root-causes the crash (our joiner wrongly built a SessionSteam via
-`drive_establish_handler`, conflicting with the join) and reframes the fix:
+**Client = drive_join to `Client(6)` WITHOUT the conflicting establish; let its join emit the type-5.**
+ERSC capture #2 (2026-07-05, verified on BOTH machines) settled the architecture: it's asymmetric in **FSM
+state only** — host `lobby_state=3` (`Host`), client `lobby_state=6` (`Client`) — but the DLNR3D session
+graph is built on BOTH sides and **mirrors** (each side's *remote* member holds the endpoint). So the member
+machinery is symmetric (`symmetric_peer` was right about that); the divergence is the FSM role. **The joiner
+crash was an FSM conflict:** our joiner drove `drive_establish_handler` (→ Host/3) AND `drive_join` (→
+Client/6) at once → teardown → null-session crash. Fix:
 
-1. **Client = pure join:** `drive_join` only (reach `lobby_state=6`), with `drive_establish_handler` +
-   `drive_add_peer` **OFF** on the client (so it doesn't build a conflicting SessionSteam → no crash). Let the
-   game's client-join flow emit the real DLNW3D handshake — including the **type-5 message (8-byte token)**
-   that the host's pump needs to set `member+0x152` and complete the member. (`symmetric_peer` is a proven
-   diagnostic — both build endpoints — but NOT the shipping shape; retire it as the endgame.)
-2. **Host unchanged:** `drive_establish` + `drive_add_peer` (builds the client member; the pump completes it
-   when the client's type-5 arrives). This side works.
-3. **The open question:** whether the client's join reaches `lobby_state=6` + emits the handshake against our
-   `drive_add_peer` host — i.e. does the client's join need a host connection blob our host must produce
-   (the blob-parse we previously bypassed)? Two-machine test: client pure-join → host member completes
-   (`flags (0,0,1,0)`, `+0x148` token set) → roster → 2 → client visible.
+1. **Client = join only:** `drive_join` → `TryToJoinSession(4)` → `Client(6)`, with **`drive_establish_handler`
+   OFF** on the client so the FSM doesn't fight (the crash). The client's own join flow builds its graph AND
+   emits the DLNW3D connect handshake — including the **type-5 message** (`{8B token, 4B len, len·blob}`) that
+   the host's pump needs to set `member+0x152` and complete the host's member. (`symmetric_peer` stays a proven
+   diagnostic — both build endpoints, both stable — but leaves both at `Host(3)` and sends no type-5, so it's
+   not the shipping shape.)
+2. **Host unchanged:** `drive_establish` + `drive_add_peer` builds the client member; the pump completes it
+   when the client's type-5 arrives.
+3. **Open question:** whether the client's `drive_join` reaches `Client(6)` + emits the handshake against our
+   `drive_add_peer` host — i.e. does it need the host connection blob we previously bypassed (the blob-parse)?
+   That bypass is likely why the earlier join left the session incomplete. Two-machine verify: client join →
+   host `member[4]` completes (`flags (0,0,1,0)`, `+0x148` token) → `players=2` → client visible.
 
-- **Completion mechanism (charted):** pump `0x1424007e0` jump table `0x1424009f8`; type-5 case `0x142400924`
-  reads the 8-byte token, validates via `conn vtable[0x88]`, sets `member+0x148`=token + `+0x152`=1.
-
-### Superseded framing (kept for history)
-
-**Complete the DLNW3D connect handshake so a driven member persists + gets roster-promoted.** The joiner
+- **Ground-truth reference (banked):** full both-sides transitive dumps at
+  `~/Documents/ersc-session-ref-{host,client}.txt`; the mirror structure, endpoint→context→connmgr→
+  `SteamConnection(+0x138 peer id)` wiring, the per-connection nonce token (`member+0x148`), and the full
+  8-type protocol + handlers are in [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) >
+  "★★ REFERENCE DUMP #2". Completion = pump `0x1424007e0` type-5 case `0x142400924` → member vtable[0x88]
+  validator `0x142402ee0`. The joiner
 crash is FIXED (`symmetric_peer` mode) and — two-machine — **both peers now build each other's
 fully-initialised `member+0x130` `MTInternalThreadSteamConnection`**, both machines stable. The *only*
 remaining gap is that the handshake never completes: member flags reach `(0,1,0,0)` (`+0x151`, set by the
