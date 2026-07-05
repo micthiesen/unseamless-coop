@@ -175,6 +175,22 @@ probe.
 > the same code ran clean. To read a deep function's return, hook it at a **function boundary** (entry + a
 > return trampoline), not in the middle of its caller.
 
+## Two same-shaped failures force a method change
+
+RE iteration has a failure mode no tool fixes: returning to the same prior — the same probe, the
+same lever, the same scan — with slightly different parameters, long after it stopped paying.
+The rule: **if two consecutive attempts fail the same way, the next attempt must change the
+*method*, not the parameters.** Switch rows in the decision table (static scan → live
+watchpoint, diagnostic bits → call-site hook, our-mod probe → ERSC reference capture), move a
+rung (offline ↔ live, solo ↔ two-machine), or invert the question ("what *writes* this field?"
+instead of "what value do I write?"). A third try with tweaked parameters after two same-shaped
+failures is almost always spent budget.
+
+Record a ruled-out approach with *why* the moment it's ruled out — STATE.md > "Candidates Not
+Chosen" for the current line of work, or the relevant findings doc — so neither this session nor
+the next one re-walks it. (The rig-iteration side of this — declare the verifier + try budget
+before cycling — is the [`/test-loop`](../test-loop/SKILL.md) skill's loop protocol.)
+
 ## Recording findings
 
 Write observations **in your own words** ("on event X the mod does Y", "field at `ChrIns+0x…`

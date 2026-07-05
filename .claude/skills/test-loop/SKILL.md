@@ -172,6 +172,26 @@ verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts
 bare install primitive `rig.sh apply` is built on — usable directly only on a clean rig with no real
 ERSC stack to protect, per RIG-RUNBOOK; otherwise prefer `rig.sh`.)
 
+**Iterating toward a rig-verifiable goal? Engineer the loop before the first cycle.** Ad-hoc
+"tweak, cycle, squint at the log" drifts; a declared loop converges. Before the first cycle,
+write down three things (a scratch note is fine — it's working state, not a doc):
+
+- **The verifier:** the goal as a concrete log/state predicate — the exact milestone line, probe
+  output, or diag field that means *done* (e.g. `lobby_state=6`, `players=2`, `coop: linked`).
+  If no such line exists yet, **make the mod log it first** (same rule as guide steps below) — a
+  loop without a machine-checkable gate is just re-running and squinting.
+- **A try budget:** how many cycles before stopping (default ~5). Hitting the budget means stop
+  and report — what was tried, what the verifier showed each pass — not grind on.
+- **An attempt log:** one line per cycle — what changed, what the verifier showed. This is what
+  makes cycle N smarter than cycle 1, and it's the raw material for the STATE.md / findings-doc
+  write-up when the loop ends either way.
+
+Then run `build → apply → cycle → check the predicate` end to end each pass, autonomously. Two
+more rules: **change one lever per cycle** (two changes per pass means the verdict tells you
+nothing), and **two same-shaped failures in a row force a method change**, not a third try with
+tweaked parameters — see the `/reverse-engineer` skill > "Two same-shaped failures force a
+method change".
+
 **Driving a specific test? Ship a guide — the guide IS the test flow.** For any in-game test sequence
 (validating one behaviour, an RE step, a two-player flow), the ordered steps live in a **committed
 guide** (`crates/unseamless-core/src/guide/guides.rs`), not in a hand-relayed step-list in a doc or in
