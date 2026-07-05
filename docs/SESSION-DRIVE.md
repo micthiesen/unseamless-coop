@@ -516,6 +516,36 @@ the same thing (a live join-built connection), not one gating the other.
   created session; null ⇒ create failed) and **`0x1423f637a`** (read `al` = readiness result; 0 ⇒ readiness is
   the wall, as expected).
 
+### ▶ RIG RESULT (2026-07-05, two-machine) — ★★★ EMITTER BUILT, no crash; parked at stall B
+
+The aim-sheet fix was implemented (`join_set_established_bit`) and run two-machine (rig host + Deck joiner).
+Outcome, banked so it survives STATE rewrites:
+
+- **★★★ The client emitter connection is BUILT for the first time.** Setting `container+0x7c0` bit 2 makes the
+  readiness gate `0x1423fd7a0` pass, `join-blob-parse 0x1423fb260` REACHES (`[conn+0x58]` populated), the
+  per-peer connection is created, `[G+0x28]=1`, `count=1`, and the Deck advances `None → Client`. The join
+  descriptor's own `0x10f5xx` carries the session cfg (`[sess+0x68..0x78]`), so the readiness OUTER early-out
+  and cfg sub-gate both pass — bit 2 was the only miss, exactly as charted. **The socket layer readiness allocs
+  after the bit is covered by `land_socket_holder`**, which was rig-observed landing `[container+0x708]` (a real
+  holder, "socketmgr init returned 1 … service nonzero") on the client the same run — so bit-2 + the existing
+  transport standup is sufficient; no extra wiring.
+- **★ The LEVER matters: direct bit-2 OR, NOT the handler.** Calling the session-established handler
+  `0x1423f4870` also passes readiness + builds the emitter (reached `Client/JoinCheck`) **but** builds a real
+  `+0x708` establish-session connection and crashes the joiner ~30s later at **`eldenring.exe+0x3f4860`** reading
+  **`0x1c5`** (the null-session establish-vs-join signature). The **direct `container+0x7c0 |= 4` OR** (no
+  handler) builds the emitter with **zero** `+0x708` artifact and the Deck **stays alive** — the session ends by
+  graceful timeout, not a crash. `drive_session_established` / `drive_establish_handler` are both the wrong lever
+  for the client for this reason. (Note: without the handler, the container self-identity `+0x7f8` stays `0`;
+  that was fine for reaching `Client` — watch it if stall B's remote-peer branch needs it.)
+- **THE STALL (B):** the client parks at `Client/WaitInitData` waiting for the host's init-data; it never
+  arrives, so ~30s later the FSM tears down gracefully `WaitInitData → None`. The client's emitter phase machine
+  doesn't advance past the initial wait (no endpoint-build `member+0x130`, no type-5 send `0x142400df0`), and the
+  host — receiving only our **synthetic 14B SYN probe** (rejected at admit gate-c) and holding the
+  `drive_add_peer` member pending — never answers. Both local objects exist; the real DLNW3D handshake between
+  them doesn't run. **NEXT:** the stall-B instrument map above (phase-step `0x1423ffc60`, endpoint-build
+  `0x142401110`, type-5 `0x142400df0`) + working out how the two *real* connection objects exchange the connect
+  handshake (the synthetic-SYN probe was a diagnostic to trip admit; it is not the emitter's real handshake).
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's

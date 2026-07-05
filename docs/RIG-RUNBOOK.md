@@ -188,6 +188,13 @@ runtime instrumentation per [RUNTIME-RE.md](RUNTIME-RE.md): a diagnostic build o
   overshoots into Continue → a loaded save), which makes the drive-probe / in-game RE solo-runnable. It
   needs the KWin + ydotool stack healthy; if a run sticks at the popups, a manual `scripts/rig.sh
   dismiss` clears them. Tune with `RIG_DISMISS_PRESETTLE` / `RIG_DISMISS_PRESSES`.
+- **Re-cycling onto a NEW build while the old game is still up: `kill` first, then `cycle`.** `cycle`'s
+  `apply` step refuses over a live install (the correct "is Michael playing?" guard), so a bare re-cycle
+  on a still-running rig **silently doesn't re-apply** — the old build keeps running. And a
+  `grep "…->Host"` on the log right after will match the *previous* run's establishment lines (the cdylib
+  appends to one log across runs) and read as a false "HOST ESTABLISHED" (hit 2026-07-05). So: `rig.sh
+  kill` → `rig.sh cycle …`, and when gating on a fresh establishment, key off a **new** log or a timestamp
+  after the kill, not just the presence of the FSM line.
 - **Rig runs clamp the game's saved graphics config.** The game persists whatever display it saw:
   inside the small rig gamescope it rewrites `GraphicsConfig.xml` (in the Proton prefix's
   `AppData/Roaming/EldenRing/`) to WINDOW mode with resolutions clamped down, which would make the
