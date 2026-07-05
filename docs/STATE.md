@@ -41,27 +41,32 @@ Last updated: **2026-07-05** (member-pipeline chart + drive_add_peer).
 
 ## Next
 
-**Complete + stabilise the JOINER (Deck) side — its mirror of the host solution.** The host now builds the
-Deck member+endpoint; the full 2-player session is blocked only by the joiner: **the Deck crashes ~90s in**
-(`eldenring.exe+0x3f4860`, a null-`this` getter reading `[rcx+0x1c5]`; the null is `[r14+0x1e508]`), before
-the host-side handshake completes. Root cause: the joiner's session is incompletely built — `drive_join`
-bypasses the blob-parse, so the joiner never fully reaches `Client` and leaves game session/network
-sub-objects null that the per-frame update later dereferences.
+**Complete the DLNW3D connect handshake so a driven member persists + gets roster-promoted.** The joiner
+crash is FIXED (`symmetric_peer` mode) and — two-machine — **both peers now build each other's
+fully-initialised `member+0x130` `MTInternalThreadSteamConnection`**, both machines stable. The *only*
+remaining gap is that the handshake never completes: member flags reach `(0,1,0,0)` (`+0x151`, set by the
+endpoint build) vs the working ERSC `(0,0,1,0)` (`+0x152`, set only by a real handshake message). So the
+member times out ~30s, is dropped + re-added (endpoint rebuilds transiently), and `players` stays 1.
+Root-caused: **our 14-byte SYN isn't a valid pump message** — the pump `0x1424007e0` dispatches `buf[0]` as a
+type 1..8 (jump table `0x1424009f8`); `0x0e`=14 is out of range → ignored. The type that sets `+0x152` is a
+real DLNW3D handshake message we don't send. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★★ SYMMETRIC PEER".
 
-1. **Mirror the host fix on the joiner:** instead of the fragile `drive_join` + bypasses, have the joiner
-   drive the establish path (like the host) and `drive_add_peer` for the **host's** SteamID, so the joiner's
-   own pump builds the host-member endpoint from the host's packets (symmetric). This likely also builds the
-   sub-objects whose absence crashes it.
-2. **Or fix the crash directly:** chart what builds `[r14+0x1e508]` on a real ERSC joiner (identify `r14`'s
-   system + the null sub-object) and ensure the joiner's driven session builds it, so the getter has a valid
-   `this`.
-3. **Then verify roster → 2:** with both sides stable, the host handshake completes → `member[4]` endpoint
-   fully wired (`+0x8`/`+0x50` populated, flags → `(0,0,1,0)`) → both players in each other's world.
+1. **Let the built endpoints drive the handshake:** once `member+0x130` (`MTInternalThreadSteamConnection`)
+   exists it has its own send/recv (callbacks `endpoint+0x20/+0x28`). Try (a) **stop our SYN-spam once the
+   endpoint is built** (channel-30 collision may block the game's endpoint traffic), and (b) **extend the
+   ~30s member timeout** (`0x1424004e0` finalize) so the endpoint persists long enough to finish — the churn
+   drops it before the handshake can complete (a poke of `+0x152` mid-churn didn't stick).
+2. **Or chart + drive the real DLNW3D connect sequence:** the type-1..8 messages the pump dispatches (esp.
+   the type whose `conn vtable[0x88]` sets `+0x152`) — likely a quick **ERSC capture** watching what the pump
+   reads/writes on a member's `conn+0x130` during a live join (both machines still set up on our mod; ERSC
+   swap-in is `rig.sh restore` + the Deck ERSC files are aside).
+3. **Verify roster → 2:** completed member (`flags (0,0,1,0)`, persists) → promoted via `0x140cb31b0` →
+   `players=2` → both players see each other.
 
-- **Why this / why now:** the host side of the joiner-member is done; the only thing between us and a real
-  2-player session is the joiner completing its side without crashing.
-- **Serial + Michael-gated:** two-machine (rig host + Deck joiner); the crash/joiner charting is solo/delegable.
-  Both machines are currently on our mod (ERSC not restored, per Michael).
+- **Why this / why now:** everything up to a persistent, roster-promoted joiner member now works
+  (host+joiner build each other's endpoint, no crash). The final mile is the connect-handshake completion.
+- **Serial + Michael-gated:** two-machine; the handshake charting/capture is Michael-gated. Both machines are
+  on our mod with `symmetric_peer=true` (ERSC not restored, per Michael).
 
 ## Candidates Not Chosen
 

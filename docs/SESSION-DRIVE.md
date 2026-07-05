@@ -235,6 +235,44 @@ per-frame pump built the Deck member's transport endpoint**, exactly as the capt
   next task is **stabilise the joiner** so the host-side handshake can finish → roster → 2. The host side of
   the joiner-member is now solved.
 
+### ★★ SYMMETRIC PEER — crash fixed, both build the endpoint; last gap = handshake completion (2026-07-05)
+
+The joiner crash was the asymmetric `drive_join` conflicting with the establish-built session: the joiner
+ran **both** (6 ADD-MEMBER from establish **and** TryToJoin→Client), the join tore the establish session
+down, and a game system dereferenced the resulting null session object. Fix = **`symmetric_peer` mode**
+(`session_probe.rs`): both machines are host-style peers — each builds its session via establish, each
+`drive_add_peer`s the other, and each SENDS the DLNW3D SYN (was joiner-only) so both worker threads receive
+and both pumps build the other's endpoint. `rung3_role` forces both to host role (no join).
+
+Two-machine result — **both machines stable (no crash), each builds the other's endpoint:**
+- Each has `member[4]` = the other peer (`+0x80` = its SteamID64) with a **fully-initialised
+  `member+0x130` `MTInternalThreadSteamConnection`** (vtable `0x143277750`, `+0x8` index=2, `+0x50` = the
+  member back-ptr) — the game's own pump built and initialised it.
+- **But the handshake doesn't complete:** member flags reach `(0,1,0,0)` (`+0x151`) vs the working ERSC
+  `(0,0,1,0)` (`+0x152`). The member then times out ~30s, is dropped, and `drive_add_peer` re-adds it —
+  the endpoint rebuilds transiently but never persists, and `players` roster stays 1 (the DLNR3D member is
+  never promoted to a visible player).
+
+**★ The precise last gap (root-caused):** our fabricated **14-byte SYN is NOT a valid pump message.** The
+per-connection pump `0x1424007e0` reads a message, takes `buf[0]` as a **type 1..8** (jump table at
+`0x1424009f8`), and one case (`0x142400924`, calling conn `vtable[0x88]`) sets `member+0x152` = the flag a
+completed member has. Our SYN's `buf[0]=0x0e`=14 is **out of range** (`cmp eax,7; ja default`) → ignored, so
+it trips host-admit but never advances the handshake. `+0x151` gets set by the endpoint build itself; `+0x152`
+needs a real DLNW3D handshake message the game's connect flow produces and we don't.
+
+**Behavioral confirmation (2026-07-05):** in the symmetric run the host player **could not rest at a grace**
+— resting is disabled during multiplayer, so the game's own multiplayer state IS engaged by our driven
+session (the session layer is active), even though the peer isn't visible yet (handshake incomplete). Good
+sign: we're genuinely in the game's co-op mode, just missing the final peer sync.
+
+**⇒ Next: complete the DLNW3D handshake.** Once the endpoint (`MTInternalThreadSteamConnection`) is built on
+both sides it has its own send/recv (callbacks at `endpoint+0x20/+0x28`); the game's connection layer should
+drive the rest — options: (a) let the built endpoints talk (our SYN-spam on channel 30 may interfere — try
+stopping the SYN once the endpoint exists, and/or extend the ~30s member timeout so the endpoint persists
+long enough to finish); (b) chart the real DLNW3D connect message sequence (the type-1..8 messages the pump
+dispatches, esp. the type that sets `+0x152`) and drive/relay it. This is the final mile: everything up to a
+persistent, roster-promoted joiner member now works.
+
 ## ★ JOINER-ADMIT (2026-07-05, two-machine) — the transport admit path is the WRONG mechanism
 
 Two-machine (reproduced rig host + Deck joiner, both our mod, `--auto-session host`/`join`): **the Deck's
