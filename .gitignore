@@ -138,3 +138,4 @@ re-dumps/
 ghidra-output/
 ida-output/
 __pycache__/
+.deck-logs/

@@ -11,7 +11,7 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (/next: client-join confirmed as Next; static type-5-send/blob aim-sheet lane drafted).
+Last updated: **2026-07-05** (client-join baseline: asymmetric split is CRASH-FREE two-machine; whole gap = client's `0x1423f62e0` bails at the descriptor check → no emitter connection).
 
 ## Now
 
@@ -47,7 +47,32 @@ Last updated: **2026-07-05** (/next: client-join confirmed as Next; static type-
 
 ## Next
 
-**Client = drive_join to `Client(6)` WITHOUT the conflicting establish; let its join emit the type-5.**
+**★ Build the client's EMITTER CONNECTION: get `0x1423f62e0` past its descriptor check so it reaches the blob
+parser `0x1423fb260`.** The 2026-07-05 two-machine baseline (rig host + Deck joiner, corrected asymmetric config)
+localized the entire remaining gap to one function. Findings:
+
+- **Asymmetric split is CRASH-FREE** (30s+ stable, no teardown). The joiner crash was the establish↔join FSM
+  conflict; host-gating `drive_establish_handler` on `do_create` (commit `c0bf009`) fixes it for the asymmetric
+  shape — `symmetric_peer` is no longer needed to avoid the crash. Host establishes, client joins, no fight.
+- **HOST side fully works:** stable `Host`/`Ingame`, `players=1`, member graph; the Deck's 14B SYN reaches
+  host-admit `0x142640e30`; `drive_add_peer 0x1423fdc80` enqueues a Deck member in the pending queue (returned 1,
+  queue grew). The host holds the member pending, waiting for the handshake completion (type-5) that never comes.
+- **CLIENT side, THE WALL:** the Deck reaches `TryToJoinSession` (not `Client(6)`) with the side-channel linked
+  and SYNs flowing. `drive_join` fires, inits the registry OK (`ready[+0x10]=1`, cap 16), and calls
+  `0x1423f62e0(registry, descriptor=0x10f520, blob_begin, blob_len=8)` (`join-conn-entry` fires) — **but
+  `join-blob-parse 0x1423fb260` NEVER fires.** So `0x1423f62e0` bails AFTER the registry-ready check (passes) and
+  BEFORE the blob parser: `[G+0x28]=0`, `count[+0x24]=0`, **no emitter connection built**. No emitter → its phase
+  machine never runs → no type-5 → the host's pending member never completes → `players` stays 1.
+- **THE REFINEMENT vs the prior plan:** the wall is the **descriptor check inside `0x1423f62e0`, not the blob
+  content** — we never reach `0x1423fb260`, so blob layout is moot until we get past the descriptor. `join-aim`
+  worker confirmed the emitter connection (built by `0x1423fb260` via `0x1423fa1b0`, seeded phase `0x1423fc9a0`) is
+  what emits the type-5; the type-5 completion blob itself is a Steam-issued credential for the client's own
+  SteamID (genuine regardless). **Next action:** the `join-aim` aim sheet — what `0x1423f62e0` validates on its
+  2nd arg (`descriptor`) between registry-ready and blob-parse, and what makes it reject our synthesized-host
+  descriptor. Then wire that (build/fix the descriptor, drop `bypass_session_join_blob_gate`, feed the blob) and
+  re-run two-machine to confirm the emitter builds → type-5 → host `member[4]` completes → `players=2`.
+
+**(Historical framing — superseded by the baseline above.) Client = drive_join to `Client(6)` WITHOUT the conflicting establish; let its join emit the type-5.**
 ERSC capture #2 (2026-07-05, verified on BOTH machines) settled the architecture: it's asymmetric in **FSM
 state only** — host `lobby_state=3` (`Host`), client `lobby_state=6` (`Client`) — but the DLNR3D session
 graph is built on BOTH sides and **mirrors** (each side's *remote* member holds the endpoint). So the member
