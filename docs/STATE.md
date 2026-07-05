@@ -51,13 +51,22 @@ client's emitter phase machine doesn't advance past the initial wait and the hos
   between us and a real 2-player session is getting the two connections to actually run the handshake to the
   type-5. Confirm: phase reaches the type-5 send → host `BeginAuthSession` validates → `member+0x152=1` →
   `players=2` → client visible in-world.
-- **Shape:** likely a delegable **static charting lane** (phase-advancement mechanics + what init-data the host
-  must send) + a serial two-machine confirm run (orchestrator-driven, both machines, no human needed). Watch
-  the client's self-identity `container+0x7f8` (stays `0` with the bit-2-OR lever — fine for reaching `Client`,
-  but the type-5 remote-peer branch may read it).
+- **Shape (decided by /next, 2026-07-05):** two parallel tracks. (1) A **delegable static charting lane**
+  (spawned): chart the client emitter phase machine's advancement mechanics, the host's init-data send path
+  (what the host sends a pending member and what triggers it), and which of the 8 DLNW3D message types form
+  the real connect handshake — output = a "STALL-B HANDSHAKE AIM SHEET" section in SESSION-DRIVE.md. (2) The
+  **serial orchestrator track**: wire the stall-B instrument map into `session_probe.rs` and run the
+  two-machine confirm (no human needed). Watch the client's self-identity `container+0x7f8` (stays `0` with
+  the bit-2-OR lever — fine for reaching `Client`, but the type-5 remote-peer branch may read it).
 
 ## Candidates Not Chosen
 
+- **Seamlessness disconnect-suppression gate** (`leave_session 0x140cae730` armed flag,
+  [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)) — charted and buildable as code, but its
+  validation needs a real 2-player session, so it queues directly behind stall B; building it now widens
+  surface without proof.
+- **Post-rung-3 wiring** (the inert overlay toggles, nameplate color-by-SteamID, event toasts on the session
+  roster) — rung-3-gated by definition; unblocked the moment stall B completes.
 - **`symmetric_peer` as the shipping design** — proven diagnostic (both build endpoints, both stable) but
   leaves both at `Host(3)` and completes no handshake (no real type-5). Superseded by the asymmetric
   client-join shape (host `Host`, client `Client`), which is now emitter-proven. Keep only as a diagnostic.
