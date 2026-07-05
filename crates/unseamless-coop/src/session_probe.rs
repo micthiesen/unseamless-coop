@@ -2958,7 +2958,10 @@ impl TransportStandupDriver {
             );
         }
         let do_accept = !self.accepted;
-        let do_ping = self.ping_throttle.tick();
+        // Under unmask the host must be FULLY silent on legacy P2P: run 3 (2026-07-05) showed that
+        // skipping Accept alone is defeated by our own outbound pings — SendP2PPacket implicitly opens
+        // the P2P session, so the peer's packets flow and P2PSessionRequest is never raised.
+        let do_ping = self.ping_throttle.tick() && !unmask;
         let seq = self.ping_seq.wrapping_add(1);
         let suppress_drain = self.suppress_drain;
         let is_host = self.is_host;
