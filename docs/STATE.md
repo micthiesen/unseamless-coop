@@ -11,7 +11,10 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (★★★ CLIENT EMITTER CONNECTION BUILT two-machine, no crash — reaches `Client/WaitInitData`; remaining gap = stall B, the DLNW3D handshake doesn't complete so it times out to `None`).
+Last updated: **2026-07-05 evening** (★★ stall B instrumented across FOUR two-machine runs — the game's real
+P2P event door `0x1423fd560` found + FIRED on the host via the accept-unmask lever; stall B is now two
+precisely-separated walls: the client never engages its transport, and the host's event handler doesn't
+create the joiner connection).
 
 ## Now
 
@@ -41,29 +44,26 @@ Last updated: **2026-07-05** (★★★ CLIENT EMITTER CONNECTION BUILT two-mach
 host `player=2`.** The emitter connection is built and both machines are stable — the last gap is that the
 client's emitter phase machine doesn't advance past the initial wait and the host never answers with init-data.
 
-- **★ Static charting DONE (2026-07-05, integrated `ec411a6`) — the stall-B picture is CORRECTED:** there are
-  **TWO phase machines** sharing one per-tick driver (`0x1423fb684`), and `WaitInitData` is the **SESSION**
-  machine (state `SessionSteam+0x3cc`) parking on the host's init-data at INIT gate `0x1423fbe10` — one level
-  ABOVE the member endpoint/type-5 machine the old map targeted (that machine is gated on `session+0x3cc==2`
-  and cannot fire first). **The host moves first**, but its session send phases (type-6 `0x1423ff2e0` +
-  enumerate/push) need a real joiner `SteamConnection` created by the **3 P2P socket callbacks**
-  (`0x1423f84a0`/`8420`/`8620`) — `drive_add_peer` only builds the identity handle. Real sequence: transport
-  connect → types 1/2/6 (session establish, host-first) → type-5 (member auth). Full map:
-  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE AIM SHEET".
-- **What to do (serial, orchestrator):** wire the aim sheet's **B0** probes (client `session+0x3cc` state, INIT
-  gate `0x1423fbe10`, wait handler `0x1423fb900`, pending-conn span `session+0x4f0..4f8`) + **B1** probes (host:
-  do the 3 P2P socket callbacks fire when the Deck connects? does the pending-conn span grow?) into
-  `session_probe.rs`, then run the two-machine confirm. **B1 is the decision fork:** callbacks never fire ⇒ the
-  Deck's transport connect isn't reaching the host's DLNW3D socket (transport problem, upstream of the
-  session); callbacks fire but no send ⇒ chase the host send phases (B2).
-- **Why this / why now:** the emitter — the months-long blocker — exists and is crash-free; the only thing
-  between us and a real 2-player session is the session-establish exchange (init-data), now precisely charted.
-  Confirm chain: joiner connection lands on the host → host sends init-data → client `session+0x3cc==2` →
-  member machines run → type-5 both ways → `players=2` → client visible in-world.
+- **★★ B0/B1 INSTRUMENTED + RUN (2026-07-05 evening, four two-machine runs)** — full results + three aim-sheet
+  corrections in [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE AIM SHEET" > "▶ RIG RESULTS". The
+  headline: the charted "P2P socket callbacks" were the REGISTRARS; the real runtime callbacks are
+  **`0x1423fd550/560/570`**, and with the host kept fully silent on legacy P2P (the new
+  `[debug.probes] host_skip_p2p_accept` lever — our probe's own Accept/pings were eating the session request),
+  **`0x1423fd560` FIRES on the host with rdx = its own `SessionSteam`** as the Deck's packets arrive — the
+  farthest a real inbound packet has ever reached. It does not (yet) create the joiner connection.
+- **Stall B is now two separated walls:** (1) **client**: the joined session never engages its transport — the
+  pending-conn span stays 0 all session (nothing pumps, nothing sent; state 4 is a park, and the "INIT gate"
+  `0x1423fbe10` is really a ~30s countdown-to-give-up, correction 2); (2) **host**: `0x1423fd560` fires on
+  inbound but bails before creating the `SteamConnection`/pending entry. Also: `0x1423fb684` is NOT hookable
+  (mid-function; crashed the Deck client — correction 1; state is now POLLED via `stall-B poll`).
+- **What to do next (static lane, delegable):** chart **`0x1423fd560`'s body** (what it does with the event
+  object rcx / r8=`0x546adb80`, and which gate stops connection-creation for an unknown peer — the member
+  lookup again?), its siblings `d550/d570`, and **what enqueues a joiner's FIRST pending-conn entry /
+  initiates the client's real transport connect** (the client-side missing link). Then a serial run drives
+  whatever lever that chart exposes.
 - **Watch item (latent, not the stall):** client self-identity `[[member+0x58]+0x7f8]==0` under the bit-2-OR
-  lever misroutes the client's **self** member (classified remote) once the session establishes — routes fine
-  for the remote/host member. Fix candidates: set `+0x7f8` directly alongside the bit-2 OR (not the crashing
-  handler), or special-case the self member. See aim sheet Task 5.
+  lever misroutes the client's **self** member once a session establishes. Fix when the handshake lands: set
+  `+0x7f8` directly alongside the bit-2 OR. See aim sheet Task 5.
 
 ## Candidates Not Chosen
 

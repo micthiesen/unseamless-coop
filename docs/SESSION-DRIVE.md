@@ -2899,3 +2899,59 @@ entry on the client's self member to confirm it's 0 and that the branch takes th
   "★★ REFERENCE DUMP #2"; live graphs `~/Documents/ersc-session-ref-{host,client}.txt`.
 - Wrong-door admit: "★ JOINER-ADMIT" (above) — the transport admit `0x142640e30`/gate-c is not the joiner
   path; the socket-callback connection creation is.
+
+### ▶ RIG RESULTS (2026-07-05, four two-machine runs) — B0/B1 instrumented; the aim sheet CORRECTED in three places
+
+The B0/B1 instrument map was wired (`session_probe.rs`: init-gate/wait tracers + a per-frame session-state
+poll + registrar/callback hooks) and run four times (rig host + Deck joiner). Corrections first, then the
+new picture.
+
+**Correction 1 — `0x1423fb684` is NOT hookable (and "the per-tick driver" reading was wrong).** Hooking it
+crashed the Deck client within ~2 frames of its join (main thread died, no crashdump), while the host ran
+the identical hook for minutes unharmed — it's a mid-function label inside a client-side update path, not
+a call boundary (and rcx there is not a SessionSteam: the tracer logged nothing on either machine). The
+session state is watched by POLLING instead: the init-gate/wait hooks (real vtable entries, safe) capture
+the `SessionSteam` pointer, and the FSM probe polls `+0x3cc/+0x3d0/+0x4f0..4f8` per frame, logging on
+change (`stall-B poll` lines). Do not re-hook `0x1423fb684`.
+
+**Correction 2 — the "INIT gate" `0x1423fbe10` is a ~30s TIMEOUT gate, not a data-received gate.**
+Live samples on both machines: `session+0x48` advances ~1/ms (a millisecond clock — e.g. +0x31d over
+~880ms) and the "threshold" is a fixed deadline armed ~0x74xx (~30s) ahead at session creation. The gate
+returns 0 while the deadline hasn't passed and 1 on expiry — which matches `0x1423fc400` arming
+`session+0x48 + 0x1388` (5000) and the observed ~30s graceful teardown (`WaitInitData → None` at +31s,
+FSM `Client->None`, state walk `1 → 4 → 0 → 5`). The client is not polling "did init-data arrive" here;
+it's counting down to giving up. (The wait handler status observed while parked: `0x8114000200000002`.)
+
+**Correction 3 — `0x1423f84a0/8420/8620` are the callback REGISTRARS, not the callbacks.** Both machines
+fire all three exactly once at their own session standup (host during establish, client during join), each
+passing the REAL runtime callback as a fn pointer in rdx: **`0x1423fd550` / `0x1423fd560` / `0x1423fd570`**
+into ctx `0x144852dd0`. The real callbacks are hooked now (`p2p-evt-*`).
+
+**★ THE UNMASK RESULT (runs 3–4) — the game's own P2P event door WORKS, but only if we stay out of its
+way.** Run 2 (baseline): the real callbacks NEVER fire, even with Deck packets arriving. Cause: our
+`game-p2p` probe pre-accepts the P2P session (`AcceptP2PSessionWithUser`) — and run 3 showed skipping
+Accept alone is still defeated because our outbound pings implicitly open the session (`SendP2PPacket`
+establishes it). Run 4, with the host fully silent on legacy P2P (`[debug.probes] host_skip_p2p_accept`:
+no accept, no pings): **`0x1423fd560` FIRES on the host — rcx = a per-event heap object, rdx = the host's
+own `SessionSteam`, r8 = a constant `0x546adb80`** — once during the host's own establish and repeatedly
+as the Deck's first packets arrive. The DLNW3D socket layer's event dispatch is alive and reaches the
+session object. However **no joiner connection results**: the pending-conn span stays at the host's own
+entries, no roster growth, and the Deck (still receiving no init-data) times out as before. The synthetic
+14B SYN keeps being rejected at admit gate-c (unchanged; wrong door, again).
+
+**The remaining two walls, now precisely separated:**
+1. **Client side (the deeper one): the joined session never engages its transport.** The client's
+   pending-conn span is 0 for the whole session — the join builds the emitter handle (`[G+0x28]=1`) but
+   nothing is ever enqueued for the pump, no phase runs, and the client sends NO real DLNW3D traffic
+   (state 4 = "connecting" is a park, not an active connect). Whatever drives the client's socket manager
+   to open the real transport connection to the host never runs. Chart WHAT `0x1423fd560`'s siblings do on
+   the CLIENT and what enqueues the first pending-conn entry on a joiner.
+2. **Host side: `0x1423fd560` fires but doesn't create the connection.** Chart its body statically: what
+   it does with the event object (rcx), and which gate (the member-lookup again?) stops it from creating
+   the `SteamConnection` + pending entry for an unknown peer. The event reaching the SessionSteam is the
+   farthest a real inbound packet has ever gotten.
+
+**Config for reproduction:** `[debug.probes] host_skip_p2p_accept = true` (host-role-only; the host stays
+silent on legacy P2P — no accept, no pings — so inbound raises the game's own event; seeded ON). All four
+runs: rig `cycle --auto-session host`, Deck `cycle --auto-session join`, ~35s window, logs
+`unseamless_coop-1783286517/1783287236/1783287683/1783287957-*.log` (+ Deck twins).
