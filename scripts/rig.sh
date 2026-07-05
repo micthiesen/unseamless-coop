@@ -53,11 +53,21 @@ RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamles
 # if a minimized window ever throttles the load). The reveal always runs, so this can't strand it.
 RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
 # Re-blank the display after a launch that woke it. If the screen was DPMS-off (blanked via the
-# Blank Screen tool) when a launch started, starting the game forces the monitor back on; this puts
-# it back to sleep RIG_REBLANK_DELAY seconds later so a remote/headless rig run doesn't leave the
-# panel lit. Set RIG_REBLANK=0 to disable. Only fires when the screen was already blanked.
+# Blank Screen tool) when a launch started, launching forces the monitor back on; a transient
+# idle-watcher (`rig.sh reblank-watch`: swayidle + a DPMS poll) then keeps it dark for the rest of
+# the run. A fixed post-launch timer can't do this reliably — cycle's ydotool injection is
+# uinput-level input that re-wakes the panel at unpredictable times — so instead the watcher blanks
+# whenever the session has been INPUT-IDLE for RIG_REBLANK_IDLE seconds (injection resets the idle
+# clock, so it can never race the automation; real typing holds the screen awake), and its poll
+# catches wakes that carry no input at all (the game/gamescope mode-set when the world loads). The
+# watcher self-expires after RIG_REBLANK_WINDOW seconds. Set RIG_REBLANK=0 to disable. Only spawned
+# when the screen was already blanked at launch.
 RIG_REBLANK="${RIG_REBLANK:-1}"
-RIG_REBLANK_DELAY="${RIG_REBLANK_DELAY:-20}"
+RIG_REBLANK_IDLE="${RIG_REBLANK_IDLE:-20}"       # blank after this many seconds of input-idle
+RIG_REBLANK_WINDOW="${RIG_REBLANK_WINDOW:-600}"  # watcher lifetime; sized to outlast the slowest cycle+load
+RIG_REBLANK_POLL="${RIG_REBLANK_POLL:-7}"        # how often the poll re-checks DPMS for input-less wakes
+RIG_REBLANK_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-reblank.pid"
+RIG_REBLANK_IDLEFLAG="${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-reblank.idle"
 # Auto-dismiss the startup popups (the offline-mode / connection-error dialogs we can't suppress in
 # code — they're Arxan-hardened, see docs/OFFLINE-TITLE-SCREEN.md) by injecting key presses via
 # ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
@@ -440,23 +450,81 @@ display_is_blanked() {
   kscreen-doctor --dpms show 2>/dev/null | grep -qiw off
 }
 
-# The screen was blanked before this launch and starting the game forced it back on. Put it back to
-# sleep after RIG_REBLANK_DELAY seconds. Detached via setsid so it survives this script exiting (the
-# no-wait `launch` path returns immediately); notifies first so a watcher knows why the panel is about
-# to go dark, then `kscreen-doctor --dpms off` (the same call the Blank Screen tool makes).
+# Stop a previous reblank watcher (and its swayidle child) if one is still running, so watchers
+# never stack across launches. The watcher is a setsid session leader, so its pid doubles as the
+# pgid and `kill -- -pid` takes the whole group. Verifies the pid is actually a reblank-watch
+# before killing (a stale pidfile must never kill an unrelated recycled pid).
+reblank_watch_kill() {
+  local pid
+  [[ -f "$RIG_REBLANK_PIDFILE" ]] || return 0
+  pid="$(cat "$RIG_REBLANK_PIDFILE" 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && grep -qa reblank-watch "/proc/$pid/cmdline" 2>/dev/null; then
+    kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$RIG_REBLANK_PIDFILE" "$RIG_REBLANK_IDLEFLAG"
+}
+
+# The screen was blanked before this launch and starting the game forced it back on. Keep it dark:
+# spawn the detached idle-watcher (cmd_reblank_watch below) via setsid so it survives this script
+# exiting (the no-wait `launch` path returns immediately). Fallback when swayidle is missing: the
+# old one-shot delayed blank — racy vs. cycle's injection, but better than leaving the panel lit.
 schedule_reblank() {
   [[ "$RIG_REBLANK" == 1 ]] || return 0
   command -v kscreen-doctor >/dev/null 2>&1 || return 0
-  setsid -f bash -c '
-    sleep "$1"
-    if command -v notify-send >/dev/null 2>&1; then
-      notify-send -a unseamless-rig -u low -t 4000 \
-        "rig: re-blanking display" "Screen was off before launch; the game woke it. Turning it back off." 2>/dev/null || true
+  reblank_watch_kill
+  if command -v swayidle >/dev/null 2>&1; then
+    setsid -f "$ROOT/scripts/rig.sh" reblank-watch >/dev/null 2>&1 || true
+    say "display was blanked before launch — idle-watcher will keep it dark for ${RIG_REBLANK_WINDOW}s (RIG_REBLANK=0 to disable)"
+  else
+    warn "swayidle not installed (pacman -S swayidle) — falling back to a one-shot ${RIG_REBLANK_IDLE}s re-blank (racy vs. cycle's key injection)"
+    setsid -f bash -c '
+      sleep "$1"
+      if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a unseamless-rig -u low -t 4000 \
+          "rig: re-blanking display" "Screen was off before launch; the game woke it. Turning it back off." 2>/dev/null || true
+      fi
+      sleep 1                                 # let the toast render before the panel powers off
+      kscreen-doctor --dpms off >/dev/null 2>&1 || true
+    ' _ "$RIG_REBLANK_IDLE" >/dev/null 2>&1 || true
+  fi
+}
+
+# (internal) Foreground body of the re-blank watcher; `launch` spawns it detached when the screen
+# was blanked pre-launch. Two cooperating parts, both scoped to RIG_REBLANK_WINDOW seconds:
+#   - swayidle (the ext-idle-notify protocol; KWin implements it): after RIG_REBLANK_IDLE seconds
+#     with no input, mark the session idle (the flag file) and blank; on any input, clear the mark.
+#     ydotool injects at the uinput level — real input to the compositor — so cycle's popup-dismiss
+#     and enter-world presses reset the idle clock and the blank lands only once the automation has
+#     actually quiesced, however long the run takes. A real user typing likewise holds the panel on.
+#   - the poll loop: a wake WITHOUT input (the game/gamescope mode-set when the world finishes
+#     loading) doesn't reset the idle clock, so swayidle won't fire again for it; whenever the idle
+#     mark is up but the panel is lit, the poll puts it back to sleep.
+# Exits early if swayidle dies (no Wayland session — e.g. spawned from a bare ssh env). NB: KDE's
+# D-Bus GetSessionIdleTime is NotSupported on Wayland, which is why swayidle does the idle sensing.
+cmd_reblank_watch() {
+  command -v swayidle >/dev/null 2>&1 || die "reblank-watch needs swayidle (pacman -S swayidle)"
+  command -v kscreen-doctor >/dev/null 2>&1 || die "reblank-watch needs kscreen-doctor"
+  echo $$ > "$RIG_REBLANK_PIDFILE"
+  rm -f "$RIG_REBLANK_IDLEFLAG"
+  # NOT local: the EXIT trap fires at script exit, after this function's locals are gone (a local
+  # here made the trap die on set -u's unbound-variable check and skip the cleanup entirely).
+  reblank_swayidle_pid=""
+  trap 'kill "${reblank_swayidle_pid:-}" 2>/dev/null || true; rm -f "$RIG_REBLANK_PIDFILE" "$RIG_REBLANK_IDLEFLAG"' EXIT
+  # The timeout command runs via sh: raise the flag first (the poll keys off it), toast, then blank.
+  swayidle -w \
+    timeout "$RIG_REBLANK_IDLE" "touch '$RIG_REBLANK_IDLEFLAG'; command -v notify-send >/dev/null 2>&1 && notify-send -a unseamless-rig -u low -t 4000 -h string:x-canonical-private-synchronous:rig-reblank 'rig: re-blanking display' 'Input-idle again after launch; turning the panel back off.' 2>/dev/null; sleep 1; kscreen-doctor --dpms off" \
+    resume "rm -f '$RIG_REBLANK_IDLEFLAG'" >/dev/null 2>&1 &
+  reblank_swayidle_pid=$!
+  local end=$((SECONDS + RIG_REBLANK_WINDOW))
+  while (( SECONDS < end )); do
+    sleep "$RIG_REBLANK_POLL"
+    kill -0 "$reblank_swayidle_pid" 2>/dev/null || break  # swayidle gone (no compositor?) — stand down
+    if [[ -e "$RIG_REBLANK_IDLEFLAG" ]] && ! display_is_blanked; then
+      notify "rig: re-blanking display" "woken without input (game mode-set) — turning it back off" 2500
+      sleep 1
+      kscreen-doctor --dpms off >/dev/null 2>&1 || true
     fi
-    sleep 1                                 # let the toast render before the panel powers off
-    kscreen-doctor --dpms off >/dev/null 2>&1 || true
-  ' _ "$RIG_REBLANK_DELAY" >/dev/null 2>&1 || true
-  say "display was blanked before launch — re-blanking in ${RIG_REBLANK_DELAY}s (RIG_REBLANK=0 to disable)"
+  done
 }
 
 cmd_launch() {
@@ -482,9 +550,9 @@ cmd_launch() {
     sleep 1                                    # let gamescope finish mapping its window
     reposition_window                          # reveal (unminimize) + move to top-left
   fi
-  # If the screen was blanked before this launch, put it back to sleep (the game woke it). Anchored
-  # here at the end so the timer starts after the window is up (--wait) and well clear of cycle's
-  # post-launch popup-dismiss key injection, which would otherwise re-wake the panel.
+  # If the screen was blanked before this launch, keep it dark (the game woke it): spawn the
+  # idle-gated watcher. It blanks only at input-quiescence, so cycle's later key injection can't
+  # race it — no timing anchor needed here beyond "after we've handed off to Steam".
   [[ $was_blanked -eq 1 ]] && schedule_reblank
   # Always succeed once we've handed off to Steam. Without this, the `&& schedule_reblank` above is the
   # function's last statement, so when the screen ISN'T blanked (the normal interactive case) it
@@ -1085,6 +1153,10 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   reposition             Move the running game window to the top-left (and reveal it if hidden). Only
                          moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
                          blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
+  reblank-watch          (internal) Keep the panel dark after a launch woke a blanked screen: blanks
+                         at input-quiescence (swayidle) + re-blanks input-less wakes (DPMS poll),
+                         self-expires after RIG_REBLANK_WINDOW s. Spawned detached by 'launch' when
+                         the screen was DPMS-off pre-launch; RIG_REBLANK=0 disables.
   seed-save [src-ext]    Copy a real save into the rig's isolated test extension so you can test on a
                          real character. src-ext defaults to 'co2' (this machine's real ERSC save);
                          destination is whatever the installed config redirects to (e.g. 'uco').
@@ -1122,7 +1194,8 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
 
 Env overrides: GAME_DIR, BACKUP_DIR, APPID, SAVE_DIR, WINDOW_MARGIN, RIG_WINDOW_WIDTH,
                RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
-               RIG_DISMISS_INTERVAL, DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
+               RIG_DISMISS_INTERVAL, RIG_REBLANK, RIG_REBLANK_IDLE, RIG_REBLANK_WINDOW,
+               DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
 EOF
 }
 
@@ -1136,6 +1209,7 @@ case "$cmd" in
   log)     cmd_log "$@" ;;
   kill)    cmd_kill "$@" ;;
   reposition) reposition_window ;;
+  reblank-watch) cmd_reblank_watch ;;
   seed-save) cmd_seed_save "$@" ;;
   dismiss) cmd_dismiss "$@" ;;
   enter-world) cmd_enter_world "$@" ;;
