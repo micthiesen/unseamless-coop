@@ -41,24 +41,25 @@ Last updated: **2026-07-04**.
 
 ## Next
 
-**Make the establish handler's builder pass — it's one descriptor field.** The 2026-07-05 rig run
-([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ REPRODUCTION") proved the driven establish handler
-`0x1423f2820` now passes every gate and **reaches the builder `0x142637440`**; the builder fails only
-because its socketmgr sub-init bails at **gate 3 (`[descriptor+8]==0`)** — the establish handler's local
-descriptor has `[+8]=0` offline where the real flow needs the `.text` fn-ptr **`0x1423f2d70`** (the value
-`land_socket_holder` hardcodes in its own *working* descriptor). `ADD-MEMBER` (new reach-hook) hasn't
-fired yet because the builder gates the `establish → session-create 0x1423f7070 → add-member 0x1423fdf20`
-chain.
+**Seed the establish handler's input descriptor so its builder builds a good socketmgr.** The 2026-07-05
+rig run ([SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ REPRODUCTION") proved the driven establish handler
+`0x1423f2820` passes every gate and **reaches the builder `0x142637440`** — the builder fails only because
+the handler pipes **our zeroed input descriptor** (`[rbx+0..0x34]`) into the socketmgr config region
+(`socketmgr[0x58..0xa0]`), clobbering the base-ctor defaults that a real descriptor (and `land_socket_holder`)
+carry. (Charted: gate 3 always passes — `local[8]` is a hardcoded `0x1423f2d70`; the earlier "wall = `[+8]==0`"
+commit was **wrong** and is corrected in SESSION-DRIVE.) `ADD-MEMBER` (new reach-hook) hasn't fired because
+the builder gates the `establish → session-create 0x1423f7070 → add-member 0x1423fdf20` chain.
 
-1. **Chart where `0x1423f2820` builds `&local`** (the builder's descriptor) — does `[+8]` copy from the
-   descriptor we hand it, or get set conditionally? Then seed/fix-up so `[&local+8]=0x1423f2d70`.
-2. **Run it:** the builder's sub-init should pass gate 3 → builder succeeds → the handler proceeds to
-   session-create → add-member. Watch the **`ADD-MEMBER` hook** + member registry `0x143dcd758` fire.
-3. **Fallback (path B):** if seeding `&local[+8]` is awkward, drive `session-create 0x1423f7070` +
-   `add-member 0x1423fdf20` directly on the `land_socket_holder` connection (the capture charted the chain).
+1. **Path A (try first):** seed the descriptor we hand `0x1423f2820` (`[rbx+0..0x34]`) with the socketmgr
+   config defaults `land_socket_holder` already reads off a fresh socketmgr, so the establish-handler builder
+   builds a good socketmgr → succeeds → the handler proceeds to session-create → add-member. Watch the
+   **`ADD-MEMBER` hook** + member registry `0x143dcd758` fire.
+2. **Path B (fallback):** `land_socket_holder` already builds a *working* connection; drive
+   `session-create 0x1423f7070 → add-member 0x1423fdf20` directly on it, feeding the host SteamID. Avoids
+   reconstructing the descriptor.
 
-- **Why this / why now:** we turned "the builder fails (Arxan mystery)" into "the builder's sub-init bails
-  on one null descriptor field, and we know the exact value it wants." That's a precise, testable wall.
+- **Why this / why now:** the establish handler is one good descriptor away from letting the game build the
+  member itself; `land_socket_holder` already knows the config bytes, so path A is a small seed change.
 - **Serial:** rig-owned (drive + watch the `ADD-MEMBER` hook); two-machine roster→2 confirmation later.
 
 ## Candidates Not Chosen

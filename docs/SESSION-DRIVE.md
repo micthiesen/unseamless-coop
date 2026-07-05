@@ -80,20 +80,33 @@ artifact — ERSC-LIVE-CAPTURE-FINDINGS). Rig result (`drive_establish_handler` 
   alloc `0x150` socketmgr → ctor `0x142638140` → **call socketmgr `vtable[8]` (the sub-init) with the
   descriptor**, bail if it returns 0. The thunk `0x1423f46b0` tail-calls the builder with `rcx = &local`
   (a stack local: `[&local+0] = config`), and the builder passes `&local` as the sub-init's descriptor.
-- **The sub-init bails at gate 3: `[descriptor+8]==0`** (STANDUP-NULL §1c). So `[&local+8]` is **0 offline**;
-  the real flow needs it = **`0x1423f2d70`** (a `.text` fn-ptr, the value `land_socket_holder` hardcodes in
-  its own *working* descriptor — which is exactly why the standalone socketmgr-init succeeds and the
-  builder's doesn't). Confirmed `0x1423f2d70` is a live `.text` target.
-- `ADD-MEMBER` (`0x1423fdf20`, the new reach-hook) did **not** fire — expected: the builder gates the whole
+- **★ CORRECTION (charted `0x1423f2820`'s local setup): gate 3 is NOT the wall.** The builder's descriptor
+  is a stack local `&local = [rbp-0x49]` the establish handler builds *unconditionally*:
+  `local[0] = container+0x48 (config)`, **`local[8] = 0x1423f2d70` (hardcoded `lea [rip+0x49d]`)**,
+  `local[0x10] = container`, and **`local[0x18..0x5c] = dwords copied from OUR input descriptor
+  `[rbx+0..0x34]``** (+ bytes `[rbx+0x3c/0x3d]`), then `call [container_vt+0x80]` (the builder). So gate 3
+  (`[descriptor+8]`) always passes — my earlier "wall = `[+8]==0`" was **wrong**.
+- **The real failure is downstream in the sub-init, and its cause is the descriptor *content*.** The sub-init
+  copies `local[0..0x60] → socketmgr[0x40..0xa0]`, so `local[0x18..0x60]` (= our **zeroed** input descriptor)
+  **clobbers the socketmgr config region `socketmgr[0x58..0xa0]`** — exactly the base-ctor defaults
+  (`+0x58/0x5c/0x60/0x74..0x9c`) that `land_socket_holder` deliberately *preserves*. That is why the
+  standalone `land_socket_holder` init succeeds and the establish-handler builder's does not: same code, but
+  ours feeds it a good config and the handler feeds it our zeros.
+- `ADD-MEMBER` (`0x1423fdf20`, the new reach-hook) did **not** fire — the builder gates the whole
   `establish → session-create 0x1423f7070 → add-member` chain, so a builder bail stops it before the member.
 
-**⇒ The wall is one field: the establish handler's local descriptor has `[+8]=0` offline instead of
-`0x1423f2d70`.** Next: chart where `0x1423f2820` builds `&local` (does it copy `[+8]` from the descriptor we
-hand it, or set it conditionally?), then either seed our descriptor so `[&local+8]=0x1423f2d70` or fix it up
-at the thunk — so the builder's sub-init passes gate 3 → builder succeeds → the handler proceeds to
-`session-create → add-member` (watch the `ADD-MEMBER` hook + member registry `0x143dcd758` fire). If the
-`&local[+8]` setup is awkward to seed, fall back to path B: drive `session-create 0x1423f7070 + add-member
-0x1423fdf20` directly on the `land_socket_holder` connection (the capture charted that chain).
+**⇒ The wall is the input-descriptor CONTENT, not one field.** The establish handler pipes our input
+descriptor (`[rbx+0..0x34]`) into the socketmgr config, so a zeroed input kills the build. **Two ways
+forward:**
+- **Path A (seed the input):** populate the descriptor we hand `0x1423f2820` (`[rbx+0..0x34]`) with the
+  socketmgr config defaults `land_socket_holder` already knows (it reads them off a freshly-ctored
+  socketmgr). Then the establish-handler builder builds a good socketmgr → succeeds → the handler proceeds
+  to `session-create → add-member` (watch the `ADD-MEMBER` hook + member registry `0x143dcd758`).
+- **Path B (skip the builder):** `land_socket_holder` already builds a *working* socketmgr+service+holder;
+  drive `session-create 0x1423f7070 → add-member 0x1423fdf20` directly on it, feeding the host SteamID (the
+  capture charted this chain). Avoids reconstructing the descriptor entirely.
+
+Path A is a small change (seed `[rbx+0..0x34]`) that lets the game do the rest; try it first, fall back to B.
 
 > ## STATUS (2026-07-04, DLNR3D reframe) — read this FIRST, it corrects the block below
 >
