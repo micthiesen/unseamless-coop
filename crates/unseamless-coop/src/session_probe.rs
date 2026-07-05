@@ -1058,6 +1058,65 @@ const TAG0_BAIL_OFFSET: usize = 0x1_423f_e52a - 0x1_4000_0000;
 /// Mid-function hook ⇒ guard or skip, per the legb-finalize precedent.
 const TAG0_BAIL_PROLOGUE: [u8; 5] = [0x48, 0x85, 0xC0, 0x0F, 0x84];
 
+// --- B5: the host SEND phase + the real game SendP2PPacket (2026-07-05 night) --------------------
+// The peerwire chart's B5 lever is "prime session+0x4f0 so the host's send phase 0x1423ff2e0 emits the
+// first SendP2PPacket(joinerID)". BUT the run-4/6 logs show our drive_add_peer ALREADY enqueues the
+// joiner member (queue 600..608 → 600..610, returns 1) and it persists the whole session, yet no send
+// leaves. So the real wall is the send phase not firing on a queued member. These two entry latches
+// answer it directly: does the game's own type-6 send phase run, and does ANY real SendP2PPacket leave
+// (and to whom)? Both are clean fn entries.
+/// Host session type-6 send phase `0x1423ff2e0` (finds the queued member via `0x1423fbd80`, sends
+/// init-data). B5: does it EVER run on the host despite a persistently-queued joiner member?
+const HOST_SEND_PHASE_OFFSET: usize = 0x1_423f_f2e0 - 0x1_4000_0000;
+/// The game's own `SendP2PPacket` wrapper `0x142640b20(mgr, steamID, data, len, sendtype, chan)` in the
+/// socket-manager region — distinct from our probe's direct iface call. B5 decisive: any fire = the
+/// GAME emitted a real DLNW3D packet; `rdx` = the target SteamID64 (is it the joiner?).
+const GAME_SEND_OFFSET: usize = 0x1_4264_0b20 - 0x1_4000_0000;
+/// Latch for the host send-phase tracer.
+static HOST_SEND_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Latch for the game SendP2PPacket tracer.
+static GAME_SEND_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// B5: host type-6 send-phase entry latch. ★ Firing = the host session machine reached its init-data
+/// send step (so a queued member IS being serviced); never = the send phase is parked/unreached.
+fn log_host_send_phase(_name: &'static str, regs: *mut Registers) {
+    let n = HOST_SEND_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 8 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx logged as an opaque value.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: ★ HOST-SEND-PHASE #{n} — 0x1423ff2e0(rcx={:#x}) — the host session's type-6 \
+             init-data send step RAN (it searches the pending-conn queue for the joiner member and \
+             sends); if this fires but no SendP2PPacket follows, the member lookup/endpoint is the gate",
+            r.rcx,
+        );
+    }));
+}
+
+/// B5: the game's own `SendP2PPacket` entry latch — THE decisive probe. Distinct from our probe's
+/// direct iface call, so a fire here means the GAME's session/transport code emitted a real DLNW3D
+/// packet. `rdx` = the destination SteamID64.
+fn log_game_send(_name: &'static str, regs: *mut Registers) {
+    let n = GAME_SEND_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 12 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rdx = a by-value SteamID64, r8/r9d by-value scalars.
+        let r = unsafe { &*regs };
+        log::info!(
+            "session-probe: ★ GAME-SENDP2P #{n} — 0x142640b20 to {} (len={}) — the GAME emitted a real \
+             DLNW3D packet (NOT our probe's synthetic send); target = the joiner ⇒ the send phase works \
+             and the bootstrap is downstream (joiner recv)",
+            unseamless_core::diagnostics::peer_tag(r.rdx),
+            r.r9 as u32,
+        );
+    }));
+}
+
 /// One-shot latches for the B4 entry tracers (log the first few fires each, then quiet).
 static CONNECT_INIT_LOGS: AtomicU32 = AtomicU32::new(0);
 /// Latch for the fcdd0/fcfc0 phase-step tracers (shared cap; the name disambiguates).
@@ -1333,6 +1392,9 @@ fn install_stall_b_trace(config: &Config) {
     if prologue_ok("tag0-bail", tb, &TAG0_BAIL_PROLOGUE) {
         install_offset_hook("tag0-bail", tb, log_tag0_bail);
     }
+    // B5: the host send phase + the real game SendP2PPacket (does the game emit any real packet?).
+    install_offset_hook("host-send-phase", exe_base + HOST_SEND_PHASE_OFFSET, log_host_send_phase);
+    install_offset_hook("game-sendp2p", exe_base + GAME_SEND_OFFSET, log_game_send);
     log::info!(
         "session-probe: stall-B trace installed (init gate 0x1423fbe10 + wait handler 0x1423fb900 + \
          P2P registrars 0x1423f84a0/8420/8620 + REAL P2P callbacks 0x1423fd550/560/570; session state \
