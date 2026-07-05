@@ -3,7 +3,7 @@ name: release
 description: Mint a new GitHub release for unseamless-coop. Determines the next version, writes clean release notes as a delta since the last tag, creates an annotated vX.Y.Z tag, and pushes it — CI then cross-compiles the DLL and publishes the release. Use when the user asks to cut/mint/publish a release or run /release.
 ---
 
-# Minting a release
+# Minting a Release
 
 This repo releases via an annotated tag: `.github/workflows/release.yml` triggers on a
 `v*` tag, builds the Windows DLL, and runs `gh release create --notes-from-tag`, so the

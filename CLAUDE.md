@@ -76,13 +76,11 @@ The only split is build-vs-run, both on this one machine:
 > running it directly clobbers the real `dinput8.dll` (Elden Mod Loader) and launcher with no way
 > back. Drive launch/log/kill through `rig.sh` too (see the `/test-loop` skill, layer 4).
 >
-> **`apply`/`cycle` freely — re-applying is cheap and repeatable.** Apply and re-launch as often as a
-> work session needs; don't track or reason about "is the mod applied" — if in doubt, just apply. It
-> reaches in-game autonomously (`cycle` loads a save via the ydotool popup-dismiss). **`restore` is
-> fine to run when a task genuinely needs it** — swapping to the real ERSC stack for a live capture,
-> or resetting a bad rig state — you don't need to ask first. What Michael *doesn't* want is restore
-> as **routine ceremony**: it's not a step between normal mod-dev cycles, and rig-applied-state is not
-> a thing to track or remember (just re-apply). Michael also restores manually whenever he likes.
+> **`apply`/`cycle` freely; `restore` when a task genuinely needs it — neither needs permission or
+> tracking.** Re-applying is cheap and repeatable (`cycle` reaches in-game autonomously); never track
+> or reason about "is the mod applied" — if in doubt, just apply. Restore is for real needs (a live
+> ERSC capture, a bad rig state), never routine ceremony between cycles. Full rig policy: the
+> `/test-loop` skill, layer 4.
 >
 > **But NEVER apply/launch/kill while the game is already running** — a running ELDEN RING you didn't
 > launch means Michael is playing: applying would overwrite the process's mapped `dinput8.dll` in
@@ -154,42 +152,28 @@ This repo can be developed as a one-orchestrator / many-worker fleet of Claude C
 [rift](https://github.com/anomalyco/rift) copy-on-write workspaces, coordinated over tmux. **You are
 the orchestrator unless a worker role is injected** (workers launch with
 `--append-system-prompt-file docs/roles/worker.md`, or `docs/roles/worker-solo.md` for a user-driven
-worker, which overrides this). The full design and the `scripts/fleet/` tooling are in
-[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The load-bearing split:
+worker, which overrides this). The **`fleet` skill is the orchestrator's operational playbook**
+(spawn/message/integrate/teardown via `scripts/fleet/`, briefs, review offloading); the full design
+is [docs/ORCHESTRATION.md](docs/ORCHESTRATION.md). The always-on rules:
 
-- **Orchestrator (default, this session):** owns the rig, RE, and in-game validation; owns
-  integration and the only commits to `main`; plans with Michael and manages the worker lifecycle
-  (`scripts/fleet/worker-new|ls|open|rm|integrate`). **Delegate by default:** any chunk of buildable
-  work that doesn't need the rig goes to a worker; do it yourself only when it's serial
-  (rig/RE/validation/integration), takes under ~15 minutes, or *is* the decision itself. **Core/live
-  RE is serial by nature** — it's rig-coupled and needs Michael in the loop — so it stays in the
-  orchestrator even when it's big; the delegable RE exception is a genuinely independent *static*
-  search (offline binary triage, decompile sweeps, call-site charting). If you've been heads-down
-  building for a long stretch without touching the rig, that chunk should have been a worker.
-- **Worker:** one lane of feature work in its own rift workspace, WIP-committing to `worker/<name>`.
-  Never drives the rig and never commits to `main`; anything serial it asks the orchestrator for by
-  message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`). **Reviews its own lane:** a worker
-  `/ultracheck`s its own branch before handoff (its overlay makes that the default), so the deep
-  per-lane review is done by whoever has the most context. The orchestrator therefore doesn't
-  re-deep-review each lane — it offloads that to workers and spends its own heaviest pass *holistically*
-  on the integrated, cross-lane result. See the `fleet` skill > "Offload the review to workers".
-
-**Fan out chunks of work as fleet workers, never as `Agent`/`Task` subagents.** When you parallelize a
-*chunk of buildable work* — a feature lane, a big *static* RE search, a migration, anything whose result is
-a branch you'd integrate — spawn a fleet worker (`scripts/fleet/worker-new`), **not** an `Agent`-tool
-subagent. Workers are visible (`worker-ls`), watchable/controllable by Michael, commit to
-`worker/<name>`, and you integrate them; a subagent is an invisible black box that can't be any of those.
-This holds even for one lane — a single chunk still goes to a worker, not a subagent. **Subagents stay
-valid for *supporting* tasks that feed your own work and return findings, not a deliverable:** running
-tests, locating code (`Explore`), grep-and-summarize research, review swarms (`/ultracheck`'s reviewers,
-`check`). The litmus test: *would the result be a branch you merge to `main`?* → fleet worker. *Is it
-just informing your own work?* → a subagent is fine. (This is the orchestrator-specific override of the
-global CLAUDE.md's "be aggressive about spawning subagents": here that aggression goes to **workers** for
-chunks, subagents only for support.)
-
-The rig is single (one game install, one `unseamless-coop/` config+log dir, one Steam), so all
-rig/RE/validation serializes through the orchestrator. This is the structured form of the
-concurrent-sessions guidance above.
+- **The split:** the orchestrator owns the rig, RE, in-game validation, integration, and the only
+  commits to `main`. A worker is one lane of feature work WIP-committing to `worker/<name>`; it
+  never drives the rig and never commits to `main` — anything serial goes to the orchestrator by
+  message (`scripts/fleet/msg usc-orch "[worker:<name>] ..."`). The rig is single, so all
+  rig/RE/validation serializes through the orchestrator (the structured form of the
+  concurrent-sessions guidance above).
+- **Delegate by default (orchestrator):** any chunk of buildable work that doesn't need the rig
+  goes to a worker; do it yourself only when it's serial (rig/RE/validation/integration), under
+  ~15 minutes, or *is* the decision itself. Core/live RE is serial by nature (rig-coupled,
+  Michael-in-the-loop); only a genuinely independent *static* RE search is delegable.
+- **Chunks go to fleet workers, never `Agent`/`Task` subagents.** The litmus test: *would the
+  result be a branch you'd merge to `main`?* → fleet worker (visible, watchable, integrable —
+  even for a single lane). *Just informing your own work* (running tests, `Explore`, research,
+  review swarms)? → a subagent is fine. (This overrides the global "be aggressive about spawning
+  subagents" for chunks; that aggression goes to workers here.)
+- **Review split:** a worker `/ultracheck`s its own lane before handoff; the orchestrator doesn't
+  re-deep-review each lane and spends its heaviest pass *holistically* on the integrated,
+  cross-lane result (`fleet` skill > "Offload The Review To Workers").
 
 **The fleet runs on either Claude Code or Codex** (Michael toggles the default; the orchestrator
 always runs it, and individual workers can be spawned on the other harness or a specific model via

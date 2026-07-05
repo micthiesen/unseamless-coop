@@ -3,7 +3,7 @@ name: test-loop
 description: How to test/verify the unseamless-coop mod — the layered test loops, when to use each, and how to drive them. Use when verifying a change, reproducing a bug, choosing a test strategy, or building out the next loop. Covers the host harness (no game), the local PC rig (scripts/rig.sh — backup/apply/restore + launch/log), the live-mod debug bridge (harness bridge-host), and real co-op. TRIGGER on "test the mod", "verify this", "how do I check X works", "run the harness", "deploy/apply/restore the mod", "set up the rig".
 ---
 
-# Test loops for unseamless-coop
+# Test Loops for unseamless-coop
 
 Testing this mod is layered, because most of it can run without the game and full co-op
 can't be automated at all (it needs two real Elden Ring instances in a real Steam session). The
@@ -16,8 +16,8 @@ lowest layer that can answer your question.
 | 2 | Two-peer harness | host, no game | side-channel coordination + convergence under loss | assistant, fast | **DONE** |
 | 2b | TCP two-process harness | host, no game | the same logic over real sockets (host half of L3) | assistant | **DONE** |
 | 3 | Debug bridge | one game + harness | the side-channel `Session` against the live mod | assistant | **DONE** (`rig.sh` + `harness bridge-host`) |
-| 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **tooling DONE** (`scripts/rig.sh`); first run pending |
-| 5 | Real co-op | friends | actual co-op behavior | you, manual | ongoing; logs handed back |
+| 4 | Local PC rig | this machine | game binding (load/register/observe/stability) | assistant (solo subset) | **DONE** (`scripts/rig.sh`); in routine use |
+| 5 | Real co-op | rig + Deck / friends | actual co-op behavior | assistant (Deck as P2) or manual | ongoing; logs handed back |
 
 **The hard limit:** no harness can join the *real game's* Steam P2P session without reimplementing
 Elden Ring's encrypted netcode + matchmaking. So we never mock "a second player talking to the
@@ -27,7 +27,7 @@ RE-gated — see `docs/RIG-RUNBOOK.md`.
 
 ---
 
-## Layer 1 — Unit tests (DONE)
+## Layer 1 — Unit Tests (DONE)
 
 ```bash
 scripts/test-core.sh            # runs unseamless-core's tests on the host triple
@@ -36,7 +36,7 @@ Pure logic: config parsing, scaling math, settings/menu models, the wire protoco
 input), diagnostics, notifications, util, and the peer coordination logic. First thing to run for
 any core change.
 
-## Layer 2 — Two-peer harness (DONE) — the fast loop the assistant drives
+## Layer 2 — Two-Peer Harness (DONE) — the Fast Loop the Assistant Drives
 
 ```bash
 scripts/harness.sh [scenario]   # handshake | version-mismatch | config-sync | session-action |
@@ -66,7 +66,7 @@ or whether `broadcast_packet` actually carries our bytes. Those are layers 3-5.
 `scenarios` table. Add a matching `#[test]` in `crates/unseamless-core/src/peer.rs` so the behavior
 is also guarded by the unit suite (the harness is for *driving/observing*, the tests for *pinning*).
 
-## Layer 2b — TCP two-process harness (DONE) — real sockets, no game
+## Layer 2b — TCP Two-Process Harness (DONE) — Real Sockets, No Game
 
 ```bash
 scripts/harness-tcp.sh [port]   # spawns tcp-listen (host) + tcp-connect (client) over localhost
@@ -82,7 +82,7 @@ a debug listener inside the live mod and the same scenarios drive a real game (s
 
 ---
 
-## Layer 3 — Debug bridge (DONE) — the side-channel against the live mod
+## Layer 3 — Debug Bridge (DONE) — the Side-Channel Against the Live Mod
 
 Lets the harness act as a second mod-peer to **one** running game, exercising the real `Session`
 side-channel (handshake, `ConfigSync`, actions, log-forward) against the live mod — no second game,
@@ -112,7 +112,7 @@ off unless `bridge_port > 0`.
 synced `ConfigSync` re-scaling params, an action firing a game call) — those land as more apply
 features do — nor the game's own P2P player sync (still needs two real games, layer 5).
 
-## Layer 4 — Local PC rig (`scripts/rig.sh`) — the game-binding loop
+## Layer 4 — Local PC Rig (`scripts/rig.sh`) — the Game-Binding Loop
 
 This is the "Linux + Proton rig" from `docs/DEVELOPMENT.md` / `RIG-RUNBOOK.md` — **this gaming PC**,
 which both builds and runs the game. `scripts/rig.sh` is the driver; it builds, installs, launches,
@@ -189,8 +189,8 @@ write down three things (a scratch note is fine — it's working state, not a do
 Then run `build → apply → cycle → check the predicate` end to end each pass, autonomously. Two
 more rules: **change one lever per cycle** (two changes per pass means the verdict tells you
 nothing), and **two same-shaped failures in a row force a method change**, not a third try with
-tweaked parameters — see the `/reverse-engineer` skill > "Two same-shaped failures force a
-method change".
+tweaked parameters — see the `/reverse-engineer` skill > "Two Same-Shaped Failures Force a
+Method Change".
 
 **Driving a specific test? Ship a guide — the guide IS the test flow.** For any in-game test sequence
 (validating one behaviour, an RE step, a two-player flow), the ordered steps live in a **committed
@@ -223,7 +223,7 @@ runs the session observer, and stays stable — i.e. the RIG-RUNBOOK "first rig"
 solo-verifiable: anything needing a loaded save / co-op session — those need layer 5. Handoff is the
 log file.
 
-## Layer 5 — Real co-op (ongoing, manual)
+## Layer 5 — Real Co-op (Ongoing, Manual)
 
 Two or more real players. **Player 2 can be assistant-driven over SSH** — a Steam Deck / second Linux box
 on a throwaway account, via `scripts/deck.sh` (the [`/steam-deck`](../steam-deck/SKILL.md) skill): the
@@ -248,7 +248,7 @@ acceptance loop and the only one that proves real co-op.
 
 ---
 
-## Picking a loop
+## Picking a Loop
 
 - Changed pure logic (config/scaling/protocol/peer)? → **layer 1**, then **layer 2** if it touches
   the side-channel flow.
@@ -259,7 +259,6 @@ acceptance loop and the only one that proves real co-op.
   (`rig.sh`, this machine).
 - Co-op behavior with real partners? → **layer 5**.
 
-What's left: the side-channel now runs live (layer 3 done), but it doesn't yet drive game *effects*
-— wiring a received `ConfigSync`/`SessionAction` to real game calls is the apply-layer, and binding
-the side-channel to the game's own P2P (the `GameTransport` over `broadcast_packet`/`receive_packet`)
-is the step that replaces the bridge for real multiplayer. Both are the next build-outs.
+The layers above are the stable machinery; what's *proven vs pending* moves fast — read
+[`docs/STATE.md`](../../../docs/STATE.md) for the current frontier rather than trusting any snapshot
+here (past snapshots in this spot went stale within weeks).

@@ -3,7 +3,7 @@ name: steam-deck
 description: Drive a REMOTE rig (a Steam Deck / second Linux machine the developer owns, on his own LAN) over SSH as player 2 for two-player co-op networking tests — apply our own mod, seed config + save, launch/kill the game, and click into gameplay, all from this PC via scripts/deck.sh. Use when setting up or running the Steam Deck second player, testing rung-3 / real co-op, or anything "on the Deck". TRIGGER on "steam deck", "second player", "remote rig", "deck.sh", "two real machines", "apply the mod on the deck", "player 2".
 ---
 
-# Remote rig over SSH (the Steam Deck — player 2)
+# Remote Rig over SSH (the Steam Deck — Player 2)
 
 The local PC rig (`scripts/rig.sh`, the [`/test-loop`](../test-loop/SKILL.md) skill) is **player 1**; the
 Deck is **player 2** for two-player tests (see [FRIEND-TEST-RUNBOOK.md](../../../docs/FRIEND-TEST-RUNBOOK.md)).
@@ -36,7 +36,7 @@ You build the DLL here and push it; the Deck stays stateless (only the helper + 
 | `seed-input` | (Re)build + push just the `uinput-tap` tapper (`setup`/`apply` already do this). |
 | `shell` | SSH shell on the Deck. |
 
-## Two-player run
+## Two-Player Run
 
 `deck.sh` and `rig.sh` apply the **same** `scripts/rig/seed-config.toml`, so both machines share the
 password + settings — edit that file once to change both. The per-machine **role** is the one
@@ -71,7 +71,7 @@ installed config (on the Deck it's incompatible with `--auto-session`, which nee
 For the **rung-3 create-drive test**, set the probes in `seed-config.toml` and follow
 [FRIEND-TEST-RUNBOOK.md](../../../docs/FRIEND-TEST-RUNBOOK.md) > "Part B — Rung-3 create-drive test".
 
-## Paths & env (override per Deck)
+## Paths & Env (Override per Deck)
 
 Defaults derive from the resolved remote `$HOME`; override when they differ:
 
@@ -88,7 +88,6 @@ Run `scripts/deck.sh paths` on a new Deck to confirm everything resolves.
 
 - **`apply` requires `setup` first** (the throwaway-rig mark) and writes into `DECK_GAME_DIR` with no backup
   — confirm the host/path with `deck.sh paths` before applying to a new Deck.
-- **`seed-save` needs the save profile dir** (`…/EldenRing/<SteamID64>/`), which ELDEN RING only creates
 - **Recommended Deck save setup: create a native character on the Deck** under the throwaway account. That
   avoids cross-account re-signing and also avoids DLC-content coupling between the main account and the
   Deck account.
@@ -108,7 +107,7 @@ Run `scripts/deck.sh paths` on a new Deck to confirm everything resolves.
 - **diag build by default** (readable logs); `apply --release` for a shipping-profile run.
 - **Build is local** — `gcc` (for `uinput-tap`) and the Rust cross-toolchain must be on this PC, not the Deck.
 
-## Run the tooling against a non-Deck (no Steam/game)
+## Run the Tooling Against a Non-Deck (No Steam/Game)
 
 All file/apply/config/save/log verbs work against any SSH box; point the env at a scratch dir:
 

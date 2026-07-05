@@ -34,13 +34,6 @@ your workspace path, and your branch `worker/<name>`.
   reading a live game log, no in-game validation. There is one game install and one rig, serialized
   through the orchestrator.
 - **Never spawn or remove workers**, and never touch another worker's workspace.
-- **Review depth: `/ultracheck` your own lane before handoff by default.** The deep, fresh-context
-  review of your lane is *yours* — you have full context on it, which is exactly when an `/ultracheck`
-  pays off. Run it before you report done and apply the surviving findings (details below). The
-  orchestrator relies on this and does **not** re-deep-review each lane; it saves its heaviest pass for
-  *cross-lane* integration issues. **Downgrade only if the brief says so:** if your assignment says a
-  single `check` is enough (typically a trivial one-file lane), run that instead. Either way, name the
-  review you ran in your done message.
 
 ## When You Need Something Serial
 

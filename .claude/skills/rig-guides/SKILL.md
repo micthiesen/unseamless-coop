@@ -3,7 +3,7 @@ name: rig-guides
 description: How to write an in-overlay rig-testing GUIDE for unseamless-coop — the authoring API (the fluent builder, ready-made finish predicates, role tagging, stub steps, the defaults). Use when adding or editing a guide in crates/unseamless-core/src/guide/guides.rs, or when someone asks to "make a guide" / "add a test guide" / "walk the tester through X". This is authoring only; the engine internals + wiring are docs/RIG-GUIDES.md.
 ---
 
-# Writing a rig-testing guide
+# Writing a Rig-Testing Guide
 
 A **guide** is an ordered list of on-screen test steps. The engine pins the current step as a banner,
 advances when its finish signal fires, optionally branches on the result, and ends with a "done
@@ -15,7 +15,7 @@ Guides live in `crates/unseamless-core/src/guide/guides.rs`. They're **debug-onl
 release). To add one: write a builder function, then add a `by_name` arm and a `NAMES` entry. Test on
 the host with `scripts/test-core.sh`.
 
-## The shape
+## The Shape
 
 ```rust
 fn my_guide() -> Guide {
@@ -42,7 +42,7 @@ pub fn by_name(name: &str) -> Option<Guide> {
 
 Run it with `[debug] guide = "my-guide"` in the config (or `scripts/rig/seed-config.toml`).
 
-## Defaults (so a step is one line)
+## Defaults (So a Step Is One Line)
 
 Each `.step(id, text)` defaults to **manual-finish, serial-next, all-roles, executable**. You only add
 a modifier to opt out of a default. The modifiers chain after the `.step(...)` they apply to:
@@ -61,7 +61,7 @@ a modifier to opt out of a default. The modifiers chain after the `.step(...)` t
 The `id` is a short stable string, unique within the guide; `.branch(...)`/`Advance::To` address steps
 by it.
 
-## Finish predicates (the auto path — preferred)
+## Finish Predicates (the Auto Path — Preferred)
 
 Pass one of these to `.done_when(...)`. They read a read-only context; compose with `.and` / `.or`.
 
@@ -94,7 +94,7 @@ surface* (a new `RigState` field, a new control) is a bigger step — check with
 adding a normal one-shot `info!` milestone next to an existing toast is not. When even that isn't
 available yet (the work is RE-gated), commit the step as a `.stub(...)` — never a "tell me it worked" step.
 
-## Branching on a result
+## Branching on a Result
 
 A branching step finishes (auto or manual) and then its `.branch` closure picks the next step:
 
@@ -118,7 +118,7 @@ A branching step finishes (auto or manual) and then its `.branch` closure picks 
 `Advance` is `Next` (the following step), `To("id")` (a named step), or `Done` (end the guide). An
 unknown `To` id ends the guide cleanly rather than panicking — but keep ids correct.
 
-## Roles (two-player guides)
+## Roles (Two-Player Guides)
 
 Tag steps so one committed guide drives both machines; each sees only its own steps plus the untagged
 shared ones. **The role is normally DERIVED, not hand-set** — drop in the standard `.connect_step()`
@@ -140,7 +140,7 @@ traps — pick an intent to derive a role, or skip/finish before acting to stay 
 *before* the connect step run with the role unresolved (`Solo`), so only untagged steps show until it
 resolves.
 
-## Stub steps (commit a guide before it's executable)
+## Stub Steps (Commit a Guide Before It's Executable)
 
 When a step can't be auto-detected yet (the RE/feature hasn't landed), commit it as a **stub** so the
 guide is living documentation now and revivable later:
@@ -154,7 +154,7 @@ A stub renders as `[PENDING: pending the settings-sync core]` in a dimmed colour
 done/skip — it never auto-finishes and never traps the tester. A guide that's **all** stubs still
 reaches the done toast via skip. When the work lands, drop `.stub(...)` and add a `.done_when(...)`.
 
-## Choice steps (the last resort after logging)
+## Choice Steps (the Last Resort After Logging)
 
 When a step needs the tester's **eyes/judgement** — the one signal logging can't reach (does the peer
 render in-world, is the nameplate placed right, does the log show the expected snapshot) — turn it into
@@ -183,7 +183,7 @@ normal manual step. A choice throws nothing away: even a skip is logged (`-> 'sk
 - `.choice(...)` supersedes `done_when`/`branch` (the option's own `Advance` is the branch). Give it a
   `.default_branch(...)` so skip is sensible, exactly like a branching step.
 
-### Look-first choices (inspect the game, then answer)
+### Look-First Choices (Inspect the Game, Then Answer)
 
 A plain choice step opens its blocking modal the **instant** it becomes active and grabs input focus, so
 the tester can't go look at the game before answering. When the answer needs **in-game inspection** — open
@@ -206,7 +206,7 @@ game* (move the camera, open a menu) before they can judge. **When NOT to:** a c
 immediate modal; `.look_first()` would just add a needless extra press. Chain it directly after
 `.choice(...)`.
 
-## Controls & rendering (you don't write these)
+## Controls & Rendering (You Don't Write These)
 
 - The tester advances with **hold `L3 + D-pad Up`** (done) and skips with **press `L3 + D-pad Down`**
   (skip). The engine appends `(hold L3 + Up = done, L3 + Down = skip)` to every banner — don't write

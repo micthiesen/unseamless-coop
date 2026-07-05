@@ -3,7 +3,7 @@ name: reverse-engineer
 description: How to study the behavior of a game we own (Elden Ring) and an existing co-op mod in order to clean-room reimplement that mod in Rust — interoperability RE on our own machine, not anti-cheat or DRM circumvention. Covers the behavioral-observation strategy, the static-triage and diagnostic patterns, and the tool decision table for inspecting your own game process (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida/capstone", "diagnostic mode", "what offset is".
 ---
 
-# Reverse-engineering for unseamless-coop
+# Reverse-Engineering for unseamless-coop
 
 > **Scope & legitimacy.** This is interoperability RE on software we own, on the developer's own
 > machine: we study how a game we bought (Elden Ring) and an existing co-op mod *behave* so we can
@@ -23,7 +23,7 @@ frame all RE here:
 2. **`ersc.dll` is Themida-packed:** ~5.5MB of ~7.4MB is a virtualized blob, only 8 stub imports
    are visible, so **static decompilation of ERSC is a dead end**. RE is observation-driven.
 
-## Step 0 — check what's already charted (don't RE what the SDK gives you)
+## Step 0 — Check What's Already Charted (Don't RE What the SDK Gives You)
 
 Before reversing anything, read [`docs/SDK-COVERAGE.md`](../../../docs/SDK-COVERAGE.md). The
 `fromsoftware-rs` SDK already exposes most game state as **named typed fields** (networking,
@@ -32,7 +32,7 @@ nothing to reverse — just use it. Prefer named SDK fields over raw offsets alw
 to byte reads for investigation (below). Pin `eldenring` + `fromsoftware-shared` to the **same**
 commit; layouts are revision-specific.
 
-## Pick the tool (decision table)
+## Pick the Tool (Decision Table)
 
 All headless/CLI, no GUI. Match the *goal*, not habit — most RE here is behavioral, so the bottom
 rows do more work than the top ones.
@@ -43,7 +43,7 @@ rows do more work than the top ones.
 | "Where in `eldenring.exe` is byte-pattern / AOB X?" | **capstone + numpy** (installed) | Throwaway Python over the raw PE; numpy scans, capstone disasms the hits (base `0x140000000`). |
 | "Quick decompile while I'm already in rizin" | **rz-ghidra** `pdg` (installed) | `rizin -q -c 'aaa; s <addr>; pdg' bin`. Ghidra decompiler core, no JVM; rizin-fed analysis (lower fidelity). |
 | "I need to *read* a hard function as good C" | **Ghidra/PyGhidra** (installed) | `scripts/re/ghidra-decompile.sh <bin> [func]`. Best fidelity; clean targets only (not `ersc.dll`). |
-| "What instruction writes this live address?" | **`scripts/re/watch-write.py`** | Native ptrace HW watchpoint (exe at `0x140000000` under Wine). Root needed. No Frida. |
+| "What instruction writes this live address?" | **`scripts/re/watch-write.py`** | Native ptrace HW watchpoint (exe at `0x140000000` under Wine). Same-uid, no sudo (this box sets Yama `ptrace_scope=0`). No Frida. |
 | "What flag/field flips when event X happens?" | **diagnostic DLL** | Our own mod, rising-edge bit observer (below). The default for unknown game state. |
 | "Map an unknown call graph / hook live, iterating fast" | **Frida** (frida-gadget) | Host CLI + matching gadget staged (`.re-tools/frida/`); placing it in the rig is a rig action ([RUNTIME-RE.md](../../../docs/RUNTIME-RE.md) > B). |
 | "What's on the wire?" (shape/timing) | **`ss` / `tcpdump` / `tshark`** | Payloads are Steam-framed/encrypted; pair with a hook for contents. |
@@ -59,7 +59,7 @@ more than decompile). Two rules of thumb: keep each script runnable headless wit
 genuinely throwaway one-off scans in `/tmp` (only promote the reusable shape into `scripts/re/`).
 Leave the next agent a sharper tool than you found.
 
-## Static triage (metadata only, safe)
+## Static Triage (Metadata Only, Safe)
 
 `ersc.dll` lives under `reference/` (gitignored). What static triage *can* tell us (factual
 metadata, not logic) is already captured in
@@ -88,7 +88,7 @@ For locating something in a clean binary, two scriptable tools beyond rz-bin (fu
   (you'd decompile the unpacker stub), and `eldenring.exe` is mostly SDK-charted, so this is
   occasional, not the default.
 
-### Persist the Ghidra project cache (don't re-analyze the 87MB exe)
+### Persist the Ghidra Project Cache (Don't Re-Analyze the 87MB Exe)
 
 First-time PyGhidra analysis of `eldenring.exe` takes **~45 min** (single-threaded, ~235k
 functions). It caches per-binary, so *later* decompiles are near-instant — but only if the cache
@@ -113,7 +113,7 @@ scripts/re/ghidra-decompile.sh "$RE_BIN" 0x140xxxxxx   # first run ~45min; reuse
   `nohup scripts/re/ghidra-decompile.sh "$RE_BIN" <addr> & ` then poll the pid — the project is
   built once the process exits, and every subsequent `<addr>` is fast.
 
-## Finding unknown game state (the diagnostic pattern)
+## Finding Unknown Game State (the Diagnostic Pattern)
 
 When a behavior **isn't** a named SDK field, don't hand-diff memory dumps. `er-crit-coop`'s
 `src/diagnostic.rs` is the template:
@@ -127,7 +127,7 @@ When a behavior **isn't** a named SDK field, don't hand-diff memory dumps. `er-c
 
 This is how you locate a flag/field the SDK doesn't expose without ever reading upstream code.
 
-## Dynamic RE on the rig
+## Dynamic RE on the Rig
 
 Live observation (the game running) is the real RE channel here, and it happens on the rig with
 the game running. The full playbook — our own diagnostic DLL (preferred), Frida-gadget under Proton, and
@@ -135,7 +135,7 @@ network capture — is in [`docs/RUNTIME-RE.md`](../../../docs/RUNTIME-RE.md). T
 target (observing the session FSM to unblock the co-op core) is the
 [`/test-loop`](../test-loop/SKILL.md) skill's layer 4 + [`docs/RIG-RUNBOOK.md`](../../../docs/RIG-RUNBOOK.md).
 
-## Capturing Arxan-decoded call targets at runtime
+## Capturing Arxan-Decoded Call Targets at Runtime
 
 Elden Ring's `eldenring.exe` is partly **Arxan-obfuscated**: some indirect calls go through a
 **trampoline** that decodes the real target at runtime and can't be read statically. The tell (from
@@ -175,7 +175,7 @@ probe.
 > the same code ran clean. To read a deep function's return, hook it at a **function boundary** (entry + a
 > return trampoline), not in the middle of its caller.
 
-## Two same-shaped failures force a method change
+## Two Same-Shaped Failures Force a Method Change
 
 RE iteration has a failure mode no tool fixes: returning to the same prior — the same probe, the
 same lever, the same scan — with slightly different parameters, long after it stopped paying.
@@ -191,7 +191,7 @@ Chosen" for the current line of work, or the relevant findings doc — so neithe
 the next one re-walks it. (The rig-iteration side of this — declare the verifier + try budget
 before cycling — is the [`/test-loop`](../test-loop/SKILL.md) skill's loop protocol.)
 
-## Recording findings
+## Recording Findings
 
 Write observations **in your own words** ("on event X the mod does Y", "field at `ChrIns+0x…`
 rises during a riposte → maps to SDK `action_flag.…`"), then implement from the note. Feed

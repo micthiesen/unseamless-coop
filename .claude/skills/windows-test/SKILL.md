@@ -1,13 +1,13 @@
 ---
 name: windows-test
-description: Validate the overlay's DX12 present-hook on a REAL Windows loader (not vkd3d/Proton) using the local Windows 11 VM, to chase the native-Windows overlay crash (docs/OVERLAY-RENDERING.md). Drives crates/dx12-harness (a minimal D3D12 app + the same hudhook hook) via scripts/win.sh — build here, copy into the VM, run, pull the log. Use when verifying an imgui/DX12 overlay-injection fix, reproducing the native-Windows present-hook crash, or anything "test on Windows / in the VM / on a real Windows box". TRIGGER on "windows vm", "native windows", "dx12 harness", "win.sh", "overlay crash on windows", "test the overlay on windows", "imgui injection crash".
+description: Regression-test the overlay's DX12 present-hook on a REAL Windows loader (not vkd3d/Proton) using the local Windows 11 VM. The 2026-07 native crash it was built to chase is root-caused (an XInput inline-hook collision, docs/OVERLAY-RENDERING.md); this remains the cheap Windows-loader gate for present-hook changes and the deterministic repro environment for Windows-loader-specific overlay issues. Drives crates/dx12-harness (a minimal D3D12 app + the same hudhook hook) via scripts/win.sh — build here, copy into the VM, run, pull the log. Use when verifying an imgui/DX12 overlay-injection change, reproducing a Windows-loader overlay issue, or anything "test on Windows / in the VM / on a real Windows box". TRIGGER on "windows vm", "native windows", "dx12 harness", "win.sh", "overlay crash on windows", "test the overlay on windows", "imgui injection crash".
 ---
 
-# Windows overlay-injection testing (the local Win11 VM)
+# Windows Overlay-Injection Testing (the Local Win11 VM)
 
 The in-game overlay (hudhook DX12 present-hook + Dear ImGui, `coop/overlay.rs`) renders fine on our
 Linux rig (vkd3d/Proton) but **crashed on native Windows** (friend tests, RTX 3080).
-**Root-caused 2026-07-01** ([`docs/OVERLAY-RENDERING.md`](../../docs/OVERLAY-RENDERING.md) > "WER
+**Root-caused 2026-07-01** ([`docs/OVERLAY-RENDERING.md`](../../../docs/OVERLAY-RENDERING.md) > "WER
 Verdict"): the crash was **never in the DX12 present path** — it was an inline-hook collision on
 `XINPUT1_4.dll!XInputGetState` (our ilhook patch vs a second 5-byte hooker; AV at `entry+5`). This
 harness's clean WARP run was *right* about the present hook and blind to the input hooks it never
@@ -16,7 +16,7 @@ the natural place to (a) repro the hook collision deterministically (ilhook deto
 over it + poll) and (b) validate the IAT-hook fix. It runs the machinery on a **real Windows
 loader** in the existing quickemu Win11 VM, with **no ELDEN RING**.
 
-## What it is
+## What It Is
 
 `crates/dx12-harness` is a minimal D3D12 app (window + clear-color present loop) that, after a warmup,
 injects the **same** hudhook DX12 present-hook + the **same** imgui font bake the overlay uses into its
@@ -32,7 +32,7 @@ crash. That **ruled out** the hardware-independent MinHook mechanism (hyp #1) an
 its job (narrowed the space); the remaining gate is the friend's machine or GPU passthrough. Re-running
 is still useful to re-confirm after a hudhook/imgui change, or to A/B a candidate fix's *mechanism*.
 
-## What it can and can't tell you (read before trusting a result)
+## What It Can and Can't Tell You (Read Before Trusting a Result)
 
 The VM has **no GPU passthrough** — Windows in it runs D3D12 via **WARP (Microsoft's software D3D12)**
 or virtio-gpu, *not* the NVIDIA driver. So it's a real native Windows DXGI/D3D12 **loader + present
@@ -54,7 +54,7 @@ real NVIDIA hardware (narrows it), and the VM can't validate the fix — escalat
 VM can't trigger it and lean on the friend gate. The **friend's native machine is the single
 super-validated final gate** — only spend it when you're already ~95% confident from the lighter loop.
 
-## First-time setup (one-time, manual)
+## First-Time Setup (One-Time, Manual)
 
 You boot and watch the VM; the script does the rest. One-time guest setup enables SSH:
 
@@ -79,7 +79,7 @@ Field gotchas that bite on first setup:
 
 `scripts/win.sh setup-help` prints the exact commands.
 
-### `run` needs more than SSH (the load-bearing gotcha)
+### `run` Needs More Than SSH (the Load-Bearing Gotcha)
 
 A DXGI swapchain needs a real **window station / desktop**, which an SSH (non-interactive) session
 lacks — running the exe straight over SSH fails with `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` (`0x887A0022`).
@@ -92,7 +92,7 @@ So `win.sh run` launches the harness via an **Interactive-principal scheduled ta
   the default adapter fails the same `0x887A0022`. Pass `DX12_HARNESS_WARP=0` only on a
   GPU-passthrough / native target.
 
-### Reading a crash report (the faulting module is the prize)
+### Reading a Crash Report (the Faulting Module Is the Prize)
 
 Both the harness and the cdylib install a shared crash handler (`unseamless-coop/src/crashdump.rs`).
 On a hard SEH fault it logs the **faulting module+offset**, the exception code, the access-violation
@@ -108,7 +108,7 @@ at nvwgf2umx.dll+0x…`. That module name is what decides the open hypotheses: `
   then `x86_64-w64-mingw32-addr2line -f -C -e <diag exe/dll> $((ImageBase + offset))` — the exe links
   at `0x140000000`; read a DLL's ImageBase from `objdump -p`. Driver/interposer frames stay name-only.
 
-## The loop
+## The Loop
 
 ```bash
 # You: boot the VM and LOG INTO its desktop (the interactive task needs a desktop session).
@@ -131,7 +131,7 @@ Read the pulled log against the doc's rig baseline. Key lines:
 `initialize() reached`, the hook died before calling us (hyp #1); if it dies after `initialize()` but
 before `first render frame`, suspect the imgui font upload (hyp #3).
 
-### Tuning the run (env knobs, all forwarded by `win.sh run`)
+### Tuning the Run (Env Knobs, All Forwarded by `win.sh run`)
 
 `run` already forces `DX12_HARNESS_WARP=1` and a finite `DX12_HARNESS_FRAMES`; override any knob on the
 command line:
@@ -167,6 +167,6 @@ is an **orchestrator** task (it drives the rig) — as a worker, ask for it rath
 
 - `crates/dx12-harness/` — the harness (D3D12 presenter + injected hudhook hook).
 - `scripts/win.sh` — build/push/run/pull-log driver for the VM.
-- [`docs/OVERLAY-RENDERING.md`](../../docs/OVERLAY-RENDERING.md) — the overlay design + the
+- [`docs/OVERLAY-RENDERING.md`](../../../docs/OVERLAY-RENDERING.md) — the overlay design + the
   "Native-Windows Crash" anatomy, hypotheses, and the rig baseline to diff against.
 - VM: `~/VMs/windows-11.conf` (quickemu); research notes in `~/.research/qemu-windows-vm.md`.

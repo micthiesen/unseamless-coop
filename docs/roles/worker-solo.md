@@ -70,7 +70,7 @@ When the user tells you you're done / to integrate / to hand off to the orchestr
 ## Everything Else in `CLAUDE.md` Still Applies
 
 The safety invariants, the logging rule, clean-room hygiene, the build/test commands, and "preserve
-other sessions' work" all hold — **except** its "ultracheck after each holistic chunk" rule: your
-default at handoff is the lighter one-shot `check`, and a full `/ultracheck` runs only when explicitly
-asked for (otherwise the orchestrator covers the deeper review at integration). Stay in your lane and
-preserve other sessions' work.
+other sessions' work" all hold — **including** its "ultracheck after each holistic chunk" rule, which
+for you fires at handoff: your lane is the holistic chunk, and `/ultracheck` is the default review then
+(downgrade to a single `check` only when the user says the lane is trivial — see "Handing Off"). Stay
+in your lane and preserve other sessions' work.

@@ -124,7 +124,8 @@ can't copy code you can't read.
   Frida: the exe loads at its preferred base `0x140000000` under Wine, so a Linux-native ptrace
   hardware write-watch (DR0/DR7) on an absolute address reports the RIP of each writing
   instruction. This is how the session-FSM store sites were found (see
-  `docs/SESSION-RE-RUNBOOK.md`). Needs root (Yama `ptrace_scope=1`).
+  `docs/SESSION-RE-RUNBOOK.md`). Runs as the normal user on this box (Yama `ptrace_scope=0` via
+  `/etc/sysctl.d/10-ptrace.conf`); on a default `ptrace_scope=1` box it needs root.
 - **Frida** (frida-gadget under Proton) — heavier dynamic instrumentation for fast iterative
   hooking when the native watchpoint isn't enough. Host CLI installed (`pipx install frida-tools`),
   a version-matched gadget + config staged at `.re-tools/frida/`; placing it in the rig's `mods/`
