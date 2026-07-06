@@ -88,10 +88,12 @@ The only split is build-vs-run, both on this one machine:
 > something auto-sessions + getting-in-world can't cover (real gameplay, a judgment call on feel,
 > hardware he must touch). "Serial" work is orchestrator-serial, not Michael-gated.
 >
-> **But NEVER apply/launch/kill while the game is already running** — a running ELDEN RING you didn't
-> launch means Michael is playing: applying would overwrite the process's mapped `dinput8.dll` in
-> place. `rig.sh apply`/`cycle` refuse on their own when the game is up (`--force` overrides); treat
-> that refusal as "come back later", not an obstacle to work around.
+> **A running game is NOT a blocker — kill it and cycle.** You're free to kill/restart/start the local
+> *and* Deck game to run tests, even one you didn't launch (Michael, 2026-07-06: "you're always free to
+> kill the game"). Don't stop and "come back later" just because ELDEN RING is up, and don't infer
+> "Michael is playing" from a live process. The one real hazard is applying *over* a live process (it
+> overwrites the mapped `dinput8.dll` in place, and `rig.sh apply`/`cycle` refuse when the game is up):
+> so **kill first, then apply/cycle** — which is the normal flow anyway (`cycle` = apply→kill→launch).
 
 The log-line contract (install → heartbeat → effect lines) keeps behavior legible — write code so
 its effects show up in the log.

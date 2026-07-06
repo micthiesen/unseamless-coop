@@ -30,6 +30,11 @@ The output is always two things: a **recommendation with its why**, and an **upd
 Don't re-read the deep RE docs unless a candidate genuinely hinges on a detail; the point of
 STATE.md is that you shouldn't have to.
 
+**STATE.md/ROADMAP candidates can be stale.** Before delegating a "build this charted thing" lane,
+`git grep`/`git log` `main` to confirm it isn't already implemented — a candidate marked "charted and
+buildable" may have shipped since it was written (a whole worker lane was spawned once for a gate that
+was already on `main`). Fix the stale entry as part of the decision.
+
 ## 2. Enumerate Candidates (2–4)
 
 For each candidate, one tight block:
