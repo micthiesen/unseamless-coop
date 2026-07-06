@@ -202,13 +202,12 @@ config through tracked symlinks — `AGENTS.md -> CLAUDE.md` and `.codex/skills 
 so edit `CLAUDE.md` and `.claude/skills/` once and both harnesses see it; never fork per-harness
 copies.
 
-> **`git add` gotcha — never stage a `.codex/skills/...` path.** `.codex/skills` is a *symlink* to
-> `.claude/skills`, so `git add .codex/skills/foo/SKILL.md` fails with `fatal: pathspec ... is beyond a
-> symbolic link` — and because that's a fatal pathspec error, git stages **none** of the paths in that
-> command, silently dropping the valid ones alongside it (e.g. your `docs/STATE.md`). When you edit a skill,
-> `git add .claude/skills/<name>/SKILL.md` **alone** already covers both harnesses (it's the same file via
-> the symlink). Same rule for `AGENTS.md` — edit/stage `CLAUDE.md`, never the symlink. If a commit ever comes
-> back "nothing staged" after editing a skill, this is why: drop the `.codex/` path.
+> **Stage only the real files you changed.** The Codex mirror is symlinks (`.codex/skills -> .claude/skills`,
+> `AGENTS.md -> CLAUDE.md`), so staging the `.claude/…` / `CLAUDE.md` originals already covers both harnesses —
+> the symlinks come along for free, they need nothing. Never `git add` a path *through* a symlink
+> (`.codex/skills/…`): git rejects it (`beyond a symbolic link`), and that fatal error aborts the whole
+> `git add`, silently dropping the good paths with it. (So "nothing staged" after a skill edit = you listed a
+> `.codex/` path; drop it.)
 
 ## Docs & naming
 
