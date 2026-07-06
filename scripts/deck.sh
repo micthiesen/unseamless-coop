@@ -329,6 +329,17 @@ cmd_pull_logs() {
 
 cmd_cycle() {
   cmd_apply "$@"
+  # Capture the co-op role from the cycle args so we can verify the Deck actually reached the world
+  # (auto-session fires only in-gameplay). Only meaningful when a role was requested.
+  local role=""; local a
+  for a in "$@"; do
+    case "$a" in
+      --auto-session=*) role="${a#*=}" ;;
+      host|join|off) [[ "$role" == "__pending__" ]] && role="$a" ;;
+      --auto-session) role="__pending__" ;;
+    esac
+  done
+  [[ "$role" == "__pending__" ]] && role=""
   say "Stopping any running game on the Deck before relaunch…"
   cmd_kill || true
   # Baseline: the latest log BEFORE launch, so wait-framework waits for a genuinely NEW run's log (the
@@ -340,6 +351,24 @@ cmd_cycle() {
   say "Settling, then dismissing startup popups…"
   sleep "${DECK_DISMISS_PRESETTLE:-10}"
   cmd_dismiss || warn "dismiss failed (/dev/uinput not accessible? no active session?) — dismiss manually or see the skill"
+  # Verify the Deck actually got into the WORLD, don't just fire-and-forget the dismiss taps. The blind
+  # taps don't reliably clear every popup + save-select + Continue on the Deck (Proton cold-start timing,
+  # a load screen), which strands the auto-session join at the menu and quietly wastes the whole run. So
+  # when a role was requested, wait for the auto-session fire line and re-dismiss up to a few rounds
+  # before giving up with a clear, actionable message. (No role = solo smoke; nothing to verify against.)
+  if [[ "$role" == host || "$role" == join ]]; then
+    local tries=0 max="${DECK_INWORLD_RETRIES:-3}"
+    say "Verifying the Deck reached the world (auto-session $role)…"
+    until deck_remote wait-inworld "${DECK_INWORLD_TIMEOUT:-60}" "$before"; do
+      tries=$((tries+1))
+      if (( tries >= max )); then
+        warn "Deck never reached the world after $tries dismiss rounds — it's likely stuck at a popup, the save-select, or a load screen. Get it in-game manually (run 'scripts/deck.sh dismiss', or click through on the Deck); auto-session $role fires on its own once it's in-world."
+        break
+      fi
+      say "Deck not in-world yet (round $tries/$max) — dismissing again…"
+      cmd_dismiss || true
+    done
+  fi
 }
 
 cmd_shell() { need_host; exec ssh "${SSH_OPTS[@]}" "$DECK_HOST"; }

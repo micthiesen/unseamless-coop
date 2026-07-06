@@ -29,7 +29,7 @@ You build the DLL here and push it; the Deck stays stateless (only the helper + 
 | `launch` | Start the game via the Deck's running Steam (outside EAC, via the applied launcher). |
 | `dismiss` | Tap Enter (`uinput-tap`) to clear the startup popups + select Continue → gameplay. |
 | `kill` | Stop the game + launcher. |
-| `cycle [apply-opts]` | `apply → kill → launch → wait-for-framework → dismiss`. The solo-on-Deck smoke test; add `--auto-session join` for the two-player run. |
+| `cycle [apply-opts]` | `apply → kill → launch → wait-for-framework → dismiss`. The solo-on-Deck smoke test; add `--auto-session join` for the two-player run. With a role, it then **verifies the Deck reached the world** (waits for the `auto-session` fire line) and **re-dismisses up to a few rounds** if not, warning clearly if the Deck is stuck — so a flubbed dismiss doesn't silently waste the run. Tunables: `DECK_INWORLD_TIMEOUT` (60s), `DECK_INWORLD_RETRIES` (3). |
 | `log [-f]` | Print/follow the latest Deck log over SSH. |
 | `pull-logs [dest]` | rsync the Deck's logs back here (default `.deck-logs/`). |
 | `status` / `paths` / `check` | Applied state / resolved Deck paths / remote deps. |
@@ -101,8 +101,10 @@ Run `scripts/deck.sh paths` on a new Deck to confirm everything resolves.
   still reject a save whose contents require DLC the Deck account does not own.
 - **`launch` needs Game Mode running** (it lifts the session env from the live Steam process and fires
   `steam://rungameid/<appid>`). It errors if no live session is found.
-- **`dismiss` needs an active session** (writes `/dev/uinput`; no sudo). If a `cycle`'s dismiss fires before
-  the popups appear (slow Proton cold-start), just run `scripts/deck.sh dismiss` again, or raise
+- **`dismiss` needs an active session** (writes `/dev/uinput`; no sudo). A role `cycle` now self-heals a
+  too-early dismiss by re-dismissing until the Deck reaches the world (see the `cycle` row); if it still
+  can't (stuck at a save-select / load screen), it warns and you finish it by hand — run
+  `scripts/deck.sh dismiss` again, or click through on the Deck, and the auto-session fires on its own. Or raise
   `DECK_DISMISS_PRESSES`.
 - **diag build by default** (readable logs); `apply --release` for a shipping-profile run.
 - **Build is local** — `gcc` (for `uinput-tap`) and the Rust cross-toolchain must be on this PC, not the Deck.

@@ -252,6 +252,23 @@ cmd_wait_framework() {
   warn "framework not up within ${timeout}s"; return 1
 }
 
+# Poll the on-Deck log until auto-session actually fires — proof the Deck reached the WORLD, not just the
+# title screen. `auto-session: (opening|joining) world` logs only once `in_gameplay()` holds, so it's the
+# one reliable "we're in-game" signal. `cycle` uses this to verify the blind dismiss taps got the Deck all
+# the way in (past EAC / save-select / Continue) instead of proceeding into a still-loading game.
+# $1 = timeout seconds (default 60). $2 = pre-launch baseline log (require the NEW run's log, like wait-framework).
+cmd_wait_inworld() {
+  local timeout="${1:-60}" baseline="${2:-}" waited=0 f
+  while (( waited < timeout )); do
+    f="$(latest_log || true)"
+    if [[ -n "$f" && "$f" != "$baseline" ]] && grep -qE "auto-session: (opening|joining) world" "$f" 2>/dev/null; then
+      ok "in-world — auto-session fired ($f)"; return 0
+    fi
+    sleep 3; waited=$((waited+3))
+  done
+  return 1   # caller decides whether to re-dismiss or warn
+}
+
 cmd_status() {
   cmd_check
   echo
@@ -279,9 +296,10 @@ main() {
     kill)              cmd_kill "$@" ;;
     latest-log)        cmd_latest_log "$@" ;;
     wait-framework)    cmd_wait_framework "$@" ;;
+    wait-inworld)      cmd_wait_inworld "$@" ;;
     log)               cmd_log "$@" ;;
     status)            cmd_status "$@" ;;
-    *) die "unknown verb '$verb' (paths|save-id64|check|mark-throwaway|apply-staged|seed-save-staged|launch|dismiss|kill|latest-log|wait-framework|log|status)" ;;
+    *) die "unknown verb '$verb' (paths|save-id64|check|mark-throwaway|apply-staged|seed-save-staged|launch|dismiss|kill|latest-log|wait-framework|wait-inworld|log|status)" ;;
   esac
 }
 
