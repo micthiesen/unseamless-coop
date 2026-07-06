@@ -17,10 +17,12 @@ validation-side** (run 17 de-risk, `instrument_type5_recv`, commit `b6533dd`): t
 **never fires on either machine** while the type-5 keeps arriving at the receiver's find-or-create admit
 `0x142640e30`. So a delivered type-5 is never dispatched to the pump — **no transport `SteamConnection` is registered
 for the peer**, so recv's sender-id search misses and the packet is dropped at admit instead of delivered. The entire
-remaining job is **registering the peer's transport connection** in `[socketmgr+0xb8..0xc0]`; ticket-timing /
-identity concerns are moot until delivery works. **Run 18 recon confirmed the table is EMPTY all session but has
-5-slot capacity, so a direct push is SAFE** (no realloc) — the insert lever is now a de-risked, well-scoped build.
-Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)".
+remaining job is **registering the peer's transport `SteamConnection`** in `[socketmgr+0xb8..0xc0]`. Run-18 analysis
+closed both cheap shortcuts (`force_gatec_accept` DEAD by disasm; `STANDUP_CONNECTION` is a socketmgr wrapper, not a
+pushable conn) and pinned the target against **ERSC ground truth**: a working session differs from ours by exactly ONE
+object — a `SteamConnection` (`+0x138`=peerID) registered in the live socketmgr — created by the establishment flow we
+skip. **Next is Michael-gated:** a real ERSC 2-player session with `watch-write.py` on `[sm+0xc0]` to name the
+connection's creator. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follow-up)".
 
 ## Now
 
@@ -80,36 +82,33 @@ ticket-timing / `member+0x80` identity are moot until delivery works. The valida
 on `main`) stays armed as the acceptance signal: once the connection is registered, `TYPE5-VALIDATOR FIRED` flipping
 from "never" to "fires" confirms delivery, then watch `member+0x152`.
 
-### The register work — path B (DIRECT insert), charted + recon-DONE 2026-07-06 (runs 17–18)
+### The register work — the missing object is a `SteamConnection`, and finding its creator is Michael-gated
 
-Both the admit register path (static, run 17) and the live table state (run 18) are charted — the build is now a
-well-scoped, de-risked lever. What's settled:
-- **Don't go through admit.** It mints a connection ONLY from a 14-byte SYN (our type-5 fails the SYN-shape gate
-  `0x142642830`, `syn_gate_on[sm+0x61]=1` live), and SYNs die at gate-c's `[S+0x168]` **stub** — `force_gatec_accept`
-  alone is insufficient (factory ptr `[rsp+0x80]` stays null).
-- **The insert target: `[socketmgr+0xb8..0xc0]` — EMPTY all session, with 5-slot capacity (`cap[sm+0xc8]`).** ⇒ a
-  **direct push is SAFE, no realloc**: write the connection ptr at `[end]`, bump `[sm+0xc0]` += 8, on the worker
-  thread (the reader — avoids racing recv). The pending queue is empty too (nothing to promote via `0x142640ff0`).
-- **What to push: a `SteamConnection@DLNW3D` keyed `+0x138`=peerSteamID64** (recv's match key). This is a **distinct
-  object from the endpoint** (`MTInternalThreadSteamConnection`, peer id at `+0x128`, pump queue at `+0x90`).
-  `stand_up_transport`'s `STANDUP_CONNECTION` is that class; set its `+0x138`=peerID and push it.
+Runs 17–18 + a static disasm (run-18 follow-up) closed BOTH cheap shortcuts and pinned the target against ERSC ground
+truth (full detail: SESSION-DRIVE.md > "★ ANALYSIS (run-18 follow-up)"):
+- **`force_gatec_accept` is DEAD** — the resolve `0x142639d00` short-circuits on the `[S+0x168]` stub (`je 0x142639dea`)
+  **before** filling the connection factory, so forcing gate-c leaves `[rsp+0x80]` null and admit still rejects. Confirmed
+  by disasm, not inferred. And `[S+0x168]`-made-real is moot (stub in working ERSC too).
+- **`STANDUP_CONNECTION` is the WRONG object** — it's a socket-manager *wrapper* (`[+8]`=its socketmgr), not a pushable
+  `SteamConnection`. The earlier "push STANDUP_CONNECTION" plan is void.
+- **ERSC ground truth (`~/Documents/ersc-session-ref-host.txt`): a working session differs from ours by exactly ONE
+  object** — a `SteamConnection @…d870` (vtable "SteamConnection" = `0x143278358/70`, `+0x138`=peerID, `+0x128`=0)
+  registered in the live `SteamConnectionManager` (`context[+0x48]` == endpoint `+0x18`). With it, member[4] is complete
+  (`flags=(0,0,1,0)`, `+0x152=1`, token stored). Ours has 0 conns → member stuck at `(0,1,0,0)`. The conn is created +
+  registered by ERSC's **establishment flow**, the step our synthetic drive skips.
 
-**The build (next step):** a `register_conn` lever, armed on the worker-drain (has `socketmgr` in rcx): once, when
-`STANDUP_CONNECTION` exists + the peer id is known + it's not already a table entry → set `conn+0x138`=peerID, push
-into the vector. Then two-machine with `instrument_type5_recv` on: **watch `TYPE5-VALIDATOR FIRED` flip from "never"
-to "fires"**, then `member+0x152` / `players`.
+**★ NEXT (Michael-gated — needs a real ERSC 2-player session):** arm `watch-write.py` on the live
+`SteamConnectionManager`'s conn-table end ptr `[sm+0xc0]` during a **real ERSC join** (restore ERSC, Michael hosts, Deck
+joins) — the RIP that bumps `[sm+0xc0]` + its caller **names the establishment step that builds+registers the
+`SteamConnection`**, which we then drive in our flow. The same capture gets the conn's full live layout (reassembler
+`+0x20`, endpoint link) as a fallback for constructing one directly. Our own driven session never writes `[sm+0xc0]`
+(0 conn), so the datum only exists on a real ERSC session — hence the human gate (the play, not the tooling). This
+re-connects the type-5 thread to the rung-3 establishment saga: **the type-5 producer is DONE; delivery needs the
+transport connection; the connection needs the establishment step we haven't located.**
 
-**The one open risk only the rig settles:** whether the pushed connection's `+0x20` reassembler (`0x142643db0`
-→`0x142642860`) actually routes to the endpoint's `[ep+0x90]` queue — it shares the socketmgr's `S`, and the deliver
-reassembler may itself resolve the endpoint via the `[S+0x168]` **stub**. If delivery still fails with a registered
-connection, that's the signal that a real member-lookup (path A / lever 3b) is unavoidable. Keep `symmetric_peer` +
-`send_type5` on; register on both machines. (Live peek helpers, argv-parameterized: `scripts/re/peek-socketmgr.py <sm>`,
-`scripts/re/catch-endpoint.py <member>` — read the addrs from the host-worker-drain + `capture-endpoint.py` logs.)
-
-**Ticket-timing note (still relevant):** `GetAuthSessionTicket` fills bytes synchronously but a remote
-`BeginAuthSession` only accepts after Steam fires `GetAuthSessionTicketResponse_t` (~ms). The sender already
-fetches once + caches + retries on a throttle, so once delivery is fixed the retries cover the validity window
-(first sends may bounce `InvalidTicket`; accept set is `{0,2}`).
+**Ticket-timing note (still relevant, post-delivery):** `GetAuthSessionTicket` is sync but `BeginAuthSession` only
+accepts after `GetAuthSessionTicketResponse_t` (~ms); the sender caches + retries on a throttle, so once delivery works
+the retries cover the validity window (first sends may bounce `InvalidTicket`; accept set `{0,2}`).
 
 **Watch item (latent, fix when the handshake lands):** the client's self-identity
 `[[member+0x58]+0x7f8]==0` under the bit-2-OR lever misroutes the client's *self* member; set `+0x7f8`

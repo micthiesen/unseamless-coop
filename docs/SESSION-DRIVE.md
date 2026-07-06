@@ -4363,5 +4363,44 @@ entry's `+0x20` reassembler (`0x142643db0` does `add rcx,0x20`), which must surf
 (5-cap, empty) table, and rig-test. **The one open risk that only the rig can settle:** whether that connection's
 reassembler routes to `[ep+0x90]` (it shares `S`, and the deliver reassembler may itself resolve the endpoint via the
 `[S+0x168]` **stub** → if so, delivery fails even with a registered connection, and path A / a real lookup is forced).
-That's the decisive next experiment. Peek scripts saved at `/tmp/peek-socketmgr.py` + `/tmp/catch-endpoint.py`
+That's the decisive next experiment. Peek scripts saved at `scripts/re/peek-socketmgr.py` + `scripts/re/catch-endpoint.py`
 (socketmgr/member addrs are per-launch ASLR — re-read them from the worker-drain + `capture-endpoint.py` logs).
+
+### ★ ANALYSIS (2026-07-06, run-18 follow-up) — both shortcuts RULED OUT; the missing object is a `SteamConnection`, and ERSC ground truth shows exactly what it is
+
+Two dead ends closed by static disasm + a code read (no rig needed):
+- **`force_gatec_accept` CANNOT work.** Disassembled the live member-resolve `0x142639d00(rcx=context S, rdx=senderID,
+  r8=&outStruct)`: at `0x142639d80` it `call [S+0x168]` (the stub `mov eax,1;ret`), then `0x142639d86: cmp eax,1; je
+  0x142639dea` — the stub's return-1 **short-circuits to "not found" (`mov eax,1; ret`) BEFORE the code that fills the
+  connection factory** (`0x142639d91`+: lock → `0x142639950` → `0x14263d060` builds the descriptor). So forcing admit's
+  gate-c eax=0 leaves the factory `[rsp+0x80]` null → `0x142640ede` still rejects. Confirmed, not inferred.
+- **`STANDUP_CONNECTION` is the WRONG object.** It's a **socket-manager wrapper** (`[STANDUP_CONNECTION+8]` = its
+  socketmgr — session_probe.rs:2141), i.e. *our own stood-up SteamConnectionManager*, not a `SteamConnection` to push
+  into the game's live table. Pushing it would be garbage.
+
+**★ ERSC GROUND TRUTH (`~/Documents/ersc-session-ref-host.txt`, a real 2-player host session) — the exact target:**
+```
+member[4] id=DECK ep=0x…f8a10 token[+0x148]=0xc36620ea430 +0x144=2 flags=(0,0,1,0)   ← +0x152=1, COMPLETE
+  endpoint @0x…f8a10 vt=MTInternalThreadSteamConnection +0x18=0x…f8350 +0x50(memberback)=member[4]
+TRANSPORT:
+  SteamConnectionManager @0x…b1b740 context[+0x48]=0x…f8350 conn[+0xb8..0xc0]=…930..938 (1 conn)
+    conn[0] @0x…b1d870 vt=SteamConnection peerid[+0x138]=DECK [+0x128]=0x0
+```
+So a working session is **structurally identical to ours except for ONE object**: a `SteamConnection` (distinct
+vtable "SteamConnection", NOT the endpoint's `MTInternalThreadSteamConnection`) with `+0x138`=peerID, `+0x128`=0,
+registered in the live `SteamConnectionManager` whose `context[+0x48]` == the endpoint's `+0x18`. Once that conn
+exists, the member completes (`+0x152=1`, token stored). **This is exactly what our run-18 socketmgr lacks (0 conn).**
+The `SteamConnection@DLNW3D` static vtable is `0x143278358`/`0x143278370` (session_probe.rs:2207).
+
+**⇒ The type-5 delivery wall = the missing transport `SteamConnection`, which is a piece of the rung-3 ESTABLISHMENT
+our synthetic drive skips** — NOT admit and NOT `[S+0x168]` (both stubs in working ERSC too; re-confirmed by the
+disasm above and correction #1). Making the lookup "real" is moot; the connection is created+registered by ERSC's
+establishment flow, and that's the step we haven't located/driven.
+
+**► NEXT (needs a real ERSC session — Michael-gated for the play, not the tooling):** find the creator/registrar of
+`conn[0]` by arming `watch-write.py` on the live `SteamConnectionManager`'s conn-table end pointer `[sm+0xc0]` during a
+**real ERSC 2-player join** (restore ERSC, Michael hosts, Deck joins) — the RIP that bumps `[sm+0xc0]` (+ its caller) names
+the establishment step that builds + registers the `SteamConnection`; then drive that step in our flow. A fresh capture
+also gets the conn's full live layout (reassembler `+0x20`, endpoint link) so, as a fallback, we could construct one
+directly (vtable `0x143278358/70`). Either way the decisive datum is on a real ERSC session; our driven session never
+writes `[sm+0xc0]` (0 conn), so there's nothing to watch there.
