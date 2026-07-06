@@ -52,6 +52,39 @@ pub fn frame_type5(token: u64, blob: &[u8]) -> Option<Vec<u8>> {
     Some(msg)
 }
 
+/// Max total on-wire packet the transport length header can encode: the frame-length check
+/// (`0x1426425d0`) reads an **11-bit** length (`byte0 | ((byte1 & 7) << 8)`), so `0x7ff`.
+pub const TRANSPORT_FRAME_MAX: usize = 0x7ff;
+
+/// The transport flag bit our 14-byte SYN set in `byte1` (and which passed the recv frame-length gate
+/// `0x1426425d0`). We reuse it for the hand-framed type-5 — the exact meaning of the byte1 high-5
+/// flag bits is Arxan-opaque on disk, so this is the one flag we've observed a frame get admitted with.
+const TRANSPORT_FLAG_BYTE1: u8 = 0x40;
+
+/// Wrap a DLNW3D message `payload` in the transport **length header** the game's recv path expects
+/// before it reaches the per-connection pump. The recv frame-length check `0x1426425d0` reads an
+/// 11-bit length as `byte0 | ((byte1 & 7) << 8)` and requires `2 <= len <= size`; the reassembler then
+/// strips this 2-byte header and enqueues the message for the pump (which reads `msgbuf[0]` = the type).
+///
+/// The encoded length is the **total on-wire size** (header + payload), matching our 14-byte SYN, whose
+/// `byte0 = 0x0e = 14` = the whole packet length. Returns `None` if the total exceeds the 11-bit field.
+///
+/// ⚠️ This reproduces only the **length header**. The chart flags a possible *inner* transport frame
+/// (bits in `byte1` beyond the length, added by the Arxan-opaque `0x142642860`); if a plain
+/// length-wrapped type-5 doesn't dispatch on the peer, the fallback is to capture a real ERSC type-5's
+/// on-wire bytes and copy the framing verbatim (docs/STATE.md > Next, decision 1).
+pub fn wrap_transport_frame(payload: &[u8]) -> Option<Vec<u8>> {
+    let total = payload.len().checked_add(2)?;
+    if total > TRANSPORT_FRAME_MAX {
+        return None;
+    }
+    let mut framed = Vec::with_capacity(total);
+    framed.push((total & 0xff) as u8);
+    framed.push(TRANSPORT_FLAG_BYTE1 | ((total >> 8) & 7) as u8);
+    framed.extend_from_slice(payload);
+    Some(framed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +112,47 @@ mod tests {
         assert!(frame_type5(0, &too_big).is_none(), "the validator's len gate is 1..=0x400");
         let at_cap = vec![0u8; TYPE5_BLOB_MAX];
         assert!(frame_type5(0, &at_cap).is_some(), "exactly 0x400 is allowed");
+    }
+
+    #[test]
+    fn transport_header_encodes_total_length() {
+        // A 12-byte payload → 14-byte packet, matching the SYN's byte0=0x0e=14 / byte1=0x40 shape.
+        let framed = wrap_transport_frame(&[0u8; 12]).expect("fits the 11-bit field");
+        assert_eq!(framed.len(), 14, "header + payload");
+        assert_eq!(framed[0], 0x0e, "byte0 = total & 0xff = 14");
+        assert_eq!(framed[1], 0x40, "byte1 = flag 0x40 | high-3-bits of length (0)");
+        // Recompute the 11-bit length the recv gate reads: byte0 | ((byte1 & 7) << 8).
+        let framed_len = framed[0] as usize | ((framed[1] as usize & 7) << 8);
+        assert_eq!(framed_len, 14, "the encoded length is the total on-wire size");
+    }
+
+    #[test]
+    fn transport_header_spills_into_byte1_over_255() {
+        // 300-byte payload → 302 total; low byte 0x2e, high bits 1 → byte1 = 0x41.
+        let framed = wrap_transport_frame(&[0u8; 300]).expect("fits the 11-bit field");
+        assert_eq!(framed[0], (302 & 0xff) as u8);
+        assert_eq!(framed[1], 0x40 | 1);
+        let framed_len = framed[0] as usize | ((framed[1] as usize & 7) << 8);
+        assert_eq!(framed_len, 302);
+    }
+
+    #[test]
+    fn transport_header_wraps_a_real_type5() {
+        // The end-to-end shape the sender emits: [len-hdr][5][token][len][ticket].
+        let ticket = vec![0x11u8; 234]; // a typical Steam session-ticket size
+        let payload = frame_type5(0, &ticket).expect("frames");
+        let framed = wrap_transport_frame(&payload).expect("wraps");
+        assert_eq!(framed.len(), payload.len() + 2);
+        assert_eq!(framed[2], 5, "the message (post-header) starts with the type byte");
+        let framed_len = framed[0] as usize | ((framed[1] as usize & 7) << 8);
+        assert_eq!(framed_len, framed.len(), "encoded length == actual packet size");
+    }
+
+    #[test]
+    fn transport_header_rejects_over_11_bits() {
+        let too_big = vec![0u8; TRANSPORT_FRAME_MAX - 1]; // +2 header pushes total past 0x7ff
+        assert!(wrap_transport_frame(&too_big).is_none(), "total exceeds the 11-bit length field");
+        let at_cap = vec![0u8; TRANSPORT_FRAME_MAX - 2];
+        assert!(wrap_transport_frame(&at_cap).is_some(), "exactly the 11-bit cap is allowed");
     }
 }

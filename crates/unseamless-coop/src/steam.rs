@@ -176,22 +176,18 @@ fn is_plausible_steam_id(id: u64) -> bool {
     (id >> 32) != 0
 }
 
-// Scaffold for the option-(b) type-5 producer (docs/STATE.md > Next (b)): the ticket fetch below is wired in
-// parallel with the `type5-chart` lane; the producer feature that *calls* it (and injects the framed message)
-// lands once the chart names the injection point. `allow(dead_code)` on the three items keeps `main` green
-// (clippy -D warnings) until then — remove when the producer wires them.
+// The type-5 producer (docs/STATE.md > Next): `get_auth_session_ticket` is the ticket source the hand-frame
+// sender (`session_probe::TransportStandupDriver`, `[debug.probes] send_type5`) frames into a type-5 message.
 
 /// `HAuthTicket SteamAPI_ISteamUser_GetAuthSessionTicket(ISteamUser*, void* pTicket, int cbMaxTicket,
 /// uint32* pcbTicket)` — the flat wrapper for the **v021** (ELDEN RING) shape. NB: v022+ (SDK 1.57) added a
 /// trailing `const SteamNetworkingIdentity*` arg; ELDEN RING bundles v021, so this 4-arg form matches. The
 /// extra arg on a newer client would be read as garbage — re-confirm the accessor version if Steam bumps
 /// (`objdump -p steam_api64.dll | grep SteamAPI_SteamUser_v`).
-#[allow(dead_code)]
 type GetAuthTicketFn = unsafe extern "C" fn(*mut c_void, *mut u8, i32, *mut u32) -> u32;
 
 /// Max Steam session-auth-ticket length. Classic tickets are ~234B; the SDK cap is ~1024B, which also fits
 /// the DLNW3D type-5 length field (charted `1..0x400`), so a ticket is always a legal type-5 blob.
-#[allow(dead_code)]
 const AUTH_TICKET_MAX: usize = 1024;
 
 /// Fetch a Steam **session auth ticket** for peer-to-peer auth — the joiner's DLNW3D **type-5** payload that
@@ -205,7 +201,6 @@ const AUTH_TICKET_MAX: usize = 1024;
 /// the producer should fetch once early and retry the type-5 send on a throttle (the first sends may be
 /// rejected until the ticket goes valid). This is the one real unknown in option (b); the type5-chart lane is
 /// charting whether the host validator actually enforces `BeginAuthSession` success or is looser.
-#[allow(dead_code)]
 pub fn get_auth_session_ticket() -> Option<Vec<u8>> {
     let module = unsafe { GetModuleHandleA(s!("steam_api64.dll")) }.ok()?;
     let (accessor, _version) = resolve_user_accessor(module)?;

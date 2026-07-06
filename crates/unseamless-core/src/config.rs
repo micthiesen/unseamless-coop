@@ -406,6 +406,20 @@ pub struct DebugProbes {
     /// Set on BOTH machines (each produces its own ticket for the other). Off by default. STATE.md > Next (b).
     pub drive_type5: bool,
 
+    /// **★ THE HAND-FRAME TYPE-5 SENDER — the primary producer** (2026-07-06). Instead of driving the
+    /// game's own send `0x142400df0` (RULED OUT — its slot-14 dispatch goes through an Arxan-locked vtable
+    /// slot and crashes cold, runs 13-15), we **frame the type-5 bytes ourselves** and `SendP2PPacket` them
+    /// on channel 30 via the plain `ISteamNetworking006` send we already drive in `drive_p2p` — never
+    /// touching the obfuscated dispatch. The bytes: `[len-hdr][5][8B token=0][4B ticket_len][ticket]`, where
+    /// the ticket is a real `GetAuthSessionTicket` blob (fetched once, cached; retried on a throttle as the
+    /// ticket only goes valid after Steam's async callback) and the token is stored unvalidated by the peer.
+    /// The peer's pump reads ch30 → routes by sender id → its endpoint queue → the type-5 case → validator
+    /// (`BeginAuthSession` against `member+0x80`) → `member+0x152=1` → roster → `players=2`. Preconditions
+    /// (same as `drive_type5`): endpoint built (`drive_add_peer` + `symmetric_peer`), peer P2P accepted,
+    /// Steam auth live, `member+0x80` = peer id. Set on BOTH machines (each sends its own ticket to the
+    /// other). Off by default. See docs/STATE.md > Next.
+    pub send_type5: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

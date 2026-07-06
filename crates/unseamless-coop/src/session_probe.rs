@@ -444,6 +444,8 @@ static TYPE5_PEER_ID: AtomicU64 = AtomicU64::new(0);
 static DRIVE_TYPE5: AtomicBool = AtomicBool::new(false);
 /// Log latch for the type-5 drive (fires on a throttle; log the first several, then quiet).
 static TYPE5_DRIVE_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Log latch for the hand-frame type-5 send (fires on a throttle; log the first several, then quiet).
+static TYPE5_SEND_LOGS: AtomicU32 = AtomicU32::new(0);
 
 /// endpoint-set latch: `0x14203ef70(rcx=&member+0x130 holder, rdx=&src)`. Reads `endpoint=[rdx]`, then the
 /// endpoint's member back-ptr `[endpoint+0x50]`, and latches that member iff its `+0x80` == our peer — so the
@@ -2991,6 +2993,14 @@ pub struct TransportStandupDriver {
     /// Last endpoint pointer seen at `member+0x130` — the type-5 drive only fires on an endpoint that was
     /// stable across two ticks (skips the pump's mid-build transients that crashed run 13).
     last_type5_ep: usize,
+    /// ★ Hand-frame type-5 sender (the primary producer): frame `[len-hdr][5][token][len][ticket]` ourselves
+    /// and `SendP2PPacket` it on channel 30 — never touching the Arxan-locked game send. See `send_type5`.
+    send_type5: bool,
+    /// Cached Steam auth ticket (the type-5 blob). `GetAuthSessionTicket` allocates a handle per call, so we
+    /// fetch once and retry the send — the ticket only goes valid after Steam's async callback, not on fetch.
+    type5_ticket: Option<Vec<u8>>,
+    /// Throttle the hand-framed type-5 send (~1s) so a run's log stays legible and we don't flood the peer.
+    type5_send_throttle: FrameThrottle,
 }
 
 impl TransportStandupDriver {
@@ -3006,6 +3016,7 @@ impl TransportStandupDriver {
         add_peer_joiner: bool,
         suppress_syn: bool,
         drive_type5: bool,
+        send_type5: bool,
     ) -> Self {
         Self {
             built: false,
@@ -3025,6 +3036,9 @@ impl TransportStandupDriver {
             suppress_syn,
             drive_type5,
             last_type5_ep: 0,
+            send_type5,
+            type5_ticket: None,
+            type5_send_throttle: FrameThrottle::every(60),
         }
     }
 
@@ -3049,6 +3063,10 @@ const ISTEAM_READ_SLOT: usize = 0x10;
 const ISTEAM_ACCEPT_SLOT: usize = 0x18;
 /// `k_EP2PSendReliable`.
 const P2P_SEND_RELIABLE: u32 = 2;
+/// `k_EP2PSendUnreliable` — the game's own type-5 send uses unreliable delivery (charted `0x142400df0`
+/// → `SendP2PPacket(..., unreliable, ch30)`). We match it so the hand-framed type-5 is as close to a
+/// real one as possible; the receiver's `ReadP2PPacket(ch30)` drains both modes identically anyway.
+const P2P_SEND_UNRELIABLE: u32 = 0;
 /// P2P channel for our game-transport probe pings (0; the game's own transport is dormant offline).
 const P2P_PROBE_CHANNEL: i32 = 0;
 /// The channel the game's socket-manager worker thread actually reads (`ReadP2PPacket(nChannel=
@@ -3339,6 +3357,15 @@ impl TransportStandupDriver {
         let symmetric = self.symmetric;
         let suppress_syn = self.suppress_syn;
         let mut accepted_ok = false;
+        // ★ Hand-frame type-5: build the framed auth-ticket packet ourselves (on a throttle) so the closure
+        // below just SendP2PPackets it on channel 30 — the Arxan-locked game send `0x142400df0` is never
+        // touched. `None` until Steam yields a ticket (fetched-once + cached inside). Sent by BOTH peers in
+        // symmetric mode (each completes the other's member); no role gate.
+        let type5_packet = if self.send_type5 && self.type5_send_throttle.tick() {
+            self.prepare_type5_packet()
+        } else {
+            None
+        };
         // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
         // each slot below is a documented method with the win64 signature transmuted here. Buffers are
         // stack-local and outlive each call. Firewalled: a Rust panic is caught; a hard fault surfaces
@@ -3430,6 +3457,32 @@ impl TransportStandupDriver {
                     unseamless_core::diagnostics::peer_tag(peer),
                 );
             }
+            // ★ Hand-frame type-5 send: push the framed auth-ticket packet on channel 30 (the channel the
+            // peer's socket-manager worker drains). The peer's recv → routes by our sender id → its endpoint
+            // queue → the type-5 case → validator (BeginAuthSession vs member+0x80) → member+0x152=1 → roster.
+            // Unreliable to match the game's own send; retried on a throttle (the ticket only goes valid after
+            // Steam's async callback, so the first sends may bounce as InvalidTicket).
+            if let Some(pkt) = type5_packet.as_ref() {
+                let ok = send(
+                    iface,
+                    peer,
+                    pkt.as_ptr(),
+                    pkt.len() as u32,
+                    P2P_SEND_UNRELIABLE,
+                    GAME_WORKER_CHANNEL,
+                );
+                let n = TYPE5_SEND_LOGS.fetch_add(1, Ordering::Relaxed);
+                if n < 16 {
+                    log::info!(
+                        "session-probe: type5-handframe — sent {}B type-5 to peer {} on channel {GAME_WORKER_CHANNEL} = {ok} \
+                         [hdr {:#04x} {:#04x}] (watch the peer's member+0x152 → 1 / flags (0,0,1,0) / players → 2)",
+                        pkt.len(),
+                        unseamless_core::diagnostics::peer_tag(peer),
+                        pkt[0],
+                        pkt[1],
+                    );
+                }
+            }
         }));
         if accepted_ok {
             self.accepted = true;
@@ -3458,6 +3511,29 @@ impl TransportStandupDriver {
             TYPE5_PEER_ID.store(peer, Ordering::Relaxed);
             self.try_drive_type5();
         }
+    }
+
+    /// Build the hand-framed type-5 packet: `[len-hdr][5][8B token=0][4B ticket_len][ticket]`. The Steam auth
+    /// ticket is the only validated field (the token is stored unvalidated by the peer, so we send zeros); it's
+    /// fetched once and cached — `GetAuthSessionTicket` allocates a fresh handle per call, and re-fetching would
+    /// leak handles and reset the ~ms validity clock. Returns `None` until Steam yields a ticket (retried each
+    /// throttle tick until it does), or if framing/length gates reject it. The transport length-header wrap is
+    /// host-tested in `core::dlnw3d`.
+    fn prepare_type5_packet(&mut self) -> Option<Vec<u8>> {
+        if self.type5_ticket.is_none() {
+            self.type5_ticket = crate::steam::get_auth_session_ticket();
+            if let Some(t) = self.type5_ticket.as_ref() {
+                log::info!(
+                    "session-probe: type5-handframe — fetched Steam auth ticket ({}B), caching for the type-5 send \
+                     (retried on a throttle until it validates on the peer)",
+                    t.len(),
+                );
+            }
+        }
+        let ticket = self.type5_ticket.as_ref()?;
+        // Token = 0: the peer's validator (`0x142402ee0`) stores it at conn+0x148 unvalidated, so any 8 bytes pass.
+        let payload = unseamless_core::dlnw3d::frame_type5(0, ticket)?;
+        unseamless_core::dlnw3d::wrap_transport_frame(&payload)
     }
 
     /// Drive the game's own type-5 send `0x142400df0(endpoint)` on the latched peer member's live endpoint
@@ -3604,6 +3680,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.drive_add_peer_joiner,
             config.debug.probes.suppress_syn,
             config.debug.probes.drive_type5,
+            config.debug.probes.send_type5,
         )));
     }
     if config.debug.probes.session_probe {
