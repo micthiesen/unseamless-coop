@@ -255,7 +255,9 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   > roster-add `0x140cb31b0` (charted: **no offline gate**) grows `players` to 2. Step-by-step: SESSION-DRIVE.md
   > > "STATUS (2026-07-04 night)".
 
-  **Seamlessness (independent, additive) — one armed gate, charted.** All game-driven co-op disconnects
+  **Seamlessness (independent, additive) — one armed gate, SHIPPED (2026-07-04) as
+  `gameplay.stay_connected` (default off; commit `7ad9000`), live 2-player validation pending.** All
+  game-driven co-op disconnects
   (boss defeat, area transition, death, host migration, remote-leave) funnel through **one primitive:
   `leave_session 0x140cae730`** (sole out-of-line writer of `lobby_state=OnLeaveSession`, 24 callers) +
   one inlined twin (`0x140cb08bc`). An armed flag there suppresses every game-driven disconnect (symmetric
