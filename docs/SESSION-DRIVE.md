@@ -4404,3 +4404,17 @@ the establishment step that builds + registers the `SteamConnection`; then drive
 also gets the conn's full live layout (reassembler `+0x20`, endpoint link) so, as a fallback, we could construct one
 directly (vtable `0x143278358/70`). Either way the decisive datum is on a real ERSC session; our driven session never
 writes `[sm+0xc0]` (0 conn), so there's nothing to watch there.
+
+**★ STATIC LEAD (may make the above NON-gated) — the `SteamConnection` ctor + its sole creator, found by vtable xref.**
+`static.py xref 0x143278358/0x143278370` → both vtable halves are written in exactly two fns; the ctor is
+**`0x142643b50(rcx=self, rdx=arg1→self+0x18, r8d, r9)`**: it inits the `+0x20` reassembler (`0x142642200` +
+`0x142642290`), sets the two vtables, `self+0x18`=arg1 (the context), and **`self+0x138`=0** (peer id — the caller
+sets the real id afterward). The ctor's **sole caller is `0x142640560`** (`calls 0x142643b50` → 1 site), which is a
+**`SteamConnectionManager` setup** (operates on `self+0x40/0x5c/0x58/0x88/0xb0/0xd0/0xf8/0x198` = manager ring-buffer
++ config fields, reading a descriptor at `rdx` with `[rdx]!=0 && [rdx+0x18]!=0` gates). So the SteamConnection is
+minted inside the manager-setup path. **Next static step (rig-independent):** finish reading `0x142640560` (past
+`0x14264067b`) to see (a) where it sets the new conn's `+0x138` to the peer id and (b) whether it pushes the conn into
+`[self+0xb8..0xc0]` (the register) or stores it elsewhere; then find `0x142640560`'s callers (`calls 0x142640560`) to
+see which establishment step invokes it and whether we can drive that directly — potentially closing this WITHOUT the
+Michael-gated ERSC capture. The capture remains the high-confidence fallback (watch-write on `[sm+0xc0]` catches the
+exact registrar live).
