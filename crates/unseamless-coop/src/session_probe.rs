@@ -2891,6 +2891,12 @@ pub struct TransportStandupDriver {
     /// Symmetric add-peer: the JOINER also drives add-peer (queuing the host in its Client session) so its
     /// game emits real SYNs too and the handshake can close both ways. See `drive_add_peer_joiner` in config.
     add_peer_joiner: bool,
+    /// ★ Option-(a) experiment (2026-07-06): suppress our fabricated 14-byte SYN on channel 30. That SYN is
+    /// ignored by the pump (`buf[0]=0x0e`=14 is out of the type-1..8 range) AND its stated purpose (tripping
+    /// host-admit `0x142640e30`) is a confirmed red herring — so it does nothing useful and its channel-30
+    /// spam may crowd out / desync the game's own connect flow, which owns the built endpoint's real send/recv.
+    /// On = stop it and let the game's own endpoints talk. See STATE.md > Next (a). Default off.
+    suppress_syn: bool,
 }
 
 impl TransportStandupDriver {
@@ -2904,6 +2910,7 @@ impl TransportStandupDriver {
         symmetric: bool,
         skip_accept: bool,
         add_peer_joiner: bool,
+        suppress_syn: bool,
     ) -> Self {
         Self {
             built: false,
@@ -2920,6 +2927,7 @@ impl TransportStandupDriver {
             symmetric,
             skip_accept,
             add_peer_joiner,
+            suppress_syn,
         }
     }
 
@@ -3232,6 +3240,7 @@ impl TransportStandupDriver {
         let suppress_drain = self.suppress_drain;
         let is_host = self.is_host;
         let symmetric = self.symmetric;
+        let suppress_syn = self.suppress_syn;
         let mut accepted_ok = false;
         // SAFETY: `iface` is the resolved ISteamNetworking006 pointer; `[iface]` is its flat vtable and
         // each slot below is a documented method with the win64 signature transmuted here. Buffers are
@@ -3292,7 +3301,7 @@ impl TransportStandupDriver {
             // channel the host worker drains), never our probe channel 0.
             // In symmetric-peer mode BOTH peers send the SYN (each worker receives, each pump builds the
             // other's endpoint); otherwise only the non-host (joiner) sends.
-            if (!is_host || symmetric) && do_ping {
+            if (!is_host || symmetric) && do_ping && !suppress_syn {
                 let mut syn = [0u8; 14];
                 syn[0] = 0x0e;
                 syn[1] = 0x40;
@@ -3301,6 +3310,11 @@ impl TransportStandupDriver {
                     "session-probe: game-p2p — sent real 14B DLNW3D SYN [0x0e,0x40,..] to peer {} on channel {GAME_WORKER_CHANNEL} = {ok} \
                      (trips the peer's host-admit 0x142640e30 + feeds its pump — the channel the worker drains)",
                     unseamless_core::diagnostics::peer_tag(peer),
+                );
+            } else if (!is_host || symmetric) && do_ping && suppress_syn {
+                log::debug!(
+                    "session-probe: game-p2p — SYN SUPPRESSED (suppress_syn) — letting the game's own endpoint \
+                     connect flow drive channel {GAME_WORKER_CHANNEL} (option-a experiment)"
                 );
             }
             // Throttled outbound reliable ping.
@@ -3426,6 +3440,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.symmetric_peer,
             config.debug.probes.host_skip_p2p_accept,
             config.debug.probes.drive_add_peer_joiner,
+            config.debug.probes.suppress_syn,
         )));
     }
     if config.debug.probes.session_probe {

@@ -387,6 +387,15 @@ pub struct DebugProbes {
     /// machines. Off by default. See docs/SESSION-DRIVE.md > "Next" (joiner side).
     pub symmetric_peer: bool,
 
+    /// **EXPERIMENTAL — option-(a) handshake test** (2026-07-06). Suppress our fabricated 14-byte SYN on
+    /// channel 30. That SYN's stated purpose (trip host-admit `0x142640e30`) is a confirmed RED HERRING (that
+    /// path is a stub even in working ERSC) and the pump ignores it (`buf[0]=0x0e`=14 is out of the type-1..8
+    /// range), so it does nothing useful — but its channel-30 spam may crowd out / desync the game's OWN
+    /// connect flow, which owns the built endpoint's real send/recv. On = stop it and see whether the game's
+    /// own endpoints complete the DLNW3D handshake (`member+0x152=1`) on their own. Pair with `symmetric_peer`
+    /// (both build endpoints). Set on BOTH machines. Off by default. See docs/STATE.md > Next (a).
+    pub suppress_syn: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

@@ -123,10 +123,10 @@ lobby_callback_probe = false # rung-4 re-derivation probe (poll one private Crea
                            # real discovery driver now runs whenever a password is set, so leave it off
                            # unless re-deriving after a game/Steam update.
 drive_create = true        # SEAM TEST (2026-07-04): drive create after the seam lands a real +0x708. Also
-drive_join = true          # JOIN driver (joiner): drive 0x140cae640 -> TryToJoinSession -> Client. ON for the
-                           # 2026-07-05 client-join run: with symmetric_peer OFF, auto_session governs the role
-                           # (host = create+establish, join = this driver). Inert on the host (do_join=false when
-                           # auto_session=host); drives only on the client. See docs/STATE.md > "Next".
+drive_join = false         # JOIN driver (joiner): drive 0x140cae640 -> TryToJoinSession -> Client. OFF for the
+                           # 2026-07-06 symmetric option-a run (rung3_role forces do_join=false under
+                           # symmetric_peer anyway; kept explicit). Flip true only for an asymmetric client-join run.
+                           # See docs/STATE.md > "Next".
                            # installs the gate-trace hooks that arm land_socket_holder below. Pairs with
                            # gameplay.enable_offline_multiplayer = true.
 join_set_established_bit = true # ★ CLIENT-JOIN FIX (2026-07-05): on the joiner, set container+0x7c0 bit 2
@@ -216,15 +216,17 @@ drive_add_peer_joiner = false # SYMMETRIC ADD-PEER (2026-07-05 night). Idea: the
                            # (a sub-object present on a Host session is null on a Client one). OFF (unsafe). The
                            # joiner needs its game to build the host connection from the host's REAL inbound SYNs
                            # (find-or-create 0x142640e30), not this. See docs/SESSION-DRIVE.md > "RIG RESULT (run 9)".
-symmetric_peer = false     # rung-3 SYMMETRIC-PEER mode (2026-07-05): both machines are host-style peers — each
-                           # builds its session via establish, each drive_add_peers the OTHER, and each SENDS the
-                           # DLNW3D SYN so both worker threads receive and both pumps build the other's endpoint. A
-                           # PROVEN DIAGNOSTIC (both build endpoints, both stable) but leaves both at Host(3) and
-                           # completes no handshake (sends no real type-5). OFF for the client-join run: the endgame
-                           # is asymmetric (host Host(3) + client Client(6)), so auto_session governs the role and
-                           # `drive_establish_handler` is host-gated in code (no FSM fight on the client — the crash
-                           # symmetric_peer sidestepped). Flip true only to re-run the symmetric diagnostic. See
-                           # docs/STATE.md > "Next".
+symmetric_peer = true      # ★ OPTION-A HANDSHAKE EXPERIMENT (2026-07-06): both machines host-style peers — each
+                           # builds its session via establish, each drive_add_peers the OTHER, both build the other's
+                           # member endpoint (member+0x130). PROVEN to build endpoints + be stable. Pair with
+                           # suppress_syn below to test whether the game's own endpoints complete the handshake
+                           # (member+0x152) once we stop spamming the useless 14B SYN. Run --auto-session host on
+                           # BOTH machines (symmetric forces host role in code; p2p_test_peer_a/_b feed the peer so
+                           # no lobby is needed). See docs/STATE.md > Next (a).
+suppress_syn = true        # ★ OPTION-A (2026-07-06): stop our fabricated 14B SYN on channel 30 — it's ignored by the
+                           # pump (buf[0]=14 out of type-1..8 range) and its host-admit purpose is a red herring, so
+                           # it only spams channel 30 and may crowd out the game's own connect flow. Off = old SYN
+                           # behavior. Pair with symmetric_peer. See docs/STATE.md > Next (a).
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether
