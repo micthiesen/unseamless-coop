@@ -3671,3 +3671,57 @@ you must also register the host in the joiner's `ManagerImpl` member collection 
   resolve reads (`ManagerImpl S+0x170`/`+0x98`).
 - The resolve context `S=[socketmgr+0x48]` is the DLNW3D `ManagerImpl` (RTTI `ManagerImpl.cpp`); its
   member-manager role matches `S=[member+0x58]` in "★ STALL-B HANDSHAKE AIM SHEET" Task 5.
+
+### ▶ RIG RESULT (run 10, 2026-07-06) — two-machine: suspect 3 CONFIRMED on the host; host→joiner delivery is a SECOND wall
+
+Ran the aim sheet's decisive splitter two-machine (rig host `--auto-session host`, Deck joiner
+`--auto-session join`), current `main` seed unchanged — the instrumentation was already in place
+(`instrument_host_accept` installs the find-or-create hooks role-independently; the joiner's `drive_p2p`
+force-accepts the host since `unmask` is host-only). Both machines' full logs pulled. **The run split the
+suspects, and the answer is asymmetric:**
+
+**Host (rig) leg — WORKS to the gate, then REJECTS (suspect 3 confirmed):**
+- Host establishes clean: `lobby=Host protocol=Ingame players=1`, warped into map `1800001`; `drive_add_peer`
+  queues the joiner; the GAME emits real 14-byte SYNs to the joiner (`GAME-SENDP2P` to `peer-cf17b9f9`).
+- The joiner's real SYNs REACH the host: `host-admit 0x142640e30 ... sender peer-cf17b9f9 (msgSize=14)`
+  fires repeatedly (joiner→host transport delivery works).
+- **Gate-c = REJECT, every time:** `host-admit-gate-c` `[socketmgr+0x40]` **returned 1 (REJECT) ×6**, and
+  **`host-admit-SUCCESS 0x142640ee4` NEVER fired** (0 occurrences). So the host reaches the member-resolve
+  and the peer is **not found** in the socket-manager member collection → no connection built → `players`
+  stays 1. This is exactly the aim sheet's prime prediction: **suspect 3 (member registration) is the wall**,
+  and `drive_add_peer` (which appends to `SessionSteam+0x4f0`) does NOT populate the collection the resolve
+  reads (`S=[socketmgr+0x48]`, `S+0x170`/`S+0x98`).
+
+**Joiner (Deck) leg — NO INBOUND DELIVERY AT ALL (a second, upstream wall):**
+- Joiner force-accepts the host (`AcceptP2PSessionWithUser(peer-64b3a95a) = true`), reaches
+  `lobby=Client protocol=WaitInitData`, its worker `0x142640bc0` drains **channel 30** (matches the host's
+  send channel — suspect 1 stays ruled out) with `connections_span=0`.
+- **The joiner's find-or-create `0x142640e30` NEVER fires** (0 host-admit/gate-c/success), and the joiner's
+  probe drain sees **0 RECV** (no channel-0 ping delivered either). So **nothing from the host reaches the
+  joiner's `ReadP2PPacket`** — total host→joiner delivery failure, despite the proactive accept. The joiner
+  parks at `WaitInitData` ~30s then tears down (`Client→None`, frame 2109).
+- So the two legs are **asymmetric**: joiner→host delivers (host-admit fires), host→joiner does not. Since
+  the joiner's find-or-create can't be observed, its gate-c can't be read directly — but by symmetry the same
+  member-resolve would reject there too.
+
+**What this pins down / next (two walls, tackle the observable one first):**
+- **Wall 1 (observable NOW, on the host): the member-resolve rejects.** Immediate lever = aim-sheet **3a**:
+  register the peer in the socket-manager's `ManagerImpl` member collection `S=[socketmgr+0x48]` so the
+  resolve `0x142639d00` returns found → gate-c flips 1→0 → `host-admit-SUCCESS 0x142640ee4` fires → host
+  builds the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2. **First resolve the
+  real-vs-stub question the aim sheet flagged:** is the lookup vmethod `[S+0x168]` a *real* lookup over
+  `S+0x170`, or the stub `0x1423fdf00` (`mov eax,1; ret`, always "not found")? If a real lookup, 3a works;
+  if the stub, registering members is inert and we need a fuller service/context init that installs a real
+  `[S+0x168]` (lever 3b territory). **Cheap to answer:** statically chart `ManagerImpl`'s vtable and read
+  `[vtable+0x168]`, OR live-enhance the gate-c probe to log `S=[socketmgr+0x48]`, `[S]` (vtable), and
+  `[[S]+0x168]` (the resolve fn) — one read tells us real-vs-stub.
+- **Wall 2 (host→joiner delivery): why the joiner never receives.** The single proactive
+  `AcceptP2PSessionWithUser` didn't open the inbound leg (0 RECV). Hypothesis: legacy P2P accept only takes
+  in response to a `P2PSessionRequest_t`, or the game closes the session because the host isn't a member —
+  in which case Wall 2 is *downstream of* Wall 1 (register the host as a member on the joiner and its game
+  keeps the session). Re-test Wall 2 after Wall 1's member-registration lever lands; if it persists, chart
+  the joiner's `P2PSessionRequest_t`/accept path directly. (Note: the 2026-07-03/04 game-P2P proof saw
+  bidirectional RECV — but that was our probe's own channel-0 ping/drain with both sides live and accepting
+  each tick; this run's host→joiner leg rides the game session, which tears down at WaitInitData.)
+
+Logs: rig via `scripts/rig.sh log`; Deck pulled to `.deck-logs/unseamless_coop-1783299492-336.log`.

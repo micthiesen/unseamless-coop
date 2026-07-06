@@ -11,12 +11,14 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05** (/next: the inbound-path Next stands — static charting of the three suspects
-delegated to a fleet lane; the two-machine confirm run stays orchestrator-serial. A second lane for the
-seamlessness gate was spawned on a stale premise and torn down: **that gate already shipped 2026-07-04 as
-`gameplay.stay_connected`**, see Candidates. Ground state below is the 2026-07-05 late-night wrap: stall B
-walked down across NINE two-machine runs to the **joiner's INBOUND path** — the host emits real DLNW3D
-SYNs, but the joiner's game never builds the host connection from them.)
+Last updated: **2026-07-06** (RUN 10 — the decisive splitter ran two-machine. **Suspect 3 (member
+registration) is CONFIRMED** on the observable host leg: the host receives the joiner's real SYNs, reaches
+the member-resolve gate-c `[socketmgr+0x40]=0x142639d00`, and it returns **1=REJECT ×6** — `host-admit-SUCCESS
+0x142640ee4` never fires, so no connection, `players` stays 1. A **second wall** surfaced: host→joiner P2P
+delivery is dead (joiner's find-or-create never fires, 0 RECV) despite the joiner force-accepting — the legs
+are asymmetric. Full result: SESSION-DRIVE.md > "▶ RIG RESULT (run 10)". Prior: the /next chart landed +
+integrated; the seamlessness-gate lane was a stale-premise dup — `gameplay.stay_connected` already shipped
+2026-07-04.)
 
 ## Now
 
@@ -27,13 +29,15 @@ SYNs, but the joiner's game never builds the host connection from them.)
   establish handler to a stable `Host`/`Ingame` with the full member graph; the client's `drive_join` +
   `join_set_established_bit` (direct `container+0x7c0` bit-2 OR) builds the per-peer emitter connection and
   parks at `Client/WaitInitData`, stable, no crash.
-- **★ Stall B is now narrowed to the joiner's INBOUND transport.** Host-side `drive_add_peer 0x1423fdc80`
-  queues the joiner and the **host's game emits real 14-byte DLNW3D SYNs** to it (`GAME-SENDP2P 0x142640b20`);
-  with bidirectional accept the host also receives the joiner's packets, and the host's real
-  connection-creator `TAG1-CONNSTATUS 0x1423fe350` fires. **But the JOINER never builds the host connection**
-  — its worker `0x142640bc0` drains channel 30 with `connections_span=0` and its find-or-create `0x142640e30`
-  never fires on the host's inbound SYNs — so it parks at `WaitInitData` and times out (~30s; the "INIT gate"
-  `0x1423fbe10` is a countdown, not a data gate).
+- **★ Stall B root = the socket-manager member-resolve gate (run 10 CONFIRMED it on the host).** The joiner's
+  real SYNs reach the host's find-or-create `0x142640e30`; it hits the member-resolve `[socketmgr+0x40]=
+  0x142639d00` and **rejects (gate-c returns 1) because the peer isn't in the socket-manager member collection**
+  (`S=[socketmgr+0x48]`, `S+0x170`/`S+0x98`). `host-admit-SUCCESS 0x142640ee4` never fires ⇒ no connection ⇒
+  `players` stays 1. `drive_add_peer 0x1423fdc80` does NOT fix this — it appends to a *different* collection
+  (`SessionSteam+0x4f0`), not the one the resolve reads. **Second wall (run 10):** host→joiner P2P delivery is
+  dead — the joiner force-accepts but its worker `0x142640bc0` drains channel 30 empty and find-or-create
+  never fires (0 RECV), so it parks at `WaitInitData` and times out (~30s). See SESSION-DRIVE.md > "★ JOINER
+  INBOUND AIM SHEET" + "▶ RIG RESULT (run 10)".
 - **Two leads killed this session (don't re-tread):** `session+0x5a8` (vtable `0x1431fa918`) is
   `DLNR3D::VoiceChatSteam`, not a connection object — `0x142401e80` is the voice pump, not a peer dial (runs
   5/6). And the joiner must **not** drive add-peer itself: it enqueues but crashes the Client session ~10s
@@ -44,28 +48,27 @@ SYNs, but the joiner's game never builds the host connection from them.)
 
 ## Next
 
-**★ Run the decisive joiner-inbound splitter (config-ready; blocked only on a free rig), then act on it.**
-The static chart landed (SESSION-DRIVE.md > "★ JOINER INBOUND AIM SHEET"): suspect 1 (channel) is ruled
-out, and suspects 2 (P2P accept) + 3 (member registration) are ONE gate — the member-resolve
-`[socketmgr+0x40]=0x142639d00` fails for the host on the joiner's Client session, and it guards BOTH the
-accept path `0x1426408b0` and find-or-create `0x142640e30`. The host is never registered in the joiner's
-transport member collection (`S=[socketmgr+0x48]`, `S+0x170`/`S+0x98`); `drive_add_peer` on the joiner is
-the wrong collection (`SessionSteam+0x4f0`) AND crashes (run 9).
+**★ Land aim-sheet lever 3a — register the peer in the socket-manager member collection so the resolve
+passes — but first answer the real-vs-stub question it hinges on.** Run 10 confirmed the wall is the
+member-resolve; the fix is to make `0x142639d00` return *found* for the peer. It hinges on one unknown:
+is the lookup vmethod `[S+0x168]` (S=`[socketmgr+0x48]`) a **real lookup** over the member collection
+`S+0x170`, or the **stub `0x1423fdf00`** (`mov eax,1; ret`, always "not found")?
+- **If real:** register the peer in `S`'s `ManagerImpl` collection (`S+0x170`/`S+0x98`) — chart the member-add
+  that *writes* it (sibling of the `[S+0x168]` lookup vmethod; aim-sheet lever 3a), call it on the HOST with
+  `S` + the peer SteamID64, and watch gate-c flip 1→0 → `host-admit-SUCCESS 0x142640ee4` fires → host builds
+  the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2.
+- **If the stub:** registering members is inert; we need a fuller service/context init that installs a real
+  `[S+0x168]` (aim-sheet lever 3b — latch the Arxan-decoded target live if dispatch-only).
 
-**The splitter run needs NO new code — the current `main` seed already runs it:** on the joiner,
-`drive_p2p` already force-accepts the host (`unmask` is host-only), and `install_host_accept_trace` installs
-the find-or-create entry (`0x142640e30`) + resolve gate-c (`0x142640ecd`) + success (`0x142640ee4`) hooks
-**role-independently**, so they observe the JOINER's worker. Just run the two-machine cycle with roles:
-`rig.sh cycle --auto-session host` + `deck.sh cycle --auto-session join` (Deck reachable at
-`deck@10.10.1.57:2222`, applied), then read the **Deck** log:
-- find-or-create entry fires + gate-c logs **REJECT** (rax≠0) ⇒ **suspect 3** (member registration is the
-  wall) ⇒ next = register the host in the joiner's `ManagerImpl` member collection (aim-sheet lever 3a:
-  chart the member-add that writes `S+0xa0`/`S+0x170`, sibling of the lookup vmethod `[S+0x168]`; 3b =
-  latch the Arxan-decoded add target live if it's dispatch-only). Predicted most-likely per the ranking.
-- entry fires + gate-c **ACCEPT** + success `0x142640ee4` fires ⇒ **suspect 2** was the wall (accept) ⇒
-  the connection builds (`conn+0x138=hostID`), init-data flows, `session+0x3cc→2`, `players=2`.
-(`force_gatec_accept` stays OFF for this run — we observe the real verdict; forcing rax=0 alone is
-insufficient anyway since the success path then calls the null finisher `[local+0x60]`.)
+**Answer real-vs-stub cheaply first (partly static-delegable):** (a) STATIC — chart `ManagerImpl`'s vtable and
+read `[vtable+0x168]` (is it `0x1423fdf00`?); (b) LIVE — enhance the gate-c probe (`log_host_admit_gatec`) to
+also log `S=[socketmgr+0x48]`, `[S]`, `[[S]+0x168]` on the host, one cheap rig cycle. Do the observable HOST
+leg first (its find-or-create fires, so gate-c is readable); the joiner leg has a **second wall** —
+host→joiner delivery is dead (run 10: 0 RECV, joiner find-or-create never fires despite force-accept). Treat
+Wall 2 as likely *downstream* of Wall 1 (register the host as a member on the joiner → its game keeps the
+inbound session) and re-test after 3a; if it persists, chart the joiner's `P2PSessionRequest_t`/accept path.
+Seed already runs the observation; `force_gatec_accept` stays OFF (forcing rax=0 alone is insufficient — the
+success path then calls the null finisher `[local+0x60]`). Deck reachable at `deck@10.10.1.57:2222`.
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
