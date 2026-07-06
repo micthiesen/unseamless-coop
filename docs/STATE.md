@@ -44,21 +44,35 @@ SYNs, but the joiner's game never builds the host connection from them.)
 
 ## Next
 
-**★ Chart the joiner's INBOUND path so its game builds the host connection from the host's real SYNs.**
-The host already sends real DLNW3D SYNs to the joiner; the last gap is that the joiner's find-or-create
-`0x142640e30` never fires on them. Make it fire (creating a `SteamConnection` with `conn+0x138=hostID`) and
-the host's already-firing tag-1 handler `0x1423fe350` promotes the connection → init-data flows →
-`session+0x3cc→2` → `players=2`. This is the joiner's *inbound* mechanism, NOT another outbound driver.
+**★ Run the decisive joiner-inbound splitter (config-ready; blocked only on a free rig), then act on it.**
+The static chart landed (SESSION-DRIVE.md > "★ JOINER INBOUND AIM SHEET"): suspect 1 (channel) is ruled
+out, and suspects 2 (P2P accept) + 3 (member registration) are ONE gate — the member-resolve
+`[socketmgr+0x40]=0x142639d00` fails for the host on the joiner's Client session, and it guards BOTH the
+accept path `0x1426408b0` and find-or-create `0x142640e30`. The host is never registered in the joiner's
+transport member collection (`S=[socketmgr+0x48]`, `S+0x170`/`S+0x98`); `drive_add_peer` on the joiner is
+the wrong collection (`SessionSteam+0x4f0`) AND crashes (run 9).
 
-- **Decision (2026-07-05, /next): split confirmed.** The static chart of the three suspects runs as a
-  fleet lane (deliverable: a "joiner inbound" aim-sheet section in SESSION-DRIVE.md with a concrete lever
-  per suspect); the orchestrator wires the resulting probes/levers and runs the two-machine confirm.
-- **Three suspects to instrument (static chart is delegable; the confirm run is serial):**
-  (a) **channel** — does the host's `SendP2PPacket 0x142640b20` go out on the channel the joiner's worker
-  `0x142640bc0` drains (30)? Log both sides' channel. (b) **P2P accept** — does the joiner accept the host's
-  Steam P2P session so Steam even delivers the packets? (c) the joiner-side **admit shape/identity gate** at
-  its `0x142640e30`. Full map + all nine runs: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE
-  AIM SHEET" and the two following aim-sheet sections (each with its "▶ RIG RESULT" addenda, runs 4–9).
+**The splitter run needs NO new code — the current `main` seed already runs it:** on the joiner,
+`drive_p2p` already force-accepts the host (`unmask` is host-only), and `install_host_accept_trace` installs
+the find-or-create entry (`0x142640e30`) + resolve gate-c (`0x142640ecd`) + success (`0x142640ee4`) hooks
+**role-independently**, so they observe the JOINER's worker. Just run the two-machine cycle with roles:
+`rig.sh cycle --auto-session host` + `deck.sh cycle --auto-session join` (Deck reachable at
+`deck@10.10.1.57:2222`, applied), then read the **Deck** log:
+- find-or-create entry fires + gate-c logs **REJECT** (rax≠0) ⇒ **suspect 3** (member registration is the
+  wall) ⇒ next = register the host in the joiner's `ManagerImpl` member collection (aim-sheet lever 3a:
+  chart the member-add that writes `S+0xa0`/`S+0x170`, sibling of the lookup vmethod `[S+0x168]`; 3b =
+  latch the Arxan-decoded add target live if it's dispatch-only). Predicted most-likely per the ranking.
+- entry fires + gate-c **ACCEPT** + success `0x142640ee4` fires ⇒ **suspect 2** was the wall (accept) ⇒
+  the connection builds (`conn+0x138=hostID`), init-data flows, `session+0x3cc→2`, `players=2`.
+(`force_gatec_accept` stays OFF for this run — we observe the real verdict; forcing rax=0 alone is
+insufficient anyway since the success path then calls the null finisher `[local+0x60]`.)
+
+- **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
+  now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
+  `07ca862`, the aim sheet), then was torn down. The three suspects collapsed to one (member-resolve gate);
+  full map + all nine prior runs: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ JOINER INBOUND AIM SHEET" (and
+  the "★ STALL-B HANDSHAKE" / "P2P-EVENT" / "JOINER PEER-WIRE" sheets it builds on, with their runs-4–9
+  "▶ RIG RESULT" addenda).
 - **Instrument + config state (on `main`):** B0/B1/B4/B5 probes wired (`session_probe.rs`). Seed
   (`scripts/rig/seed-config.toml`): `drive_add_peer` ON (host → real SYNs), `host_skip_p2p_accept` **OFF**
   (host must accept the joiner so its return leg isn't dropped), `drive_add_peer_joiner` **OFF** (crashes the
