@@ -78,17 +78,23 @@ ticket-timing / `member+0x80` identity are moot until delivery works. The valida
 on `main`) stays armed as the acceptance signal: once the connection is registered, `TYPE5-VALIDATOR FIRED` flipping
 from "never" to "fires" confirms delivery, then watch `member+0x152`.
 
-### The register work — the questions to answer (in order)
+### The register work — path B (DIRECT insert), charted 2026-07-06 (run 17 static)
 
-1. **The connection-table shape.** Confirm `[socketmgr+0xb8..0xc0]` is the array recv searches and `+0x138` is the
-   `SteamConnection`'s peer-id key (both from the Q1 chart — re-verify live with `scan-vtable.py` / a read of the
-   socketmgr). Find where `socketmgr` is reachable from what `stand_up_transport` already holds.
-2. **The register primitive.** Is there a game fn that inserts a `SteamConnection` into the table (the natural
-   join flow's registrar), or do we write the array slot + `+0x138` ourselves? Prefer the game fn if charted.
-3. **Which connection object.** The one `stand_up_transport` builds, or the DLNW3D endpoint's own transport
-   (`endpoint+0x18`)? They must be the same object recv's deliver path (`0x142642860`) expects.
-4. **Symmetric vs one-sided.** Both machines already send + receive; registering on both (symmetric) should
-   complete both members. Keep `symmetric_peer` + `send_type5` on.
+The admit fn `0x142640e30` was charted end-to-end (SESSION-DRIVE.md > "★ STATIC CHART"): it mints+registers a
+connection ONLY from a **14-byte SYN** (our type-5 fails the SYN-shape gate `0x142642830`), and even the game's own
+SYNs die at gate-c because the member-resolve bottoms out in the `[S+0x168]` **stub** and never fills the connection
+factory — so **`force_gatec_accept` alone is insufficient** (the factory ptr `[rsp+0x80]` stays null). ⇒ **Don't go
+through admit. Insert the `SteamConnection` directly into `[socketmgr+0xb8..0xc0]`** (the table recv's sender-id
+search reads), keyed `+0x138==peerSteamID64`, so recv finds it + delivers. Open questions to answer next:
+
+1. **The table's insert mechanics.** `+0xb8`=begin, `+0xc0`=end — is it a `Vec`-like push (grow + write slot), and
+   is there a game insert fn, or do we write the slot + bump `+0xc0` ourselves? Re-verify the table live.
+2. **The entry's key.** Set the new `SteamConnection`'s `+0x138` = the peer SteamID64 (what recv matches on).
+3. **Which connection object + is it wired enough.** Reuse the one `stand_up_transport` builds off the game heap, or
+   the DLNW3D endpoint's own transport (`endpoint+0x18`)? It must be the object the deliver path `0x142642860`
+   expects to enqueue onto the pump's endpoint queue.
+4. **Symmetric.** Both machines send + receive; register on both. Keep `symmetric_peer` + `send_type5` +
+   `instrument_type5_recv` on (watch `TYPE5-VALIDATOR FIRED` flip once delivery works).
 
 **Ticket-timing note (still relevant):** `GetAuthSessionTicket` fills bytes synchronously but a remote
 `BeginAuthSession` only accepts after Steam fires `GetAuthSessionTicketResponse_t` (~ms). The sender already

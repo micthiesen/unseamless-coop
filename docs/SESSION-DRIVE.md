@@ -4302,3 +4302,33 @@ This removes a whole branch from the Next step: the entire remaining job is **re
 so recv's sender-id search *hits* and delivers (`0x142643db0`→`0x142642860`) into the endpoint queue → pump → validator
 → `+0x152=1`. The validator hook stays on `main` as the acceptance signal: once the connection is registered, watch
 for `TYPE5-VALIDATOR FIRED` to flip from "never" to "fires", then watch `member+0x152`.
+
+### ★ STATIC CHART — how admit `0x142640e30` registers a connection, and why our type-5 can't use it
+
+Disassembled the admit fn end to end (clean 2.6.2, `static.py fn 0x142640e30`). In order (`rcx=socketmgr`,
+`rdx=sender`, `r8=buf`, `r9d=msgSize`):
+1. **Size gate** `cmp [socketmgr+0x5c], msgSize; jae ok` — needs `[socketmgr+0x5c] >= msgSize`.
+2. **SYN-shape gate** (only if `[socketmgr+0x61]!=0`): `call 0x142642830(rcx=buf, edx=msgSize); test al,al; jz reject`.
+   **Our 249B type-5 fails HERE** — it's not a 14-byte SYN, so it's rejected before gate-c ever runs. Admit mints a
+   connection ONLY from a SYN-shaped packet.
+3. Zero a ~0x70B stack struct `[rsp+0x20..0x88]`, then **gate-c** `call [socketmgr+0x40]` (the member-resolve;
+   `rdx=&struct`). `test eax,eax; jnz reject`, then `cmp [rsp+0x80],0; jz reject` — the resolve must **return 0 AND
+   fill `[rsp+0x80]`** (a connection-factory fn ptr) + `[rsp+0x88]` (its context).
+4. **Success `0x142640ee4`:** `call [socketmgr_vtable+8](socketmgr, sender, &struct)` **creates** the connection
+   (returns it in rax), then `call [rsp+0x80](newConn, [rsp+0x88])` **wires/registers** it. Returns the new connection.
+
+So admit's register path is gated twice against us: our data packet isn't a SYN (gate 2), and even the game's own
+14-byte SYNs die at gate-c because the member-resolve bottoms out in the `[S+0x168]` **stub** (`mov eax,1;ret` → "not
+found" → returns non-zero → reject) and never fills the `[rsp+0x80]` factory. `force_gatec_accept` (forces eax=0 at
+`0x142640ecd`) is therefore **insufficient alone** — `[rsp+0x80]` stays null, so `0x142640ede` still rejects.
+
+**⇒ Concrete next approach = DIRECT registration (path B), not admit.** Rather than satisfy admit's SYN+resolve
+gates, **insert a `SteamConnection` straight into `[socketmgr+0xb8..0xc0]` keyed `+0x138==peerSteamID64`** — the exact
+table recv's sender-id search reads — so recv *finds* it and delivers our type-5 (`0x142643db0`→`0x142642860`) into
+its endpoint queue. `stand_up_transport` already builds a `SteamConnection` off the game heap; the open questions are
+(a) the table's growth/insert mechanics (`+0xb8`=begin, `+0xc0`=end — is it a `Vec`-like push, and is there a game
+insert fn?), (b) setting the new entry's `+0x138` to the peer id, and (c) whether that connection is wired enough for
+the deliver path (`0x142642860`) to enqueue onto the endpoint the pump reads. Alternative (path A, heavier): install a
+real `[S+0x168]` member-lookup so the game's own SYN admit-success runs — but that's the lever-3b service/context
+init we've avoided; path B is the smaller bet. **Next rig run:** build the direct-insert lever, watch
+`TYPE5-VALIDATOR FIRED` flip + `member+0x152`.
