@@ -4418,3 +4418,14 @@ minted inside the manager-setup path. **Next static step (rig-independent):** fi
 see which establishment step invokes it and whether we can drive that directly — potentially closing this WITHOUT the
 Michael-gated ERSC capture. The capture remains the high-confidence fallback (watch-write on `[sm+0xc0]` catches the
 exact registrar live).
+
+**► STATIC TRACE RESULT (continued) — the chain bottoms out at a RUNTIME-dispatched factory; the live capture is now
+necessary + sharper.** Climbed the chain: ctor `0x142643b50` ← `0x142640560` (conn/manager init, sole caller) ←
+**`0x14263b720`** = the `SteamConnection` **factory** (allocates `0x1b8` bytes via `0x141eb9ed0`, constructs
+`0x14263f700`, inits `0x142640560`, returns the conn). But `0x14263b720` has **0 direct E8 callers AND 0 raw-pointer
+occurrences in the image** — so it's invoked via a **vtable slot populated at runtime** (the same Arxan dynamic-dispatch
+pattern that blocked the type-5 send `0x142400df0`). ⇒ Static analysis cannot name the establishment step that calls it.
+**So the live ERSC capture is the path (not a fallback), and now targeted: on a real ERSC 2-player join, breakpoint/watch
+the factory `0x14263b720` (or the register write to `[sm+0xc0]`) — its caller/return address names the establishment
+function to drive.** Hand the capture these addrs: factory `0x14263b720`, init `0x142640560`, ctor `0x142643b50`, conn
+size `0x1b8`, key `+0x138`, vtable `0x143278358/70`.

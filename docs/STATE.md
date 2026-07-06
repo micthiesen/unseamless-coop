@@ -21,9 +21,10 @@ remaining job is **registering the peer's transport `SteamConnection`** in `[soc
 closed both cheap shortcuts (`force_gatec_accept` DEAD by disasm; `STANDUP_CONNECTION` is a socketmgr wrapper, not a
 pushable conn) and pinned the target against **ERSC ground truth**: a working session differs from ours by exactly ONE
 object — a `SteamConnection` (`+0x138`=peerID) registered in the live socketmgr — created by the establishment flow we
-skip. **Next: trace the connection's creator** — the ctor is `0x142643b50`, minted inside `0x142640560` (static lead,
-rig-independent); finish that trace to find + drive the establishment step, else fall back to a Michael-gated ERSC
-watch-write. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follow-up)".
+skip. The static trace found the connection's whole creation chain (ctor `0x142643b50` ← init `0x142640560` ← factory
+`0x14263b720`) but it bottoms out — the factory is invoked via a **runtime-dispatched (Arxan) vtable slot**, so
+**Next is a Michael-gated ERSC capture** to breakpoint the factory + name its establishment caller. Full evidence:
+SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follow-up)".
 
 ## Now
 
@@ -98,18 +99,20 @@ truth (full detail: SESSION-DRIVE.md > "★ ANALYSIS (run-18 follow-up)"):
   (`flags=(0,0,1,0)`, `+0x152=1`, token stored). Ours has 0 conns → member stuck at `(0,1,0,0)`. The conn is created +
   registered by ERSC's **establishment flow**, the step our synthetic drive skips.
 
-**★ NEXT — two paths to the connection's creator/registrar (try the static one first, it's not gated):**
-1. **STATIC (rig-independent, delegable):** the `SteamConnection` ctor is **`0x142643b50`**, found by vtable xref
-   (`0x143278358/70`); its **sole caller is `0x142640560`** (a `SteamConnectionManager` setup). Finish reading
-   `0x142640560` (where it sets the new conn's `+0x138`=peerID and whether it pushes into `[self+0xb8..0xc0]`), then
-   `calls 0x142640560` to find which establishment step invokes it — and whether we can drive that step in our flow.
-   This could close it WITHOUT a real ERSC session. (SESSION-DRIVE.md > "★ STATIC LEAD".)
-2. **ERSC CAPTURE (Michael-gated, high-confidence fallback):** restore ERSC, Michael hosts + Deck joins, arm
-   `watch-write.py` on the live `SteamConnectionManager`'s `[sm+0xc0]` — the RIP that bumps it names the registrar
-   live, and the session gives the conn's full layout for direct construction.
+**★ NEXT — ERSC live capture of the connection's creator (Michael-gated; the static trace bottomed out).**
+The static trace climbed the whole creation chain — ctor `0x142643b50` ← init `0x142640560` ← **factory
+`0x14263b720`** (allocs `0x1b8`B, returns the conn) — but the factory has **0 direct callers + 0 raw-pointer refs in
+the image**, so it's dispatched through a **runtime-populated vtable slot** (Arxan pattern, like the type-5 send). ⇒
+static can't name the establishment step that calls it. **So: restore ERSC, Michael hosts + Deck joins (a real
+2-player session), and breakpoint/watch the factory `0x14263b720` (or the register write to `[sm+0xc0]`) — its
+caller/return address names the establishment function to drive** (and the live session gives the conn's full layout
+for direct construction as a backup). Chain addrs for the capture: factory `0x14263b720`, init `0x142640560`, ctor
+`0x142643b50`, conn size `0x1b8`, key `+0x138`, vtable `0x143278358/70`. Details: SESSION-DRIVE.md > "★ STATIC LEAD"
++ "► STATIC TRACE RESULT (continued)".
 
 This re-connects the type-5 thread to the rung-3 establishment saga: **the type-5 producer is DONE; delivery needs the
-transport `SteamConnection`; the connection is minted in `0x142640560` by an establishment step we must locate + drive.**
+transport `SteamConnection`; the connection is minted by the factory `0x14263b720`, invoked by an establishment step
+that only a live ERSC capture can name.**
 
 **Ticket-timing note (still relevant, post-delivery):** `GetAuthSessionTicket` is sync but `BeginAuthSession` only
 accepts after `GetAuthSessionTicketResponse_t` (~ms); the sender caches + retries on a throttle, so once delivery works
