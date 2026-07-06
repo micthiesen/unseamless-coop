@@ -11,12 +11,14 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (RUN 11 — real-vs-stub SETTLED live. The member-lookup vmethod **`[S+0x168]`
-IS the stub `0x1423fdf00`** (always not-found); the collection is NON-empty (has members); the live resolve
-callback is `0x142639810` (not the statically-charted `0x142639d00`). So **lever 3a (register a member) is
-INERT** — the stub ignores the collection — and **lever 3b (install a REAL `[S+0x168]` lookup) is the path.**
-Prior: run 10 confirmed the member-resolve is the wall (gate-c REJECT ×6, host-admit-SUCCESS never fires) +
-a 2nd wall (host→joiner delivery dead). Full: SESSION-DRIVE.md > "▶ RIG RESULT (run 10/11)".)
+Last updated: **2026-07-06** (★ COURSE-CORRECTION. Cross-checking the ERSC captures (Michael: "use the info
+I captured") revealed runs 4–11 — including this session's runs 10/11 chasing the transport gate-c /
+`[S+0x168]` member-resolve — were a **red herring**: ERSC-LIVE-CAPTURE correction #1 already proved that stub
+is present *even in working ERSC*, and the connection is built by the session-layer pump, not find-or-create.
+The **real frontier** (charted 2026-07-05, ahead of the stall-B trail): the endpoint `member+0x130` is
+already built by the game's pump; the sole gap is **completing the DLNW3D handshake** (`member+0x152=1` via a
+real type-5 message — our 14-byte SYN is out of the pump's type range). STATE re-anchored on that; the
+gate-c path is now marked DO-NOT-RE-LITIGATE.)
 
 ## Now
 
@@ -27,56 +29,54 @@ a 2nd wall (host→joiner delivery dead). Full: SESSION-DRIVE.md > "▶ RIG RESU
   establish handler to a stable `Host`/`Ingame` with the full member graph; the client's `drive_join` +
   `join_set_established_bit` (direct `container+0x7c0` bit-2 OR) builds the per-peer emitter connection and
   parks at `Client/WaitInitData`, stable, no crash.
-- **★ Stall B root = a STUB member-lookup on our stood-up context (run 11 settled it).** The joiner's real
-  SYNs reach the host's find-or-create `0x142640e30`; it hits the member-resolve `[mgr+0x40]=0x142639810`,
-  which dispatches to the lookup vmethod **`[S+0x168]` = the stub `0x1423fdf00`** (`mov eax,1; ret`, always
-  not-found), so the resolve REJECTS (gate-c returns 1) and `host-admit-SUCCESS 0x142640ee4` never fires ⇒ no
-  connection ⇒ `players` stays 1. **The member collection is NON-empty** (`[S+0x98..0xa0]` span 0x28, `[S+0x170]`
-  non-null) — so the wall is the stub lookup, not a missing member. `drive_add_peer` (writes `SessionSteam+0x4f0`)
-  AND aim-sheet lever 3a (register in `S+0x170`) are BOTH inert against a stub that ignores the collection.
-  **Second wall (run 10):** host→joiner P2P delivery is dead — the joiner force-accepts but its worker
-  `0x142640bc0` drains channel 30 empty and find-or-create never fires (0 RECV), so it parks at `WaitInitData`
-  and times out (~30s). See SESSION-DRIVE.md > "★ JOINER INBOUND AIM SHEET" + "▶ RIG RESULT (run 10/11)".
-- **Two leads killed this session (don't re-tread):** `session+0x5a8` (vtable `0x1431fa918`) is
-  `DLNR3D::VoiceChatSteam`, not a connection object — `0x142401e80` is the voice pump, not a peer dial (runs
-  5/6). And the joiner must **not** drive add-peer itself: it enqueues but crashes the Client session ~10s
-  later (run 9, ACCESS_VIOLATION reading null `+0x5f8`, add-peer in the backtrace).
-- **The type-5 completion protocol is banked** (ERSC capture #2): completion = a type-5 DLNW3D message (Steam
-  auth ticket via `GetAuthSessionTicket`) the host validates with `BeginAuthSession` (`0x142402ee0`) →
-  `member+0x152=1`. Dumps at `~/Documents/ersc-session-ref-{host,client}.txt`.
+- **★★ REAL FRONTIER = complete the DLNW3D handshake (`member+0x152=1`). The endpoint is already built.**
+  The captured 2026-07-05 state (SESSION-DRIVE > "★★★ HOST BUILDS THE JOINER ENDPOINT" + "SYMMETRIC PEER"):
+  `drive_add_peer` queues the peer member and **the game's own per-frame pump `0x1424007e0 → 0x142401110 →
+  0x14203ef70` builds `member+0x130`** (a live `MTInternalThreadSteamConnection`, vtable `0x143277750`) — on
+  both machines, stable, no crash. The one gap: member flags reach `(0,1,0,0)` (`+0x151`, set by the endpoint
+  build) vs working ERSC `(0,0,1,0)` (`+0x152`). `+0x152` is set only by a **type-5** pump message; our
+  fabricated 14-byte SYN (`buf[0]=0x0e`=14) is **out of the pump's type-1..8 range → ignored**, so the
+  handshake never completes and the member is dropped/re-added, `players` stuck at 1.
+- **⚠️ RED HERRING (runs 4–11, incl. this session's 10/11) — DO NOT RE-LITIGATE:** the transport
+  gate-c / find-or-create `0x142640e30` / `[S+0x168]` member-resolve path is **NOT** the admission mechanism.
+  ERSC-LIVE-CAPTURE-FINDINGS correction #1 proved `[context+0x168]` = the stub `0x1423fdf00` **even in a fully
+  working 2-player ERSC session**; run 11 only re-confirmed the stub is `mov eax,1; ret` on our side too. The
+  connection is built by the **session-layer pump** (above), not the transport worker's find-or-create. Levers
+  3a/3b (make `[S+0x168]` real) are moot — a real session doesn't have it real either. `drive_add_peer_joiner`
+  and `session+0x5a8` (voice, `0x142401e80`) remain killed leads.
+- **The type-5 completion protocol is fully charted** (ERSC capture #2). Pump `0x1424007e0`, `buf[0]`=type,
+  jump table `0x1424009f8`; **type 5** (`0x142400924`) reads 8B token, calls conn `vtable[0x88]` validator
+  `0x142402ee0` → `conn+0x148`=token, **`conn+0x152`=1 (COMPLETE)**. Type-5 payload = `{8B token, 4B len
+  (1..0x400), len·blob}` = a real **Steam auth ticket** (`GetAuthSessionTicket`) validated with
+  `BeginAuthSession` against `member+0x80`. Full 8-message table: ERSC-LIVE-CAPTURE-FINDINGS > "★ The DLNW3D
+  connect protocol". Dumps at `~/Documents/ersc-session-ref-{host,client}.txt` + `ersc-live-capture*.txt`.
 
 ## Next
 
-**★ Lever 3b — install a REAL `[S+0x168]` member-lookup on our stood-up socket-manager context.** Run 11
-settled real-vs-stub: `[S+0x168]` is the stub `0x1423fdf00`, so 3a is dead. Our context `S` (built by
-`stand_up_transport` + the establish handler) never got the real member-lookup wired because the online
-member-service init that installs it doesn't run offline. Make `[S+0x168]` a real lookup over the
-already-populated collection → resolve finds the peer → gate-c ACCEPT → `host-admit-SUCCESS 0x142640ee4`
-fires → host builds the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2.
+**★ Complete the DLNW3D handshake — get `member+0x152=1`.** The endpoint (`member+0x130`) is already built
+by the game's own pump; the sole gap is that a **valid type-5 completion message** never reaches the pump in
+our driven setup. Two approaches, cheapest first:
 
-**Structure charted (member-add-chart lane, integrated):** `S = [socketmgr+0x48]` is a
-`DLNR3D::ManagerImplSteam`; the registry is a **delegate pair** `[S+0x168]` (lookup fn-ptr) + `[S+0x170]`
-(bound container), **both zeroed at ctor and bound at session-establish** — the step our driven join skips.
-Members are `SessionMemberSteam` (0x170B) minted **only** by the Arxan factory `0x1423fdf20` from two
-refcounted identity handles — so there is **no cheap `insert(S, u64)`** and no static writer of `[S+0x168]`
-(the bind is Arxan/off-image). Full: SESSION-DRIVE.md > "★ MEMBER-ADD WRITER".
+**(a) FIRST — cheap experiment, no ERSC restore, no new capture: let the game's own endpoints talk.** Our
+fabricated 14-byte SYN spam on channel 30 is ignored by the pump (out of type range) and may be *interfering*
+with / crowding out the game's own connect flow, which owns the built endpoint's real send/recv
+(`endpoint+0x20/+0x28`). Test in `symmetric_peer` mode (both build endpoints):
+1. **Stop sending the fabricated SYN once `member+0x130` is built** (gate the `drive_p2p` SYN on
+   endpoint-null) — small change in `session_probe.rs`.
+2. **Hold the member longer** — extend the ~30s drop / keep `drive_add_peer` re-firing so the endpoint
+   persists long enough for the game's connect flow to run.
+3. Two-machine (both on our mod); watch `member+0x152` / flags `(0,0,1,0)` and `players→2`. Read `+0x152`
+   with `capture-endpoint.py` (or a probe). Serial — I drive both machines, no ERSC restore.
+If the game's own flow then emits a real type-5 → done. If not, (b).
 
-**The concrete lever-3b step (serial, needs a real-ERSC capture — the strategic fork; checkpoint with
-Michael before restoring his real stack):** the real `[S+0x168]` delegate + its bind are only observable at
-runtime on a real ERSC session. Capture plan (same shape as the banked type-5 capture):
-1. `rig.sh restore` the real ERSC stack; run real ERSC and open a co-op session (solo host may suffice if
-   the member-service binds at host-open; else Deck as an ERSC peer).
-2. Walk `CSSessionManager → container → [container+0x708]=socketmgr → [socketmgr+0x48]=S` via `/proc/mem`
-   peek (same static singleton RVA), and read the **real `[S+0x168]`** (a `.text` fn — a fixed RVA we can
-   then install) + the shape of `[S+0x170]`.
-3. Latch the bind call site / the factory `0x1423fdf20` args live (the `/reverse-engineer` "Arxan-decoded
-   call targets" pattern) to learn *how* the delegate is installed and how a member is minted.
-4. Back on our mod: install the captured real `[S+0x168]` (+ a valid `[S+0x170]`) on our stood-up `S`, or
-   drive the captured bind — watch gate-c flip 1→0, `host-admit-SUCCESS 0x142640ee4` fire, `players` 1→2.
-- **Wall 2 (host→joiner delivery, run 10):** still open (joiner's find-or-create never fires, 0 RECV despite
-  force-accept). Likely downstream of the member-lookup fix; re-test after 3b lands, else chart the joiner's
-  `P2PSessionRequest_t`/accept path. `force_gatec_accept` stays OFF (the stub never fills `[local+0x60]`).
-  Deck at `deck@10.10.1.57:2222`.
+**(b) If the game never emits a type-5 on its own:** the joiner's connect flow must produce a real Steam auth
+ticket (`GetAuthSessionTicket`) type-5 = `{8B token, 4B len, len·blob}` that the host validates
+(`0x142402ee0`/`BeginAuthSession`) → `conn+0x152=1`. Chart where the game's connect flow *would* call
+`GetAuthSessionTicket` and why it doesn't fire in our driven setup (gated on a step we bypass?), then
+drive/relay it. The hard mile — but everything up to a persistent, endpoint-wired joiner member already works.
+
+**Do NOT re-run the transport gate-c / `[S+0x168]` path** (see the ⚠️ RED HERRING bullet in Now). `players`
+stuck at 1 is the *handshake* not completing, not a connection failing to build.
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit

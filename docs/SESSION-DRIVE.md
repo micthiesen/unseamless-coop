@@ -3439,6 +3439,16 @@ That's the joiner's inbound path, not another outbound driver.
 and re-dismisses if not, instead of firing the dismiss taps blind and stranding the join at a menu — see
 the commit. The run-9 Deck had to be hand-dismissed into the world before the join fired.)
 
+> **⚠️ RED HERRING — the entire "JOINER INBOUND / gate-c / `[S+0x168]`" trail below (this aim sheet + run-10/11
+> results + the MEMBER-ADD WRITER chart) is SUPERSEDED. DO NOT RE-LITIGATE.** Cross-checking the ERSC captures
+> (2026-07-06) confirmed [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) **correction #1**:
+> `[context+0x168]` is the stub `0x1423fdf00` **even in a fully working 2-player ERSC session**, and the
+> connection is built by the **session-layer pump** (`0x1424007e0 → 0x142401110`), not the transport worker's
+> find-or-create `0x142640e30`. Making `[S+0x168]` "real" (levers 3a/3b) is moot — a real session doesn't have it
+> real either. **The real frontier is completing the DLNW3D handshake (`member+0x152=1`)** — see "★★★ HOST BUILDS
+> THE JOINER ENDPOINT" + "SYMMETRIC PEER" above and STATE.md > Next. The material below is kept as history (and it
+> did settle, via run-11 disasm, that `0x1423fdf00` is literally `mov eax,1; ret`).
+
 ## ★ JOINER INBOUND AIM SHEET (2026-07-05, static)
 
 Static RE (clean on-disk `eldenring.exe`, capstone via `scripts/re/static.py`; behavioral notes in our
