@@ -176,6 +176,57 @@ fn is_plausible_steam_id(id: u64) -> bool {
     (id >> 32) != 0
 }
 
+// Scaffold for the option-(b) type-5 producer (docs/STATE.md > Next (b)): the ticket fetch below is wired in
+// parallel with the `type5-chart` lane; the producer feature that *calls* it (and injects the framed message)
+// lands once the chart names the injection point. `allow(dead_code)` on the three items keeps `main` green
+// (clippy -D warnings) until then — remove when the producer wires them.
+
+/// `HAuthTicket SteamAPI_ISteamUser_GetAuthSessionTicket(ISteamUser*, void* pTicket, int cbMaxTicket,
+/// uint32* pcbTicket)` — the flat wrapper for the **v021** (ELDEN RING) shape. NB: v022+ (SDK 1.57) added a
+/// trailing `const SteamNetworkingIdentity*` arg; ELDEN RING bundles v021, so this 4-arg form matches. The
+/// extra arg on a newer client would be read as garbage — re-confirm the accessor version if Steam bumps
+/// (`objdump -p steam_api64.dll | grep SteamAPI_SteamUser_v`).
+#[allow(dead_code)]
+type GetAuthTicketFn = unsafe extern "C" fn(*mut c_void, *mut u8, i32, *mut u32) -> u32;
+
+/// Max Steam session-auth-ticket length. Classic tickets are ~234B; the SDK cap is ~1024B, which also fits
+/// the DLNW3D type-5 length field (charted `1..0x400`), so a ticket is always a legal type-5 blob.
+#[allow(dead_code)]
+const AUTH_TICKET_MAX: usize = 1024;
+
+/// Fetch a Steam **session auth ticket** for peer-to-peer auth — the joiner's DLNW3D **type-5** payload that
+/// the host validates via `BeginAuthSession` (`0x142402ee0`) to set `member+0x152=1` and complete the
+/// handshake (see docs/STATE.md > Next (b)). Returns the raw ticket bytes (a legal type-5 blob), or `None`
+/// if Steam / the export isn't resolvable yet.
+///
+/// ⚠️ Caveat the producer must respect: `GetAuthSessionTicket` populates the bytes **synchronously**, but the
+/// ticket is only *accepted* by a remote `BeginAuthSession` after Steam fires `GetAuthSessionTicketResponse_t`
+/// (~ms, k_EResultOK). ELDEN RING owns the Steam callback pump, so we can't wait on that callback directly —
+/// the producer should fetch once early and retry the type-5 send on a throttle (the first sends may be
+/// rejected until the ticket goes valid). This is the one real unknown in option (b); the type5-chart lane is
+/// charting whether the host validator actually enforces `BeginAuthSession` success or is looser.
+#[allow(dead_code)]
+pub fn get_auth_session_ticket() -> Option<Vec<u8>> {
+    let module = unsafe { GetModuleHandleA(s!("steam_api64.dll")) }.ok()?;
+    let (accessor, _version) = resolve_user_accessor(module)?;
+    let addr = unsafe { GetProcAddress(module, s!("SteamAPI_ISteamUser_GetAuthSessionTicket")) }? as usize;
+    // SAFETY: resolved flat export; the 4-arg v021 signature is transmuted here (same binding discipline as
+    // `query_self`). The accessor takes no args; the ticket call writes only into our stack buffer + `written`.
+    let get_ticket: GetAuthTicketFn = unsafe { std::mem::transmute(addr) };
+    let user = unsafe { accessor() };
+    if user.is_null() {
+        return None; // Steam not initialized yet
+    }
+    let mut buf = [0u8; AUTH_TICKET_MAX];
+    let mut written: u32 = 0;
+    let _handle = unsafe { get_ticket(user, buf.as_mut_ptr(), buf.len() as i32, &mut written) };
+    let n = (written as usize).min(buf.len());
+    if n == 0 {
+        return None;
+    }
+    Some(buf[..n].to_vec())
+}
+
 // ===================================================================================================
 // Rung 2: ISteamNetworkingMessages — the poll-based Steam P2P side-channel.
 //

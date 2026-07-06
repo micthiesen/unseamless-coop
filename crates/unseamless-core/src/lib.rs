@@ -19,6 +19,7 @@ pub mod config;
 pub mod crypto;
 pub mod death_debuffs;
 pub mod diagnostics;
+pub mod dlnw3d;
 pub mod framing;
 pub mod game_state;
 /// The in-overlay rig-testing guide engine. Debug-only (`dev`/test/`diag` profiles): the shipping
