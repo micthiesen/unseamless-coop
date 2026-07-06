@@ -11,14 +11,15 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (★ COURSE-CORRECTION. Cross-checking the ERSC captures (Michael: "use the info
-I captured") revealed runs 4–11 — including this session's runs 10/11 chasing the transport gate-c /
-`[S+0x168]` member-resolve — were a **red herring**: ERSC-LIVE-CAPTURE correction #1 already proved that stub
-is present *even in working ERSC*, and the connection is built by the session-layer pump, not find-or-create.
-The **real frontier** (charted 2026-07-05, ahead of the stall-B trail): the endpoint `member+0x130` is
-already built by the game's pump; the sole gap is **completing the DLNW3D handshake** (`member+0x152=1` via a
-real type-5 message — our 14-byte SYN is out of the pump's type range). STATE re-anchored on that; the
-gate-c path is now marked DO-NOT-RE-LITIGATE.)
+Last updated: **2026-07-06** (★ COURSE-CORRECTION + run 12. Cross-checking the ERSC captures (Michael: "use
+the info I captured") revealed runs 4–11 — this session's 10/11 chasing the transport gate-c / `[S+0x168]`
+member-resolve — were a **red herring** (correction #1: that stub is present *even in working ERSC*; the
+connection is built by the session-layer pump, not find-or-create). Re-anchored on the **real frontier**
+(charted 2026-07-05): the endpoint `member+0x130` is already built by the game's pump; the sole gap is
+**completing the DLNW3D handshake** (`member+0x152=1`). Run 12 disproved option (a): with `suppress_syn` the
+endpoint still builds (SYN was noise) but `+0x152` never sets — it needs a real **type-5 auth-ticket** message.
+Next = option (b): produce the type-5 ourselves (`GetAuthSessionTicket` → framed message → host validator).
+The gate-c path stays DO-NOT-RE-LITIGATE.)
 
 ## Now
 
@@ -30,13 +31,14 @@ gate-c path is now marked DO-NOT-RE-LITIGATE.)
   `join_set_established_bit` (direct `container+0x7c0` bit-2 OR) builds the per-peer emitter connection and
   parks at `Client/WaitInitData`, stable, no crash.
 - **★★ REAL FRONTIER = complete the DLNW3D handshake (`member+0x152=1`). The endpoint is already built.**
-  The captured 2026-07-05 state (SESSION-DRIVE > "★★★ HOST BUILDS THE JOINER ENDPOINT" + "SYMMETRIC PEER"):
   `drive_add_peer` queues the peer member and **the game's own per-frame pump `0x1424007e0 → 0x142401110 →
-  0x14203ef70` builds `member+0x130`** (a live `MTInternalThreadSteamConnection`, vtable `0x143277750`) — on
-  both machines, stable, no crash. The one gap: member flags reach `(0,1,0,0)` (`+0x151`, set by the endpoint
-  build) vs working ERSC `(0,0,1,0)` (`+0x152`). `+0x152` is set only by a **type-5** pump message; our
-  fabricated 14-byte SYN (`buf[0]=0x0e`=14) is **out of the pump's type-1..8 range → ignored**, so the
-  handshake never completes and the member is dropped/re-added, `players` stuck at 1.
+  0x14203ef70` builds `member+0x130`** (a live `MTInternalThreadSteamConnection`, vtable `0x143277750`).
+  **Run 12 (2026-07-06) confirmed this builds even with our SYN suppressed** — the fabricated 14-byte SYN was
+  pure noise. The one gap: member flags reach `(0,1,0,0)` (`+0x151`, set by the endpoint build) and never
+  reach working ERSC's `(0,0,1,0)` (`+0x152`); the endpoint cycles build → ~30s drop → rebuild, `players`
+  stuck at 1. `+0x152` is set only by a **type-5** message = a real Steam **auth ticket** the host validates;
+  the game's own connect flow never produces it in our driven setup (and symmetric mode has no joiner to
+  produce it). ⇒ we produce it ourselves (Next).
 - **⚠️ RED HERRING (runs 4–11, incl. this session's 10/11) — DO NOT RE-LITIGATE:** the transport
   gate-c / find-or-create `0x142640e30` / `[S+0x168]` member-resolve path is **NOT** the admission mechanism.
   ERSC-LIVE-CAPTURE-FINDINGS correction #1 proved `[context+0x168]` = the stub `0x1423fdf00` **even in a fully
@@ -53,30 +55,30 @@ gate-c path is now marked DO-NOT-RE-LITIGATE.)
 
 ## Next
 
-**★ Complete the DLNW3D handshake — get `member+0x152=1`.** The endpoint (`member+0x130`) is already built
-by the game's own pump; the sole gap is that a **valid type-5 completion message** never reaches the pump in
-our driven setup. Two approaches, cheapest first:
+**★ Option (b) — PRODUCE a real type-5 auth-ticket message ourselves to set `member+0x152=1`.** Run 12
+(2026-07-06) disproved option (a): with `suppress_syn` on both machines the endpoint `member+0x130` **still
+builds** (the game's pump builds it from `drive_add_peer` queuing — our SYN was pure noise), but flags stay
+`(0,1,0,0)` and never reach the working-ERSC `(0,0,1,0)` (`+0x152`). The endpoint just cycles build → ~30s
+drop → rebuild. So the SYN wasn't blocking anything; the gap is squarely the missing **type-5**. Full: SESSION-DRIVE.md > "▶ RIG RESULT (run 12)".
 
-**(a) FIRST — cheap experiment, no ERSC restore, no new capture: let the game's own endpoints talk.** Our
-fabricated 14-byte SYN spam on channel 30 is ignored by the pump (out of type range) and may be *interfering*
-with / crowding out the game's own connect flow, which owns the built endpoint's real send/recv
-(`endpoint+0x20/+0x28`). Test in `symmetric_peer` mode (both build endpoints):
-1. **Stop sending the fabricated SYN once `member+0x130` is built** (gate the `drive_p2p` SYN on
-   endpoint-null) — small change in `session_probe.rs`.
-2. **Hold the member longer** — extend the ~30s drop / keep `drive_add_peer` re-firing so the endpoint
-   persists long enough for the game's connect flow to run.
-3. Two-machine (both on our mod); watch `member+0x152` / flags `(0,0,1,0)` and `players→2`. Read `+0x152`
-   with `capture-endpoint.py` (or a probe). Serial — I drive both machines, no ERSC restore.
-If the game's own flow then emits a real type-5 → done. If not, (b).
+**The concrete build (serial, no ERSC restore — everything charted):**
+1. On the peer, call Steam **`GetAuthSessionTicket`** (we already bind Steam interfaces for rung-4 in
+   `coop/steam.rs`) to get a real auth ticket blob.
+2. Construct the type-5 message `{buf[0]=5, 8B token, 4B len (1..0x400), len·blob=ticket}` (payload shape
+   charted, ERSC-LIVE-CAPTURE > "★ The DLNW3D connect protocol").
+3. Deliver it to the host's pump — send on the built endpoint / the channel the pump reads (`0x14203f250` on
+   `conn+0x130`). Host type-5 case `0x142400924` → validator `0x142402ee0` (`BeginAuthSession`) → `conn+0x152=1`
+   → member completes → roster → `players=2`.
+- **Open sub-questions:** the 8B token semantics (`member+0x148` — echoed value or a session nonce?), and
+  **who sends** — a real joiner produces the type-5, so this likely needs one machine in a **joiner role**
+  (not the symmetric both-host mode, which has no joiner) OR we relay. First chart the game's own type-5
+  *send* path (does its connect flow call `GetAuthSessionTicket`? where?) to copy the exact token/framing,
+  rather than guess.
+- **Retire the SYN:** `suppress_syn` proved the fabricated 14-byte SYN is unnecessary (endpoint builds
+  without it); drop it from the drive to cut channel-30 noise.
 
-**(b) If the game never emits a type-5 on its own:** the joiner's connect flow must produce a real Steam auth
-ticket (`GetAuthSessionTicket`) type-5 = `{8B token, 4B len, len·blob}` that the host validates
-(`0x142402ee0`/`BeginAuthSession`) → `conn+0x152=1`. Chart where the game's connect flow *would* call
-`GetAuthSessionTicket` and why it doesn't fire in our driven setup (gated on a step we bypass?), then
-drive/relay it. The hard mile — but everything up to a persistent, endpoint-wired joiner member already works.
-
-**Do NOT re-run the transport gate-c / `[S+0x168]` path** (see the ⚠️ RED HERRING bullet in Now). `players`
-stuck at 1 is the *handshake* not completing, not a connection failing to build.
+**Do NOT re-run the transport gate-c / `[S+0x168]` path** (⚠️ RED HERRING bullet in Now). `players` stuck at
+1 is the *handshake type-5* not completing, not a connection failing to build.
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit

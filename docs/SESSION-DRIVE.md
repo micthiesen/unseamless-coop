@@ -3955,3 +3955,45 @@ the insert alone won't stick.
   `SessionSteam+0x4f0` queue.
 
 [ERSC-LIVE-CAPTURE-FINDINGS.md]: ERSC-LIVE-CAPTURE-FINDINGS.md
+
+### ▶ RIG RESULT (run 12, 2026-07-06) — option (a) DISPROVEN: the SYN is noise; +0x152 needs a real type-5
+
+Ran the option-(a) experiment: `symmetric_peer` + **`suppress_syn`** on BOTH machines (each `--auto-session
+host`), stopping our fabricated 14-byte channel-30 SYN to see if the game's own endpoints complete the
+DLNW3D handshake on their own. Read `member+0x130`/`+0x150` on the rig with `capture-endpoint.py` across
+three snapshots as the pump advanced the Deck member (`member[4]`, `+0x80` = Deck SteamID64):
+
+| t | `member[4]+0x130` (endpoint) | flags `+0x150..0x153` |
+|---|---|---|
+| ~0s (just after add-peer) | `0x0` | `(0,1,0,0)` |
+| ~20s | **`0x7ffef4170c10` (BUILT)** | `(0,1,0,0)` |
+| ~40s | `0x0` (dropped) | `(0,1,0,0)` |
+
+**Two conclusions:**
+1. **The endpoint builds WITHOUT our SYN.** Even with zero fabricated channel-30 traffic on either machine,
+   the game's own pump built `member[4]+0x130` (a real `MTInternalThreadSteamConnection`) from `drive_add_peer`
+   queuing the member. So the SYN was **pure noise** for the endpoint build (contradicting the run-7 framing
+   that the SYN "feeds the pump"). It cycles build → ~30s timeout → drop → re-add → rebuild.
+2. **Option (a) is DISPROVEN — the SYN wasn't blocking `+0x152`.** Suppressing it changed nothing: flags stay
+   `(0,1,0,0)` (`+0x151`, set by the endpoint build) and never reach the working-ERSC `(0,0,1,0)` (`+0x152`).
+   The handshake-completion gap is exactly what the 2026-07-05 root-cause said: **`+0x152` needs a real type-5
+   message** the game's connect flow isn't producing — not a SYN-interference artifact.
+
+**★ New insight → the type-5 is a JOINER-produced auth ticket, and symmetric mode has no joiner.** Type-5 =
+the joiner's Steam auth ticket (`GetAuthSessionTicket`) sent to the host, which validates it
+(`0x142402ee0`/`BeginAuthSession`) → `conn+0x152=1`. In `symmetric_peer` mode BOTH machines are host-style, so
+**neither is the joiner that produces the type-5** — which is likely why it never appears. The game's own
+connect flow never reaches `GetAuthSessionTicket` in our driven setup (we drive establish directly, bypassing
+the connect handshake that would call it).
+
+**⇒ Next = option (b), and it's concretely buildable.** Produce a real type-5 ourselves rather than wait for
+the game: on the peer, call Steam `GetAuthSessionTicket` (we already bind Steam interfaces for rung-4), build
+a type-5 message `{buf[0]=5, 8B token, 4B len (1..0x400), len·blob=ticket}`, and deliver it to the host's pump
+(send on the endpoint / the channel the pump reads via holder API `0x14203f250` on `conn+0x130`). The host's
+type-5 case `0x142400924` → validator `0x142402ee0` sets `conn+0x152=1` → member completes → roster → 2.
+Open sub-questions: the 8B token semantics (`member+0x148`; is it echoed, or a session nonce?), and which
+side sends (a real joiner sends to the host — may need one machine in a joiner role, or we relay). The SYN
+lever can be retired (`suppress_syn` proved it unnecessary).
+
+Probe/flags: commit `fdcdfd1` (`suppress_syn`). Read member state with `scripts/re/capture-endpoint.py` (rig
+pid auto-found).
