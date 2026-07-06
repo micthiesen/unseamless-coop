@@ -799,6 +799,18 @@ const HOST_WORKER_DRAIN_OFFSET: usize = 0x1_4264_0bc0 - 0x1_4000_0000;
 /// Throttle for [`log_host_worker_drain`] — the drain loop fires every worker tick, so log only the first
 /// few to confirm it runs + capture the channel, then go silent.
 static WORKER_DRAIN_LOGS: AtomicU32 = AtomicU32::new(0);
+/// The exe base, latched at `install_host_accept_trace`, so [`log_host_admit`] can convert the live
+/// member-resolve pointers into RVAs to name them (is `[S+0x168]` the stub `0x1423fdf00`, or a real lookup?).
+static ADMIT_EXE_BASE: AtomicUsize = AtomicUsize::new(0);
+/// Throttle for the S-chain detail in [`log_host_admit`] — the admit fires on every retried SYN, so log the
+/// member-manager/lookup/collection dump only the first few times, then let the plain admit line stand alone.
+static ADMIT_SCHAIN_LOGS: AtomicU32 = AtomicU32::new(0);
+/// The stub `0x1423fdf00` (`mov eax,1; ret`, always "not found"). If the live `[S+0x168]` lookup vmethod
+/// equals this RVA, aim-sheet lever 3a (register a member) is inert and we need a fuller service/context
+/// init (lever 3b). Charted 2026-07-04 (SESSION-DRIVE.md > host-side admit); confirmed real-vs-stub live here.
+const MEMBER_LOOKUP_STUB_RVA: usize = 0x1_423f_df00 - 0x1_4000_0000;
+/// The real member-resolve `0x142639d00` (`[socketmgr+0x40]`) — sanity-check the callback we deref through.
+const MEMBER_RESOLVE_RVA: usize = 0x1_4263_9d00 - 0x1_4000_0000;
 
 /// host-admit tracer: `0x142640e30(rcx=socketmgr, rdx=senderSteamID64, r8=buf, r9d=msgSize)`. Fires on the
 /// worker thread when a datagram from an UNKNOWN peer reaches the admit path — so it firing at all means the
@@ -814,6 +826,52 @@ fn log_host_admit(_name: &'static str, regs: *mut Registers) {
             unseamless_core::diagnostics::peer_tag(r.rdx),
             r.r9 as u32,
         );
+        // ★ REAL-VS-STUB probe (aim-sheet lever 3a gate, 2026-07-06): at admit entry rcx = socketmgr = mgr,
+        // so we can walk the member-resolve chain the gate rejects on and name its pieces by RVA. Answers:
+        // is the lookup vmethod `[S+0x168]` a REAL lookup over the collection, or the stub 0x1423fdf00 (which
+        // makes registering a member inert)? And is the collection actually empty? Throttled to the first few.
+        let n = ADMIT_SCHAIN_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n >= 4 {
+            return;
+        }
+        let base = ADMIT_EXE_BASE.load(Ordering::Relaxed);
+        let mgr = r.rcx as usize;
+        // SAFETY: mgr = socketmgr (rcx at entry). `+0x40` (resolve cb), `+0x48` (context S) are in-bounds
+        // fields; S's `+0x168` (lookup vmethod ptr), `+0x98`/`+0xa0` (collection begin/end), `+0x170`
+        // (collection root) are the charted ManagerImpl fields. Every deref null-guarded; read-only.
+        let rva = |p: usize| if base != 0 && p >= base { p - base } else { usize::MAX };
+        unsafe {
+            let rd = |p: usize| (p as *const usize).read_volatile();
+            if mgr == 0 {
+                return;
+            }
+            let resolve_cb = rd(mgr + 0x40);
+            let s = rd(mgr + 0x48);
+            if s == 0 {
+                log::info!("session-probe: host-admit S-chain #{n} — mgr={mgr:#x} resolve_cb rva={:#x} (want {MEMBER_RESOLVE_RVA:#x}); S=[mgr+0x48] is NULL", rva(resolve_cb));
+                return;
+            }
+            let lookup_fn = rd(s + 0x168);
+            let begin = rd(s + 0x98);
+            let end = rd(s + 0xa0);
+            let root = rd(s + 0x170);
+            let lookup_rva = rva(lookup_fn);
+            let is_stub = lookup_rva == MEMBER_LOOKUP_STUB_RVA;
+            let coll_bytes = end.saturating_sub(begin);
+            log::info!(
+                "session-probe: ★ host-admit S-chain #{n} — mgr={mgr:#x} resolve_cb rva={:#x}(want {MEMBER_RESOLVE_RVA:#x}) \
+                 S=[mgr+0x48]={s:#x} lookup[S+0x168] rva={lookup_rva:#x} => {} | collection[S+0x98..0xa0]={begin:#x}..{end:#x} \
+                 span={coll_bytes:#x}B ({}) root[S+0x170]={root:#x} — {}",
+                rva(resolve_cb),
+                if is_stub { "STUB 0x1423fdf00 (always not-found)" } else { "REAL lookup" },
+                if coll_bytes == 0 { "EMPTY" } else { "has members" },
+                if is_stub {
+                    "⇒ lever 3a INERT: registering a member won't help; need a fuller service/context init (3b)"
+                } else {
+                    "⇒ lever 3a VIABLE: register the peer in [S+0x170]/[S+0x98] and the resolve should find it"
+                },
+            );
+        }
     }));
 }
 
@@ -938,6 +996,7 @@ fn install_host_accept_trace(config: &Config) {
             return;
         }
     };
+    ADMIT_EXE_BASE.store(exe_base, Ordering::Relaxed);
     FORCE_GATEC_ACCEPT.store(config.debug.probes.force_gatec_accept, Ordering::Relaxed);
     if config.debug.probes.force_gatec_accept {
         log::info!("session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c");
