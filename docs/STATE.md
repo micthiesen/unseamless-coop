@@ -61,6 +61,17 @@ builds** (the game's pump builds it from `drive_add_peer` queuing — our SYN wa
 `(0,1,0,0)` and never reach the working-ERSC `(0,0,1,0)` (`+0x152`). The endpoint just cycles build → ~30s
 drop → rebuild. So the SYN wasn't blocking anything; the gap is squarely the missing **type-5**. Full: SESSION-DRIVE.md > "▶ RIG RESULT (run 12)".
 
+**Decision (/next, 2026-07-06): split A (delegated static chart) + B (serial scaffold), injection-path first.**
+The biggest unknown is the **injection path** — run 12 proved the pump reads type messages from `conn+0x130`
+via holder API `0x14203f250`, but *what transport/channel feeds that endpoint's recv* (where we inject a
+type-5) is unknown; if a type-5 can only arrive via the game's own connect flow, "produce it ourselves"
+becomes "drive that flow." So: **lane `type5-chart`** charts (a) the pump-read `0x14203f250` + endpoint recv
+source (the injection point), (b) the validator `0x142402ee0` (token semantics at `member+0x148`, whether
+`BeginAuthSession` success is enforced, what the blob must be), (c) the game's own type-5 SEND site (does the
+connect flow call `GetAuthSessionTicket`? framing?). Orchestrator **scaffolds B in parallel** (Steam
+`GetAuthSessionTicket` binding + a config-gated type-5-producer feature) so the chart's answers drop straight
+in. Both land → serial two-machine confirm run (watch `member+0x152`, `players→2`).
+
 **The concrete build (serial, no ERSC restore — everything charted):**
 1. On the peer, call Steam **`GetAuthSessionTicket`** (we already bind Steam interfaces for rung-4 in
    `coop/steam.rs`) to get a real auth ticket blob.
