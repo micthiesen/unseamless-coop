@@ -3491,25 +3491,28 @@ impl TransportStandupDriver {
             }
             let vtable = (ep as *const usize).read_volatile();
             let token_src = ((ep + 0x60) as *const usize).read_volatile();
-            if vtable != want_vtable || token_src == 0 {
-                let n = TYPE5_DRIVE_LOGS.fetch_add(1, Ordering::Relaxed);
-                if n < 8 {
-                    log::info!(
-                        "session-probe: type5-DRIVE skipped — endpoint {ep:#x} not send-ready \
-                         (vtable={vtable:#x} want {want_vtable:#x}, [ep+0x60]={token_src:#x}) — waiting for a full build",
-                    );
-                }
-                return;
-            }
-            let send: extern "win64" fn(usize) = std::mem::transmute(send_fn);
-            send(ep);
+            let send_ready = vtable == want_vtable && token_src != 0;
+            // ★ OBSERVE-ONLY (run 13/14 crashed at the send's slot-14 call `[[ep]+0x70]` with a DETERMINISTIC
+            // fault target `0x119930522` across two ASLR'd launches — so it's a fixed dispatch value, not heap
+            // garbage). Before calling the game's send cold again, LOG exactly what we'd dispatch on (ep, its
+            // vtable vs the expected endpoint vtable, the token source, slot-14) so the log tells us whether
+            // our `ep` is the real `MTInternalThreadSteamConnection` or something else. The actual `send(ep)`
+            // stays commented until we understand the crash (likely the send needs its game call context /
+            // worker-thread affinity — see STATE.md > Next). Re-enable the call when the caller is charted.
+            let slot14 = (vtable as *const usize).read_volatile().wrapping_add(0); // [ep]; slot-14 read below
+            let slot14_fn = if vtable != 0 { ((vtable + 0x70) as *const usize).read_volatile() } else { 0 };
+            let _ = slot14;
             let n = TYPE5_DRIVE_LOGS.fetch_add(1, Ordering::Relaxed);
             if n < 12 {
                 log::info!(
-                    "session-probe: ★ type5-DRIVE #{n} — 0x142400df0(endpoint={ep:#x}) on member {member:#x} \
-                     — the GAME frames + sends a real type-5 auth ticket; the peer validates it → member+0x152=1 → roster",
+                    "session-probe: type5-OBSERVE #{n} — endpoint {ep:#x} member {member:#x} send_ready={send_ready} \
+                     [ep](vtable)={vtable:#x} want {want_vtable:#x} [vtable+0x70](slot14)={slot14_fn:#x} [ep+0x60](token_src)={token_src:#x} \
+                     — NOT calling 0x142400df0 (observe-only until the send's crash is understood)",
                 );
             }
+            // let send: extern "win64" fn(usize) = std::mem::transmute(send_fn);
+            // send(ep);   // ← re-enable once the send's required call context is charted (STATE.md > Next)
+            let _ = send_fn;
         }));
     }
 
