@@ -54,19 +54,29 @@ member-service init that installs it doesn't run offline. Make `[S+0x168]` a rea
 already-populated collection → resolve finds the peer → gate-c ACCEPT → `host-admit-SUCCESS 0x142640ee4`
 fires → host builds the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2.
 
-- **Delegated (static, lane `member-add-chart`, re-scoped live):** (a) chart the live resolve `0x142639810`
-  (how it fills the finisher `local+0x60`); (b) find the WRITER of the `S+0x168` field — what installs a real
-  fn vs the stub, and is it the socketmgr init `0x14263a9d0` or a separate online-only member-service init we
-  skip; (c) name the real lookup fn (candidate: the iterator `0x142639950`). Deliverable: SESSION-DRIVE.md >
-  "★ MEMBER-LOOKUP INSTALLER ([S+0x168]) — lever 3b".
-- **Serial (orchestrator):** once the installer or the real lookup fn is named, drive it live on the host —
-  either run the fuller member-service init, or directly write the real lookup fn into `[S+0x168]` on our
-  stood-up `S` — and watch gate-c flip 1→0 and `players` 1→2. The S-chain probe (commit `7965078`) already
-  reports the verdict each run.
+**Structure charted (member-add-chart lane, integrated):** `S = [socketmgr+0x48]` is a
+`DLNR3D::ManagerImplSteam`; the registry is a **delegate pair** `[S+0x168]` (lookup fn-ptr) + `[S+0x170]`
+(bound container), **both zeroed at ctor and bound at session-establish** — the step our driven join skips.
+Members are `SessionMemberSteam` (0x170B) minted **only** by the Arxan factory `0x1423fdf20` from two
+refcounted identity handles — so there is **no cheap `insert(S, u64)`** and no static writer of `[S+0x168]`
+(the bind is Arxan/off-image). Full: SESSION-DRIVE.md > "★ MEMBER-ADD WRITER".
+
+**The concrete lever-3b step (serial, needs a real-ERSC capture — the strategic fork; checkpoint with
+Michael before restoring his real stack):** the real `[S+0x168]` delegate + its bind are only observable at
+runtime on a real ERSC session. Capture plan (same shape as the banked type-5 capture):
+1. `rig.sh restore` the real ERSC stack; run real ERSC and open a co-op session (solo host may suffice if
+   the member-service binds at host-open; else Deck as an ERSC peer).
+2. Walk `CSSessionManager → container → [container+0x708]=socketmgr → [socketmgr+0x48]=S` via `/proc/mem`
+   peek (same static singleton RVA), and read the **real `[S+0x168]`** (a `.text` fn — a fixed RVA we can
+   then install) + the shape of `[S+0x170]`.
+3. Latch the bind call site / the factory `0x1423fdf20` args live (the `/reverse-engineer` "Arxan-decoded
+   call targets" pattern) to learn *how* the delegate is installed and how a member is minted.
+4. Back on our mod: install the captured real `[S+0x168]` (+ a valid `[S+0x170]`) on our stood-up `S`, or
+   drive the captured bind — watch gate-c flip 1→0, `host-admit-SUCCESS 0x142640ee4` fire, `players` 1→2.
 - **Wall 2 (host→joiner delivery, run 10):** still open (joiner's find-or-create never fires, 0 RECV despite
-  force-accept). Likely downstream of the member-lookup fix on the joiner side; re-test after 3b lands, else
-  chart the joiner's `P2PSessionRequest_t`/accept path. `force_gatec_accept` stays OFF (insufficient — the
-  stub never fills `[local+0x60]`). Deck reachable at `deck@10.10.1.57:2222`.
+  force-accept). Likely downstream of the member-lookup fix; re-test after 3b lands, else chart the joiner's
+  `P2PSessionRequest_t`/accept path. `force_gatec_accept` stays OFF (the stub never fills `[local+0x60]`).
+  Deck at `deck@10.10.1.57:2222`.
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
