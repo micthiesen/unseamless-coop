@@ -4242,3 +4242,43 @@ through an Arxan-locked vtable slot, so invoking it out of context can't work.
 
 Code: the send-drive is OBSERVE-ONLY on `main` (commit `ec691cc`, the `send()` call commented); the
 hand-frame halves are `steam::get_auth_session_ticket` + `core::dlnw3d::frame_type5` (commit `be7f64e`).
+
+### ▶ RIG RESULT (run 16, 2026-07-06) — the HAND-FRAME type-5 CROSSES bidirectionally but stops at find-or-create admit
+
+Built + shipped the hand-frame sender (commit `2ceddb0`, `[debug.probes] send_type5`): `core::dlnw3d::wrap_transport_frame`
+wraps the `frame_type5` payload in the 11-bit transport length header, and `TransportStandupDriver` `SendP2PPacket`s
+`[len-hdr][5][8B token=0][4B ticket_len][ticket]` unreliable on ch30 (ticket = a real `GetAuthSessionTicket`, fetched
+once + cached). Two-machine (rig host A + Deck host B, both `symmetric_peer` + `drive_add_peer` + `send_type5`, both
+`--auto-session host`, both warped into `1800001`, `players=1`).
+
+**✅ THE SEND SIDE IS PROVEN — the type-5 crosses the wire, both ways.**
+- **Rig** fetched a 240B ticket → framed a **255B** packet (`hdr 0xff 0x40`, i.e. 11-bit len 255 = the whole packet),
+  `SendP2PPacket ... = true`, retried on the throttle, **no crash** (the Arxan `drive_type5` fault is fully sidestepped).
+- **Deck** symmetrically fetched a 234B ticket → **249B** packet (`hdr 0xf9 0x40`).
+- **Each machine's `instrument_host_accept` hook shows the OTHER's type-5 arriving:** rig logs
+  `host-admit 0x142640e30 admit-new-peer from sender <Deck> (msgSize=249)`; Deck logs `... from sender <rig> (msgSize=255)`.
+  So the framed type-5 passes Steam delivery + the recv frame-length gate `0x1426425d0` and reaches the DLNW3D recv
+  routing on **both** peers. The 11-bit length header is correct — the packet is not dropped as malformed.
+
+**★ THE HANDSHAKE STILL DOES NOT COMPLETE — and the wall has MOVED (and is now pinned).** `capture-endpoint.py` on the
+rig: the Deck member (`+0x80`=Deck id) has **`+0x152=0`** (flags `(0,1,0,0)`) and **`+0x130`(endpoint)=0** (still cycling
+build→drop); `players` stays 1 on both. The pinning evidence: our data type-5 keeps hitting **find-or-create
+`0x142640e30`**, which per the recv chart (Q1) is called **only in the "sender-id search found no connection" branch**
+(`[socketmgr+0xb8..0xc0]` for a `SteamConnection` with `+0x138==senderID`). So **no transport `SteamConnection` is
+registered for the peer** — the type-5 has nowhere to be *delivered* (`0x142643db0`→`0x142642860` needs the found
+connection), so it never reaches the endpoint queue → never reaches the pump's type-5 case → `+0x152` never sets. The
+game's own 14-byte SYNs (`msgSize=14`, emitted despite `suppress_syn` — those are the game's, not ours) hit the same
+admit and also fail to create a persistent connection (the known gate-c wall). **⇒ The remaining gap is no longer
+*producing* the type-5 (solved — it crosses both ways); it's that the receiver has no registered transport
+`SteamConnection` for the sender to deliver it into.** This reconciles with correction #1 (gate-c is a stub even in
+working ERSC): in real ERSC the connection is registered by the establishment/join flow (not by admit), so recv *finds*
+it and delivers; our driven setup skips that flow, so `[socketmgr+0xb8..0xc0]` has no entry keyed to the peer id.
+
+**► NEXT (pinned): register the transport `SteamConnection` in the receiver's socket-manager connection table**
+(`[socketmgr+0xb8..0xc0]`, keyed `+0x138==peerSteamID64`) so recv routes the type-5 to a real connection + delivers it,
+instead of falling through to find-or-create admit. `stand_up_transport` already *builds* a `SteamConnection` off the
+game heap but does not register it here. Confirm the exact table shape + the register primitive, land a connection for
+the peer, then re-run: the type-5 should then deliver → pump → validator → `+0x152=1`. **First diagnostic to de-risk it:**
+a receive-side hook on the pump `0x1424007e0` / validator `0x142402ee0` to positively confirm the type-5 never reaches
+the pump today (vs. reaching it and failing the ticket validate) — cheap, and it tells us whether the wall is purely
+delivery-side or also validation-side.
