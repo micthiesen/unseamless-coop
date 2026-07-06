@@ -429,6 +429,10 @@ const ADD_PEER_OFFSET: usize = 0x1_423f_dc80 - 0x1_4000_0000;
 const TYPE5_SEND_OFFSET: usize = 0x1_4240_0df0 - 0x1_4000_0000;
 /// `0x14203ef70` — the `member+0x130` endpoint-holder writer. `(rcx = &holder, rdx = &src)`; `[rdx]` = endpoint.
 const ENDPOINT_SET_OFFSET: usize = 0x1_4203_ef70 - 0x1_4000_0000;
+/// RVA of the `DLNW3D::MTInternalThreadSteamConnection` vtable `0x143277750` (the endpoint's vtable). We only
+/// drive the type-5 send on an endpoint whose `[ep] == exe_base + this` — a guard against the pump's
+/// build/drop race handing us a half-constructed / freed object (run-13 crash: `call [garbage_vtable+0x70]`).
+const ENDPOINT_VTABLE_RVA: usize = 0x3277750;
 /// Resolved absolute `0x142400df0` (set at install when `drive_type5`).
 static TYPE5_SEND_FN: AtomicUsize = AtomicUsize::new(0);
 /// Latched peer `SessionMemberSteam` (pool slot whose `+0x80` == the peer id). Stable while the session
@@ -2984,6 +2988,9 @@ pub struct TransportStandupDriver {
     /// ★ Type-5 producer (option b): drive the game's own send `0x142400df0` on the peer member's built
     /// endpoint to complete the handshake (`member+0x152=1`). See `drive_type5` in config.
     drive_type5: bool,
+    /// Last endpoint pointer seen at `member+0x130` — the type-5 drive only fires on an endpoint that was
+    /// stable across two ticks (skips the pump's mid-build transients that crashed run 13).
+    last_type5_ep: usize,
 }
 
 impl TransportStandupDriver {
@@ -3017,6 +3024,7 @@ impl TransportStandupDriver {
             add_peer_joiner,
             suppress_syn,
             drive_type5,
+            last_type5_ep: 0,
         }
     }
 
@@ -3462,14 +3470,36 @@ impl TransportStandupDriver {
         if member == 0 || send_fn == 0 || !self.add_peer_throttle.tick() {
             return;
         }
+        let want_vtable = (send_fn - TYPE5_SEND_OFFSET) + ENDPOINT_VTABLE_RVA;
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            // SAFETY: `member` is the latched, still-allocated pool slot; `member+0x130` is its endpoint holder
-            // (0 between the pump's build/drop cycles). We only call the send on a NON-NULL live endpoint, so
-            // we never dispatch on a freed object. `0x142400df0(rcx=endpoint)` is the game's own send (charted
-            // single-arg); it reads the endpoint + calls GetAuthSessionTicket/SendP2PPacket, no arg of ours.
+            // SAFETY: `member` is the latched, still-allocated pool slot; `member+0x130` is its live endpoint
+            // (0 between the pump's build/drop cycles). Before dispatching we GUARD that the endpoint is a
+            // fully-constructed `MTInternalThreadSteamConnection`: its vtable `[ep]` must equal the known
+            // endpoint vtable, and its token source `[ep+0x60]` must be non-null (run-13 crash was `call
+            // [garbage_vtable+0x70]` on a half-built endpoint). We also require it STABLE across two ticks
+            // (same `ep` as last tick) to skip mid-build transients. Only then is `0x142400df0(rcx=endpoint)`
+            // (the game's own charted single-arg send) safe to drive.
             let ep = ((member + 0x130) as *const usize).read_volatile();
             if ep == 0 {
                 return; // endpoint dropped between rebuilds — wait for the pump to rebuild it
+            }
+            // Stability: only drive an endpoint we saw last tick (filters a freshly-allocated, not-yet-wired one).
+            let stable = ep == self.last_type5_ep;
+            self.last_type5_ep = ep;
+            if !stable {
+                return;
+            }
+            let vtable = (ep as *const usize).read_volatile();
+            let token_src = ((ep + 0x60) as *const usize).read_volatile();
+            if vtable != want_vtable || token_src == 0 {
+                let n = TYPE5_DRIVE_LOGS.fetch_add(1, Ordering::Relaxed);
+                if n < 8 {
+                    log::info!(
+                        "session-probe: type5-DRIVE skipped — endpoint {ep:#x} not send-ready \
+                         (vtable={vtable:#x} want {want_vtable:#x}, [ep+0x60]={token_src:#x}) — waiting for a full build",
+                    );
+                }
+                return;
             }
             let send: extern "win64" fn(usize) = std::mem::transmute(send_fn);
             send(ep);
