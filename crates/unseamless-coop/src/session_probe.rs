@@ -122,6 +122,31 @@ pub fn install_hooks(config: &Config) {
     install_host_accept_trace(config);
     // Read-only stall-B session-machine + P2P-callback observation (B0/B1 of the stall-B aim sheet).
     install_stall_b_trace(config);
+    // ★ Type-5 producer: latch the peer member off the endpoint-set writer + resolve the game's send fn.
+    install_type5_trace(config);
+}
+
+/// Install the type-5 producer's endpoint-set latch (`0x14203ef70`) and resolve the game's own send
+/// `0x142400df0`, when `[debug.probes] drive_type5` is on. The driver ([`TransportStandupDriver`]) does the
+/// actual driving each tick; this just wires the latch + the fn pointer. Best-effort (a failed hook logs).
+fn install_type5_trace(config: &Config) {
+    if !config.debug.probes.drive_type5 {
+        return;
+    }
+    let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::error!("session-probe: type5 — GetModuleHandle(NULL) failed: {e}");
+            return;
+        }
+    };
+    DRIVE_TYPE5.store(true, Ordering::Relaxed);
+    TYPE5_SEND_FN.store(exe_base + TYPE5_SEND_OFFSET, Ordering::Relaxed);
+    install_offset_hook("type5-endpoint-latch", exe_base + ENDPOINT_SET_OFFSET, latch_type5_peer_member);
+    log::info!(
+        "session-probe: type5 producer armed — latch 0x14203ef70 (peer member off the endpoint), drive the \
+         game's own send 0x142400df0 on member+0x130 each tick (option b; sets member+0x152 → players=2)"
+    );
 }
 
 /// Place the read-only create/join initiation hooks when `session_probe` is on. No-op otherwise.
@@ -388,6 +413,65 @@ const ADD_MEMBER_OFFSET: usize = 0x1_423f_df20 - 0x1_4000_0000;
 /// identity: if it fires with the Deck's key, the natural producer works and only the handshake pump
 /// remains; if it never fires for the Deck, the add-peer *event* was never posted (post it ourselves).
 const ADD_PEER_OFFSET: usize = 0x1_423f_dc80 - 0x1_4000_0000;
+
+// --- ★ Type-5 producer (option b, 2026-07-06) — drive the game's own handshake-completion send -----------
+//
+// Charted by the `type5-chart` lane (docs/SESSION-DRIVE.md > "★ TYPE-5 PRODUCER + INJECTION"): the DLNW3D
+// handshake completes when the peer receives a **type-5** message = a real Steam auth ticket the host
+// validates (`0x142402ee0`/`BeginAuthSession` against `member+0x80`) → sets `member+0x152=1`. Rather than
+// hand-frame it (the inner transport frame is Arxan-opaque, no external inject bypass), we drive the game's
+// OWN send `0x142400df0(endpoint)`: given the member's built endpoint it writes type 5, pulls the 8B token
+// from `[[endpoint+0x60]+0x548]`, calls the endpoint vtable slot 14 = `GetAuthSessionTicket`, appends
+// `[4B len][ticket]`, and `SendP2PPacket`s it on ch30. To get the endpoint we latch the peer member off the
+// `+0x130` writer `0x14203ef70` (`endpoint=[rdx]`, `member=[endpoint+0x50]`), then read the member's LIVE
+// `+0x130` each tick (0 between the pump's build/drop cycles → we skip, so we never call on a freed endpoint).
+/// `0x142400df0` — the game's own type-5 send. `(rcx = endpoint)`; single arg.
+const TYPE5_SEND_OFFSET: usize = 0x1_4240_0df0 - 0x1_4000_0000;
+/// `0x14203ef70` — the `member+0x130` endpoint-holder writer. `(rcx = &holder, rdx = &src)`; `[rdx]` = endpoint.
+const ENDPOINT_SET_OFFSET: usize = 0x1_4203_ef70 - 0x1_4000_0000;
+/// Resolved absolute `0x142400df0` (set at install when `drive_type5`).
+static TYPE5_SEND_FN: AtomicUsize = AtomicUsize::new(0);
+/// Latched peer `SessionMemberSteam` (pool slot whose `+0x80` == the peer id). Stable while the session
+/// holds; its `+0x130` is the live endpoint, or 0 when the pump has dropped it between rebuilds.
+static TYPE5_PEER_MEMBER: AtomicUsize = AtomicUsize::new(0);
+/// The peer SteamID64 the endpoint-set hook matches `member+0x80` against (published by the driver).
+static TYPE5_PEER_ID: AtomicU64 = AtomicU64::new(0);
+/// Armed by `[debug.probes] drive_type5`.
+static DRIVE_TYPE5: AtomicBool = AtomicBool::new(false);
+/// Log latch for the type-5 drive (fires on a throttle; log the first several, then quiet).
+static TYPE5_DRIVE_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// endpoint-set latch: `0x14203ef70(rcx=&member+0x130 holder, rdx=&src)`. Reads `endpoint=[rdx]`, then the
+/// endpoint's member back-ptr `[endpoint+0x50]`, and latches that member iff its `+0x80` == our peer — so the
+/// driver can read the member's live `+0x130` and drive the type-5 send on it. Read-only (no game-state write).
+fn latch_type5_peer_member(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        // SAFETY: ilhook entry registers; rdx = &src holder. Every deref bounds-checked for null before use;
+        // `endpoint+0x50` (member back-ptr) and `member+0x80` (peer id) are charted in-object fields.
+        let r = &*regs;
+        let src = r.rdx as usize;
+        if src == 0 {
+            return;
+        }
+        let endpoint = (src as *const usize).read_volatile();
+        if endpoint == 0 {
+            return;
+        }
+        let member = ((endpoint + 0x50) as *const usize).read_volatile();
+        if member == 0 {
+            return;
+        }
+        let peer = TYPE5_PEER_ID.load(Ordering::Relaxed);
+        let mid = ((member + 0x80) as *const u64).read_volatile();
+        if peer != 0 && mid == peer && TYPE5_PEER_MEMBER.swap(member, Ordering::Relaxed) != member {
+            log::info!(
+                "session-probe: type5 — latched peer member {member:#x} (endpoint {endpoint:#x}, +0x80={}) \
+                 — will drive the game's type-5 send 0x142400df0 on its live +0x130",
+                unseamless_core::diagnostics::peer_tag(mid),
+            );
+        }
+    }));
+}
 
 /// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
 /// `SocketManagerHolder@DLNR3D` around the standup connection and land it at `[container+0x708]` — the
@@ -2897,6 +2981,9 @@ pub struct TransportStandupDriver {
     /// spam may crowd out / desync the game's own connect flow, which owns the built endpoint's real send/recv.
     /// On = stop it and let the game's own endpoints talk. See STATE.md > Next (a). Default off.
     suppress_syn: bool,
+    /// ★ Type-5 producer (option b): drive the game's own send `0x142400df0` on the peer member's built
+    /// endpoint to complete the handshake (`member+0x152=1`). See `drive_type5` in config.
+    drive_type5: bool,
 }
 
 impl TransportStandupDriver {
@@ -2911,6 +2998,7 @@ impl TransportStandupDriver {
         skip_accept: bool,
         add_peer_joiner: bool,
         suppress_syn: bool,
+        drive_type5: bool,
     ) -> Self {
         Self {
             built: false,
@@ -2928,6 +3016,7 @@ impl TransportStandupDriver {
             skip_accept,
             add_peer_joiner,
             suppress_syn,
+            drive_type5,
         }
     }
 
@@ -3352,6 +3441,46 @@ impl TransportStandupDriver {
         if drive && self.add_peer_throttle.tick() {
             self.try_drive_add_peer(peer);
         }
+        // ★ Type-5 producer (option b): once the peer member's endpoint is built, drive the game's own type-5
+        // send on its LIVE +0x130 so the game frames + SendP2PPackets a real auth-ticket message. The peer's
+        // pump validates it → member+0x152=1 → roster → players=2. Throttled retry (the auth ticket only goes
+        // valid after Steam's GetAuthSessionTicketResponse_t callback, ~ms; the endpoint also cycles
+        // build/drop, so re-read +0x130 each tick and skip when 0). The latch hook publishes the peer member.
+        if self.drive_type5 {
+            TYPE5_PEER_ID.store(peer, Ordering::Relaxed);
+            self.try_drive_type5();
+        }
+    }
+
+    /// Drive the game's own type-5 send `0x142400df0(endpoint)` on the latched peer member's live endpoint
+    /// (`member+0x130`). No-op until the endpoint-set hook has latched the peer member AND the pump has built
+    /// a live endpoint (member+0x130 != 0). Firewalled; a hard fault surfaces via crashdump. Reuses the
+    /// add-peer throttle cadence so we don't spam the send (each call re-fetches a fresh auth ticket).
+    fn try_drive_type5(&mut self) {
+        let member = TYPE5_PEER_MEMBER.load(Ordering::Relaxed);
+        let send_fn = TYPE5_SEND_FN.load(Ordering::Relaxed);
+        if member == 0 || send_fn == 0 || !self.add_peer_throttle.tick() {
+            return;
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            // SAFETY: `member` is the latched, still-allocated pool slot; `member+0x130` is its endpoint holder
+            // (0 between the pump's build/drop cycles). We only call the send on a NON-NULL live endpoint, so
+            // we never dispatch on a freed object. `0x142400df0(rcx=endpoint)` is the game's own send (charted
+            // single-arg); it reads the endpoint + calls GetAuthSessionTicket/SendP2PPacket, no arg of ours.
+            let ep = ((member + 0x130) as *const usize).read_volatile();
+            if ep == 0 {
+                return; // endpoint dropped between rebuilds — wait for the pump to rebuild it
+            }
+            let send: extern "win64" fn(usize) = std::mem::transmute(send_fn);
+            send(ep);
+            let n = TYPE5_DRIVE_LOGS.fetch_add(1, Ordering::Relaxed);
+            if n < 12 {
+                log::info!(
+                    "session-probe: ★ type5-DRIVE #{n} — 0x142400df0(endpoint={ep:#x}) on member {member:#x} \
+                     — the GAME frames + sends a real type-5 auth ticket; the peer validates it → member+0x152=1 → roster",
+                );
+            }
+        }));
     }
 
     /// Drive the session-layer add-peer entry `0x1423fdc80(session, &peerSteamID, &selfSteamID, flag)` for the
@@ -3441,6 +3570,7 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
             config.debug.probes.host_skip_p2p_accept,
             config.debug.probes.drive_add_peer_joiner,
             config.debug.probes.suppress_syn,
+            config.debug.probes.drive_type5,
         )));
     }
     if config.debug.probes.session_probe {

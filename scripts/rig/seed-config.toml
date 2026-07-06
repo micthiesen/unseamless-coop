@@ -227,6 +227,13 @@ suppress_syn = true        # ★ OPTION-A (2026-07-06): stop our fabricated 14B 
                            # pump (buf[0]=14 out of type-1..8 range) and its host-admit purpose is a red herring, so
                            # it only spams channel 30 and may crowd out the game's own connect flow. Off = old SYN
                            # behavior. Pair with symmetric_peer. See docs/STATE.md > Next (a).
+drive_type5 = true         # ★ THE TYPE-5 PRODUCER (option b, 2026-07-06) — the payoff. Once the peer member's
+                           # endpoint (member+0x130) is built (symmetric_peer + drive_add_peer), drive the game's
+                           # OWN send 0x142400df0(endpoint) each tick: it frames a real type-5 (type byte, token,
+                           # GetAuthSessionTicket, SendP2PPacket ch30). The peer's pump validates the auth ticket
+                           # (0x142402ee0/BeginAuthSession vs member+0x80) → member+0x152=1 → roster → players=2.
+                           # Set on BOTH machines (each produces its own ticket for the other). Pair with
+                           # symmetric_peer + drive_add_peer. See docs/STATE.md > Next (b).
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether

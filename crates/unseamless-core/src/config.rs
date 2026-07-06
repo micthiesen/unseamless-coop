@@ -396,6 +396,16 @@ pub struct DebugProbes {
     /// (both build endpoints). Set on BOTH machines. Off by default. See docs/STATE.md > Next (a).
     pub suppress_syn: bool,
 
+    /// **★ THE TYPE-5 PRODUCER — option (b)** (2026-07-06). Drive the game's OWN handshake-completion send
+    /// `0x142400df0(endpoint)` on the peer member's built endpoint (`member+0x130`). The game frames a proper
+    /// type-5 (writes type 5, pulls the token, calls `GetAuthSessionTicket`, `SendP2PPacket` ch30); the peer's
+    /// pump validates the auth ticket (`0x142402ee0`/`BeginAuthSession` against `member+0x80`) → `member+0x152=1`
+    /// → the member completes → roster → `players=2`. We latch the peer member off the endpoint-set writer
+    /// `0x14203ef70` and read its live `+0x130` each tick. Preconditions (charted): endpoint built
+    /// (`drive_add_peer` + `symmetric_peer`), peer P2P accepted, Steam auth live, `member+0x80` = peer id.
+    /// Set on BOTH machines (each produces its own ticket for the other). Off by default. STATE.md > Next (b).
+    pub drive_type5: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so
