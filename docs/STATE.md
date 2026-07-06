@@ -18,7 +18,9 @@ validation-side** (run 17 de-risk, `instrument_type5_recv`, commit `b6533dd`): t
 `0x142640e30`. So a delivered type-5 is never dispatched to the pump — **no transport `SteamConnection` is registered
 for the peer**, so recv's sender-id search misses and the packet is dropped at admit instead of delivered. The entire
 remaining job is **registering the peer's transport connection** in `[socketmgr+0xb8..0xc0]`; ticket-timing /
-identity concerns are moot until delivery works. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17)".
+identity concerns are moot until delivery works. **Run 18 recon confirmed the table is EMPTY all session but has
+5-slot capacity, so a direct push is SAFE** (no realloc) — the insert lever is now a de-risked, well-scoped build.
+Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)".
 
 ## Now
 
@@ -78,23 +80,30 @@ ticket-timing / `member+0x80` identity are moot until delivery works. The valida
 on `main`) stays armed as the acceptance signal: once the connection is registered, `TYPE5-VALIDATOR FIRED` flipping
 from "never" to "fires" confirms delivery, then watch `member+0x152`.
 
-### The register work — path B (DIRECT insert), charted 2026-07-06 (run 17 static)
+### The register work — path B (DIRECT insert), charted + recon-DONE 2026-07-06 (runs 17–18)
 
-The admit fn `0x142640e30` was charted end-to-end (SESSION-DRIVE.md > "★ STATIC CHART"): it mints+registers a
-connection ONLY from a **14-byte SYN** (our type-5 fails the SYN-shape gate `0x142642830`), and even the game's own
-SYNs die at gate-c because the member-resolve bottoms out in the `[S+0x168]` **stub** and never fills the connection
-factory — so **`force_gatec_accept` alone is insufficient** (the factory ptr `[rsp+0x80]` stays null). ⇒ **Don't go
-through admit. Insert the `SteamConnection` directly into `[socketmgr+0xb8..0xc0]`** (the table recv's sender-id
-search reads), keyed `+0x138==peerSteamID64`, so recv finds it + delivers. Open questions to answer next:
+Both the admit register path (static, run 17) and the live table state (run 18) are charted — the build is now a
+well-scoped, de-risked lever. What's settled:
+- **Don't go through admit.** It mints a connection ONLY from a 14-byte SYN (our type-5 fails the SYN-shape gate
+  `0x142642830`, `syn_gate_on[sm+0x61]=1` live), and SYNs die at gate-c's `[S+0x168]` **stub** — `force_gatec_accept`
+  alone is insufficient (factory ptr `[rsp+0x80]` stays null).
+- **The insert target: `[socketmgr+0xb8..0xc0]` — EMPTY all session, with 5-slot capacity (`cap[sm+0xc8]`).** ⇒ a
+  **direct push is SAFE, no realloc**: write the connection ptr at `[end]`, bump `[sm+0xc0]` += 8, on the worker
+  thread (the reader — avoids racing recv). The pending queue is empty too (nothing to promote via `0x142640ff0`).
+- **What to push: a `SteamConnection@DLNW3D` keyed `+0x138`=peerSteamID64** (recv's match key). This is a **distinct
+  object from the endpoint** (`MTInternalThreadSteamConnection`, peer id at `+0x128`, pump queue at `+0x90`).
+  `stand_up_transport`'s `STANDUP_CONNECTION` is that class; set its `+0x138`=peerID and push it.
 
-1. **The table's insert mechanics.** `+0xb8`=begin, `+0xc0`=end — is it a `Vec`-like push (grow + write slot), and
-   is there a game insert fn, or do we write the slot + bump `+0xc0` ourselves? Re-verify the table live.
-2. **The entry's key.** Set the new `SteamConnection`'s `+0x138` = the peer SteamID64 (what recv matches on).
-3. **Which connection object + is it wired enough.** Reuse the one `stand_up_transport` builds off the game heap, or
-   the DLNW3D endpoint's own transport (`endpoint+0x18`)? It must be the object the deliver path `0x142642860`
-   expects to enqueue onto the pump's endpoint queue.
-4. **Symmetric.** Both machines send + receive; register on both. Keep `symmetric_peer` + `send_type5` +
-   `instrument_type5_recv` on (watch `TYPE5-VALIDATOR FIRED` flip once delivery works).
+**The build (next step):** a `register_conn` lever, armed on the worker-drain (has `socketmgr` in rcx): once, when
+`STANDUP_CONNECTION` exists + the peer id is known + it's not already a table entry → set `conn+0x138`=peerID, push
+into the vector. Then two-machine with `instrument_type5_recv` on: **watch `TYPE5-VALIDATOR FIRED` flip from "never"
+to "fires"**, then `member+0x152` / `players`.
+
+**The one open risk only the rig settles:** whether the pushed connection's `+0x20` reassembler (`0x142643db0`
+→`0x142642860`) actually routes to the endpoint's `[ep+0x90]` queue — it shares the socketmgr's `S`, and the deliver
+reassembler may itself resolve the endpoint via the `[S+0x168]` **stub**. If delivery still fails with a registered
+connection, that's the signal that a real member-lookup (path A / lever 3b) is unavoidable. Keep `symmetric_peer` +
+`send_type5` on; register on both machines. (Live peek helpers: `/tmp/peek-socketmgr.py`, `/tmp/catch-endpoint.py`.)
 
 **Ticket-timing note (still relevant):** `GetAuthSessionTicket` fills bytes synchronously but a remote
 `BeginAuthSession` only accepts after Steam fires `GetAuthSessionTicketResponse_t` (~ms). The sender already
@@ -144,9 +153,10 @@ directly alongside the bit-2 OR once a session establishes.
   `steam::get_auth_session_ticket` (`be7f64e`); `session_probe.rs` — the **hand-frame sender** `send_type5` +
   `prepare_type5_packet` (`2ceddb0`, the working producer), the `drive_type5` observe-only send-drive (`ec691cc`,
   retired — do not re-enable), the endpoint-set latch `0x14203ef70`, `drive_add_peer`, `symmetric_peer`/`suppress_syn`
-  levers, `instrument_host_accept` (the receive-side admit hook that logged the type-5 arriving), and
-  **`instrument_type5_recv`** (the validator hook `0x142402ee0` — the acceptance signal, `b6533dd`). Config gates in
-  `unseamless-core/config.rs`; the seed (`scripts/rig/seed-config.toml`) documents each flag inline.
+  levers, `instrument_host_accept` (the receive-side admit hook — its worker-drain tracer now also dumps the conn
+  table + pending queue, `7ccd41e`), and **`instrument_type5_recv`** (the validator hook `0x142402ee0` — the
+  acceptance signal, `b6533dd`). Config gates in `unseamless-core/config.rs`; the seed
+  (`scripts/rig/seed-config.toml`) documents each flag inline.
 - **Current seed** (`scripts/rig/seed-config.toml`): `symmetric_peer` + `drive_add_peer` + **`send_type5` ON**
   (both build endpoints + send their type-5); `suppress_syn` ON; `instrument_host_accept` + **`instrument_type5_recv`
   ON** (the receive-side signals); `drive_type5` OFF (retired); both machines `--auto-session host`. This is the

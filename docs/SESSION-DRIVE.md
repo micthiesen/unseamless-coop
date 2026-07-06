@@ -4332,3 +4332,36 @@ the deliver path (`0x142642860`) to enqueue onto the endpoint the pump reads. Al
 real `[S+0x168]` member-lookup so the game's own SYN admit-success runs — but that's the lever-3b service/context
 init we've avoided; path B is the smaller bet. **Next rig run:** build the direct-insert lever, watch
 `TYPE5-VALIDATOR FIRED` flip + `member+0x152`.
+
+### ▶ RIG RESULT (run 18, 2026-07-06) — LIVE RECON: table empty w/ 5-slot capacity (direct push is SAFE); the table entry ≠ the endpoint
+
+Extended the worker-drain hook to dump the conn-vector + pending queue (commit `7ccd41e`), ran two-machine, then
+peeked the live socketmgr + peer-member endpoint by ptrace (`/tmp/peek-socketmgr.py`, `/tmp/catch-endpoint.py`, using
+the socketmgr `0x7ffe93a92fe0` + member addr the hooks/`capture-endpoint.py` logged). Findings:
+
+- **The conn table `[sm+0xb8..0xc0]` is EMPTY the entire session** (begin==end, sustained tick #2 → #3300 ≈ 2 min
+  while the peer sends type-5s), **but has capacity: `cap[sm+0xc8]` = 5 slots** (`room_to_push=True`). ⇒ **A direct
+  push is SAFE — write the connection pointer at `[end]` and bump `[sm+0xc0]` by 8; NO reallocation** (the biggest
+  path-B risk is gone). Do it on the worker thread (the reader) to avoid racing recv's iteration.
+- **The pending queue `[sm+0xd8..0xe0]` is also EMPTY** (`has_pending[sm+0xf0]=0`, cap = 5×0x80B). So nothing is
+  ever queued to become a connection either — the game's natural registrar (`0x142640ff0`) has nothing to promote.
+- **Live socketmgr gate fields:** `channel[+0x50]=30` ✓, `[+0x5c]=0x480` (≥ msgSize, size-gate passes),
+  **`syn_gate_on[+0x61]=1`** (the SYN-shape gate IS active → confirms our 249B type-5 is rejected there),
+  `resolve_cb[+0x40]=0x142639810`, `S[+0x48]=0x7ffe9386fbf0`, **`lookup[S+0x168]=0x1423fdf00` = the STUB (confirmed
+  live)**, `coll[S+0x98..0xa0]` span 0x28B (non-empty, but the stub ignores it).
+- **★ Caught the transient endpoint live** (`member+0x130`, which cycles 0): `ep=…702b0`, `vtable=0x143277750`
+  (`MTInternalThreadSteamConnection`). **Key layout:** `[ep+0x128]` = the Deck peer SteamID64 (NOT `+0x138`),
+  `[ep+0x90]` = the pump's message queue (`…9c4670`, real), **`[ep+0x18]` = `0x7ffe9386fbf0` = the socketmgr's `S`**
+  (the endpoint shares the socketmgr's resolve context). `[ep+0x20]`/`[ep+0x28]` are code ptrs (an inner dispatch
+  table), NOT a reassembler.
+
+**⇒ Refined path B.** The **table entry is a distinct `SteamConnection@DLNW3D` (peer key at `+0x138`)**, NOT the
+endpoint (`MTInternalThreadSteamConnection`, peer id at `+0x128`, queue at `+0x90`). recv delivers to the table
+entry's `+0x20` reassembler (`0x142643db0` does `add rcx,0x20`), which must surface messages on the endpoint's
+`[ep+0x90]` queue that the pump reads. So the insert needs a `SteamConnection@DLNW3D` **linked to this endpoint**.
+`stand_up_transport`'s `STANDUP_CONNECTION` is that class — the build is: set its `+0x138`=peerID, push it into the
+(5-cap, empty) table, and rig-test. **The one open risk that only the rig can settle:** whether that connection's
+reassembler routes to `[ep+0x90]` (it shares `S`, and the deliver reassembler may itself resolve the endpoint via the
+`[S+0x168]` **stub** → if so, delivery fails even with a registered connection, and path A / a real lookup is forced).
+That's the decisive next experiment. Peek scripts saved at `/tmp/peek-socketmgr.py` + `/tmp/catch-endpoint.py`
+(socketmgr/member addrs are per-launch ASLR — re-read them from the worker-drain + `capture-endpoint.py` logs).
