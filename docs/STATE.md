@@ -103,7 +103,8 @@ to "fires"**, then `member+0x152` / `players`.
 →`0x142642860`) actually routes to the endpoint's `[ep+0x90]` queue — it shares the socketmgr's `S`, and the deliver
 reassembler may itself resolve the endpoint via the `[S+0x168]` **stub**. If delivery still fails with a registered
 connection, that's the signal that a real member-lookup (path A / lever 3b) is unavoidable. Keep `symmetric_peer` +
-`send_type5` on; register on both machines. (Live peek helpers: `/tmp/peek-socketmgr.py`, `/tmp/catch-endpoint.py`.)
+`send_type5` on; register on both machines. (Live peek helpers, argv-parameterized: `scripts/re/peek-socketmgr.py <sm>`,
+`scripts/re/catch-endpoint.py <member>` — read the addrs from the host-worker-drain + `capture-endpoint.py` logs.)
 
 **Ticket-timing note (still relevant):** `GetAuthSessionTicket` fills bytes synchronously but a remote
 `BeginAuthSession` only accepts after Steam fires `GetAuthSessionTicketResponse_t` (~ms). The sender already
