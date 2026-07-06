@@ -3997,3 +3997,210 @@ lever can be retired (`suppress_syn` proved it unnecessary).
 
 Probe/flags: commit `fdcdfd1` (`suppress_syn`). Read member state with `scripts/re/capture-endpoint.py` (rig
 pid auto-found).
+
+## ★ TYPE-5 PRODUCER + INJECTION (2026-07-06, static — worker:type5-chart)
+
+Static RE (clean on-disk `eldenring.exe` 2.6.2, capstone via `scripts/re/static.py`, base `0x140000000`;
+behavioral notes in our own words, exact addresses). Charts the type-5 handshake-completion message END TO
+END so the orchestrator can PRODUCE + INJECT one to set the receiver's `+0x152=1`. Answers run-12's option-(b)
+open sub-questions (token semantics; which side sends; the exact bytes). **Load-bearing conclusion first, then
+the three charted questions with evidence + a concrete lever each, then the confidence ranking.**
+
+### ▶ TL;DR — the wire format is exact; the ticket forces a real joiner; the game will frame it for us
+
+- **The type-5 wire message (ground truth, read off three independent sites — send builder, pump case, and
+  validator, all agreeing):**
+  ```
+  [1B  type = 0x05]
+  [8B  token         ]   ← receiver STORES verbatim at conn+0x148; never validated/echoed/compared → ANY 8 bytes
+  [4B  ticket_len LE ]   ← must be 1..0x400
+  [N·  auth ticket   ]   ← N = ticket_len; a REAL ISteamUser::GetAuthSessionTicket blob from the SENDER's Steam
+  ```
+- **The completion gate is purely the ticket.** The pump stores the token blindly and sets `+0x152=1` **iff**
+  the validator returns true, and the validator's only real test is `BeginAuthSession(ticket, ticket_len,
+  peerSteamID)` returning OK(0) or DuplicateRequest(2). A random blob → `InvalidTicket(1)` → rejected. **⇒ the
+  type-5 cannot be host-fabricated; the ticket must be minted by the JOINER's Steam** (issued for the host to
+  validate against the joiner's SteamID64). This confirms run-12's "joiner-produced auth ticket" read and the
+  2026-07-05 "can't be banked/synthesized" note.
+- **⇒ There is NO external inject point into the host's own pump queue.** The pump drains an in-process message
+  queue on the endpoint (`[endpoint+0x90]`), and that queue is fed only by the transport recv (`ReadP2PPacket`
+  on channel 30, keyed by sender SteamID64). To land a type-5, a genuine inbound Steam P2P packet from the
+  joiner must arrive. **The faithful producer is the joiner's OWN game send stack** — call the game's type-5
+  builder `0x142400df0` on the joiner's built endpoint; the game does the transport framing + SendP2PPacket, so
+  it lands correctly in the host's recv → pump → type-5 case → `+0x152=1`. (Raw hand-framed SendP2PPacket is
+  possible but fragile — parts of the transport frame are Arxan-dispatched; see Q1.)
+
+---
+
+### Q3 — THE GAME'S OWN TYPE-5 SEND SITE (charted first: it's the ground truth for the bytes) — CONFIDENCE #1
+
+**`0x142400df0(rcx = conn)`** builds and sends the completion type-5. `conn` is the DLNW3D
+`MTInternalThreadSteamConnection` (the endpoint = `member+0x130`). Body, in order:
+
+1. **Open a message writer** over a 0x400-byte stack buffer: `0x141ede5e0(&writer, &buf, 0x400)`. Thereafter
+   `0x141ede700(&writer, src, len)` = append `len` bytes.
+2. **Write `[1B = 5]`** — the type byte (`mov byte [local],5` then append len 1).
+3. **Write `[8B token]`** — the token is read from **`[[conn+0x60]+0x548]`**, a per-connection nonce living on
+   the owning session-back object (`conn+0x60`). Appended as 8 raw bytes. This is a *local* value; the receiver
+   just records it (Q on token semantics: it's a send-side nonce, NOT an echo of anything the host sent).
+4. **Append the auth ticket** via conn vtable slot **14** (`[conn_vt+0x70]`) = **`0x1424030f0`**: it resolves
+   **ISteamUser** (ctx `0x143b48a00`, accessor `0x144c0d0a4`, version string `SteamUser021` @ `0x142bf7c68`),
+   calls **`GetAuthSessionTicket(buf, 0x400, &len)`** (ISteamUser vtable slot **13** = `[iface_vt+0x68]`),
+   stores the returned ticket handle at **`conn+0x158`**, and — if the handle is nonzero — appends
+   **`[4B len LE][len·ticket bytes]`** to the writer. Returns false if the handle is 0 (Steam auth not ready) →
+   the whole send aborts (no empty type-5 is sent).
+5. **Send:** get the writer length (`0x141ede7b0`) + data ptr (`0x141ede870`), then
+   **`0x1424006a0(conn, data, len)`** → `0x1423f3cb0` on the endpoint (dispatches through `endpoint+0x18` = the
+   transport context) → the `SteamConnection` send `0x142643dd0` → **`SendP2PPacket`** (`0x142640b20`,
+   ISteamNetworking006 ctx `0x143c602b0`) to the peer's SteamID64, unreliable, channel `[socketmgr+0x50]` (=30).
+
+**Framing (byte-exact):** `0x05` ‖ token (native-LE u64) ‖ ticket_len (LE u32, 1..0x400) ‖ ticket. The type
+byte is written FIRST as its own 1-byte append; token and length are little-endian; the ticket is copied
+verbatim. **Token source = `[[conn+0x60]+0x548]`; ticket source = the sender's own `GetAuthSessionTicket`.**
+
+**► LEVER (produce a type-5 on the joiner):** best = **invoke `0x142400df0` on the joiner's built endpoint**
+(`member+0x130`, once `drive_add_peer`/the pump has built it aimed at the host) — the game frames + sends it
+faithfully. If reconstructing by hand instead: build `[5][8 arbitrary token bytes][4B len][GetAuthSessionTicket
+blob]` and hand it to `0x1424006a0(endpoint, data, len)` (still uses the game's transport framing). Steam is
+already bound for rung-4, so `GetAuthSessionTicket` is in reach. Expected effect: the host's pump dispatches
+type-5 → validator succeeds → `conn+0x152=1` → member completes → roster → 2.
+
+### Q2 — THE VALIDATOR `0x142402ee0` (conn vtable slot 17) — what makes it set completion — CONFIDENCE #2
+
+**`0x142402ee0(rcx = conn, rdx = reader)`.** The pump has already read the 1B type + 8B token; the `reader` is
+positioned at the ticket portion. Body:
+
+1. **Read `[4B len]`** from the reader (reader vtable slot at `+0x18` = read-bytes); require exactly 4 read.
+2. **Require `len-1 <= 0x3FF`** → **`len ∈ [1, 0x400]`** (matches the send-side cap and the pump's message size).
+3. **Read `len` bytes** (the ticket) into a stack buffer; require exactly `len` read.
+4. **Resolve ISteamUser** (same ctx `0x143b48a00` / accessor `0x144c0d0a4` / `SteamUser021` as the send side).
+5. **Resolve the peer identity** by dereferencing the connection's identity field at **`conn+0x80`** (handle
+   resolve `0x141eba220`) → a `CSteamID`. *This is the identity the ticket is checked against* — it must be the
+   **joiner's real SteamID64**. (Live: the *member's* `+0x80` = the peer SteamID64; a live read should confirm
+   the endpoint's `+0x80` mirrors it — flagged, not blocking.)
+6. **Call `BeginAuthSession(pTicket = buffer, cbTicket = len, steamID = conn+0x80)`** — ISteamUser vtable slot
+   **14** (`[iface_vt+0x70]`).
+7. **Set `conn+0x168 = 1`** (an "auth-begun" marker) and **return true iff `result & ~2 == 0`** — i.e. result
+   ∈ **{0 = OK, 2 = DuplicateRequest}**; anything else (1 InvalidTicket, 3 InvalidVersion, 4 GameMismatch,
+   5 ExpiredTicket) → **return false** (no completion).
+
+**The pump case then (0x142400955): `conn+0x148 = token` (stored verbatim), `conn+0x152 = 1`** — but ONLY if the
+validator returned true. So:
+
+- **The 8B token is NOT part of the gate** — it is read and stored blindly (`conn+0x148`), never validated,
+  echoed, or compared. Run-12's open question ("is the token echoed, or a session nonce?") is answered: it is
+  the **sender's local nonce, stored by the receiver**; any 8 bytes complete this part.
+- **The gate is the ticket** — a genuine, Steam-issued `GetAuthSessionTicket` blob (1..0x400 bytes) that
+  `BeginAuthSession` accepts against the peer's SteamID64. **The check is NOT looser than that.** (The `result==2`
+  acceptance only helps if the host already has an open auth session for that steamID — the ticket must still be
+  Steam-valid; there is no bypass to fabricate one host-side.)
+
+**► LEVER / DELIVERABLE:** the minimal blob that flips `+0x152` = **`[8B any token][4B len][real joiner
+GetAuthSessionTicket]`**, AND the host's `member+0x80` (the endpoint identity) must equal the joiner's real
+SteamID64 (a wrong/zero peer id rejects every ticket — watch `drive_add_peer`'s peer-id arg). No shortcut blob
+exists.
+
+### Q1 — THE INJECTION PATH (highest priority) — where the type-5 bytes must land — CONFIDENCE #3 (architecture high; raw-inject bytes partly Arxan)
+
+**How the pump gets a message (forward):** the per-connection pump **`0x1424007e0(rcx = conn)`** reads messages
+by calling **`0x14203f250(&conn+0x130, tag=0xfa, &msgbuf, 0x400, &outlen)`** in a loop. `0x14203f250` derefs the
+holder (`mov rcx,[rcx]`) and tail-jumps to **`0x14203f6b0`**, which **dequeues from an in-process typed message
+queue on the endpoint at `[endpoint+0x90]`** (a fixed ring: per-slot head at `+0x28+idx*8`, mirror pointer at
+`+0x828+idx*8`, presence bitmap at `+0x1058`; slot chosen by the `tag` byte). It copies the message bytes into
+`msgbuf` and returns the length. The pump takes `msgbuf[0]` as the type, wraps `msgbuf+1` in a reader
+(`0x141edfa20`), gates `type ∈ 1..8` (jump table `0x1424009f8`), and dispatches. **This queue is NOT Steam — it
+is an in-process reassembly buffer.**
+
+**Backward — what fills `[endpoint+0x90]`:** the transport recv **`0x142640bc0`** = the `ReadP2PPacket` drain
+loop (ISteamNetworking006 slot 2, ctx `0x143c602b0`). Per packet:
+- reads into a `0x4b1` buffer, out sender-SteamID64, out-size, **channel `[socketmgr+0x50]` (=30)**;
+- **frame-length check `0x1426425d0`**: needs `size >= 2`, and computes an **11-bit framed length =
+  `byte0 | ((byte1 & 7) << 8)`** (byte1's high 5 bits are transport flags); requires `2 <= framed_len <= size`;
+- routes by sender id: search `[socketmgr+0xb8..0xc0]` for the `SteamConnection` with **`+0x138 == senderID`**;
+  if none, **find-or-create `0x142640e30`**;
+- **delivers via `0x142643db0` → `0x142642860`** (reassembles the framed bytes into the connection's message
+  stream, which surfaces as the pump's endpoint queue).
+
+So the inbound door is: **ISteamNetworking006 `ReadP2PPacket`, channel 30, keyed by the sender's SteamID64,
+transport-framed (11-bit length header), reassembled into the endpoint's message queue.** Two gates block
+delivery of an arbitrary packet: (1) the host must have **`AcceptP2PSessionWithUser(joiner)`** or Steam drops
+the joiner's packets before `ReadP2PPacket` ever sees them — the accept path `0x1426408b0` is itself gated on
+the member-resolve, which `drive_add_peer` (registering the joiner member) should satisfy, else force the accept
+(the JOINER-INBOUND aim sheet's decisive-splitter lever); (2) the frame-length gate `0x1426425d0`.
+
+**⇒ There is no external inject point into the host's own pump.** The type-5 must ride the real transport as an
+inbound packet from the joiner's SteamID64. **Run-12 reconciled:** the endpoint build (`member+0x130`) is
+DECOUPLED from this recv feed — the pump's `0x142401110` builds the endpoint from the session's transport
+fields the moment `drive_add_peer` queues the member, with zero inbound packets (that's why it built under
+`suppress_syn`). The recv feed carries only real DLNW3D frames; our 14-byte SYN was never a type-5 (buf[0]=14 is
+out of the 1..8 range and is dropped by the pump) and, as a raw blob, also failed the accept/frame gates. **The
+missing piece is a real type-5 frame from a joiner, not a driver into the endpoint.**
+
+**► LEVER (the injection):** **drive the joiner's own game send** (Q3's `0x142400df0` on the joiner's built
+endpoint). This is the ONLY faithful path — the game's send stack applies the transport framing that
+`0x1426425d0`/`0x142642860` expect, and SendP2PPackets from the joiner's SteamID64 on channel 30, so the host's
+recv admits it (given the P2P session is accepted). Preconditions to line up before the run:
+1. **Joiner endpoint built + aimed at host** — `drive_add_peer` on the joiner queues the host member; the
+   joiner's pump builds its `member+0x130` (proven both-sides in `symmetric_peer`/run-12).
+2. **Host accepts the joiner's P2P session** — `drive_add_peer` registers the joiner member so the accept
+   `0x1426408b0` resolves; if it still rejects, force accept (joiner-role-gated `AcceptP2PSessionWithUser`).
+3. **Steam auth live on the joiner** — `GetAuthSessionTicket` must return a nonzero handle.
+4. **Host `member+0x80` = the joiner's real SteamID64** (BeginAuthSession validates against it).
+
+A **raw hand-framed inject** (build the full transport frame + `SendP2PPacket 0x142640b20(hostID, bytes, len,
+0, 30)`) is the fallback but is FRAGILE: the inner transport framing added by `0x1423f3cb0`/`0x142642860` is
+partly Arxan-dispatched (opaque call boundaries on disk), so reproducing the exact header bits beyond the 11-bit
+length is guesswork. Prefer letting the game frame it.
+
+### Confidence ranking
+
+1. **Q3 (send site / the exact bytes) — HIGHEST.** Fully static, unobfuscated; the framing is read directly off
+   `0x142400df0` + `0x1424030f0` and independently corroborated by the pump case (`0x142400924`) and the
+   validator (`0x142402ee0`) reading the same shape. No Arxan gaps.
+2. **Q2 (validator) — HIGH.** Fully static; the `GetAuthSessionTicket`/`BeginAuthSession` pairing and the
+   accept mask `{0,2}` are unambiguous. Only soft spot: confirming live that the endpoint's `+0x80` is the
+   joiner's SteamID64 (the member's `+0x80` is — capture-confirmed) and the exact Steam meaning of result `2`.
+3. **Q1 (injection path) — architecture HIGH, raw-inject bytes MEDIUM.** The recv→queue→pump chain and "no
+   external bypass; must be joiner-produced" are solidly static. The recommended lever (drive the game's own
+   send) sidesteps the one Arxan-opaque part (the inner transport frame), so the *actionable* recommendation is
+   high-confidence even though a hand-built raw packet would not be.
+
+### Re-derivation notes (per function, `scripts/re/static.py fn <addr>` on clean 2.6.2, base `0x140000000`)
+
+- **Pump `0x1424007e0`:** the read loop `call 0x14203f250` on `lea rcx,[rdi+0x130]` (tag `dl=0xfa`, buf
+  `[rbp-0x70]`, cap `r9d=0x400`); `movzx ebx,[rbp-0x70]` = type; `0x141edfa20(&reader,&buf+1,eax-1)`;
+  `lea eax,[rbx-1]; cmp eax,7; ja default`; jump `[r15 + rax*4 + 0x24009f8]`.
+- **Type-5 case `0x142400924`:** `r8d=8; call [reader+0x18]` reads the 8B token; `call [rdi+0x88]` (vtable slot
+  17 = validator); on true → `mov [rdi+0x148],token; mov byte [rdi+0x152],1`.
+- **Read primitive `0x14203f250` → `0x14203f6b0`:** the holder deref + the `[endpoint+0x90]` slot-ring dequeue
+  (`+0x28+idx*8` heads, `+0x828` mirror, `+0x1058` bitmap).
+- **Validator `0x142402ee0`:** two `call [reader+0x18]` reads (4B len then len bytes; `lea eax,[rcx-1]; cmp
+  eax,0x3ff; ja fail`); resolve `ISteamUser` (`lea rcx,[0x143b48a00]; call [0x144c0d0a4]`); `lea rcx,[rdi+0x80];
+  call 0x141eba220` (peer CSteamID); `call [iface+0x70]` = BeginAuthSession; `test eax,0xfffffffd; ... sete al`
+  (accept 0/2); `mov byte [rdi+0x168],1`.
+- **Send builder `0x142400df0`:** writer init `0x141ede5e0`; `mov byte,5` + `0x141ede700(_,_,1)`; token from
+  `[[rdi+0x60]+0x548]` + `0x141ede700(_,_,8)`; `call [rdi+0x70]` (vtable slot 14 = `0x1424030f0`); len/data via
+  `0x141ede7b0`/`0x141ede870`; send `0x1424006a0` → `0x1423f3cb0` (via `[conn+0x18]`).
+- **Ticket appender `0x1424030f0`:** resolve `ISteamUser`; `call [iface+0x68]` = GetAuthSessionTicket
+  (buf,0x400,&len); handle → `[rbx+0x158]`; if nonzero append `[4B len][len bytes]` via `[writer+0x18]`.
+- **Recv `0x142640bc0`:** `call [iface+0x10]` = ReadP2PPacket (channel `[rdi+0x50]`, buf cap `0x4b1`);
+  `0x1426425d0` frame-length (`>=2`, `byte0 | (byte1&7)<<8`); search `[rdi+0xb8..0xc0]` for `[conn+0x138]==id`;
+  find-or-create `0x142640e30`; deliver `0x142643db0` → `0x142642860`.
+- **Frame length `0x1426425d0`:** `cmp edx,2; jb 0` then `(([rcx+1]&7)<<8) + [rcx]`.
+- **Interface strings:** `SteamUser021` @ `0x142bf7c68`, `SteamNetworking006` @ `0x143277fd0` (ascii).
+- **Arxan-opaque (called out):** the transport deliver/enqueue `0x142642860` and the accept path `0x1426408b0`
+  have opaque call boundaries on disk — the *bytes* of the inner transport frame can't be fully re-derived
+  statically, which is why the lever routes through the game's own send rather than a hand-built raw packet.
+
+### Cross-references
+
+- Confirms + supersedes the run-12 option-(b) open sub-questions ("★ New insight → the type-5 is a
+  JOINER-produced auth ticket", above): token = send-side nonce stored verbatim; the sender must be a real
+  joiner (ticket); the exact bytes are now pinned.
+- Extends the "★ CLIENT-JOIN AIM SHEET" > "The type-5 SEND side (task-1)" with the byte-exact framing + the
+  receiver/injection side (that aim sheet charted the emitter preconditions; this pins the wire format and
+  proves there is no host-side inject bypass).
+- Endpoint queue `[endpoint+0x90]` is the DLNW3D `MTInternalThreadSteamConnection` (vtable `0x143277750`);
+  transport = `SteamConnection` + ISteamNetworking006 (`SendP2PPacket`/`ReadP2PPacket`, ctx `0x143c602b0`,
+  channel `[socketmgr+0x50]`=30) — consistent with the transport map in "★ JOINER INBOUND AIM SHEET" and the
+  ISteamNetworking006 findings above.
