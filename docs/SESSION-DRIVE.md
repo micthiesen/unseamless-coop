@@ -4204,3 +4204,41 @@ length is guesswork. Prefer letting the game frame it.
   transport = `SteamConnection` + ISteamNetworking006 (`SendP2PPacket`/`ReadP2PPacket`, ctx `0x143c602b0`,
   channel `[socketmgr+0x50]`=30) — consistent with the transport map in "★ JOINER INBOUND AIM SHEET" and the
   ISteamNetworking006 findings above.
+
+### ▶ RIG RESULT (runs 13–15, 2026-07-06) — the game's own send is ARXAN-LOCKED; hand-frame is the way
+
+Wired the type-5 producer to drive the game's own send `0x142400df0(endpoint)` on the latched peer member's
+built `member+0x130`. Three two-machine runs:
+
+- **Run 13/14 — CRASH.** `0x142400df0` faulted at its slot-14 call (`0x142400e82: call [[ep]+0x70]`) with a
+  DEP-execute `ACCESS_VIOLATION` on `0x119930522`, **identical across two ASLR'd launches**. Run 14 added a
+  guard (endpoint vtable == `0x143277750` + `[ep+0x60]` non-null + stable-2-ticks); it produced **zero skip
+  logs**, so the guard PASSED and the send still crashed — i.e. the endpoint was fully valid, the crash is
+  *inside* the send.
+- **Run 15 — OBSERVE-ONLY diagnosis (the answer).** Logged what we'd dispatch on without calling: endpoint
+  `send_ready=true`, `[ep](vtable)=0x143277750` (== expected, a real `MTInternalThreadSteamConnection`),
+  `[ep+0x60](token_src)` non-null — **but `[vtable+0x70]` (slot 14, the GetAuthSessionTicket getter) =
+  `0x119930522`**, a value BELOW the image base (`< 0x140000000`), identical every launch.
+
+**★ Conclusion: the endpoint vtable's slot 14 is ARXAN-obfuscated.** `0x119930522` is not a real code pointer
+— it's an obfuscated/sentinel slot that Arxan only resolves when the call is reached through the game's own
+protected control flow. Calling `0x142400df0` **cold** (from our frame task) hits the raw slot → DEP execute
+fault. So the type5-chart lever "drive the game's own send" is blocked: `0x142400df0` itself dispatches
+through an Arxan-locked vtable slot, so invoking it out of context can't work.
+
+**⇒ Pivot to the HAND-FRAME path (the scaffold, now the primary).** Build the type-5 bytes ourselves and
+`SendP2PPacket` them on ch30 — this never touches the Arxan vtable dispatch:
+- Payload (validator `0x142402ee0`, CONF #2): `[5][8B token][4B ticket_len][ticket]`, token arbitrary
+  (stored unvalidated), ticket = a real `GetAuthSessionTicket` blob (`steam::get_auth_session_ticket`,
+  scaffolded), `member+0x80` = the peer's real SteamID64.
+- Transport frame: wrap it in the same 11-bit length header our 14-byte SYN uses (`byte0 = len & 0xff`,
+  `byte1 = 0x40 | ((len >> 8) & 7)`), then the payload — send on ch30 via `ISteamNetworking006` (the send we
+  already drive in `drive_p2p`). The receiving pump reads ch30 → routes by sender id → endpoint queue →
+  dispatches the type-5 case → validator → `member+0x152=1`.
+- Open risk the chart flagged: an *inner* transport frame beyond the 11-bit len header may exist
+  (`0x142642860`/`0x1426408b0` are Arxan-opaque on disk). If the plain `[lenhdr][5][token][len][ticket]`
+  doesn't dispatch, capture the exact on-wire bytes of a real type-5 from a live ERSC session (the send goes
+  through `SendP2PPacket` ch30 — hookable/observable) to copy the framing. That's the fallback capture.
+
+Code: the send-drive is OBSERVE-ONLY on `main` (commit `ec691cc`, the `send()` call commented); the
+hand-frame halves are `steam::get_auth_session_ticket` + `core::dlnw3d::frame_type5` (commit `be7f64e`).

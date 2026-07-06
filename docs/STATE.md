@@ -11,7 +11,13 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (★ COURSE-CORRECTION + run 12. Cross-checking the ERSC captures (Michael: "use
+Last updated: **2026-07-06** (runs 13–15: driving the game's own type-5 send `0x142400df0` cold **crashes** —
+its endpoint vtable slot 14 is **Arxan-obfuscated** (`0x119930522`), only valid through the game's protected
+control flow. Pivoted option (b) to the **HAND-FRAME path**: build `[lenhdr][5][token][ticket_len][ticket]`
+and `SendP2PPacket` it on ch30 ourselves (scaffold `frame_type5` + `get_auth_session_ticket` already landed),
+avoiding the Arxan dispatch. The send-drive is OBSERVE-ONLY on `main`; don't re-enable it. See Next.)
+
+Prior update (★ COURSE-CORRECTION + run 12): Cross-checking the ERSC captures (Michael: "use
 the info I captured") revealed runs 4–11 — this session's 10/11 chasing the transport gate-c / `[S+0x168]`
 member-resolve — were a **red herring** (correction #1: that stub is present *even in working ERSC*; the
 connection is built by the session-layer pump, not find-or-create). Re-anchored on the **real frontier**
@@ -55,41 +61,32 @@ The gate-c path stays DO-NOT-RE-LITIGATE.)
 
 ## Next
 
-**★ Option (b) — PRODUCE a real type-5 auth-ticket message ourselves to set `member+0x152=1`.** Run 12
-(2026-07-06) disproved option (a): with `suppress_syn` on both machines the endpoint `member+0x130` **still
-builds** (the game's pump builds it from `drive_add_peer` queuing — our SYN was pure noise), but flags stay
-`(0,1,0,0)` and never reach the working-ERSC `(0,0,1,0)` (`+0x152`). The endpoint just cycles build → ~30s
-drop → rebuild. So the SYN wasn't blocking anything; the gap is squarely the missing **type-5**. Full: SESSION-DRIVE.md > "▶ RIG RESULT (run 12)".
+**★ Option (b), HAND-FRAME path — send our own type-5 bytes on ch30 (the game's own send is Arxan-locked).**
+Runs 13–15 (2026-07-06) proved driving the game's own send `0x142400df0(endpoint)` **crashes**: the endpoint
+is fully valid (`[ep]`=`0x143277750`, send-ready) but its **vtable slot 14 = `0x119930522`** (below the image
+base, identical across ASLR launches) — an **Arxan-obfuscated slot** only resolvable through the game's own
+protected control flow. Calling the send cold hits the raw slot → DEP fault. Full: SESSION-DRIVE.md > "▶ RIG
+RESULT (runs 13–15)". The send-drive is OBSERVE-ONLY on `main` (`ec691cc`); don't re-enable the `send()` call.
 
-**Decision (/next, 2026-07-06): split A (delegated static chart) + B (serial scaffold), injection-path first.**
-The biggest unknown is the **injection path** — run 12 proved the pump reads type messages from `conn+0x130`
-via holder API `0x14203f250`, but *what transport/channel feeds that endpoint's recv* (where we inject a
-type-5) is unknown; if a type-5 can only arrive via the game's own connect flow, "produce it ourselves"
-becomes "drive that flow." So: **lane `type5-chart`** charts (a) the pump-read `0x14203f250` + endpoint recv
-source (the injection point), (b) the validator `0x142402ee0` (token semantics at `member+0x148`, whether
-`BeginAuthSession` success is enforced, what the blob must be), (c) the game's own type-5 SEND site (does the
-connect flow call `GetAuthSessionTicket`? framing?). Orchestrator **scaffolds B in parallel** (Steam
-`GetAuthSessionTicket` binding + a config-gated type-5-producer feature) so the chart's answers drop straight
-in. Both land → serial two-machine confirm run (watch `member+0x152`, `players→2`).
+**⇒ The hand-frame path avoids the Arxan dispatch entirely — build the bytes, `SendP2PPacket` ch30:**
+1. Payload (host-tested scaffold `core::dlnw3d::frame_type5`, `be7f64e`): `[5][8B token][4B ticket_len][ticket]`.
+   Token arbitrary (validator `0x142402ee0` stores it unvalidated); ticket = a real `GetAuthSessionTicket` blob
+   (`steam::get_auth_session_ticket`, scaffolded); the host must have `member+0x80` = our real SteamID64
+   (`drive_add_peer` sets it). Validator gates ONLY on the ticket via `BeginAuthSession` → `member+0x152=1`.
+2. Transport frame: wrap in the same 11-bit length header the 14-byte SYN uses (`byte0 = len & 0xff`,
+   `byte1 = 0x40 | ((len>>8)&7)`), then the payload; send on **ch30** via `ISteamNetworking006` (the send we
+   already drive in `drive_p2p`). The peer's pump reads ch30 → routes by sender id → endpoint queue →
+   type-5 case → validator → `member+0x152=1` → roster → `players=2`. Set on BOTH machines (each sends its
+   own ticket to the other).
+3. **If the plain frame doesn't dispatch** (the chart flagged a possible inner transport frame beyond the
+   11-bit header — `0x142642860`/`0x1426408b0` are Arxan-opaque): **capture the exact on-wire bytes** of a
+   real ERSC type-5 by hooking `SendP2PPacket` ch30 on a live ERSC session, and copy the framing. That's the
+   fallback (a real-ERSC capture, but a small targeted one — just the bytes).
 
-**The concrete build (serial, no ERSC restore — everything charted):**
-1. On the peer, call Steam **`GetAuthSessionTicket`** (we already bind Steam interfaces for rung-4 in
-   `coop/steam.rs`) to get a real auth ticket blob.
-2. Construct the type-5 message `{buf[0]=5, 8B token, 4B len (1..0x400), len·blob=ticket}` (payload shape
-   charted, ERSC-LIVE-CAPTURE > "★ The DLNW3D connect protocol").
-3. Deliver it to the host's pump — send on the built endpoint / the channel the pump reads (`0x14203f250` on
-   `conn+0x130`). Host type-5 case `0x142400924` → validator `0x142402ee0` (`BeginAuthSession`) → `conn+0x152=1`
-   → member completes → roster → `players=2`.
-- **Open sub-questions:** the 8B token semantics (`member+0x148` — echoed value or a session nonce?), and
-  **who sends** — a real joiner produces the type-5, so this likely needs one machine in a **joiner role**
-  (not the symmetric both-host mode, which has no joiner) OR we relay. First chart the game's own type-5
-  *send* path (does its connect flow call `GetAuthSessionTicket`? where?) to copy the exact token/framing,
-  rather than guess.
-- **Retire the SYN:** `suppress_syn` proved the fabricated 14-byte SYN is unnecessary (endpoint builds
-  without it); drop it from the drive to cut channel-30 noise.
-
-**Do NOT re-run the transport gate-c / `[S+0x168]` path** (⚠️ RED HERRING bullet in Now). `players` stuck at
-1 is the *handshake type-5* not completing, not a connection failing to build.
+**Retire/observe:** the fabricated 14-byte SYN is unnecessary (`suppress_syn` proved the endpoint builds
+without it, run 12) — the hand-framed type-5 replaces it on ch30. **Do NOT re-run the transport gate-c /
+`[S+0x168]` path** (⚠️ RED HERRING bullet in Now), and **do NOT re-enable the cold `0x142400df0` drive**
+(Arxan-locked, runs 13–15).
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
