@@ -3408,3 +3408,33 @@ unmask is likely net-harmful. **NEXT: re-run with `host_skip_p2p_accept = false`
 again) + `drive_add_peer` — so both sides accept each other and the SYN handshake can complete both ways.
 Watch: host `0x142640e30` find-or-create firing for the joiner (a real host-side connection), the Deck's
 `host-admit`/worker `connections_span` growing, and `0x1423ff2e0` finally firing → init-data → `players=2`.
+
+### ▶ RIG RESULT (2026-07-05 night, run 9) — joiner-side add-peer CRASHES the Client session (not the path)
+
+Tested the symmetric lever (`drive_add_peer_joiner`): the JOINER also drives add-peer `0x1423fdc80`,
+queuing the HOST in its Client session so both games emit real SYNs. Two-machine (both on the run-9
+build). Result:
+
+- **It enqueues fine on the Client session** — `drive-add-peer 0x1423fdc80(peer=<host>, self=<joiner>)
+  returned 1`, the pending-conn queue grew by one (`…2c0..2c0 → …2c0..2c8`), same as the host side.
+- **~10s later the joiner CRASHES.** `crashdump: ACCESS_VIOLATION code=0xc0000005 at eldenring.exe+0x23fc3e4`,
+  **reading null `+0x5f8`**; backtrace has `eldenring.exe+0x23fdc80` (= `0x1423fdc80`, add-peer) at bt[2]
+  and bt[4]. So the Client session's per-frame pump, processing the member we enqueued, dereferences a
+  sub-object at `session+0x5f8` that is **present on a Host session but null on a Client one**. Driving
+  add-peer on the joiner is unsafe — the Client-session member graph isn't wired the way the pump expects.
+- `drive_add_peer_joiner` is now **OFF by default** (seed + config doc note the crash).
+
+**What this means for the path.** Host-side `drive_add_peer` is the good half — it makes the HOST emit
+real DLNW3D SYNs to the joiner (runs 7/8). The joiner does NOT need to drive add-peer; it needs its game
+to **build the host connection from the host's real inbound SYNs** — the joiner's find-or-create
+`0x142640e30` should fire on the host's packets and create a `SteamConnection` (`conn+0x138=hostID`), the
+same inbound-only mechanism that works on the host. In run 8 that didn't happen (Deck's worker drained
+channel 30 with `connections_span=0`, find-or-create never fired for the host's SYNs). **NEXT: on the
+JOINER, chart why the host's real inbound SYNs don't reach/pass the joiner's find-or-create** — channel
+match (does the host send on the channel the joiner's worker drains?), P2P accept (does the joiner accept
+the host's session so Steam delivers the packets?), and the admit shape/identity gate on the joiner side.
+That's the joiner's inbound path, not another outbound driver.
+
+**(Footgun fixed alongside this run:** `deck.sh cycle` now verifies the Deck actually reached the world
+and re-dismisses if not, instead of firing the dismiss taps blind and stranding the join at a menu — see
+the commit. The run-9 Deck had to be hand-dismissed into the world before the join fired.)

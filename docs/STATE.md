@@ -11,11 +11,11 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05 night** (★★ stall B walked down to its root across SIX two-machine runs: the
-client's connect chain RUNS and the host's real connection-creator `0x1423fe350` FIRES, but the client's
-connection object `session+0x5a8` carries **no peer identity** — the join builds the object shell and never
-wires the host's SteamID64 into it, so the client dials nobody and the host has no real inbound connection to
-promote. The missing wire is the peer-identity write on the joiner).
+Last updated: **2026-07-05 late night** (★★ stall B narrowed to the joiner's INBOUND path across NINE
+two-machine runs. Host-side `drive_add_peer` makes the HOST emit real DLNW3D SYNs to the joiner (runs 7/8);
+the joiner-side symmetric add-peer CRASHES its Client session (run 9, null `+0x5f8`). So the joiner must build
+the host connection from the host's real inbound SYNs via its own find-or-create `0x142640e30` — which isn't
+firing. Next = chart the joiner's inbound path (channel / P2P-accept / admit gate), not another driver.)
 
 ## Now
 
@@ -41,30 +41,36 @@ promote. The missing wire is the peer-identity write on the joiner).
 
 ## Next
 
-**★ Stall B, root cause found: the joiner's connection object has no peer identity, so the client dials
-nobody.** Get the host's SteamID64 wired into the client's `session+0x5a8` connection object (or drive the
-real peer-directed connect call) → the client opens a P2P connection to the host → the host's already-firing
-tag-1 handler `0x1423fe350` promotes it → `players=2`.
+**★ Stall B, narrowed to the joiner's INBOUND path.** The host now emits real DLNW3D SYNs to the joiner
+(host-side `drive_add_peer` — runs 7/8); what's missing is the joiner's game building the host connection
+from those inbound SYNs via its own find-or-create `0x142640e30` (inbound-only, writes `conn+0x138=hostID`) —
+which never fires on the joiner (run 8: worker drains channel 30 with `connections_span=0`). Fix the joiner's
+inbound path and the host's already-firing tag-1 handler `0x1423fe350` promotes the connection → `players=2`.
+(NB: `session+0x5a8` is the VOICE object, not a connection — that run-5/6 lead was a dead end; and the joiner
+must NOT drive add-peer itself: run 9 proved it crashes the Client session, null `+0x5f8`.)
 
-- **★★ SIX two-machine runs (2026-07-05) walked it down** — full chain + all corrections in
-  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE AIM SHEET" (+ the "P2P-EVENT + CLIENT-CONNECT
-  AIM SHEET" section and its three "▶ RIG RESULT" addenda, runs 4/5/6). Confirmed live: the client's state-4
-  phase chain fully walks and `CLIENT-CONNECT-INIT 0x142401e80` runs; the host's real connection-creator
-  `TAG1-CONNSTATUS 0x1423fe350` fires. **But** the client's embedded connection object
-  (`session+0x5a8`, vtable `0x1431fa918`) dumps **no peer SteamID64** — and `0x142401e80` calls
-  `iface_vtable[0x40]` with no peer arg (it's a per-frame pump/status step, not a peer-directed dial). So the
-  join builds the object shell and never populates the host identity; the client connects to nothing, the
-  host has no real inbound connection to promote, and it times out (~30s, the "INIT gate" `0x1423fbe10`).
-- **What to do next (static lane, delegable — spawned):** decode the `+0x5a8` connection object (vtable
-  `0x1431fa918`): its layout, where a peer SteamID64 belongs, and which fn WRITES it on a genuine joiner
-  (start from the join-blob parser `0x1423fb260` with `[conn+0x58]` populated — follow the 8-byte host blob).
-  Resolve `iface_vtable[0x40]` (ctx `0x143b48a00`, method 8) and find the joiner's REAL "connect to peer"
-  call (the one that takes a SteamID64) — that, not `0x142401e80`, is the lever to drive. Then a serial run
-  drives it.
-- **Instrument state:** B0/B1/B4 probes are wired + on `main` (`session_probe.rs`); `[debug.probes]
-  host_skip_p2p_accept` seeded ON (host stays silent on legacy P2P so the game's own event door fires). Do
-  NOT hook `0x1423fb684` or the drain `0x1423ff446` (both unaligned mid-region in the client update path —
-  crash the client; state is POLLED via `stall-B poll` instead).
+- **★★ NINE two-machine runs (2026-07-05) walked it down** — full chain + all corrections + the eight
+  "▶ RIG RESULT" addenda in [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ STALL-B HANDSHAKE AIM SHEET" and the
+  two following aim-sheet sections. What's PROVEN live: host-side `drive_add_peer 0x1423fdc80` queues the
+  joiner and the host's game emits **real 14-byte DLNW3D SYNs** to the joiner (`GAME-SENDP2P 0x142640b20`,
+  runs 7/8); with bidirectional accept the host also RECEIVES the joiner's packets (`host-admit`, run 8);
+  the host's real connection-creator `TAG1-CONNSTATUS 0x1423fe350` fires. What's NOT happening: the JOINER
+  never builds a host connection — its worker drains channel 30 with `connections_span=0` and its
+  find-or-create `0x142640e30` never fires on the host's inbound SYNs, so it parks at `Client/WaitInitData`
+  and times out (~30s; the "INIT gate" `0x1423fbe10` is a countdown, not a data gate).
+- **What to do next (static + serial):** chart the **joiner's INBOUND path** — why the host's real SYNs
+  don't reach/pass the joiner's find-or-create `0x142640e30`. Three suspects: (a) **channel** — does the
+  host's `SendP2PPacket` go out on the channel the joiner's worker `0x142640bc0` drains (30)? (b) **P2P
+  accept** — does the joiner accept the host's Steam P2P session so Steam delivers the packets at all? (c)
+  the joiner-side **admit shape/identity gate**. This is the joiner's *inbound* mechanism (the same
+  inbound-only find-or-create that works on the host), NOT another outbound driver — run 9 proved the joiner
+  must NOT drive add-peer (it crashes the Client session, null `+0x5f8`; `drive_add_peer_joiner` is OFF).
+- **Instrument + config state (on `main`):** B0/B1/B4/B5 probes wired (`session_probe.rs`). Seed
+  (`scripts/rig/seed-config.toml`): `drive_add_peer` ON (host queues joiner → host sends real SYNs),
+  `host_skip_p2p_accept` **OFF** (run 8 flipped it — the host must accept the joiner so the return leg
+  isn't dropped), `drive_add_peer_joiner` **OFF** (crashes the joiner), `drive_join` + `join_set_established_bit`
+  ON (client reaches `Client/WaitInitData`). Do NOT hook `0x1423fb684` or the drain `0x1423ff446` (unaligned
+  mid-region in the client update path — crash the client; session state is POLLED via `stall-B poll`).
 - **Watch item (latent, not the stall):** client self-identity `[[member+0x58]+0x7f8]==0` under the bit-2-OR
   lever misroutes the client's **self** member once a session establishes. Fix when the handshake lands: set
   `+0x7f8` directly alongside the bit-2 OR. See aim sheet Task 5.
