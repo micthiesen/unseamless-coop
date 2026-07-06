@@ -1052,7 +1052,10 @@ fn log_host_admit_success(_name: &'static str, _regs: *mut Registers) {
 /// channel other than our probe channel 0, a joiner SYN on channel 0 will never reach the admit path.
 fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
     let n = WORKER_DRAIN_LOGS.fetch_add(1, Ordering::Relaxed);
-    if n >= 5 {
+    // Dump the first few ticks (startup, table empty) AND periodically thereafter (~every 300 worker ticks)
+    // so the table state is captured AFTER the peer connects + starts sending type-5s — the moment that
+    // matters for path B. Hard-capped so a long session doesn't flood the log.
+    if n > 9000 || !(n < 3 || n.is_multiple_of(300)) {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1071,12 +1074,55 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
         } else {
             (-1, 0, 0)
         };
-        // Connection-vector stride is unknown here; report the raw byte span so a non-empty span is visible.
+        // The connection vector is an array of `SteamConnection*` (8-byte stride), each keyed at `[conn+0x138]`
+        // == the peer SteamID64 (charted from recv 0x142640bc0's search loop). Report the entry count + walk
+        // each entry's vtable + key, so a two-machine run shows EMPIRICALLY whether the table is empty (why
+        // recv falls to admit) and, once we register, what a valid entry looks like. This is the path-B target.
         let span = end.saturating_sub(begin);
+        let count = if begin != 0 && end > begin && span.is_multiple_of(8) { span / 8 } else { usize::MAX };
         log::info!(
             "session-probe: host-worker-drain #{n} — 0x142640bc0 socketmgr={sm:#x} reads channel={channel} \
-             connections_span={span:#x}B (worker RUNS offline; a joiner SYN must land on THIS channel to be admitted)",
+             conn_table[sm+0xb8..0xc0]={begin:#x}..{end:#x} entries={} (worker RUNS offline; recv delivers to a \
+             table entry whose [conn+0x138]==senderID, else falls to admit)",
+            if count == usize::MAX { -1i64 } else { count as i64 },
         );
+        // Walk the table entries (bounded to 32) — the empirical picture of what's registered.
+        if count != usize::MAX && count > 0 && count <= 32 {
+            unsafe {
+                let mut slot = begin;
+                let mut i = 0usize;
+                while slot < end {
+                    let conn = (slot as *const usize).read_volatile();
+                    let (vt, key) = if conn != 0 {
+                        (
+                            (conn as *const usize).read_volatile(),
+                            ((conn + 0x138) as *const u64).read_volatile(),
+                        )
+                    } else {
+                        (0, 0)
+                    };
+                    log::info!(
+                        "session-probe:   conn-table[{i}] @{slot:#x} -> conn={conn:#x} vtable={vt:#x} [conn+0x138](key)={key:#x} ({})",
+                        unseamless_core::diagnostics::peer_tag(key),
+                    );
+                    slot += 8;
+                    i += 1;
+                }
+            }
+        }
+        // The PENDING-connection queue [sm+0xd8..0xe0] (0x80-byte entries) that 0x142640ff0 drains + promotes
+        // into the table — the game's natural registrar. A non-empty pending queue means a register is in
+        // flight; empty means nothing is queued to become a connection.
+        unsafe {
+            let pbegin = ((sm + 0xd8) as *const usize).read_volatile();
+            let pend = ((sm + 0xe0) as *const usize).read_volatile();
+            let has_pending = ((sm + 0xf0) as *const u8).read_volatile();
+            let pspan = pend.saturating_sub(pbegin);
+            log::info!(
+                "session-probe:   pending-queue[sm+0xd8..0xe0]={pbegin:#x}..{pend:#x} span={pspan:#x}B (0x80B entries) has_pending[sm+0xf0]={has_pending} \
+                 (0x142640ff0 drains this into the conn table — the natural registrar)",
+            );
+        }
     }));
 }
 
