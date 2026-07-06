@@ -420,6 +420,17 @@ pub struct DebugProbes {
     /// other). Off by default. See docs/STATE.md > Next.
     pub send_type5: bool,
 
+    /// **★ RECEIVE-SIDE TYPE-5 DIAGNOSTIC** (2026-07-06, run-16 de-risk). Read-only hook on the type-5
+    /// **validator** `0x142402ee0` (the DLNW3D connection's vtable slot 17, called ONLY from the pump's type-5
+    /// dispatch case). It fires iff a delivered type-5 reached the pump and was dispatched — so it cleanly
+    /// separates the two candidate walls: **validator never fires** ⇒ the type-5 is never *delivered* (the
+    /// run-16 read: it falls through to find-or-create admit because no `SteamConnection` is registered for the
+    /// peer — the fix is connection registration); **validator fires but `member+0x152` stays 0** ⇒ delivery
+    /// works and the wall is *validation* (`BeginAuthSession` rejects — ticket-timing or a `conn+0x80` identity
+    /// mismatch). Logs `conn`, the reader, and `conn+0x80` (the identity `BeginAuthSession` validates against).
+    /// Role-independent (both machines receive); pair with `send_type5`. Off by default. STATE.md > Next.
+    pub instrument_type5_recv: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so

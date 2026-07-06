@@ -244,6 +244,14 @@ send_type5 = true          # ★ THE HAND-FRAME TYPE-5 SENDER (2026-07-06) — t
                            # scripts/re/capture-endpoint.py and players → 2. OPEN RISK: an inner transport frame beyond
                            # the 11-bit len header (0x142642860 is Arxan-opaque) — if the plain frame doesn't dispatch,
                            # fall back to capturing a real ERSC type-5's on-wire bytes. See docs/STATE.md > Next.
+instrument_type5_recv = true # ★ RECEIVE-SIDE TYPE-5 DE-RISK (2026-07-06, run-16 follow-up) — read-only hook on the
+                           # type-5 validator 0x142402ee0 (DLNW3D conn vtable slot 17, reached ONLY from the pump's
+                           # type-5 dispatch case). Fires iff a delivered type-5 reaches the pump. THE DIAGNOSTIC:
+                           # if TYPE5-VALIDATOR FIRED never appears in the log ⇒ the type-5 is never DELIVERED (falls
+                           # through to find-or-create admit; no SteamConnection registered for the peer — the fix is
+                           # connection registration). If it FIRES but member+0x152 stays 0 (capture-endpoint.py) ⇒
+                           # delivery works, the wall is VALIDATION (BeginAuthSession rejects — ticket-timing or a
+                           # conn+0x80 identity mismatch). Role-independent (both machines receive). See docs/STATE.md > Next.
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether

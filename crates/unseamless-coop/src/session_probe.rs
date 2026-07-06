@@ -124,6 +124,8 @@ pub fn install_hooks(config: &Config) {
     install_stall_b_trace(config);
     // ★ Type-5 producer: latch the peer member off the endpoint-set writer + resolve the game's send fn.
     install_type5_trace(config);
+    // ★ Receive-side type-5 de-risk: read-only validator hook (fires iff a delivered type-5 reaches the pump).
+    install_type5_recv_trace(config);
 }
 
 /// Install the type-5 producer's endpoint-set latch (`0x14203ef70`) and resolve the game's own send
@@ -446,6 +448,13 @@ static DRIVE_TYPE5: AtomicBool = AtomicBool::new(false);
 static TYPE5_DRIVE_LOGS: AtomicU32 = AtomicU32::new(0);
 /// Log latch for the hand-frame type-5 send (fires on a throttle; log the first several, then quiet).
 static TYPE5_SEND_LOGS: AtomicU32 = AtomicU32::new(0);
+/// `0x142402ee0` — the type-5 **validator** (DLNW3D connection vtable slot 17), called ONLY from the pump's
+/// type-5 dispatch case. The receive-side de-risk hook (`instrument_type5_recv`) fires here iff a delivered
+/// type-5 reached the pump. Re-derive after a game update: it's the fn reached by `call [rdi+0x88]` in the
+/// pump's type-5 case `0x142400924` (reads 4B len then `BeginAuthSession`; see SESSION-DRIVE.md > Q2).
+const TYPE5_VALIDATOR_OFFSET: usize = 0x1_4240_2ee0 - 0x1_4000_0000;
+/// Log latch for the type-5 validator hook (fires per delivered type-5; log the first several, then quiet).
+static TYPE5_VALIDATOR_LOGS: AtomicU32 = AtomicU32::new(0);
 
 /// endpoint-set latch: `0x14203ef70(rcx=&member+0x130 holder, rdx=&src)`. Reads `endpoint=[rdx]`, then the
 /// endpoint's member back-ptr `[endpoint+0x50]`, and latches that member iff its `+0x80` == our peer — so the
@@ -1100,6 +1109,60 @@ fn install_host_accept_trace(config: &Config) {
     log::info!(
         "session-probe: host-accept trace installed (host-admit 0x142640e30 + gate-c 0x142640ecd + success \
          0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0 + add-peer 0x1423fdc80)"
+    );
+}
+
+// --- Receive-side type-5 validator observation (read-only, run-16 de-risk) ----------------------
+//
+// Charted 2026-07-06 (SESSION-DRIVE.md > "★ TYPE-5 PRODUCER + INJECTION" > Q2). The type-5 validator
+// `0x142402ee0(rcx=conn, rdx=reader)` is the DLNW3D connection's vtable slot 17, reached ONLY from the
+// pump's type-5 dispatch case `0x142400924` (`call [rdi+0x88]`). So a hook on its entry fires iff a
+// delivered type-5 reached the pump AND was dispatched — the decisive receive-side signal. It separates
+// the two candidate walls from run 16: validator never fires ⇒ the type-5 is never DELIVERED (falls
+// through to find-or-create admit; fix = register the peer's SteamConnection); validator fires but
+// member+0x152 stays 0 ⇒ delivery works and the wall is VALIDATION (BeginAuthSession rejects). Read-only.
+
+/// type-5 validator tracer: `0x142402ee0(rcx=conn, rdx=reader)`. Fires per delivered+dispatched type-5.
+/// Logs `conn`, the reader, and `conn+0x80` (the identity `BeginAuthSession` validates the ticket against —
+/// the run-16 watch-item: it must be the sender's real SteamID64, not a handle/zero). Throttled.
+fn log_type5_validator(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: ilhook entry registers; rcx = conn (DLNW3D connection), rdx = reader. `conn+0x80` is the
+        // charted identity field (a single bounded qword read, null-guarded); we only read + log scalars.
+        let r = unsafe { &*regs };
+        let conn = r.rcx as usize;
+        let reader = r.rdx as usize;
+        let identity = if conn != 0 { unsafe { ((conn + 0x80) as *const u64).read_volatile() } } else { 0 };
+        let n = TYPE5_VALIDATOR_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n < 16 {
+            log::info!(
+                "session-probe: ★★ TYPE5-VALIDATOR FIRED #{n} — 0x142402ee0(conn={conn:#x}, reader={reader:#x}) \
+                 [conn+0x80](identity)={identity:#x} ({}) — a type-5 WAS DELIVERED + dispatched to the pump; the \
+                 wall is now VALIDATION (watch member+0x152: still 0 ⇒ BeginAuthSession rejected — ticket-timing \
+                 or the identity above != the sender's SteamID64)",
+                unseamless_core::diagnostics::peer_tag(identity),
+            );
+        }
+    }));
+}
+
+/// Install the read-only receive-side type-5 validator tracer when `[debug.probes] instrument_type5_recv`
+/// is on. Role-independent (both machines receive type-5s). Best-effort; a failed hook logs and is skipped.
+fn install_type5_recv_trace(config: &Config) {
+    if !config.debug.probes.instrument_type5_recv {
+        return;
+    }
+    let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
+        Ok(h) => h.0 as usize,
+        Err(e) => {
+            log::error!("session-probe: type5-recv trace — GetModuleHandle(NULL) failed: {e}");
+            return;
+        }
+    };
+    install_offset_hook("type5-validator", exe_base + TYPE5_VALIDATOR_OFFSET, log_type5_validator);
+    log::info!(
+        "session-probe: type5-recv trace installed (validator 0x142402ee0) — fires iff a delivered type-5 \
+         reaches the pump; pair with a capture-endpoint.py read of member+0x152 to localize the wall"
     );
 }
 
