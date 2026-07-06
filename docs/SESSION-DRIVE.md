@@ -4282,3 +4282,23 @@ the peer, then re-run: the type-5 should then deliver → pump → validator →
 a receive-side hook on the pump `0x1424007e0` / validator `0x142402ee0` to positively confirm the type-5 never reaches
 the pump today (vs. reaching it and failing the ticket validate) — cheap, and it tells us whether the wall is purely
 delivery-side or also validation-side.
+
+### ▶ RIG RESULT (run 17, 2026-07-06) — DE-RISK CONCLUSIVE: the wall is 100% DELIVERY-side (validation is NOT in play)
+
+Added a read-only hook on the type-5 **validator `0x142402ee0`** (DLNW3D conn vtable slot 17, reached ONLY from the
+pump's type-5 dispatch case), gated by `[debug.probes] instrument_type5_recv` (commit `b6533dd`). Two-machine, same
+config as run 16 + the new hook on both. The hook installed clean on both (`type5-recv trace installed`).
+
+**★ RESULT: `TYPE5-VALIDATOR FIRED` never appears — count 0 on BOTH machines** — while the type-5 keeps arriving at
+`host-admit 0x142640e30` (`msgSize=249`/`255`, continuously) and `capture-endpoint.py` shows the peer member still at
+`+0x152=0` / `+0x130=0`. So a delivered type-5 is **never dispatched to the pump**: it reaches the recv routing, finds
+no registered `SteamConnection` for the sender, falls through to find-or-create admit, and is dropped there — it never
+enters an endpoint queue, so the pump never runs the type-5 case, so the validator never fires.
+
+**⇒ The wall is purely DELIVERY-side. Validation (`BeginAuthSession`) is NOT yet in play** — the ticket-timing and
+`conn+0x80`-identity concerns are moot until delivery works (they'd only surface once the validator starts firing).
+This removes a whole branch from the Next step: the entire remaining job is **registering the peer's transport
+`SteamConnection`** in the receiver's socket-manager table (`[socketmgr+0xb8..0xc0]`, keyed `+0x138==senderSteamID64`)
+so recv's sender-id search *hits* and delivers (`0x142643db0`→`0x142642860`) into the endpoint queue → pump → validator
+→ `+0x152=1`. The validator hook stays on `main` as the acceptance signal: once the connection is registered, watch
+for `TYPE5-VALIDATOR FIRED` to flip from "never" to "fires", then watch `member+0x152`.

@@ -11,13 +11,14 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (run 16). **The type-5 producer is SOLVED — the hand-frame sender works and the type-5
-crosses the wire bidirectionally** (rig 255B ↔ Deck 249B, each reaching the other's DLNW3D recv, `send_type5`, commit
-`2ceddb0`). But the handshake still doesn't complete, and **the wall has moved and is now pinned**: the type-5 keeps
-hitting the receiver's **find-or-create admit `0x142640e30`** — the "no connection found" branch — so **no transport
-`SteamConnection` is registered for the peer** and the type-5 has nowhere to be *delivered* (→ never reaches the pump →
-`+0x152` stays 0, `players=1`). The remaining gap is no longer producing the type-5; it's **registering the receiver's
-transport connection** so recv delivers the type-5 into it. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16)".
+Last updated: **2026-07-06** (run 17). **The type-5 producer is SOLVED** (hand-frame sender, crosses the wire
+bidirectionally, `send_type5`, commit `2ceddb0`) **and the remaining wall is now CONFIRMED delivery-side, not
+validation-side** (run 17 de-risk, `instrument_type5_recv`, commit `b6533dd`): the type-5 validator `0x142402ee0`
+**never fires on either machine** while the type-5 keeps arriving at the receiver's find-or-create admit
+`0x142640e30`. So a delivered type-5 is never dispatched to the pump — **no transport `SteamConnection` is registered
+for the peer**, so recv's sender-id search misses and the packet is dropped at admit instead of delivered. The entire
+remaining job is **registering the peer's transport connection** in `[socketmgr+0xb8..0xc0]`; ticket-timing /
+identity concerns are moot until delivery works. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17)".
 
 ## Now
 
@@ -43,7 +44,9 @@ transport connection** so recv delivers the type-5 into it. Full evidence: SESSI
   (`capture-endpoint.py`): the peer member has `+0x152=0` (flags `(0,1,0,0)`), `+0x130`(endpoint)=0 (still
   cycling), `players=1`. **Reconciles with correction #1** (gate-c `[context+0x168]` is a stub even in working
   ERSC): real ERSC registers the connection via the establishment/join flow, so recv *finds* it; our driven setup
-  skips that flow, so the table has no entry. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16)".
+  skips that flow, so the table has no entry. **Run 17 confirmed delivery-side, not validation-side:** the validator
+  `0x142402ee0` (hooked via `instrument_type5_recv`) **never fires on either machine** — a delivered type-5 never
+  even reaches the pump. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17)".
 - **The type-5 wire format is fully charted + now wire-validated.** Payload `{[5], 8B token, 4B len (1..0x400),
   len·ticket}`; validator `0x142402ee0` gates ONLY on the ticket (`BeginAuthSession` vs `member+0x80`, result ∈
   {0,2}) — the 8B token is stored unvalidated. Transport wrap = the 11-bit len header (`byte0=total&0xff`,
@@ -69,12 +72,11 @@ get a connection keyed to the peer id into that table.** `stand_up_transport` al
 off the game heap but never registers it in the socket-manager connection table. Serial (orchestrator drives rig +
 Deck). Plan doc: SESSION-DRIVE.md > "▶ RIG RESULT (run 16)" > "► NEXT".
 
-**First, a cheap de-risking diagnostic (do this before building the register):** hook the receive-side pump
-`0x1424007e0` and validator `0x142402ee0` to positively confirm the type-5 **never reaches the pump today** (vs.
-reaching it and failing the ticket validate). This tells us whether the wall is purely delivery-side (the run-16
-read) or also validation-side (e.g. `member+0x80` mismatch, ticket not yet valid). If the type-5 never reaches the
-pump, the register-the-connection work is the whole job; if it reaches the pump but the validator rejects, the ticket
-timing / `member+0x80` identity is the issue instead.
+**The de-risk is DONE (run 17) and the answer is one-sided:** the validator `0x142402ee0` never fires on either
+machine, so the wall is **purely delivery-side** — the register-the-connection work below is the whole job, and
+ticket-timing / `member+0x80` identity are moot until delivery works. The validator hook (`instrument_type5_recv`,
+on `main`) stays armed as the acceptance signal: once the connection is registered, `TYPE5-VALIDATOR FIRED` flipping
+from "never" to "fires" confirms delivery, then watch `member+0x152`.
 
 ### The register work — the questions to answer (in order)
 
@@ -136,12 +138,13 @@ directly alongside the bit-2 OR once a session establishes.
   `steam::get_auth_session_ticket` (`be7f64e`); `session_probe.rs` — the **hand-frame sender** `send_type5` +
   `prepare_type5_packet` (`2ceddb0`, the working producer), the `drive_type5` observe-only send-drive (`ec691cc`,
   retired — do not re-enable), the endpoint-set latch `0x14203ef70`, `drive_add_peer`, `symmetric_peer`/`suppress_syn`
-  levers, and `instrument_host_accept` (the receive-side admit hook that logged the type-5 arriving). Config gates in
+  levers, `instrument_host_accept` (the receive-side admit hook that logged the type-5 arriving), and
+  **`instrument_type5_recv`** (the validator hook `0x142402ee0` — the acceptance signal, `b6533dd`). Config gates in
   `unseamless-core/config.rs`; the seed (`scripts/rig/seed-config.toml`) documents each flag inline.
 - **Current seed** (`scripts/rig/seed-config.toml`): `symmetric_peer` + `drive_add_peer` + **`send_type5` ON**
-  (both build endpoints + send their type-5); `suppress_syn` ON; `instrument_host_accept` ON (the receive-side
-  signal); `drive_type5` OFF (retired); both machines `--auto-session host`. This is the run-16 config; the next
-  run adds the connection-register lever.
+  (both build endpoints + send their type-5); `suppress_syn` ON; `instrument_host_accept` + **`instrument_type5_recv`
+  ON** (the receive-side signals); `drive_type5` OFF (retired); both machines `--auto-session host`. This is the
+  run-16/17 config; the next run adds the connection-register lever.
 - **Workflow/rig learnings:** solo-precheck a new sender/producer on the local rig *before* pulling Michael in
   for the Deck — run 16's send half (ticket fetch 240B, framing, `SendP2PPacket=true`, no crash) was fully
   confirmed solo (`rig.sh cycle --auto-session host` + grep the log) while the Deck booted, so the two-machine
