@@ -3725,3 +3725,43 @@ suspects, and the answer is asymmetric:**
   each tick; this run's host→joiner leg rides the game session, which tears down at WaitInitData.)
 
 Logs: rig via `scripts/rig.sh log`; Deck pulled to `.deck-logs/unseamless_coop-1783299492-336.log`.
+
+### ▶ RIG RESULT (run 11, 2026-07-06) — real-vs-stub SETTLED: [S+0x168] IS the stub; lever 3a is dead, 3b is the path
+
+Wired a **host-admit S-chain probe** (`log_host_admit`, entry `0x142640e30` where `rcx=socketmgr=mgr`,
+read-only, throttled) to walk the member-resolve chain live and name each piece by RVA, then ran the same
+two-machine setup as run 10 (rig host + Deck joiner). The joiner's SYNs reached the host admit path and the
+probe fired 4×, identically every time:
+
+```
+mgr resolve_cb rva=0x2639810 (want 0x2639d00)
+S=[mgr+0x48]  lookup[S+0x168] rva=0x23fdf00 => STUB 0x1423fdf00 (always not-found)
+collection[S+0x98..0xa0] span=0x28B (HAS members)   root[S+0x170] non-null
+```
+
+**Three facts, all decisive:**
+1. **`[S+0x168]` IS the stub `0x1423fdf00`** (`mov eax,1; ret`, always "not found"). This confirms the older
+   ROADMAP live note (2026-07-04 night) and **overturns the aim sheet's optimistic "maybe a real lookup"
+   framing.** So **aim-sheet lever 3a is INERT** — registering a member in `S`'s collection can't help,
+   because the lookup vmethod ignores the collection entirely and always returns not-found.
+2. **The collection is NON-empty** (`[S+0x98..0xa0]` span `0x28`, `[S+0x170]` non-null) — members are
+   already present (the host's own, from the establish reproduction's add-member). So "empty collection" was
+   never the problem; the **stub lookup** is. This is why `force_gatec_accept` can't work either: even
+   forcing gate-c past the `test eax` leaves the finisher `[local+0x60]` null (the stub never fills it), so
+   the success path's `cmp [local+0x60],0; je return 0` still bails.
+3. **The live resolve callback `[mgr+0x40]` is `0x142639810`, not the `0x142639d00` the aim sheet charted
+   statically.** The static chart pointed at the wrong resolve fn (or there are two and the live one is
+   `0x142639810`). Re-chart `0x142639810` — it is the fn that dispatches to the stub `[S+0x168]`.
+
+**★ NEXT = lever 3b: install a REAL `[S+0x168]` member-lookup on our stood-up context.** Our socket-manager
+context `S` (built by `stand_up_transport` + the establish handler) has the stub at `+0x168` because the
+online member-service init that installs the real lookup never runs offline. The finish is to make `[S+0x168]`
+a real lookup over the (already-populated) collection so the resolve finds the peer → gate-c ACCEPT →
+`host-admit-SUCCESS 0x142640ee4` fires → host builds the joiner connection → roster 1→2. Open questions handed
+to the `member-add-chart` lane (re-scoped live): (a) chart `0x142639810` (how it fills `local+0x60`); (b) the
+WRITER of the `S+0x168` field — what installs a real fn vs the stub, and is it the socketmgr init `0x14263a9d0`
+or a separate online-only member-service init we skip; (c) the real lookup fn itself (candidate: the iterator
+`0x142639950`). Once the installer/real-fn is named, drive it live on the host.
+
+Probe: commit `7965078` (`session_probe.rs` `log_host_admit` S-chain block + `ADMIT_EXE_BASE`). Logs: rig via
+`scripts/rig.sh log`; Deck at `.deck-logs/`.

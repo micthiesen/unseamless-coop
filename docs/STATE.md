@@ -11,14 +11,12 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (RUN 10 — the decisive splitter ran two-machine. **Suspect 3 (member
-registration) is CONFIRMED** on the observable host leg: the host receives the joiner's real SYNs, reaches
-the member-resolve gate-c `[socketmgr+0x40]=0x142639d00`, and it returns **1=REJECT ×6** — `host-admit-SUCCESS
-0x142640ee4` never fires, so no connection, `players` stays 1. A **second wall** surfaced: host→joiner P2P
-delivery is dead (joiner's find-or-create never fires, 0 RECV) despite the joiner force-accepting — the legs
-are asymmetric. Full result: SESSION-DRIVE.md > "▶ RIG RESULT (run 10)". Prior: the /next chart landed +
-integrated; the seamlessness-gate lane was a stale-premise dup — `gameplay.stay_connected` already shipped
-2026-07-04.)
+Last updated: **2026-07-06** (RUN 11 — real-vs-stub SETTLED live. The member-lookup vmethod **`[S+0x168]`
+IS the stub `0x1423fdf00`** (always not-found); the collection is NON-empty (has members); the live resolve
+callback is `0x142639810` (not the statically-charted `0x142639d00`). So **lever 3a (register a member) is
+INERT** — the stub ignores the collection — and **lever 3b (install a REAL `[S+0x168]` lookup) is the path.**
+Prior: run 10 confirmed the member-resolve is the wall (gate-c REJECT ×6, host-admit-SUCCESS never fires) +
+a 2nd wall (host→joiner delivery dead). Full: SESSION-DRIVE.md > "▶ RIG RESULT (run 10/11)".)
 
 ## Now
 
@@ -29,15 +27,16 @@ integrated; the seamlessness-gate lane was a stale-premise dup — `gameplay.sta
   establish handler to a stable `Host`/`Ingame` with the full member graph; the client's `drive_join` +
   `join_set_established_bit` (direct `container+0x7c0` bit-2 OR) builds the per-peer emitter connection and
   parks at `Client/WaitInitData`, stable, no crash.
-- **★ Stall B root = the socket-manager member-resolve gate (run 10 CONFIRMED it on the host).** The joiner's
-  real SYNs reach the host's find-or-create `0x142640e30`; it hits the member-resolve `[socketmgr+0x40]=
-  0x142639d00` and **rejects (gate-c returns 1) because the peer isn't in the socket-manager member collection**
-  (`S=[socketmgr+0x48]`, `S+0x170`/`S+0x98`). `host-admit-SUCCESS 0x142640ee4` never fires ⇒ no connection ⇒
-  `players` stays 1. `drive_add_peer 0x1423fdc80` does NOT fix this — it appends to a *different* collection
-  (`SessionSteam+0x4f0`), not the one the resolve reads. **Second wall (run 10):** host→joiner P2P delivery is
-  dead — the joiner force-accepts but its worker `0x142640bc0` drains channel 30 empty and find-or-create
-  never fires (0 RECV), so it parks at `WaitInitData` and times out (~30s). See SESSION-DRIVE.md > "★ JOINER
-  INBOUND AIM SHEET" + "▶ RIG RESULT (run 10)".
+- **★ Stall B root = a STUB member-lookup on our stood-up context (run 11 settled it).** The joiner's real
+  SYNs reach the host's find-or-create `0x142640e30`; it hits the member-resolve `[mgr+0x40]=0x142639810`,
+  which dispatches to the lookup vmethod **`[S+0x168]` = the stub `0x1423fdf00`** (`mov eax,1; ret`, always
+  not-found), so the resolve REJECTS (gate-c returns 1) and `host-admit-SUCCESS 0x142640ee4` never fires ⇒ no
+  connection ⇒ `players` stays 1. **The member collection is NON-empty** (`[S+0x98..0xa0]` span 0x28, `[S+0x170]`
+  non-null) — so the wall is the stub lookup, not a missing member. `drive_add_peer` (writes `SessionSteam+0x4f0`)
+  AND aim-sheet lever 3a (register in `S+0x170`) are BOTH inert against a stub that ignores the collection.
+  **Second wall (run 10):** host→joiner P2P delivery is dead — the joiner force-accepts but its worker
+  `0x142640bc0` drains channel 30 empty and find-or-create never fires (0 RECV), so it parks at `WaitInitData`
+  and times out (~30s). See SESSION-DRIVE.md > "★ JOINER INBOUND AIM SHEET" + "▶ RIG RESULT (run 10/11)".
 - **Two leads killed this session (don't re-tread):** `session+0x5a8` (vtable `0x1431fa918`) is
   `DLNR3D::VoiceChatSteam`, not a connection object — `0x142401e80` is the voice pump, not a peer dial (runs
   5/6). And the joiner must **not** drive add-peer itself: it enqueues but crashes the Client session ~10s
@@ -48,27 +47,26 @@ integrated; the seamlessness-gate lane was a stale-premise dup — `gameplay.sta
 
 ## Next
 
-**★ Land aim-sheet lever 3a — register the peer in the socket-manager member collection so the resolve
-passes — but first answer the real-vs-stub question it hinges on.** Run 10 confirmed the wall is the
-member-resolve; the fix is to make `0x142639d00` return *found* for the peer. It hinges on one unknown:
-is the lookup vmethod `[S+0x168]` (S=`[socketmgr+0x48]`) a **real lookup** over the member collection
-`S+0x170`, or the **stub `0x1423fdf00`** (`mov eax,1; ret`, always "not found")?
-- **If real:** register the peer in `S`'s `ManagerImpl` collection (`S+0x170`/`S+0x98`) — chart the member-add
-  that *writes* it (sibling of the `[S+0x168]` lookup vmethod; aim-sheet lever 3a), call it on the HOST with
-  `S` + the peer SteamID64, and watch gate-c flip 1→0 → `host-admit-SUCCESS 0x142640ee4` fires → host builds
-  the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2.
-- **If the stub:** registering members is inert; we need a fuller service/context init that installs a real
-  `[S+0x168]` (aim-sheet lever 3b — latch the Arxan-decoded target live if dispatch-only).
+**★ Lever 3b — install a REAL `[S+0x168]` member-lookup on our stood-up socket-manager context.** Run 11
+settled real-vs-stub: `[S+0x168]` is the stub `0x1423fdf00`, so 3a is dead. Our context `S` (built by
+`stand_up_transport` + the establish handler) never got the real member-lookup wired because the online
+member-service init that installs it doesn't run offline. Make `[S+0x168]` a real lookup over the
+already-populated collection → resolve finds the peer → gate-c ACCEPT → `host-admit-SUCCESS 0x142640ee4`
+fires → host builds the joiner connection → roster-add `0x140cb31b0` grows `players` 1→2.
 
-**Answer real-vs-stub cheaply first (partly static-delegable):** (a) STATIC — chart `ManagerImpl`'s vtable and
-read `[vtable+0x168]` (is it `0x1423fdf00`?); (b) LIVE — enhance the gate-c probe (`log_host_admit_gatec`) to
-also log `S=[socketmgr+0x48]`, `[S]`, `[[S]+0x168]` on the host, one cheap rig cycle. Do the observable HOST
-leg first (its find-or-create fires, so gate-c is readable); the joiner leg has a **second wall** —
-host→joiner delivery is dead (run 10: 0 RECV, joiner find-or-create never fires despite force-accept). Treat
-Wall 2 as likely *downstream* of Wall 1 (register the host as a member on the joiner → its game keeps the
-inbound session) and re-test after 3a; if it persists, chart the joiner's `P2PSessionRequest_t`/accept path.
-Seed already runs the observation; `force_gatec_accept` stays OFF (forcing rax=0 alone is insufficient — the
-success path then calls the null finisher `[local+0x60]`). Deck reachable at `deck@10.10.1.57:2222`.
+- **Delegated (static, lane `member-add-chart`, re-scoped live):** (a) chart the live resolve `0x142639810`
+  (how it fills the finisher `local+0x60`); (b) find the WRITER of the `S+0x168` field — what installs a real
+  fn vs the stub, and is it the socketmgr init `0x14263a9d0` or a separate online-only member-service init we
+  skip; (c) name the real lookup fn (candidate: the iterator `0x142639950`). Deliverable: SESSION-DRIVE.md >
+  "★ MEMBER-LOOKUP INSTALLER ([S+0x168]) — lever 3b".
+- **Serial (orchestrator):** once the installer or the real lookup fn is named, drive it live on the host —
+  either run the fuller member-service init, or directly write the real lookup fn into `[S+0x168]` on our
+  stood-up `S` — and watch gate-c flip 1→0 and `players` 1→2. The S-chain probe (commit `7965078`) already
+  reports the verdict each run.
+- **Wall 2 (host→joiner delivery, run 10):** still open (joiner's find-or-create never fires, 0 RECV despite
+  force-accept). Likely downstream of the member-lookup fix on the joiner side; re-test after 3b lands, else
+  chart the joiner's `P2PSessionRequest_t`/accept path. `force_gatec_accept` stays OFF (insufficient — the
+  stub never fills `[local+0x60]`). Deck reachable at `deck@10.10.1.57:2222`.
 
 - **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
   now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
