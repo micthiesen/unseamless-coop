@@ -11,10 +11,11 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-05 late night** (stall B walked down to its root across NINE two-machine runs — the
-gap is now the **joiner's INBOUND path**: the host emits real DLNW3D SYNs to the joiner, but the joiner's
-game never builds the host connection from them. Two dead-end leads killed (+0x5a8 voice, joiner add-peer
-crash). Also this session: review lightened project-wide, and the Deck get-into-world footgun fixed.)
+Last updated: **2026-07-05** (/next: the inbound-path Next stands — static charting of the three suspects
+delegated to a fleet lane, the seamlessness disconnect-gate *build* spawned as a second parallel lane,
+the two-machine confirm run stays orchestrator-serial. Ground state below is the 2026-07-05 late-night
+wrap: stall B walked down across NINE two-machine runs to the **joiner's INBOUND path** — the host emits
+real DLNW3D SYNs, but the joiner's game never builds the host connection from them.)
 
 ## Now
 
@@ -48,6 +49,11 @@ The host already sends real DLNW3D SYNs to the joiner; the last gap is that the 
 the host's already-firing tag-1 handler `0x1423fe350` promotes the connection → init-data flows →
 `session+0x3cc→2` → `players=2`. This is the joiner's *inbound* mechanism, NOT another outbound driver.
 
+- **Decision (2026-07-05, /next): split confirmed.** The static chart of the three suspects runs as a
+  fleet lane (deliverable: a "joiner inbound" aim-sheet section in SESSION-DRIVE.md with a concrete lever
+  per suspect); the orchestrator wires the resulting probes/levers and runs the two-machine confirm. The
+  seamlessness disconnect-gate **build** runs as a second parallel lane (dormant, config-gated off —
+  see Candidates below; only its live validation queues behind stall B).
 - **Three suspects to instrument (static chart is delegable; the confirm run is serial):**
   (a) **channel** — does the host's `SendP2PPacket 0x142640b20` go out on the channel the joiner's worker
   `0x142640bc0` drains (30)? Log both sides' channel. (b) **P2P accept** — does the joiner accept the host's
@@ -67,8 +73,9 @@ the host's already-firing tag-1 handler `0x1423fe350` promotes the connection �
 ## Candidates Not Chosen
 
 - **Seamlessness disconnect-suppression gate** (`leave_session 0x140cae730` armed flag,
-  [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)) — charted and buildable, but its validation
-  needs a real 2-player session, so it queues directly behind stall B.
+  [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md)) — charted and buildable; its **build was
+  delegated to a parallel lane (2026-07-05)**, shipping dormant + gated off. Only the *live validation*
+  needs a real 2-player session, so that check still queues directly behind stall B.
 - **Post-rung-3 wiring** (inert overlay toggles, nameplate color-by-SteamID, session-roster event toasts) —
   rung-3-gated by definition; unblocked the moment stall B completes.
 - **Joiner-side `drive_add_peer` (symmetric add-peer)** — RULED OUT (run 9): enqueues fine on the Client
