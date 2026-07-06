@@ -3438,3 +3438,236 @@ That's the joiner's inbound path, not another outbound driver.
 **(Footgun fixed alongside this run:** `deck.sh cycle` now verifies the Deck actually reached the world
 and re-dismisses if not, instead of firing the dismiss taps blind and stranding the join at a menu — see
 the commit. The run-9 Deck had to be hand-dismissed into the world before the join fired.)
+
+## ★ JOINER INBOUND AIM SHEET (2026-07-05, static)
+
+Static RE (clean on-disk `eldenring.exe`, capstone via `scripts/re/static.py`; behavioral notes in our
+own words, exact addresses). Charts the joiner's INBOUND DLNW3D path per the three stall-B suspects (run
+9's "NEXT"): the host emits real 14-byte SYNs (`GAME-SENDP2P 0x142640b20`), the host's own connection
+creator `TAG1-CONNSTATUS 0x1423fe350` fires, but the JOINER's worker `0x142640bc0` drains channel 30 with
+`connections_span=0` and its find-or-create `0x142640e30` never fires. **Load-bearing conclusion first,
+then per-suspect answer + evidence + lever, then a ranking.**
+
+### ▶ TL;DR — suspects 2 and 3 are ONE gate; suspect 1 is ruled out
+
+The joiner's whole inbound door is guarded by a **single member-resolve callback `[socketmgr+0x40]`**
+(= `0x142639d00`, bound to the session's member-manager `S = [socketmgr+0x48]`). It is called in **two**
+places and BOTH bail identically when the peer isn't a registered member:
+
+- the **accept** path `0x1426408b0` (before `AcceptP2PSessionWithUser`) — so the joiner never accepts the
+  host's Steam P2P session, and Steam never delivers the host's SYNs to `ReadP2PPacket` (worker "drains
+  empty");
+- the **find-or-create** path `0x142640e30` (before building the `SteamConnection`) — so even if a packet
+  were delivered, no connection object is created.
+
+So the real wall is: **the host's SteamID64 is not registered as a member in the joiner's socket-manager
+member collection** (`S+0x170` / `S+0x98..0xa0`), so the resolve returns "not found" and every inbound
+step rejects. Channel (suspect 1) is a red herring: send and receive read the *same* per-manager channel
+field `[socketmgr+0x50]`, so within the game they cannot disagree, and run 7 already saw the joiner drain
+the same channel 30 the host sends on.
+
+Re-derivation for all of the below: `python3 scripts/re/static.py fn <addr>` (capstone over the clean
+2.6.2 exe, base `0x140000000`) for each cited function; `calls`/`xref` for the call graph; a raw
+image-wide 8-byte pointer scan (`/tmp/inbound_ptrscan.py`) to test for vtable/callback pointers. The
+socket-manager region (`0x14263xxxx`/`0x142640xxx`) is heavily **Arxan-dispatched** — several entries
+(`0x14263b720`, `0x1426408b0`, `0x14263b7c0`) have *no* static E8 caller and *no* pointer anywhere in the
+image, so their call boundaries are opaque on disk; where that blocks a static trace it is called out.
+
+### Suspect 1 — CHANNEL: RULED OUT (send and receive share one per-manager channel field)
+
+**Answer: same channel, structurally.** Both the host's send and the joiner's receive read the channel
+from the identical field `[socketmgr+0x50]` on the one socket-manager instance per process; it is a fixed
+per-manager value set once at build, not per-call or per-role state. The host sends on channel 30 because
+the joiner drains channel 30 (run 7) — they are the same game's identical code.
+
+**Evidence:**
+- **Send** `0x142640b20` = the game's `SendP2PPacket` wrapper `(rcx=socketmgr, rdx=steamID, r8=data,
+  r9d=len)`. It resolves `ISteamNetworking006` (ctx `0x143c602b0`, accessor `0x144c0d0a4`), then at
+  `0x142640b59` does `mov eax,[rbx+0x50]` and stores it as the 5th stack arg (`[rsp+0x28]` = `nChannel`),
+  with `[rsp+0x20]=0` (`eP2PSendType=k_EP2PSendUnreliable`), and calls iface **slot 0** (`[r10]`) =
+  `SendP2PPacket`. So **send-channel = `[socketmgr+0x50]`**. Its `rcx` is the manager: the `SteamConnection`
+  send `0x142643dd0` calls it as `0x142640b20(rcx=[conn+8]=mgr, rdx=[conn+0x128]=target id, …)`.
+- **Receive** `0x142640bc0` = the `ReadP2PPacket` drain loop. At `0x142640c5b` it does `mov eax,[rdi+0x50]`
+  and stores it as the 5th stack arg (`[rsp+0x28]` = `nChannel`) to iface **slot 2** (`[r10+0x10]`) =
+  `ReadP2PPacket` (buffer `[rsp+0x40]`, cap `0x4b1`, out-size `[rsp+0x30]`, out-id `[rsp+0x38]`). Same read
+  at the loop's second `ReadP2PPacket` (`0x142640d75`). So **receive-channel = `[socketmgr+0x50]`** — the
+  same field, same object type (`rdi`=mgr, which also owns the connection list `[mgr+0xb8..0xc0]`).
+- **The field is set once, role-agnostically.** The manager builder `0x142640560` copies a 0x30-byte config
+  block into the manager: `0x14264059e: movups [rcx+0x50], xmm1` sets `[mgr+0x50]` (channel) and `[mgr+0x58]`
+  (pool count) from `config[0x10..0x20]`; `0x142640596` sets `[mgr+0x40]`/`[mgr+0x48]` from `config[0..0x10]`;
+  `[mgr+0x5c]` (max size) is clamped to `0x4b0` (matching the `0x4b1` recv cap and the loop's `edx<=0x4b0`
+  check). The init `0x14263f700` nulls all of these first (`[mgr+0x50]=0` at `0x14263f73e`), so the config
+  is their sole source. There is **no host/client branch** anywhere in `0x142640560`, `0x14263b720`
+  (its one caller), or `0x14263f700`.
+- Empirically: run 7 logged the joiner draining **channel 30** — so the joiner's `[mgr+0x50]=30`, and the
+  host, running the same builder, sends on 30.
+
+**Concrete lever (cheap confirmation, optional):** if the orchestrator wants a belt-and-suspenders check,
+hook `0x142640b20` entry (host) and `0x142640bc0` entry (joiner) and log `[rcx+0x50]` / `[rdi+0x50]` — the
+manager's channel — on each. Expected: both print `0x1e` (30). A mismatch would be the only way channel
+could be the wall, and the structure above says it can't be. **Do not spend a rig cycle on this alone;**
+fold it into the suspect-2/3 run as a free read.
+
+**Re-derivation note:** `static.py fn 0x142640b20` and `0x142640bc0` (the `[rbx+0x50]`/`[rdi+0x50]` reads),
+`fn 0x142643dd0` (rcx=`[conn+8]`=mgr proves the send object is the manager), `fn 0x142640560` (the
+`movups [rcx+0x50], xmm1` config copy + the `+0x5c` clamps), `fn 0x14263f700` (the `[mgr+0x50]=0` init),
+`calls 0x142640560` (one caller). The config's channel *constant* could not be pinned statically — its
+producer reaches the builder through an Arxan-dispatched call (`0x14263b720` has no static caller/pointer)
+— but the field-identity + single-builder + run-7 empirics make mismatch impossible regardless.
+
+### Suspect 2 — P2P ACCEPT: the joiner's accept is gated by the member-resolve and fails for the host
+
+**Answer: the joiner does not accept the host's P2P session, because the game's accept path is gated on the
+same member-lookup that fails.** In connectionless `ISteamNetworking006`, the receiver must
+`AcceptP2PSessionWithUser(sender)` (from the `P2PSessionRequest_t` callback) or Steam drops the sender's
+packets. The joiner's accept function `0x1426408b0` resolves the requesting SteamID64 to a session member
+*first* and bails before the accept if the resolve fails — which it does for the host on a Client session
+that never registered him. So the host's SYNs are never delivered → `ReadP2PPacket` returns false → the
+worker "drains" an empty channel → find-or-create never fires. (This is fully separable from suspect 3:
+accept controls *delivery*; the resolve in find-or-create controls *connection creation*. Both must pass.)
+
+**Evidence — `0x1426408b0` (accept/admit) charted:**
+- `(rcx=socketmgr, rdx=&id)`, `r15=[rdx]` = the requesting peer's SteamID64.
+- Pre-gates: `[mgr+0x70]!=0` and `[mgr+0xa8]!=0` (socket pool stood up), and a capacity check
+  `((mgr+0xe0)-(mgr+0xd8))>>7 < [mgr+0x58]` (identity array not full) — else bail to the `ret` at
+  `0x142640a59`.
+- **The resolve gate (`0x14264097f`–`0x142640990`):** `r8=[mgr+0x48]` (context S), `rdx=&local` (out),
+  `rcx=r15` (the id), `call [mgr+0x40]` — the member-resolve callback. `test eax,eax; jne 0x142640a59`
+  → **resolve failed ⇒ bail**, and `cmp [rbp-0x70],0; je 0x142640a59` → resolved-identity null ⇒ bail. No
+  accept happens on either bail.
+- Only past the gate: at `0x1426409e2` it resolves `ISteamNetworking006` (ctx `0x143c602b0`) and at
+  `0x1426409f8` does `call [rax+0x18]` = iface **slot 3 = `AcceptP2PSessionWithUser`** with `rdx=[rbx]`
+  (the id); then registers the identity into `[mgr+0xd8..0xe0]` (0x80-byte entries, `0x14263f4e0`) and sets
+  `[mgr+0xf0]=1`. So accept is *downstream* of the resolve — no member, no accept.
+- The call boundary into `0x1426408b0` (the `P2PSessionRequest_t` handler) is Arxan-dispatched (no static
+  caller, no image pointer), so the exact registrar can't be read on disk — but the body proves the gate.
+
+**Concrete lever (DECISIVE splitter, cheap & non-crashing):** on the **JOINER**, force a raw, ungated
+accept of the host once the side-channel knows the host's SteamID64: resolve the iface exactly as the game
+does — `lea rcx,[0x143c602b0]; call [0x144c0d0a4]` → `iface=[rax]`; `vt=[iface]`; call
+`vt[3]` (`[vt+0x18]`) `(iface, hostSteamID64)` — from a recurring task or a one-shot when B5 shows the host's
+SYNs arriving. This bypasses `0x1426408b0`'s member gate and makes Steam deliver the host's packets to
+`ReadP2PPacket`.
+- **Expected log signature:** the joiner's worker `0x142640bc0` now sees `ReadP2PPacket` return true; probe
+  **`0x142640e30` (find-or-create) entry** — if it **now fires** (it never did before), delivery was the
+  block and the host was resolvable → **accept was the wall (suspect 2)**. If `0x142640e30` fires but
+  **returns 0** (hook its exit / read `rax` at `0x142640f0a` vs the early-`ret` `0x142640e5b`), the resolve
+  is *also* blocking → **suspect 3 confirmed as the deeper wall.** Either outcome splits the two cleanly in
+  one run.
+- Gate note: this is the joiner accepting the host; it is independent of the host's `host_skip_p2p_accept`
+  (that lever is host-role-only). Keep it joiner-role-gated.
+
+**Re-derivation note:** `static.py fn 0x1426408b0` — read the two bail branches around the `call [mgr+0x40]`
+at `0x14264098b`, and the `call [rax+0x18]` (iface slot 3) at `0x1426409f8`; iface slot numbering is
+cross-checked against send (slot 0, `0x142640b20`) and recv (slot 2, `0x142640bc0`). `calls 0x1426408b0`
++ the pointer scan both return empty ⇒ Arxan-dispatched caller.
+
+### Suspect 3 — MEMBER REGISTRATION: the resolve reads a collection nothing on our join populates (PRIME)
+
+**Answer: the host is never registered as a member in the joiner's socket-manager member collection, so the
+resolve `0x142639d00` returns "not found" and find-or-create `0x142640e30` refuses to build the host
+connection.** This is the root the other two symptoms hang off. Crucially, **`drive_add_peer` does NOT fix
+this on the joiner**: it writes a *different* collection (`SessionSteam+0x4f0`, the pending-conn queue) than
+the resolve reads (the member-manager `S`'s collection at `S+0x170`/`S+0x98`), and it also calls a
+Host-session-only helper that null-derefs on a Client session (run 9's crash).
+
+**Evidence — find-or-create `0x142640e30` gates (called by the worker `0x142640bc0` at `0x142640d39`, its
+only caller):**
+- `(rcx=mgr, rdx=senderID, r8=buffer, r9d=len)`.
+- Size gate `0x142640e43`: `[mgr+0x5c] >= len` else return 0.
+- Optional blob-validator `0x142640e5c`: if `[mgr+0x61]!=0`, `0x142642830(buffer,len)` must pass.
+- **The resolve gate `0x142640eca`:** `call [mgr+0x40]` (context `r8=[mgr+0x48]`, `rcx=senderID`,
+  `rdx=&local`); `test eax,eax; jne → return 0` (`0x142640ecf`), and `cmp [local+0x60],0; je → return 0`
+  (`0x142640ed5`). Only on success does it call the manager factory `[mgr]+8` and the identity's finisher
+  `[local+0x60]` (filled by the resolve) to build the `SteamConnection`. **Same `[mgr+0x40]` resolve as the
+  accept path** — one gate, two call sites.
+
+**Evidence — the resolve `[mgr+0x40]` = `0x142639d00` charted (context `S=[mgr+0x48]`):**
+- `(this=S, id, &out)`. At `0x142639d80`: `call [S+0x168]` (the member-lookup vmethod) with `r8=[S+0x170]`
+  (the member collection root) and `rcx=id`. `cmp eax,1; je 0x142639dea` → **lookup returned 1 = NOT FOUND ⇒
+  return 1 (resolve fail)**; `cmp [rbp],0; je` → null entry ⇒ same fail. The member fetch helper
+  `0x142639950` iterates the member array `[S+0x98..0xa0]` and returns null when empty
+  (`cmp [S+0x98],[S+0xa0]` at `0x142639960`). On a *found* member it builds the ~0x60-byte identity into
+  `out`, sets `out+0x60 = 0x142639830` (the finisher fn find-or-create calls) and `out+0x68 = member`, and
+  returns 0 (success). So resolve success ⇔ the peer id is already in `S`'s member collection.
+- `[mgr+0x40]` (resolve) and `[mgr+0x48]` (context S) are wired from the config block by the builder
+  (`0x142640596: movups [mgr+0x40], xmm0` ← `config[0..0x10]`); the init nulls them. So on any working
+  socket manager S is the live session's member-manager (the DLNW3D `ManagerImpl`; RTTI in-image:
+  `ManagerImpl.cpp`, `SessionMemberSteam@DLNR3D@@`). The collection it reads is the session's member
+  registry — the host must be in it.
+
+**Evidence — what does NOT register the host (why prior levers failed):**
+- **`drive_add_peer 0x1423fdc80` targets the wrong collection.** It builds a member (`0x1423fb980`),
+  validates it (`0x1424004e0`), and appends it to **`SessionSteam+0x4f0..+0x4f8`** (`0x1423fdea3`
+  `0x1423fa2a0` → `[rsi+0x4f8]=rax`). That is the pending-conn queue the host's *send* phase searches — not
+  the member-manager `S+0x170`/`S+0x98` collection the resolve reads. So even setting aside the crash,
+  host-style add-peer on the joiner would not make the joiner's resolve pass.
+- **…and it crashes the Client session (run 9's null `+0x5f8`).** `drive_add_peer` calls `0x1423fc3e0`
+  (`0x1423fddb4`, `0x1423fde48`) — a session-object field-setup helper (`mov rax,[rax]; mov rcx,[rax+0x10];
+  … [rcx+0x28]=…`) that walks a pointer chain present on a Host session but null on a Client one. This is
+  the run-9 fault (`eldenring.exe+0x23fc3e4`, add-peer in the backtrace). So the joiner's member graph isn't
+  wired the way this Host-path helper expects.
+- **What SHOULD register it:** on a genuine ERSC join the host becomes a member of `S`'s collection during
+  the **session-establish / join-member-registration** the client runs off the join blob — the step our
+  bit-2-OR + `drive_join` shortcut bypasses (it seeds the SESSION machine via `0x1423fb260` but never turns
+  the host identity into a registered member; see "★ JOINER PEER-WIRE" Task 2). The `0x14263b7c0` this lane
+  was pointed at is **not** that registrar — it's a **teardown/release thunk** (`call [vt]` deleting-dtor +
+  owner `[vt+0x68]` at `0x14263b7e9`/`0x14263b7f4`), Arxan-dispatched (no static caller/pointer). The real
+  member-add is a `ManagerImpl` insert into `S`'s `+0x98`/`+0x170` collection, invoked by the establish path.
+
+**Concrete lever (two options, in order of preference):**
+- **Lever 3a (preferred — pair with suspect-2's forced accept):** run the suspect-2 forced accept first.
+  If it shows `0x142640e30` firing but returning 0 at the resolve, then register the host in `S`'s member
+  collection directly. Chart the `ManagerImpl` member-add (start from `0x142639d00`'s siblings — the fn that
+  *writes* `[S+0xa0]`/`[S+0x170]`, adjacent to the lookup vmethod `[S+0x168]`) and call it on the joiner
+  with `S=[socketmgr+0x48]` and the host's SteamID64. Then the resolve passes and the worker's find-or-create
+  builds the `SteamConnection` (`conn+0x138=hostID`) on the host's already-arriving SYNs.
+  - **Expected log signature:** `0x142640e30` returns non-null; `[conn+0x138]==hostID` on the new
+    socket-mgr conn (`[mgr+0xb8..0xc0]`); `session+0x3cc` on the joiner walks `1 → 4 → 2` (established);
+    `players=2`.
+- **Lever 3b (if 3a's member-add proves Arxan-only / unreachable):** capture the `ManagerImpl` member-add
+  target live off a call-site hook (the skill's "Arxan-decoded call targets" pattern — hook where the decoded
+  target is in a register, latch once, then disassemble the decoded address offline), so the exact add call
+  and its args become known; then drive it as in 3a. This is the fallback when the add is only reachable
+  through the region's obfuscated dispatch.
+- **Do NOT** re-use `drive_add_peer` on the joiner for this: wrong collection + Host-only `0x1423fc3e0`
+  crash (run 9). If a session-member is ever wanted on the joiner, the `0x1423fc3e0` null `session+0x5f8`
+  chain must be populated/guarded first — out of scope for the inbound wire, which needs the *transport*
+  member (`S`'s collection), not the pending-conn queue.
+
+**Re-derivation note:** `static.py fn 0x142640e30` (the two resolve bails at `0x142640ecf`/`0x142640ed5`),
+`fn 0x142639d00` (the `[S+0x168]` lookup + `cmp eax,1` not-found bail at `0x142639d86`), `fn 0x142639950`
+(the `[S+0x98..0xa0]` member-array iterate), `fn 0x1423fdc80` (the `[rsi+0x4f8]` append via `0x1423fa2a0`
+and the `0x1423fc3e0` calls), `fn 0x1423fc3e4` (the run-9 crash helper), `fn 0x14263b7c0` (the
+deleting-dtor shape). `calls 0x142640e30` → one caller (`0x142640bc0`). `calls`/pointer-scan for
+`0x14263b7c0`, `0x1426408b0`, `0x14263b720` all empty ⇒ Arxan-dispatched. RTTI via `static.py ascii
+ManagerImpl` / `SessionMember`.
+
+### Ranking (most→least likely as the cause of "joiner never builds the host connection")
+
+1. **Suspect 3 — member registration (ROOT, prime).** The resolve `[mgr+0x40]`→`0x142639d00` fails the
+   member-lookup for the host on the Client session, and that single gate guards *both* the accept and the
+   connection-create. Nothing on our driven join populates the collection it reads. This is the wall.
+2. **Suspect 2 — P2P accept (the same gate, accept-side face).** The joiner not accepting the host is a
+   *consequence* of suspect 3 (accept is gated on the same resolve), but it is separately load-bearing:
+   even with the member registered, delivery still needs an accept (or joiner-initiated traffic) in
+   connectionless P2P. Worth the forced-accept lever precisely because it *splits* 2 from 3 in one run.
+3. **Suspect 1 — channel. RULED OUT.** Send and receive read the same per-manager field `[mgr+0x50]`, set
+   once by one role-agnostic builder; run 7 already observed the joiner on channel 30. Include the free
+   channel read in the run, but it is not the wall.
+
+**One-line for the orchestrator:** wire the suspect-2 forced-accept on the joiner + a `0x142640e30`
+entry/exit probe; that single run tells you whether accept alone unblocks (build the host conn) or whether
+you must also register the host in the joiner's `ManagerImpl` member collection (suspect 3 lever 3a/3b).
+
+### Cross-references
+
+- Supersedes nothing; **appends** to the stall-B trail. Builds directly on "★ JOINER PEER-WIRE AIM SHEET"
+  (connectionless `ISteamNetworking006`, `0x142640b20`/`0xbc0`/`0xe30`, the `drive_add_peer` send lever) and
+  run 7/9's RIG RESULTS (host emits real SYNs; joiner add-peer crashes).
+- `drive_add_peer 0x1423fdc80` / member layout (`member+0x80`=peer id) — same as
+  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "the member-add writer chain"; this
+  section adds that its append target (`SessionSteam+0x4f0`) is a *different* collection than the transport
+  resolve reads (`ManagerImpl S+0x170`/`+0x98`).
+- The resolve context `S=[socketmgr+0x48]` is the DLNW3D `ManagerImpl` (RTTI `ManagerImpl.cpp`); its
+  member-manager role matches `S=[member+0x58]` in "★ STALL-B HANDSHAKE AIM SHEET" Task 5.
