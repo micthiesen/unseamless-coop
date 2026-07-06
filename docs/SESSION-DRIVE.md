@@ -3765,3 +3765,183 @@ or a separate online-only member-service init we skip; (c) the real lookup fn it
 
 Probe: commit `7965078` (`session_probe.rs` `log_host_admit` S-chain block + `ADMIT_EXE_BASE`). Logs: rig via
 `scripts/rig.sh log`; Deck at `.deck-logs/`.
+
+**Disasm confirmation (settles the "real lookup, empty container" alternative):** `static.py fn 0x1423fdf00`
+= `mov eax, 1; ret` — a *trivial* always-return-1 stub, not a real lookup over an empty container. So the
+`[S+0x168]` value we read live is the **default/unbound** callback; the fix is to get the real delegate
+*bound* (lever 3b), not to populate `[S+0x170]`. (The `member-add-chart` chart below reasons statically that
+the delegate "was installed" — read that as *the default stub was installed*; the real member-service bind at
+session-establish, which our driven-join shortcut skips, is what's missing.)
+
+## ★ MEMBER-ADD WRITER (2026-07-06, static — charts lever 3a's WRITE side)
+
+Static RE of the clean on-disk `eldenring.exe` 2.6.2 (`scripts/re/static.py` capstone + the pre-analyzed
+Ghidra project at `/var/tmp/ghidra-projects/ghx_eldenring_exe`; behavioral notes in my own words, exact
+addresses). Answers lever 3a's question — *what inserts a member into S's collection and what's its
+signature* — and it changes the recommendation: **3a-as-imagined (a cheap direct "insert(S, steamID64)"
+call) does not exist. The registry write is a runtime-bound delegate + a heavy refcounted member object,
+both reached only through the region's Arxan dispatch. The sound path is lever 3b (live-latch the
+insert).** Full reasoning below.
+
+### Load-bearing conclusion first
+
+`S = [socketmgr+0x48]` is a **`DLNR3D::ManagerImplSteam`** (vtable `0x1431f8780`; base
+`DLNR3D::ManagerImpl` vtable `0x1431f8360`). Confirmed structurally, not just by RTTI: `S`'s ctor chain
+(`0x1423f4080` → base `0x1423f20b0`) initializes a `CRITICAL_SECTION` at `S+0x10` (`InitializeCriticalSection`
+wrapper `0x141ed6150`), and the resolve `0x142639d00` locks exactly that field (`EnterCriticalSection`
+`0x141ed6210(S[2]=[S+0x10])` / `LeaveCriticalSection` `0x141ed6280`). Same object, same lock.
+
+The member registry `S` reads is **a bound delegate, not a vtable method**:
+
+- `[S+0x168]` is a **stored function-pointer field** (the lookup callback), and `[S+0x170]` is its **bound
+  context** (the actual member-container object). The resolve calls it as a bare `code*`:
+  `iVar = (*(code*)S[0x2d])(id, &out_local, S[0x2e])` — i.e. `[S+0x168](steamID64, &out, [S+0x170])`,
+  returning `1 = NOT FOUND`. `S[0x2d]`/`S[0x2e]` = `[S+0x168]`/`[S+0x170]`.
+- It is **not** `[vtable+0x168]`: the `ManagerImplSteam` vtable `0x1431f8780` has only ~17 real function
+  slots (`[0]..[16]`, `+0x000..+0x080`); everything from `+0x088` on is RTTI/data, not code pointers. So
+  `0x168` cannot be a vtable index — it is an object field.
+- **Both fields are zero-initialized at construction.** They sit inside the config block at `S+0xb0`, which
+  the base-ctor sub-init `0x1423f21f0` `memset`s to 0 (`0x14251c2e0(S+0xf1, 0, 0xd2)` — `0x14251c2e0` is a
+  plain SSE `memset`). So a freshly-constructed manager has `[S+0x168]=0` / `[S+0x170]=0`; the delegate is
+  **installed at runtime by the member-service bind step** (session-establish), which our driven-join
+  shortcut skips. Run 10's clean `gate-c returned 1` (not a crash on `call 0` and not `players` growth)
+  means at runtime the delegate *was* installed but its container `[S+0x170]` had no entry for the host.
+
+### The member element — what a correct inserted member looks like
+
+The registry stores **`DLNR3D::SessionMemberSteam`** objects (vtable `0x1431fa978`; base
+`DLNR3D::SessionMember` vtable `0x1431fa688`), size **`0x170` bytes**. Layout from the ctors
+(base `0x142400210`, Steam-subclass `0x142402bf0`):
+
+| Offset | Field (my naming) | Set by / meaning |
+|--------|-------------------|------------------|
+| `+0x00` | vtable | `SessionMemberSteam::vftable` = `0x1431fa978` |
+| `+0x58` | `mgr` | the owning manager (`= [owner+0x58]`, passed into the ctor) |
+| `+0x60` | `owner` | the object that requested the add |
+| `+0x70` | `identity A` (refcounted) | ctor bumps `[A+8]` via interlocked-inc `0x141eba1c0` |
+| `+0x78` | `identity B` (refcounted) | ctor bumps `[B+8]` — a second refcounted handle |
+| `+0x88` | inline-string vtable | `DLTX::DLInplaceStr<1,64,DLCodedStr<1>>::vftable` |
+| `+0x90` | inline-string ptr | points at the 64-byte inline buffer `member+0xa8` (member name/persona) |
+| `+0x158` | Steam dword | zeroed by subclass ctor, filled on add |
+| `+0x160` | **Steam qword — the `CSteamID`/`SteamID64` key (most likely)** | zeroed by subclass ctor, filled on add |
+| `+0x168` | Steam byte | zeroed by subclass ctor |
+
+So a member is **not** a bare `SteamID64` written into an array. The key the lookup compares against is
+carried by the refcounted identity objects at `+0x70`/`+0x78` (and/or the Steam `+0x160` qword) — a member
+can only be constructed by allocating identity handles and refcounting them, not by memcpy'ing a `u64`.
+(Caveat on the key offset: the ctors zero `+0x160`, so I could not statically prove the `SteamID64` lands
+at `+0x160` vs. inside identity A/B — it is filled post-ctor in the Arxan caller. `+0x160` is the strongest
+static candidate; a live read settles it. Note this may reconcile with the live-captured "`member+0x80` =
+peer id" in [ERSC-LIVE-CAPTURE-FINDINGS.md] only if that capture was a *different* member class — see the
+`drive_add_peer` disambiguation below.)
+
+### The member builder — `0x1423fdf20` (the only `SessionMemberSteam` factory)
+
+`0x1423fdf20` is the **sole** constructor site of `SessionMemberSteam` (only caller of ctor `0x142402bf0`).
+It is `new SessionMemberSteam(...)`:
+
+- `alloc = [[this+0x58]+0x48]` (the manager's allocator), `obj = 0x141eb9ed0(size=0x170, align=8, alloc)`
+  (`0x141eb9ed0` = allocator dispatch: `jmp [[alloc]+0x50]`).
+- `0x142402bf0(rcx=obj, rdx=[this+0x58]=mgr, r8=this=owner, r9=identityA, stack=identityB)` — constructs the
+  member from the two identity handles.
+- Signature (my naming): `SessionMemberSteam* build_member(this=ManagerImplSteam-ish, identityA, identityB)`.
+
+**`0x1423fdf20` has 0 static callers and 0 static pointers** (`static.py calls`/`xref` both empty). It is
+reached only through the socket-mgr region's Arxan dispatch — same wall as `0x1426408b0` / `0x14263b720` /
+`0x14263b7c0`. So the *build* is opaque on disk, and so is the *insert* that follows it (the delegate
+`[S+0x168]` is runtime-bound, and there is **no static `mov [reg+0x168]` / `mov [reg+0x170]` writer anywhere
+in the DLNR3D manager region** — I scanned every `.pdata` function for base+disp writes to those offsets;
+the binding is done via the obfuscated path or pointer arithmetic through a helper, not a direct field
+store).
+
+### The node pool at `S+0x98..0xc0` is NOT the registry (don't confuse them)
+
+The resolve's found-branch helper `0x142639950` operates on a **separate node pool**, not the keyed
+registry:
+
+- `[S+0x98..0xa0]` = a **free-node stack** (begin/end of 8-byte slots); `[S+0xb0..0xc0]` = an **active-node
+  vector**. `0x142639950` = "pop one free node (if predicate `0x14263ddb0` passes), push it onto the active
+  list via `0x142639840`, advance `[S+0xc0]`." It is a pool allocator/recycler the resolve calls **after** a
+  successful lookup to materialize the identity it returns — it is **not** where membership is decided.
+- Membership is decided entirely by `[S+0x168](id, &out, [S+0x170])`. Writing the pool at `S+0x98/S+0xa0`
+  would not make the lookup find the host. (This is the analogue, inside `S`, of the earlier `drive_add_peer`
+  mistake of writing the wrong collection.)
+
+### `drive_add_peer` builds a DIFFERENT member (reaffirmed, disambiguated)
+
+`drive_add_peer 0x1423fdc80` builds its member via `0x1423fb980` and appends to `SessionSteam+0x4f0` — a
+different builder *and* a different collection than `S`'s registry. It is **not** the `SessionMemberSteam`
+factory (`0x1423fb980 != 0x1423fdf20`; only `0x1423fdf20` constructs `SessionMemberSteam`). So the two
+"member" objects in play are distinct types/paths: the transport registry wants the `SessionMemberSteam`
+from `0x1423fdf20`; `drive_add_peer` produces the pending-conn-queue member. Dead ends from run 9/10 stand:
+`drive_add_peer` on the joiner writes the wrong collection and null-derefs the Host-only `0x1423fc3e0`
+(`session+0x5f8`).
+
+### Real-vs-stub — a runtime property, not statically decidable (as the aim sheet predicted)
+
+Because `[S+0x168]` is zeroed at ctor and bound at runtime, whether it is a **real lookup** over `[S+0x170]`
+or the **`mov eax,1; ret` stub `0x1423fdf00`** cannot be read from the on-disk image — there is no static
+site that installs `0x1423fdf00` into `[S+0x168]`. (The stub `0x1423fdf00` *does* appear once as a `lea`, at
+`0x1423fe052` inside `0x1423fe030`, but there it is used as a **temporary default callback passed by value**
+to a lookup helper `0x14203f240`, not stored into any manager's `+0x168`.) Both "real lookup over an empty
+container" and "always-1 stub" are consistent with run 10's `gate-c=1`. **Cheap live settle (hand to the
+orchestrator):** read `[socketmgr+0x48]=S`, then `[S+0x168]` from `/proc/<pid>/mem`; if it equals
+`0x1423fdf00` it's the stub (registering members is inert — lever 3b territory: a fuller service init must
+install a real `[S+0x168]` first); if it's any other `.text` address, it's a real lookup and 3a's
+"populate `[S+0x170]`" is meaningful.
+
+### Recommendation to lever 3a/3b (this is the actionable change)
+
+**Lever 3a as originally scoped is not viable**: there is no static "insert(S, steamID64)" — the registry
+write is (1) a runtime-bound delegate whose install site is Arxan/absent statically, over (2) a heavy
+refcounted `SessionMemberSteam` that only the Arxan-dispatched factory `0x1423fdf20` can mint from identity
+handles we don't have in hand. Go to **lever 3b — the live latch** (`/reverse-engineer` skill,
+"Arxan-decoded call targets"):
+
+1. **Latch the insert live.** Place a read-only, latch-once, panic-firewalled `jmp`-back hook at a call site
+   in the establish path where the decoded insert/registrar target is already in a register (hook the
+   trampoline's `test rbx,rbx` gated on the return address, or the caller right after the vtable/function-ptr
+   load). Capture the decoded target address and disassemble it offline (`static.py fn <decoded>`), and
+   capture its live args (`S`, the member/identity, the `SteamID64`).
+2. **Also latch `0x1423fdf20` on a real join** (hook its entry once) to read the live `identityA`/`identityB`
+   it is handed and confirm the `SteamID64` offset in the finished member (read `member+0x160` and
+   `member+0x70/+0x78` from `/proc/mem`). That gives the exact recipe to mint + insert a member for the host
+   on the joiner.
+3. Then drive that captured insert on the joiner with `S=[socketmgr+0x48]` and the host's `SteamID64`; expect
+   `gate-c` to flip `1→0`, `host-admit-SUCCESS 0x142640ee4` to fire, and the connection to build.
+
+Confirm real-vs-stub (the `[S+0x168]` read above) **before** step 3: if `[S+0x168]` is the stub on the
+driven shortcut, the establish/bind step that installs the real delegate is the prerequisite, and latching
+the insert alone won't stick.
+
+### Re-derivation notes (per function)
+
+- `static.py fn 0x142639d00` — the resolve; the `call [S+0x168]` (as `code*`), the `cmp eax,1; je` not-found
+  bail, and the found-branch `EnterCriticalSection [S+0x10]` → `0x142639950` → identity copy. Ghidra confirms
+  `S[0x2d]`/`S[0x2e]` = `[S+0x168]`/`[S+0x170]`.
+- `static.py vtable '.?AVManagerImplSteam@DLNR3D@@'` → `0x1431f8780`; dump its slots (only `[0]..[16]` are
+  code) to prove `0x168` is not a vtable index. Base `.?AVManagerImpl@DLNR3D@@` → `0x1431f8360`.
+- `static.py fn 0x1423f4080` (`ManagerImplSteam` ctor) → base `0x1423f20b0`: `InitializeCriticalSection` at
+  `S+0x10`, config sub-init `0x1423f21f0(S+0xb0)` whose tail `memset`s the `[S+0x168]/[S+0x170]` region
+  (`0x14251c2e0` = SSE memset). This is the "zeroed at ctor" proof.
+- `static.py fn 0x142639950` (Ghidra) — the pool pop→push (`[S+0x98..0xa0]` free stack, `[S+0xb0..0xc0]`
+  active), *not* the registry.
+- `static.py xref 0x1431fa978` (`SessionMemberSteam` vtable) → ctor `0x142402bf0`; `calls 0x142402bf0` →
+  factory `0x1423fdf20`; `calls`/`xref 0x1423fdf20` → both empty ⇒ Arxan-dispatched. Ghidra of `0x142402bf0`
+  + base `0x142400210` gives the member layout table above. `0x141eba1c0` = interlocked refcount inc (proves
+  `+0x70`/`+0x78` are refcounted handles); `0x141eb9ed0` = allocator dispatch (`new`, size `0x170`).
+- Per-`.pdata`-function scan for `mov [reg+0x168]`/`mov [reg+0x170]` base+disp writes: **none** land in the
+  DLNR3D manager region ⇒ the delegate is bound off-image (Arxan) or via a helper, not a direct field store.
+- Stub check: `static.py xref 0x1423fdf00` → single `lea` at `0x1423fe052` (a by-value default callback into
+  `0x14203f240`), not an install into any `+0x168`.
+
+### Cross-references
+
+- Appends to "★ JOINER INBOUND AIM SHEET" + its run-10 result: this is the WRITE-side chart for that aim
+  sheet's lever 3a, and it upgrades the recommendation from "3a: direct insert" to "3b: live latch."
+- `S = ManagerImplSteam@DLNR3D`, member = `SessionMemberSteam@DLNR3D` — consistent with the RTTI cited in the
+  aim sheet (`ManagerImpl.cpp`, `SessionMemberSteam@DLNR3D`). The registry is the delegate pair
+  `[S+0x168]`/`[S+0x170]`, distinct from the `S+0x98..0xc0` node pool and from `drive_add_peer`'s
+  `SessionSteam+0x4f0` queue.
+
+[ERSC-LIVE-CAPTURE-FINDINGS.md]: ERSC-LIVE-CAPTURE-FINDINGS.md
