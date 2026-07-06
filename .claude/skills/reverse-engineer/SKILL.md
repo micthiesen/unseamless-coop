@@ -175,6 +175,20 @@ probe.
 > the same code ran clean. To read a deep function's return, hook it at a **function boundary** (entry + a
 > return trampoline), not in the middle of its caller.
 
+> **You can't DRIVE (call cold) a game function whose own dispatch goes through an Arxan-obfuscated vtable
+> slot.** 2026-07-06: driving the game's own type-5 send `0x142400df0(endpoint)` from our frame task crashed
+> at its `call [[endpoint]+0x70]` (vtable slot 14). The endpoint was fully valid (`[endpoint]` = the real
+> static vtable `0x143277750`, all other fields good), but that vtable's **slot 14 read `0x119930522` — a
+> value BELOW the image base (`< 0x140000000`), identical across two ASLR'd launches.** That's the tell of an
+> **Arxan-obfuscated slot**: it's a sentinel/trampoline only resolvable when the call is reached through the
+> game's own protected control flow (which decodes it); jumping to it cold hits the raw value → DEP-execute
+> `ACCESS_VIOLATION`. **Diagnostic before you call:** make the drive *observe-only* first — log the target
+> object's `[vtable+slotoff]`; if it's below the image base (or identical across launches), the slot is
+> Arxan-locked and driving the function is a dead end. **The way around is not to call it** — either reach the
+> game state where the game's own flow calls it, or (usually cheaper) **replicate its effect without the
+> obfuscated dispatch** (e.g. hand-build the bytes it would send and push them through the plain transport you
+> already drive). See [`docs/SESSION-DRIVE.md`](../../../docs/SESSION-DRIVE.md) > "RIG RESULT (runs 13–15)".
+
 ## Two Same-Shaped Failures Force a Method Change
 
 RE iteration has a failure mode no tool fixes: returning to the same prior — the same probe, the

@@ -11,139 +11,127 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (runs 13–15: driving the game's own type-5 send `0x142400df0` cold **crashes** —
-its endpoint vtable slot 14 is **Arxan-obfuscated** (`0x119930522`), only valid through the game's protected
-control flow. Pivoted option (b) to the **HAND-FRAME path**: build `[lenhdr][5][token][ticket_len][ticket]`
-and `SendP2PPacket` it on ch30 ourselves (scaffold `frame_type5` + `get_auth_session_ticket` already landed),
-avoiding the Arxan dispatch. The send-drive is OBSERVE-ONLY on `main`; don't re-enable it. See Next.)
-
-Prior update (★ COURSE-CORRECTION + run 12): Cross-checking the ERSC captures (Michael: "use
-the info I captured") revealed runs 4–11 — this session's 10/11 chasing the transport gate-c / `[S+0x168]`
-member-resolve — were a **red herring** (correction #1: that stub is present *even in working ERSC*; the
-connection is built by the session-layer pump, not find-or-create). Re-anchored on the **real frontier**
-(charted 2026-07-05): the endpoint `member+0x130` is already built by the game's pump; the sole gap is
-**completing the DLNW3D handshake** (`member+0x152=1`). Run 12 disproved option (a): with `suppress_syn` the
-endpoint still builds (SYN was noise) but `+0x152` never sets — it needs a real **type-5 auth-ticket** message.
-Next = option (b): produce the type-5 ourselves (`GetAuthSessionTicket` → framed message → host validator).
-The gate-c path stays DO-NOT-RE-LITIGATE.)
+Last updated: **2026-07-06**. Two-player co-op is **one message away**: everything up to a persistent,
+endpoint-wired joiner member works; the last gap is delivering a valid **type-5** (Steam auth-ticket) message
+to complete the handshake (`member+0x152=1` → `players=2`). This session course-corrected off a red-herring
+trail, disproved two producer approaches, and pinned the path: **hand-frame the type-5 ourselves and
+`SendP2PPacket` it on ch30** (the game's own send is Arxan-locked). The next session builds that sender.
 
 ## Now
 
 - **Out-of-band connection stack (rungs 1/2/4 + the DLNW3D Steam P2P transport) is shipped and
   two-machine-proven.** Peers find each other by password-keyed Steam lobby, authenticate the side-channel,
   and exchange game-P2P packets by SteamID64 alone.
-- **Host-side rung-3 establishment reproduced; client reaches `Client/WaitInitData`.** Host drives its own
-  establish handler to a stable `Host`/`Ingame` with the full member graph; the client's `drive_join` +
-  `join_set_established_bit` (direct `container+0x7c0` bit-2 OR) builds the per-peer emitter connection and
-  parks at `Client/WaitInitData`, stable, no crash.
-- **★★ REAL FRONTIER = complete the DLNW3D handshake (`member+0x152=1`). The endpoint is already built.**
-  `drive_add_peer` queues the peer member and **the game's own per-frame pump `0x1424007e0 → 0x142401110 →
-  0x14203ef70` builds `member+0x130`** (a live `MTInternalThreadSteamConnection`, vtable `0x143277750`).
-  **Run 12 (2026-07-06) confirmed this builds even with our SYN suppressed** — the fabricated 14-byte SYN was
-  pure noise. The one gap: member flags reach `(0,1,0,0)` (`+0x151`, set by the endpoint build) and never
-  reach working ERSC's `(0,0,1,0)` (`+0x152`); the endpoint cycles build → ~30s drop → rebuild, `players`
-  stuck at 1. `+0x152` is set only by a **type-5** message = a real Steam **auth ticket** the host validates;
-  the game's own connect flow never produces it in our driven setup (and symmetric mode has no joiner to
-  produce it). ⇒ we produce it ourselves (Next).
-- **⚠️ RED HERRING (runs 4–11, incl. this session's 10/11) — DO NOT RE-LITIGATE:** the transport
-  gate-c / find-or-create `0x142640e30` / `[S+0x168]` member-resolve path is **NOT** the admission mechanism.
-  ERSC-LIVE-CAPTURE-FINDINGS correction #1 proved `[context+0x168]` = the stub `0x1423fdf00` **even in a fully
-  working 2-player ERSC session**; run 11 only re-confirmed the stub is `mov eax,1; ret` on our side too. The
-  connection is built by the **session-layer pump** (above), not the transport worker's find-or-create. Levers
-  3a/3b (make `[S+0x168]` real) are moot — a real session doesn't have it real either. `drive_add_peer_joiner`
-  and `session+0x5a8` (voice, `0x142401e80`) remain killed leads.
-- **The type-5 completion protocol is fully charted** (ERSC capture #2). Pump `0x1424007e0`, `buf[0]`=type,
-  jump table `0x1424009f8`; **type 5** (`0x142400924`) reads 8B token, calls conn `vtable[0x88]` validator
-  `0x142402ee0` → `conn+0x148`=token, **`conn+0x152`=1 (COMPLETE)**. Type-5 payload = `{8B token, 4B len
-  (1..0x400), len·blob}` = a real **Steam auth ticket** (`GetAuthSessionTicket`) validated with
-  `BeginAuthSession` against `member+0x80`. Full 8-message table: ERSC-LIVE-CAPTURE-FINDINGS > "★ The DLNW3D
-  connect protocol". Dumps at `~/Documents/ersc-session-ref-{host,client}.txt` + `ersc-live-capture*.txt`.
+- **The session graph is reproduced up to the handshake.** `drive_add_peer` queues the peer member; the
+  game's own per-frame pump (`0x1424007e0 → 0x142401110 → 0x14203ef70`) **builds the peer's endpoint**
+  `member+0x130` (a real `MTInternalThreadSteamConnection`, vtable `0x143277750`) — on both machines, stable,
+  no crash. Run 12 confirmed it builds even with our fabricated SYN suppressed (the SYN was pure noise).
+- **★★ THE ONE REMAINING GAP: the DLNW3D handshake never completes.** The peer member's flags reach
+  `(0,1,0,0)` (`+0x151`, set by the endpoint build) but never `(0,0,1,0)` (`+0x152`, working-ERSC). `+0x152`
+  is set only by a **type-5** message = a real Steam **auth ticket** the host validates
+  (`0x142402ee0`/`BeginAuthSession` vs `member+0x80`). Our driven flow never produces it, so the member
+  times out (~30s), drops, re-adds — `players` stuck at 1. Producing a valid type-5 is the whole ballgame.
+- **The type-5 is fully charted** (ERSC capture #2). Pump `0x1424007e0`, `buf[0]`=type, jump table
+  `0x1424009f8`; **type 5** case `0x142400924` → validator `0x142402ee0` → `conn+0x148`=token,
+  **`conn+0x152`=1**. Payload = `{[5], 8B token, 4B len (1..0x400), len·blob}`; validator gates ONLY on the
+  ticket (`BeginAuthSession`, result ∈ {0,2}) — **the 8B token is stored unvalidated (any bytes)**. The full
+  send/validator/injection chart is SESSION-DRIVE.md > "★ TYPE-5 PRODUCER + INJECTION".
+- **Two producer approaches DISPROVEN this session (don't retry):** (a) *let the game's endpoints talk* — run
+  12: suppressing our SYN didn't help, `+0x152` still never sets. (b) *drive the game's own send
+  `0x142400df0` cold* — runs 13–15: **crashes**, because that send dispatches through an **Arxan-obfuscated
+  endpoint vtable slot** (`[vtable+0x70]=0x119930522`, below the image base, identical across ASLR launches),
+  only valid in the game's protected control flow. The send-drive is OBSERVE-ONLY on `main` (`ec691cc`) —
+  **do not re-enable its `send()` call.**
+- **⚠️ RED HERRING (runs 4–11) — DO NOT RE-LITIGATE:** the transport gate-c / find-or-create `0x142640e30` /
+  `[S+0x168]` member-resolve is **not** the admission mechanism — ERSC-LIVE-CAPTURE correction #1 proved
+  `[context+0x168]` is the stub `0x1423fdf00` **even in a fully working ERSC session**. The connection is
+  built by the session-layer pump, not find-or-create. (Banner atop SESSION-DRIVE.md > "★ JOINER INBOUND AIM
+  SHEET".)
 
 ## Next
 
-**★ Option (b), HAND-FRAME path — send our own type-5 bytes on ch30 (the game's own send is Arxan-locked).**
-Runs 13–15 (2026-07-06) proved driving the game's own send `0x142400df0(endpoint)` **crashes**: the endpoint
-is fully valid (`[ep]`=`0x143277750`, send-ready) but its **vtable slot 14 = `0x119930522`** (below the image
-base, identical across ASLR launches) — an **Arxan-obfuscated slot** only resolvable through the game's own
-protected control flow. Calling the send cold hits the raw slot → DEP fault. Full: SESSION-DRIVE.md > "▶ RIG
-RESULT (runs 13–15)". The send-drive is OBSERVE-ONLY on `main` (`ec691cc`); don't re-enable the `send()` call.
+**★ Build the HAND-FRAME type-5 sender: construct the message bytes ourselves and `SendP2PPacket` them on
+ch30.** This is the only path that avoids the Arxan-locked send `0x142400df0` — we never call the game's
+obfuscated dispatch, we just push bytes through the plain `ISteamNetworking006` send we already drive in
+`drive_p2p`. The peer's pump reads ch30 → routes by sender id → the endpoint's queue → the type-5 case →
+validator → `member+0x152=1` → roster → **`players=2`**. Serial (orchestrator drives the rig + Deck).
 
-**⇒ The hand-frame path avoids the Arxan dispatch entirely — build the bytes, `SendP2PPacket` ch30:**
-1. Payload (host-tested scaffold `core::dlnw3d::frame_type5`, `be7f64e`): `[5][8B token][4B ticket_len][ticket]`.
-   Token arbitrary (validator `0x142402ee0` stores it unvalidated); ticket = a real `GetAuthSessionTicket` blob
-   (`steam::get_auth_session_ticket`, scaffolded); the host must have `member+0x80` = our real SteamID64
-   (`drive_add_peer` sets it). Validator gates ONLY on the ticket via `BeginAuthSession` → `member+0x152=1`.
-2. Transport frame: wrap in the same 11-bit length header the 14-byte SYN uses (`byte0 = len & 0xff`,
-   `byte1 = 0x40 | ((len>>8)&7)`), then the payload; send on **ch30** via `ISteamNetworking006` (the send we
-   already drive in `drive_p2p`). The peer's pump reads ch30 → routes by sender id → endpoint queue →
-   type-5 case → validator → `member+0x152=1` → roster → `players=2`. Set on BOTH machines (each sends its
-   own ticket to the other).
-3. **If the plain frame doesn't dispatch** (the chart flagged a possible inner transport frame beyond the
-   11-bit header — `0x142642860`/`0x1426408b0` are Arxan-opaque): **capture the exact on-wire bytes** of a
-   real ERSC type-5 by hooking `SendP2PPacket` ch30 on a live ERSC session, and copy the framing. That's the
-   fallback (a real-ERSC capture, but a small targeted one — just the bytes).
+**The scaffold is already on `main`** (host-tested): `core::dlnw3d::frame_type5(token, blob)` frames
+`[5][8B token][4B len][blob]` (`be7f64e`); `steam::get_auth_session_ticket()` binds the flat
+`GetAuthSessionTicket` and returns the ticket blob (`be7f64e`). **The build is: wrap that payload in the
+transport length header + send it on ch30, gated by a new flag, on both machines.** Then a two-machine
+confirm run watching `member+0x152` / flags `(0,0,1,0)` (read with `scripts/re/capture-endpoint.py`) and
+`players → 2`.
 
-**Retire/observe:** the fabricated 14-byte SYN is unnecessary (`suppress_syn` proved the endpoint builds
-without it, run 12) — the hand-framed type-5 replaces it on ch30. **Do NOT re-run the transport gate-c /
-`[S+0x168]` path** (⚠️ RED HERRING bullet in Now), and **do NOT re-enable the cold `0x142400df0` drive**
-(Arxan-locked, runs 13–15).
+### Decisions we'll face (in order)
 
-- **Decision trail (2026-07-05, /next): chart delegated → landed → integrated; confirm run is serial and
-  now config-ready.** The static charting lane (`inbound-chart`) completed and integrated (commit
-  `07ca862`, the aim sheet), then was torn down. The three suspects collapsed to one (member-resolve gate);
-  full map + all nine prior runs: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ JOINER INBOUND AIM SHEET" (and
-  the "★ STALL-B HANDSHAKE" / "P2P-EVENT" / "JOINER PEER-WIRE" sheets it builds on, with their runs-4–9
-  "▶ RIG RESULT" addenda).
-- **Instrument + config state (on `main`):** B0/B1/B4/B5 probes wired (`session_probe.rs`). Seed
-  (`scripts/rig/seed-config.toml`): `drive_add_peer` ON (host → real SYNs), `host_skip_p2p_accept` **OFF**
-  (host must accept the joiner so its return leg isn't dropped), `drive_add_peer_joiner` **OFF** (crashes the
-  joiner), `drive_join` + `join_set_established_bit` ON. Do NOT hook `0x1423fb684` or the drain `0x1423ff446`
-  (unaligned mid-region in the client update path — crash the client; session state is POLLED via `stall-B
-  poll`).
-- **Watch item (latent, not the stall):** client self-identity `[[member+0x58]+0x7f8]==0` under the bit-2-OR
-  lever misroutes the client's **self** member once a session establishes. Fix when the handshake lands: set
-  `+0x7f8` directly alongside the bit-2 OR.
+1. **Plain-frame-first, or capture-the-bytes-first?** *(Recommendation: plain first — it's free.)* The plain
+   frame is `[byte0=len&0xff][byte1=0x40|((len>>8)&7)][5][8B token][4B ticket_len][ticket]` (the len header
+   is the same 11-bit scheme our old 14-byte SYN used). Try it first — no ERSC restore. **If it doesn't
+   dispatch** (the chart flagged a possible *inner* transport frame beyond the len header; `0x142642860` /
+   `0x1426408b0` are Arxan-opaque on disk), fall back to **capturing the exact on-wire bytes** of a real ERSC
+   type-5 by hooking `SendP2PPacket` ch30 on a live ERSC session, and copy the framing verbatim. (Small
+   targeted capture — just the bytes — not a full graph dump.)
+2. **The 8B token — send zeros, or a real value?** The validator stores it unvalidated (`conn+0x148`), so
+   **any 8 bytes should pass.** Start with zeros; only revisit if the pump's *pre-validator* framing cares.
+3. **Who sends — symmetric (both) or a real joiner?** In `symmetric_peer` mode both machines build the
+   other's endpoint, so **both can send their own ticket to the other** (each completes the other's member) —
+   the simplest first attempt. If symmetric misbehaves (both think they're host), fall back to an asymmetric
+   host+joiner and send only from the joiner. *(Try symmetric first; it's what's wired.)*
+4. **Ticket validity timing.** `GetAuthSessionTicket` fills bytes synchronously but the ticket is only
+   *accepted* by a remote `BeginAuthSession` after Steam fires `GetAuthSessionTicketResponse_t` (~ms) — and
+   the game owns that callback pump. So **fetch once early and retry the send on a throttle**; the first sends
+   may bounce as `InvalidTicket` until it goes valid. Confirm the validator's accept set is `{0,2}` (k_EResultOK / k_EResultOKPending-ish).
+5. **The big fork — if hand-frame ALSO hits an Arxan wall.** If the inner transport frame turns out to be
+   Arxan-produced too (not just obfuscated-on-disk but genuinely unforgeable), then producing a type-5
+   *offline* is blocked, and the fallback is to **drive the game's own connect flow into the state where it
+   sends the type-5 itself** (its protected control flow decodes the Arxan slot) — a much bigger RE effort
+   (chart what gates the send, reach that state). Only go here if choice 1's capture shows the framing is
+   unreproducible. *(Not expected — the ticket is the only validated field — but name it so we don't thrash.)*
+
+**Watch item (latent, fix when the handshake lands):** the client's self-identity
+`[[member+0x58]+0x7f8]==0` under the bit-2-OR lever misroutes the client's *self* member; set `+0x7f8`
+directly alongside the bit-2 OR once a session establishes.
 
 ## Candidates Not Chosen
 
-- **Seamlessness disconnect-suppression gate — ALREADY SHIPPED (2026-07-04), don't rebuild.** It landed as
-  `gameplay.stay_connected` (default off): `coop/stay_connected` hooks both charted sites (leave_session
-  `0x140cae730` + the inlined twin), settings-registry toggle, host-tested `SuppressAnnouncer` core, toast +
-  milestone log, install+arm rig-validated solo (commits `7ad9000`/`38917c0`/`1981f70`;
-  [SESSION-LIFECYCLE-FINDINGS.md](SESSION-LIFECYCLE-FINDINGS.md) addendum). A /next lane spawned for it on
-  this stale entry was torn down as a duplicate. Remaining work is rig-gated only: live 2-player validation,
-  and caller→cause attribution in the suppression log — both queue directly behind stall B.
+- **Seamlessness disconnect-suppression gate — ALREADY SHIPPED (2026-07-04), don't rebuild.**
+  `gameplay.stay_connected` (default off): hooks both charted sites, settings toggle, host-tested core, toast,
+  install+arm rig-validated solo (`7ad9000`/`38917c0`/`1981f70`). Remaining is rig-gated only: live 2-player
+  validation + caller→cause attribution in the suppression log — both unblock the moment co-op is 2-player.
 - **Post-rung-3 wiring** (inert overlay toggles, nameplate color-by-SteamID, session-roster event toasts) —
-  rung-3-gated by definition; unblocked the moment stall B completes.
-- **Joiner-side `drive_add_peer` (symmetric add-peer)** — RULED OUT (run 9): enqueues fine on the Client
-  session but crashes it ~10s later (null `+0x5f8`; a Host-session sub-object is null on a Client one). The
-  joiner's connection must come from inbound find-or-create, not an outbound driver.
-- **`symmetric_peer` as the shipping design** — diagnostic only; leaves both at `Host(3)`, no real type-5.
-- **Calling the session-established handler `0x1423f4870` for the client** — builds a `+0x708` artifact that
-  crashes the joiner ~30s later at `eldenring.exe+0x3f4860`. The direct bit-2 OR is the safe lever.
-- **Fabricating the type-5 message / forcing transport admit** (`force_gatec_accept`) — both ruled out; the
-  type-5 needs a real Steam auth ticket, and the admit identity callback rejects the same way in real ERSC.
+  gated on 2-player co-op by definition; unblocked the moment `players=2` lands.
+- **Drive the game's own type-5 send `0x142400df0`** — RULED OUT (runs 13–15): Arxan-locked vtable slot,
+  crashes cold (see Now). Kept observe-only for diagnosis; do not re-enable.
+- **Let the game's endpoints complete the handshake on their own** — RULED OUT (run 12): suppressing our SYN
+  didn't make `+0x152` appear; the game's flow never produces the type-5 in our driven setup.
+- **The transport gate-c / `[S+0x168]` / find-or-create path & levers 3a/3b** — RED HERRING (runs 4–11):
+  the `[S+0x168]` stub is present even in working ERSC; not the admission mechanism.
+- **Joiner-side `drive_add_peer` (symmetric add-peer at the session layer)** — RULED OUT (run 9): crashes the
+  Client session (null `+0x5f8`, a Host-only sub-object).
+- **`force_gatec_accept` / fabricating transport admit** — moot: the wall was never the transport admit.
 
 ## Learned Recently (Pointers Only)
 
-- [SESSION-DRIVE.md](SESSION-DRIVE.md) — the full stall-B trail: "★ STALL-B HANDSHAKE AIM SHEET" (two phase
-  machines; `WaitInitData` = the session machine), "★ P2P-EVENT + CLIENT-CONNECT AIM SHEET" (the event ring;
-  `+0x5a8` = voice), "★ JOINER PEER-WIRE AIM SHEET" (connectionless `ISteamNetworking006`; SteamConnections
-  are inbound-only), and the nine "▶ RIG RESULT" addenda (runs 4–9: the P2P callbacks, the accept-unmask, the
-  host emitting real SYNs, the joiner add-peer crash).
-- Code: `session_probe.rs` — the B0/B1/B4/B5 read-only probes (session-state poll, P2P-callback/event
-  tracers, client-connect chain, host send-phase + game `SendP2PPacket`); the `drive_add_peer` driver (host +
-  the OFF joiner path); the `host_skip_p2p_accept` accept-unmask lever. Config gates in `unseamless-core/config.rs`.
-- **Review is now light (this session).** CLAUDE.md > "Review is light here": experiments get no formal
-  review (eyeball); solid work gets `/check` (1 agent) or the new **`/tricheck`** skill (3 agents). Ultracheck
-  is not used here. Applied across CLAUDE.md, ORCHESTRATION.md, the fleet skill, and both worker roles.
-- **Deck get-into-world footgun fixed (this session).** `deck.sh cycle` now verifies the Deck reached the
-  world (waits for the `auto-session` fire line) and re-dismisses if not, instead of firing blind dismiss taps
-  and stranding the join at a menu. See the `/steam-deck` skill (`wait-inworld`, `DECK_INWORLD_*`).
-- [RIG-RUNBOOK.md](RIG-RUNBOOK.md) > "Rig constraints & gotchas" — `kill` before `cycle` (apply refuses over a
-  live game → **silent no-op**; hit again this session on run 9 — always kill first).
-- [RUNG3-DRIVE-RUNBOOK.md](RUNG3-DRIVE-RUNBOOK.md) > "★ TWO-MACHINE HARNESS" — the two-machine procedure; pass
-  the role on every cycle.
-- Ground-truth ERSC dumps (persistent, uncommitted): `~/Documents/ersc-session-ref-{host,client}.txt`; the
-  full 8-type DLNW3D protocol + type-5 path in
-  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "★★ REFERENCE DUMP #2".
+- **The whole type-5 / handshake trail** → [SESSION-DRIVE.md](SESSION-DRIVE.md): "★ TYPE-5 PRODUCER +
+  INJECTION" (send `0x142400df0`, validator `0x142402ee0`, injection path), "★★ ENDPOINT CAPTURED" +
+  "★★★ HOST BUILDS THE JOINER ENDPOINT" (the pump builds `member+0x130`), and "▶ RIG RESULT (runs 10–15)"
+  (the red-herring confirm, option-a disproof, the Arxan-locked send). The 8-type protocol + type-5 payload:
+  [ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) > "★ The DLNW3D connect protocol" +
+  correction #1 (the `[context+0x168]` stub is stub-in-working-ERSC too).
+- **Arxan gotcha** → the [`/reverse-engineer`](../.claude/skills/reverse-engineer/SKILL.md) skill >
+  "Capturing Arxan-Decoded Call Targets": you **can't drive (call cold)** a game function whose own dispatch
+  goes through an Arxan slot; the tell is a call target below the image base, identical across ASLR launches —
+  observe-log the slot before calling, and replicate the effect without the dispatch instead.
+- **Code on `main`:** `core::dlnw3d` (host-tested type-5 framing) + `steam::get_auth_session_ticket` (the
+  scaffold, `be7f64e`); `session_probe.rs` — the type-5 producer (OBSERVE-ONLY, `ec691cc`), the endpoint-set
+  latch `0x14203ef70`, `drive_add_peer`, `symmetric_peer`/`suppress_syn` levers. Config gates in
+  `unseamless-core/config.rs`; the seed (`scripts/rig/seed-config.toml`) documents each flag inline.
+- **Current seed for the next run** (`scripts/rig/seed-config.toml`): `symmetric_peer` + `drive_add_peer` ON
+  (both build endpoints); `suppress_syn` ON (SYN retired, proven noise); `drive_type5` OFF (send-drive is
+  observe-only/retired — the hand-frame sender will get its own new flag); both machines `--auto-session host`.
+- **Workflow/rig learnings (this session):** a running game is NOT a blocker — kill-first then cycle
+  (CLAUDE.md); `/next` git-greps `main` before delegating a "build this" lane (a stale entry once spawned a
+  dup lane); don't chain `sleep N; cmd` (harness blocks it — poll or `run_in_background`) (global CLAUDE.md).
+- **Ground-truth ERSC captures** (persistent, uncommitted): `~/Documents/ersc-session-ref-{host,client}.txt`
+  + `ersc-live-capture*.txt` — the real 2-player member graph, the type-5 payload, the mirrored endpoints.
