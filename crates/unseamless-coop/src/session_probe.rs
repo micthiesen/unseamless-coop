@@ -38,12 +38,12 @@
 //! ## Lifetime & safety
 //! The entry hooks (when live) follow the same invariants as [`crate::saves`]: installed once on the
 //! init thread, `mem::forget`-ten (resident for the process lifetime — never unhook a live code
-//! path). The callbacks are **read-only** — they log register values and never write game memory or
-//! dereference a pointer they were handed, so a probe can't perturb the session it's observing. The
-//! one exception is the leg-B tracer's opt-in slot-array **fabrication** (`fabricate_slot_array`, off
-//! by default): when armed it writes the `NetworkSession`'s empty slot-array fields so a solo create
-//! can reach `Host` — a deliberate experiment, gated and guarded (only writes an unallocated array).
+//! path). Observer callbacks are read-only. The explicitly mutating exceptions are the leg-B tracer's
+//! slot-array fabrication and the worker-thread peer registrar, both off by default and guarded against
+//! the charted object layouts. The registrar runs only at the live manager's own worker entry so vector
+//! mutation stays inside its native ownership boundary.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use eldenring::cs::{CSSessionManager, CSTaskGroupIndex, LobbyState, ProtocolState};
@@ -118,7 +118,7 @@ pub fn install_hooks(config: &Config) {
     install_initiation_hooks(config);
     // Independently gated on `drive_create` (you only want the gate trace alongside a driven create).
     install_create_gate_trace(config);
-    // Read-only host-side admit/roster observation (fires on the receiving machine). Role-independent.
+    // Host-side admit/roster observation plus the independently gated worker-thread registrar lever.
     install_host_accept_trace(config);
     // Read-only stall-B session-machine + P2P-callback observation (B0/B1 of the stall-B aim sheet).
     install_stall_b_trace(config);
@@ -128,11 +128,14 @@ pub fn install_hooks(config: &Config) {
     install_type5_recv_trace(config);
 }
 
-/// Install the type-5 producer's endpoint-set latch (`0x14203ef70`) and resolve the game's own send
-/// `0x142400df0`, when `[debug.probes] drive_type5` is on. The driver ([`TransportStandupDriver`]) does the
-/// actual driving each tick; this just wires the latch + the fn pointer. Best-effort (a failed hook logs).
+/// Install the peer endpoint-set latch (`0x14203ef70`) when either the retired native type-5 sender or
+/// the worker-thread connection registrar needs it. The driver ([`TransportStandupDriver`]) does the
+/// type-5 driving; the registrar path copies a stable descriptor here for its worker callback. Best-effort
+/// (a failed hook logs).
 fn install_type5_trace(config: &Config) {
-    if !config.debug.probes.drive_type5 {
+    let drive_type5 = config.debug.probes.drive_type5;
+    let register_peer = config.debug.probes.register_peer_connection;
+    if !drive_type5 && !register_peer {
         return;
     }
     let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
@@ -142,13 +145,23 @@ fn install_type5_trace(config: &Config) {
             return;
         }
     };
-    DRIVE_TYPE5.store(true, Ordering::Relaxed);
-    TYPE5_SEND_FN.store(exe_base + TYPE5_SEND_OFFSET, Ordering::Relaxed);
+    DRIVE_TYPE5.store(drive_type5, Ordering::Relaxed);
+    if drive_type5 {
+        TYPE5_SEND_FN.store(exe_base + TYPE5_SEND_OFFSET, Ordering::Relaxed);
+    }
     install_offset_hook("type5-endpoint-latch", exe_base + ENDPOINT_SET_OFFSET, latch_type5_peer_member);
-    log::info!(
-        "session-probe: type5 producer armed — latch 0x14203ef70 (peer member off the endpoint), drive the \
-         game's own send 0x142400df0 on member+0x130 each tick (option b; sets member+0x152 → players=2)"
-    );
+    if drive_type5 {
+        log::info!(
+            "session-probe: type5 producer armed — latch 0x14203ef70 (peer member off the endpoint), drive the \
+             game's own send 0x142400df0 on member+0x130 each tick (option b; sets member+0x152 → players=2)"
+        );
+    }
+    if register_peer {
+        log::info!(
+            "session-probe: peer-register endpoint capture armed at 0x14203ef70 — copy the remote peer's \
+             callback descriptor for one worker-thread registrar attempt"
+        );
+    }
 }
 
 /// Place the read-only create/join initiation hooks when `session_probe` is on. No-op otherwise.
@@ -435,6 +448,18 @@ const ENDPOINT_SET_OFFSET: usize = 0x1_4203_ef70 - 0x1_4000_0000;
 /// drive the type-5 send on an endpoint whose `[ep] == exe_base + this` — a guard against the pump's
 /// build/drop race handing us a half-constructed / freed object (run-13 crash: `call [garbage_vtable+0x70]`).
 const ENDPOINT_VTABLE_RVA: usize = 0x3277750;
+/// `SteamConnectionManager` vtable and its pooled `SteamConnection` vtable. These guards keep the
+/// mutating registrar experiment pinned to the two charted object types after a game update.
+const CONNECTION_MANAGER_VTABLE_RVA: usize = 0x3278020;
+const STEAM_CONNECTION_VTABLE_RVA: usize = 0x3278358;
+/// Manager vtable slot 1, `0x14263fd10(manager, peer_id, descriptor)`. It pops one free pool slot,
+/// initializes it through `0x142643d50`, and appends it to the active vector.
+const PEER_REGISTER_OFFSET: usize = 0x1_4263_fd10 - 0x1_4000_0000;
+/// The callback quartet at the front of the endpoint's registrar-compatible 0x60-byte descriptor.
+/// These are stable code pointers; checking all four distinguishes the expected endpoint layout from
+/// another object passing through the generic holder writer.
+const PEER_DESCRIPTOR_CALLBACK_RVAS: [usize; 4] = [0x2400a20, 0x2400a40, 0x2400a30, 0x2400a50];
+const PEER_DESCRIPTOR_QWORDS: usize = 0x60 / size_of::<usize>();
 /// Resolved absolute `0x142400df0` (set at install when `drive_type5`).
 static TYPE5_SEND_FN: AtomicUsize = AtomicUsize::new(0);
 /// Latched peer `SessionMemberSteam` (pool slot whose `+0x80` == the peer id). Stable while the session
@@ -444,6 +469,24 @@ static TYPE5_PEER_MEMBER: AtomicUsize = AtomicUsize::new(0);
 static TYPE5_PEER_ID: AtomicU64 = AtomicU64::new(0);
 /// Armed by `[debug.probes] drive_type5`.
 static DRIVE_TYPE5: AtomicBool = AtomicBool::new(false);
+/// Armed by `[debug.probes] register_peer_connection`; all mutable manager work remains on the
+/// manager's own worker thread.
+static REGISTER_PEER_CONNECTION: AtomicBool = AtomicBool::new(false);
+/// Resolved executable base and registrar entry for descriptor/vtable guards and the one native call.
+static PEER_REGISTER_EXE_BASE: AtomicUsize = AtomicUsize::new(0);
+static PEER_REGISTER_FN: AtomicUsize = AtomicUsize::new(0);
+/// Process-lifetime one-shot latch. A failed native registrar call is not retried in the same run.
+static PEER_REGISTER_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+struct PendingPeerRegistration {
+    peer_id: u64,
+    descriptor: [usize; PEER_DESCRIPTOR_QWORDS],
+}
+
+/// Cross-thread handoff from the endpoint writer to the connection-manager worker. The descriptor is
+/// copied, not borrowed from the transient endpoint, and the lock is never held across the native call.
+static PENDING_PEER_REGISTRATION: Mutex<Option<PendingPeerRegistration>> = Mutex::new(None);
 /// Log latch for the type-5 drive (fires on a throttle; log the first several, then quiet).
 static TYPE5_DRIVE_LOGS: AtomicU32 = AtomicU32::new(0);
 /// Log latch for the hand-frame type-5 send (fires on a throttle; log the first several, then quiet).
@@ -476,8 +519,10 @@ fn latch_type5_peer_member(_name: &'static str, regs: *mut Registers) {
         if member == 0 {
             return;
         }
-        let peer = TYPE5_PEER_ID.load(Ordering::Relaxed);
         let mid = ((member + 0x80) as *const u64).read_volatile();
+        capture_peer_registration(endpoint, member, mid);
+
+        let peer = TYPE5_PEER_ID.load(Ordering::Relaxed);
         if peer != 0 && mid == peer && TYPE5_PEER_MEMBER.swap(member, Ordering::Relaxed) != member {
             log::info!(
                 "session-probe: type5 — latched peer member {member:#x} (endpoint {endpoint:#x}, +0x80={}) \
@@ -486,6 +531,78 @@ fn latch_type5_peer_member(_name: &'static str, regs: *mut Registers) {
             );
         }
     }));
+}
+
+/// Form the remote endpoint's registrar descriptor in process-stable storage. The first seven qwords
+/// come from `endpoint+0x20..+0x58`; the native builder `0x14263d060` then sources descriptor
+/// `+0x38/+0x40/+0x48/+0x50/+0x58` from endpoint `+0x40/+0x48/+0x50/+0x60/+0x68`. The repeated
+/// callbacks and member context are intentional: the reassembler calls descriptor `+0x38` while using
+/// `+0x48` as its context. Copying a contiguous 0x60 bytes instead puts endpoint `+0x58` in that callback
+/// slot and crashes when the worker services the connection.
+unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64) {
+    if !REGISTER_PEER_CONNECTION.load(Ordering::Relaxed)
+        || PEER_REGISTER_ATTEMPTED.load(Ordering::Relaxed)
+        || peer_id == 0
+        || crate::steam::self_steam_id().is_none_or(|self_id| peer_id == self_id)
+    {
+        return;
+    }
+
+    let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
+    if exe_base == 0
+        || unsafe { (endpoint as *const usize).read_volatile() } != exe_base + ENDPOINT_VTABLE_RVA
+    {
+        return;
+    }
+
+    let mut descriptor = [0usize; PEER_DESCRIPTOR_QWORDS];
+    for (i, word) in descriptor.iter_mut().take(7).enumerate() {
+        *word = unsafe {
+            ((endpoint + 0x20 + i * size_of::<usize>()) as *const usize).read_volatile()
+        };
+    }
+    for (i, endpoint_offset) in [0x40, 0x48, 0x50, 0x60, 0x68].into_iter().enumerate() {
+        descriptor[7 + i] = unsafe {
+            ((endpoint + endpoint_offset) as *const usize).read_volatile()
+        };
+    }
+    let callbacks_match = PEER_DESCRIPTOR_CALLBACK_RVAS
+        .iter()
+        .enumerate()
+        .all(|(i, rva)| descriptor[i] == exe_base + rva);
+    let is_game_code = |address: usize| {
+        address >= exe_base && address.wrapping_sub(exe_base) < 0x0300_0000
+    };
+    let downstream_callbacks_match = (descriptor[4] == 0 && descriptor[5] == 0)
+        || (is_game_code(descriptor[4]) && is_game_code(descriptor[5]));
+    let optional_pair_matches = (descriptor[10] == 0) == (descriptor[11] == 0);
+    // descriptor+0x30 and +0x48 are the member context used by the two callback groups.
+    if !callbacks_match
+        || !downstream_callbacks_match
+        || descriptor[6] != member
+        || descriptor[7] != descriptor[4]
+        || descriptor[8] != descriptor[5]
+        || descriptor[9] != member
+        || !optional_pair_matches
+    {
+        return;
+    }
+
+    let pending = PendingPeerRegistration { peer_id, descriptor };
+    let mut slot = PENDING_PEER_REGISTRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_some() {
+        return;
+    }
+    *slot = Some(pending);
+    log::info!(
+        "session-probe: peer-register captured descriptor from endpoint {endpoint:#x}, member {member:#x}, \
+         peer {} — native-builder field mapping valid; callbacks ({:#x}, {:#x}), optional pair ({:#x}, {:#x})",
+        unseamless_core::diagnostics::peer_tag(peer_id),
+        descriptor[7],
+        descriptor[8],
+        descriptor[10],
+        descriptor[11],
+    );
 }
 
 /// Armed by `[debug.probes] land_socket_holder`: at the veto-vmethod hook, build a real
@@ -719,8 +836,7 @@ fn legb_prologue_ok(addr: usize) -> bool {
     prologue_ok("leg-B entry", addr, &LEGB_ENTRY_PROLOGUE)
 }
 
-/// Place one read-only `jmp-back` hook at a resolved address for the gate tracers, logging the
-/// outcome under their `gate-trace` tag.
+/// Place one `jmp-back` hook at a resolved address, logging the outcome under the `gate-trace` tag.
 fn install_offset_hook(name: &'static str, addr: usize, body: fn(&'static str, *mut Registers)) {
     match place_jmp_back_hook(name, addr, body) {
         Ok(()) => log::info!("session-probe: gate-trace hooked {name} at {addr:#x}"),
@@ -739,8 +855,8 @@ fn place_jmp_back_hook(
 ) -> Result<(), String> {
     // SAFETY: `addr` is a charted, clean function entry (exe base + a fixed offset; the initiation
     // sites are additionally prologue-verified by their caller); the detour bodies are panic-firewalled
-    // and read-only, except the leg-B tracer's opt-in `fabricate_slot_array` write, which is itself
-    // gated on a prologue check before it's armed (see the log_* fns).
+    // and panic-firewalled. Mutating bodies are separately opt-in: leg-B fabrication is prologue-
+    // guarded, and peer registration validates the manager/pool layout and runs on its worker thread.
     let hook = unsafe {
         hook_closure_jmp_back(
             addr,
@@ -895,9 +1011,13 @@ const HOST_ADMIT_SUCCESS_OFFSET: usize = 0x1_4264_0ee4 - 0x1_4000_0000;
 /// connections it services (`([this+0xc0]-[this+0xb8])/entry`) — the linchpin for whether a joiner SYN on
 /// our probe channel is even seen. Throttled (the loop runs every worker tick).
 const HOST_WORKER_DRAIN_OFFSET: usize = 0x1_4264_0bc0 - 0x1_4000_0000;
+/// Connection-retire event dispatch inside `0x1426411d0`: `rdi=connection`, `rsi=peer_id`,
+/// `rbp=reason`. It fires immediately before the manager removes the connection through `0x142640f20`.
+const PEER_CONNECTION_RETIRE_OFFSET: usize = 0x1_4264_12b9 - 0x1_4000_0000;
 /// Throttle for [`log_host_worker_drain`] — the drain loop fires every worker tick, so log only the first
 /// few to confirm it runs + capture the channel, then go silent.
 static WORKER_DRAIN_LOGS: AtomicU32 = AtomicU32::new(0);
+static PEER_CONNECTION_RETIRE_LOGS: AtomicU32 = AtomicU32::new(0);
 /// The exe base, latched at `install_host_accept_trace`, so [`log_host_admit`] can convert the live
 /// member-resolve pointers into RVAs to name them (is `[S+0x168]` the stub `0x1423fdf00`, or a real lookup?).
 static ADMIT_EXE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -1046,11 +1166,15 @@ fn log_host_admit_success(_name: &'static str, _regs: *mut Registers) {
     }));
 }
 
-/// host-worker-drain tracer: `0x142640bc0(rcx=socketmgr)`. Fires on the worker thread each drain tick;
-/// throttled to the first few so we learn (a) the worker RUNS offline, (b) which channel it reads
-/// (`[socketmgr+0x50]`), and (c) how many connections it services (`[socketmgr+0xb8..0xc0]`). If it reads a
-/// channel other than our probe channel 0, a joiner SYN on channel 0 will never reach the admit path.
+/// Host-worker callback: `0x142640bc0(rcx=socketmgr)`. It remains a throttled observer unless the
+/// independent peer-registration flag is armed; then it first attempts the guarded one-shot registrar
+/// call on this owning worker thread. The observer reports the channel and active connection vector.
 fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
+    let sm = unsafe { (&*regs).rcx as usize };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        try_register_peer_connection(sm);
+    }));
+
     let n = WORKER_DRAIN_LOGS.fetch_add(1, Ordering::Relaxed);
     // Dump the first few ticks (startup, table empty) AND periodically thereafter (~every 300 worker ticks)
     // so the table state is captured AFTER the peer connects + starts sending type-5s — the moment that
@@ -1061,8 +1185,6 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: ilhook entry registers; rcx = socketmgr. `+0x50` (channel), `+0xb8/+0xc0` (connection
         // vector begin/end) are in-bounds fields; all reads null-guarded.
-        let r = unsafe { &*regs };
-        let sm = r.rcx as usize;
         let (channel, begin, end) = if sm != 0 {
             unsafe {
                 (
@@ -1079,7 +1201,7 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
         // each entry's vtable + key, so a two-machine run shows EMPIRICALLY whether the table is empty (why
         // recv falls to admit) and, once we register, what a valid entry looks like. This is the path-B target.
         let span = end.saturating_sub(begin);
-        let count = if begin != 0 && end > begin && span.is_multiple_of(8) { span / 8 } else { usize::MAX };
+        let count = if begin != 0 && end >= begin && span.is_multiple_of(8) { span / 8 } else { usize::MAX };
         log::info!(
             "session-probe: host-worker-drain #{n} — 0x142640bc0 socketmgr={sm:#x} reads channel={channel} \
              conn_table[sm+0xb8..0xc0]={begin:#x}..{end:#x} entries={} (worker RUNS offline; recv delivers to a \
@@ -1126,12 +1248,178 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
-/// Install the read-only host-admit + roster-add tracers when `[debug.probes] instrument_host_accept` is on.
-/// Role-independent (fires on whichever machine receives an inbound peer). Best-effort: a failed hook logs
-/// and is skipped. NB: `host-admit` fires on the socket-manager WORKER THREAD, not the main thread — the
-/// handler only logs (no game-state touch), so that's safe.
+/// Observe why the manager retires a registered peer connection. Read-only and bounded; the event's
+/// second qword is preserved in `rbp` by `0x1426411d0` before it marks and removes the connection.
+fn log_peer_connection_retire(_name: &'static str, regs: *mut Registers) {
+    let n = PEER_CONNECTION_RETIRE_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n >= 8 {
+        return;
+    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let r = unsafe { &*regs };
+        let reason_name = match r.rbp {
+            4 => "Steam P2P timeout (remote not responding)",
+            _ => "unclassified",
+        };
+        log::info!(
+            "session-probe: peer-register RETIRE event — connection={:#x}, peer={}, reason={:#x} ({reason_name}); \
+             manager will remove it through 0x142640f20",
+            r.rdi,
+            unseamless_core::diagnostics::peer_tag(r.rsi),
+            r.rbp,
+        );
+    }));
+}
+
+/// Run the one mutating experiment at the receive manager's worker entry. Every object/vector check
+/// happens before the latch flips; once the native call starts, this process will not retry it even if
+/// initialization returns null. This preserves the test-loop's one-lever-per-cycle boundary.
+unsafe fn try_register_peer_connection(manager: usize) {
+    if !REGISTER_PEER_CONNECTION.load(Ordering::Relaxed)
+        || PEER_REGISTER_ATTEMPTED.load(Ordering::Relaxed)
+        || manager == 0
+    {
+        return;
+    }
+    let pending = {
+        let slot = PENDING_PEER_REGISTRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot
+    };
+    let Some(pending) = pending else { return };
+
+    let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
+    let register_fn = PEER_REGISTER_FN.load(Ordering::Relaxed);
+    if exe_base == 0
+        || register_fn == 0
+        || unsafe { (manager as *const usize).read_volatile() }
+            != exe_base + CONNECTION_MANAGER_VTABLE_RVA
+    {
+        return;
+    }
+
+    let free_begin = unsafe { ((manager + 0x90) as *const usize).read_volatile() };
+    let free_end = unsafe { ((manager + 0x98) as *const usize).read_volatile() };
+    let active_begin = unsafe { ((manager + 0xb8) as *const usize).read_volatile() };
+    let active_end = unsafe { ((manager + 0xc0) as *const usize).read_volatile() };
+    let Some(free_count) = pointer_vector_count(free_begin, free_end, 32) else { return };
+    let Some(active_count) = pointer_vector_count(active_begin, active_end, 32) else { return };
+
+    for i in 0..active_count {
+        let connection = unsafe {
+            ((active_begin + i * size_of::<usize>()) as *const usize).read_volatile()
+        };
+        if connection != 0
+            && unsafe { ((connection + 0x138) as *const u64).read_volatile() } == pending.peer_id
+        {
+            PEER_REGISTER_ATTEMPTED.store(true, Ordering::Relaxed);
+            log::info!(
+                "session-probe: peer-register skipped — manager {manager:#x} already has active connection \
+                 {connection:#x} for peer {}",
+                unseamless_core::diagnostics::peer_tag(pending.peer_id),
+            );
+            return;
+        }
+    }
+    if free_count == 0 {
+        return;
+    }
+
+    let selected = unsafe { ((free_end - size_of::<usize>()) as *const usize).read_volatile() };
+    if selected == 0
+        || unsafe { (selected as *const usize).read_volatile() }
+            != exe_base + STEAM_CONNECTION_VTABLE_RVA
+        || unsafe { ((selected + 0x18) as *const usize).read_volatile() } != manager
+        || unsafe { ((selected + 0x138) as *const u64).read_volatile() } != 0
+    {
+        return;
+    }
+
+    if PEER_REGISTER_ATTEMPTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    {
+        let mut slot = PENDING_PEER_REGISTRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = None;
+    }
+
+    let mode_a = unsafe { ((manager + 0x61) as *const u8).read_volatile() };
+    let mode_b = unsafe { ((manager + 0x62) as *const u8).read_volatile() };
+    log::info!(
+        "session-probe: peer-register ATTEMPT — 0x14263fd10(manager={manager:#x}, peer={}, descriptor=stable) \
+         on worker thread; free={free_count}, active={active_count}, selected={selected:#x}, modes=({mode_a},{mode_b})",
+        unseamless_core::diagnostics::peer_tag(pending.peer_id),
+    );
+
+    let register: extern "win64" fn(usize, u64, *const usize) -> usize =
+        unsafe { std::mem::transmute(register_fn) };
+    let connection = register(manager, pending.peer_id, pending.descriptor.as_ptr());
+
+    let free_after_end = unsafe { ((manager + 0x98) as *const usize).read_volatile() };
+    let active_after_end = unsafe { ((manager + 0xc0) as *const usize).read_volatile() };
+    let free_after = pointer_vector_count(free_begin, free_after_end, 32);
+    let active_after = pointer_vector_count(active_begin, active_after_end, 32);
+    let appended = if active_after_end >= active_begin + size_of::<usize>() {
+        unsafe { ((active_after_end - size_of::<usize>()) as *const usize).read_volatile() }
+    } else {
+        0
+    };
+    let (vtable, owner, key) = if connection != 0 {
+        (
+            unsafe { (connection as *const usize).read_volatile() },
+            unsafe { ((connection + 0x18) as *const usize).read_volatile() },
+            unsafe { ((connection + 0x138) as *const u64).read_volatile() },
+        )
+    } else {
+        (0, 0, 0)
+    };
+    let success = connection == selected
+        && free_after == Some(free_count - 1)
+        && active_after == Some(active_count + 1)
+        && appended == connection
+        && vtable == exe_base + STEAM_CONNECTION_VTABLE_RVA
+        && owner == manager
+        && key == pending.peer_id;
+    if success {
+        log::info!(
+            "session-probe: peer-register SUCCESS — connection={connection:#x}, free {free_count}->{}, \
+             active {active_count}->{}, appended={appended:#x}, vtable={vtable:#x}, owner={owner:#x}, peer={} \
+             (worker-thread registrar acceptance predicate passed)",
+            free_after.unwrap_or(usize::MAX),
+            active_after.unwrap_or(usize::MAX),
+            unseamless_core::diagnostics::peer_tag(key),
+        );
+    } else {
+        log::error!(
+            "session-probe: peer-register FAILED — returned={connection:#x} selected={selected:#x}, \
+             free {free_count}->{free_after:?}, active {active_count}->{active_after:?}, appended={appended:#x}, \
+             vtable={vtable:#x}, owner={owner:#x}, key={key:#x}"
+        );
+    }
+}
+
+/// Validate a pointer-vector span before the registrar experiment reads an entry from it.
+fn pointer_vector_count(begin: usize, end: usize, max: usize) -> Option<usize> {
+    if begin == 0 || end < begin {
+        return None;
+    }
+    let bytes = end - begin;
+    if !bytes.is_multiple_of(size_of::<usize>()) {
+        return None;
+    }
+    let count = bytes / size_of::<usize>();
+    (count <= max).then_some(count)
+}
+
+/// Install host-admit/roster tracers and/or the independently gated worker-thread registrar. The
+/// observer hooks remain read-only; the registrar mutates only after its full manager/pool validation at
+/// `0x142640bc0`, keeping the active-vector write on the manager's owning thread. Best-effort throughout.
 fn install_host_accept_trace(config: &Config) {
-    if !config.debug.probes.instrument_host_accept {
+    let instrument = config.debug.probes.instrument_host_accept;
+    let register_peer = config.debug.probes.register_peer_connection;
+    if !instrument && !register_peer {
         return;
     }
     let exe_base = match unsafe { GetModuleHandleA(PCSTR::null()) } {
@@ -1141,21 +1429,41 @@ fn install_host_accept_trace(config: &Config) {
             return;
         }
     };
-    ADMIT_EXE_BASE.store(exe_base, Ordering::Relaxed);
-    FORCE_GATEC_ACCEPT.store(config.debug.probes.force_gatec_accept, Ordering::Relaxed);
-    if config.debug.probes.force_gatec_accept {
-        log::info!("session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c");
+    if register_peer {
+        REGISTER_PEER_CONNECTION.store(true, Ordering::Relaxed);
+        PEER_REGISTER_EXE_BASE.store(exe_base, Ordering::Relaxed);
+        PEER_REGISTER_FN.store(exe_base + PEER_REGISTER_OFFSET, Ordering::Relaxed);
     }
-    install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
-    install_offset_hook("host-admit-gate-c", exe_base + HOST_ADMIT_GATEC_OFFSET, log_host_admit_gatec);
-    install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);
-    install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
+    if instrument {
+        ADMIT_EXE_BASE.store(exe_base, Ordering::Relaxed);
+        FORCE_GATEC_ACCEPT.store(config.debug.probes.force_gatec_accept, Ordering::Relaxed);
+        if config.debug.probes.force_gatec_accept {
+            log::info!("session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c");
+        }
+        install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
+        install_offset_hook("host-admit-gate-c", exe_base + HOST_ADMIT_GATEC_OFFSET, log_host_admit_gatec);
+        install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);
+        install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
+        install_offset_hook("add-peer", exe_base + ADD_PEER_OFFSET, log_add_peer);
+    }
     install_offset_hook("host-worker-drain", exe_base + HOST_WORKER_DRAIN_OFFSET, log_host_worker_drain);
-    install_offset_hook("add-peer", exe_base + ADD_PEER_OFFSET, log_add_peer);
-    log::info!(
-        "session-probe: host-accept trace installed (host-admit 0x142640e30 + gate-c 0x142640ecd + success \
-         0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0 + add-peer 0x1423fdc80)"
-    );
+    if instrument {
+        log::info!(
+            "session-probe: host-accept trace installed (host-admit 0x142640e30 + gate-c 0x142640ecd + success \
+             0x142640ee4 + host-roster-add 0x140cb31b0 + host-worker-drain 0x142640bc0 + add-peer 0x1423fdc80)"
+        );
+    }
+    if register_peer {
+        install_offset_hook(
+            "peer-connection-retire",
+            exe_base + PEER_CONNECTION_RETIRE_OFFSET,
+            log_peer_connection_retire,
+        );
+        log::info!(
+            "session-probe: peer-register worker lever armed — 0x142640bc0 will call registrar \
+             0x14263fd10 once after a guarded remote endpoint descriptor is captured"
+        );
+    }
 }
 
 // --- Receive-side type-5 validator observation (read-only, run-16 de-risk) ----------------------

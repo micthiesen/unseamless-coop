@@ -16,9 +16,27 @@ if len(sys.argv) < 2:
     sys.exit("usage: peek-socketmgr.py <socketmgr_hex>  (read it from the host-worker-drain log line)")
 sm = int(sys.argv[1], 16)  # socketmgr from the worker-drain log (per-launch ASLR)
 print(f"# pid={pid} socketmgr={sm:#x}")
+print(f"vtable[+0x00]={rq(sm):#x}")
+pool = rq(sm+0x78)
+count = struct.unpack("<I", rd(sm+0x58,4))[0]
+free_begin = rq(sm+0x90); free_end = rq(sm+0x98); free_cap = rq(sm+0xa0)
+print(f"connection-pool: base[+0x78]={pool:#x} count[+0x58]={count}")
+print(f"free-vector: begin[+0x90]={free_begin:#x} end[+0x98]={free_end:#x} cap[+0xa0]={free_cap:#x}")
+if free_begin and free_end >= free_begin:
+    for i, slot in enumerate(range(free_begin, free_end, 8)):
+        conn = rq(slot)
+        print(f"  free[{i}] ptr@{slot:#x}={conn:#x} vt={rq(conn):#x} ctx[+0x18]={rq(conn+0x18):#x} "
+              f"state[+0x20]={struct.unpack('<I', rd(conn+0x20,4))[0]} "
+              f"peer[+0x128]={rq(conn+0x128):#x} key[+0x138]={rq(conn+0x138):#x}")
 begin = rq(sm+0xb8); end = rq(sm+0xc0); cap = rq(sm+0xc8)
 print(f"conn-vector: begin[+0xb8]={begin:#x} end[+0xc0]={end:#x} cap[+0xc8]={cap:#x}")
 print(f"  -> entries={(end-begin)//8}  capacity_slots={(cap-begin)//8 if cap>=begin else 'n/a'}  room_to_push={cap>end}")
+if begin and end >= begin:
+    for i, slot in enumerate(range(begin, end, 8)):
+        conn = rq(slot)
+        print(f"  active[{i}] ptr@{slot:#x}={conn:#x} vt={rq(conn):#x} ctx[+0x18]={rq(conn+0x18):#x} "
+              f"state[+0x20]={struct.unpack('<I', rd(conn+0x20,4))[0]} "
+              f"peer[+0x128]={rq(conn+0x128):#x} key[+0x138]={rq(conn+0x138):#x}")
 # pending queue
 pb = rq(sm+0xd8); pe = rq(sm+0xe0); pc = rq(sm+0xe8)
 print(f"pending-queue: begin[+0xd8]={pb:#x} end[+0xe0]={pe:#x} cap[+0xe8]={pc:#x}  has_pending[+0xf0]={rd(sm+0xf0,1)[0]}")

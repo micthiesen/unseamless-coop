@@ -12,8 +12,9 @@ Based on unseamless-coop/scripts/re/watch-write.py (same ptrace mechanics). Defa
 import argparse, ctypes, os, signal, struct, subprocess, sys
 
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
-PTRACE_CONT, PTRACE_ATTACH, PTRACE_DETACH = 7, 16, 17
+PTRACE_CONT, PTRACE_DETACH = 7, 17
 PTRACE_POKEUSER, PTRACE_GETREGS = 6, 12
+PTRACE_SEIZE, PTRACE_INTERRUPT = 0x4206, 0x4207
 DEBUGREG_OFF = 848
 RIP_OFF, RSP_OFF = 16 * 8, 19 * 8
 DR7_WRITE_4B_SLOT0 = (1 << 0) | (0b01 << 16) | (0b11 << 18)
@@ -79,7 +80,8 @@ def backtrace(pid, rsp, depth=20, scan=0x600):
 
 
 def arm(tid, addr):
-    ptrace(PTRACE_ATTACH, tid, 0, 0)
+    ptrace(PTRACE_SEIZE, tid, 0, 0)
+    ptrace(PTRACE_INTERRUPT, tid, 0, 0)
     os.waitpid(tid, __WALL)
     ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 0 * 8, addr)
     ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 7 * 8, DR7_WRITE_4B_SLOT0)
@@ -92,6 +94,30 @@ def disarm(tid):
         ptrace(PTRACE_DETACH, tid, 0, 0)
     except OSError:
         pass
+
+
+def stop_and_disarm(armed, already_stopped):
+    stopped = set(already_stopped)
+    for tid in armed:
+        if tid not in stopped:
+            try:
+                ptrace(PTRACE_INTERRUPT, tid, 0, 0)
+            except OSError:
+                pass
+    for tid in armed:
+        if tid in stopped:
+            continue
+        try:
+            _, status = os.waitpid(tid, __WALL)
+            if os.WIFSTOPPED(status):
+                stopped.add(tid)
+        except (ChildProcessError, OSError):
+            pass
+    for tid in armed:
+        if tid in stopped:
+            disarm(tid)
+        else:
+            print(f"  warn: tid {tid} did not stop for DR7 cleanup", file=sys.stderr)
 
 
 def main():
@@ -116,6 +142,7 @@ def main():
     print(f"armed {len(armed)}/{len(threads)} threads; hit the enemy now...", file=sys.stderr)
 
     hits = 0
+    stopped = set()
     stop = {"f": False}
     signal.signal(signal.SIGINT, lambda *_: stop.update(f=True))
     try:
@@ -135,6 +162,9 @@ def main():
                     sys.stdout.flush()
                 except OSError as e:
                     print(f"  regs read failed tid {tid}: {e}", file=sys.stderr)
+                if hits >= args.max_hits:
+                    stopped.add(tid)
+                    break
                 ptrace(PTRACE_CONT, tid, 0, 0)
             elif os.WIFSTOPPED(status):
                 ptrace(PTRACE_CONT, tid, 0, os.WSTOPSIG(status))
@@ -144,8 +174,7 @@ def main():
                 if not armed:
                     break
     finally:
-        for tid in armed:
-            disarm(tid)
+        stop_and_disarm(armed, stopped)
         print(f"\ndetached; {hits} hit(s).", file=sys.stderr)
 
 

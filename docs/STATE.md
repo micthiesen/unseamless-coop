@@ -11,20 +11,13 @@ picture, the chosen next step, and pointers.
 > **Deliberately not tracked here:** live workers (use `scripts/fleet/worker-ls`), rig/Deck state (cheap
 > to re-apply, never to remember or restore), and uncommitted git state (workers integrate before a wrap).
 
-Last updated: **2026-07-06** (run 17). **The type-5 producer is SOLVED** (hand-frame sender, crosses the wire
-bidirectionally, `send_type5`, commit `2ceddb0`) **and the remaining wall is now CONFIRMED delivery-side, not
-validation-side** (run 17 de-risk, `instrument_type5_recv`, commit `b6533dd`): the type-5 validator `0x142402ee0`
-**never fires on either machine** while the type-5 keeps arriving at the receiver's find-or-create admit
-`0x142640e30`. So a delivered type-5 is never dispatched to the pump — **no transport `SteamConnection` is registered
-for the peer**, so recv's sender-id search misses and the packet is dropped at admit instead of delivered. The entire
-remaining job is **registering the peer's transport `SteamConnection`** in `[socketmgr+0xb8..0xc0]`. Run-18 analysis
-closed both cheap shortcuts (`force_gatec_accept` DEAD by disasm; `STANDUP_CONNECTION` is a socketmgr wrapper, not a
-pushable conn) and pinned the target against **ERSC ground truth**: a working session differs from ours by exactly ONE
-object — a `SteamConnection` (`+0x138`=peerID) registered in the live socketmgr — created by the establishment flow we
-skip. The static trace found the connection's whole creation chain (ctor `0x142643b50` ← init `0x142640560` ← factory
-`0x14263b720`) but it bottoms out — the factory is invoked via a **runtime-dispatched (Arxan) vtable slot**, so
-**Next is a Michael-gated ERSC capture** to breakpoint the factory + name its establishment caller. Full evidence:
-SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follow-up)".
+Last updated: **2026-07-12** (local registrar runs 19-20). **The delivery-side connection-registration wall is solved
+locally.** The worker-thread lever now forms the endpoint descriptor with the native builder's field mapping and calls
+`0x14263fd10` on the live receive manager. Runtime acceptance passed exactly: returned pool slot non-null, free
+`5 -> 4`, active `0 -> 1`, correct vtable/owner/peer key, and no crash. With the Deck offline, Steam retired the entry
+6.57 seconds later with `EP2PSessionError::Timeout`, expected remote-not-responding cleanup. **Next is the minimal Deck
+run:** prove an online peer keeps the connection active and the already-arriving type-5 reaches the validator, then
+`member+0x152=1` and `players=2`. Full evidence: SESSION-DRIVE.md > "Worker-Thread Registrar Result (2026-07-12)".
 
 ## Now
 
@@ -53,6 +46,12 @@ SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follo
   skips that flow, so the table has no entry. **Run 17 confirmed delivery-side, not validation-side:** the validator
   `0x142402ee0` (hooked via `instrument_type5_recv`) **never fires on either machine** — a delivered type-5 never
   even reaches the pump. Full evidence: SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17)".
+- **The registrar is implemented and solo-proven.** `0x14263fd10(manager, peer_id, descriptor)` pops one of the
+  five preconstructed `SteamConnection` slots from `[manager+0x90..+0x98]`, sets its `+0x138` key through
+  `0x142643d50`, and appends it to `[manager+0xb8..+0xc0]`. The corrected endpoint descriptor mapping survives the
+  worker service loop. A raw contiguous endpoint copy is invalid because it places `endpoint+0x58` in callable
+  descriptor `+0x38`; the native mapping supplies the endpoint's null notification callback pair and valid
+  `+0x60/+0x68` interface pair. The only solo retirement was Steam timeout reason 4 with the Deck offline.
 - **The type-5 wire format is fully charted + now wire-validated.** Payload `{[5], 8B token, 4B len (1..0x400),
   len·ticket}`; validator `0x142402ee0` gates ONLY on the ticket (`BeginAuthSession` vs `member+0x80`, result ∈
   {0,2}) — the 8B token is stored unvalidated. Transport wrap = the 11-bit len header (`byte0=total&0xff`,
@@ -69,50 +68,16 @@ SESSION-DRIVE.md > "▶ RIG RESULT (run 16/17/18)" + "★ ANALYSIS (run-18 follo
 
 ## Next
 
-**★ Register the receiver's transport `SteamConnection` for the peer** so recv delivers the (already-arriving)
-type-5 into it instead of falling through to find-or-create admit. The recv path (`0x142640bc0`) routes a packet
-by searching `[socketmgr+0xb8..0xc0]` for a `SteamConnection` with `+0x138==senderSteamID64`; on a hit it delivers
-(`0x142643db0`→`0x142642860`) into the endpoint queue → pump → type-5 case → validator → `member+0x152=1` →
-`players=2`. Today that search finds nothing (every type-5 hits find-or-create `0x142640e30`), so **the job is to
-get a connection keyed to the peer id into that table.** `stand_up_transport` already *builds* a `SteamConnection`
-off the game heap but never registers it in the socket-manager connection table. Serial (orchestrator drives rig +
-Deck). Plan doc: SESSION-DRIVE.md > "▶ RIG RESULT (run 16)" > "► NEXT".
+**★ Run the registrar lever with the Deck online.** Use the existing symmetric two-machine setup with
+`register_peer_connection`, `send_type5`, and `instrument_type5_recv` enabled on both machines. The local acceptance
+predicate is already proven; this run asks only whether a responding peer prevents timeout retirement and unlocks the
+downstream path.
 
-**The de-risk is DONE (run 17) and the answer is one-sided:** the validator `0x142402ee0` never fires on either
-machine, so the wall is **purely delivery-side** — the register-the-connection work below is the whole job, and
-ticket-timing / `member+0x80` identity are moot until delivery works. The validator hook (`instrument_type5_recv`,
-on `main`) stays armed as the acceptance signal: once the connection is registered, `TYPE5-VALIDATOR FIRED` flipping
-from "never" to "fires" confirms delivery, then watch `member+0x152`.
-
-### The register work — the missing object is a `SteamConnection`, and finding its creator is Michael-gated
-
-Runs 17–18 + a static disasm (run-18 follow-up) closed BOTH cheap shortcuts and pinned the target against ERSC ground
-truth (full detail: SESSION-DRIVE.md > "★ ANALYSIS (run-18 follow-up)"):
-- **`force_gatec_accept` is DEAD** — the resolve `0x142639d00` short-circuits on the `[S+0x168]` stub (`je 0x142639dea`)
-  **before** filling the connection factory, so forcing gate-c leaves `[rsp+0x80]` null and admit still rejects. Confirmed
-  by disasm, not inferred. And `[S+0x168]`-made-real is moot (stub in working ERSC too).
-- **`STANDUP_CONNECTION` is the WRONG object** — it's a socket-manager *wrapper* (`[+8]`=its socketmgr), not a pushable
-  `SteamConnection`. The earlier "push STANDUP_CONNECTION" plan is void.
-- **ERSC ground truth (`~/Documents/ersc-session-ref-host.txt`): a working session differs from ours by exactly ONE
-  object** — a `SteamConnection @…d870` (vtable "SteamConnection" = `0x143278358/70`, `+0x138`=peerID, `+0x128`=0)
-  registered in the live `SteamConnectionManager` (`context[+0x48]` == endpoint `+0x18`). With it, member[4] is complete
-  (`flags=(0,0,1,0)`, `+0x152=1`, token stored). Ours has 0 conns → member stuck at `(0,1,0,0)`. The conn is created +
-  registered by ERSC's **establishment flow**, the step our synthetic drive skips.
-
-**★ NEXT — ERSC live capture of the connection's creator (Michael-gated; the static trace bottomed out).**
-The static trace climbed the whole creation chain — ctor `0x142643b50` ← init `0x142640560` ← **factory
-`0x14263b720`** (allocs `0x1b8`B, returns the conn) — but the factory has **0 direct callers + 0 raw-pointer refs in
-the image**, so it's dispatched through a **runtime-populated vtable slot** (Arxan pattern, like the type-5 send). ⇒
-static can't name the establishment step that calls it. **So: restore ERSC, Michael hosts + Deck joins (a real
-2-player session), and breakpoint/watch the factory `0x14263b720` (or the register write to `[sm+0xc0]`) — its
-caller/return address names the establishment function to drive** (and the live session gives the conn's full layout
-for direct construction as a backup). Chain addrs for the capture: factory `0x14263b720`, init `0x142640560`, ctor
-`0x142643b50`, conn size `0x1b8`, key `+0x138`, vtable `0x143278358/70`. Details: SESSION-DRIVE.md > "★ STATIC LEAD"
-+ "► STATIC TRACE RESULT (continued)".
-
-This re-connects the type-5 thread to the rung-3 establishment saga: **the type-5 producer is DONE; delivery needs the
-transport `SteamConnection`; the connection is minted by the factory `0x14263b720`, invoked by an establishment step
-that only a live ERSC capture can name.**
+**Acceptance sequence on each receiver:** `peer-register SUCCESS`; active vector remains at one while peer traffic is
+live; the peer's already-arriving type-5 stops falling through to admit; `TYPE5-VALIDATOR FIRED` appears; then the
+peer member reaches `+0x152=1` and the session observer reports `players=2`. If the validator fires but completion does
+not follow, inspect `BeginAuthSession` ticket timing/identity. If reason-4 retirement still occurs while the Deck is
+responding, inspect the legacy P2P accept state before changing the descriptor or registrar.
 
 **Ticket-timing note (still relevant, post-delivery):** `GetAuthSessionTicket` is sync but `BeginAuthSession` only
 accepts after `GetAuthSessionTicketResponse_t` (~ms); the sender caches + retries on a throttle, so once delivery works
@@ -124,6 +89,9 @@ directly alongside the bit-2 OR once a session establishes.
 
 ## Candidates Not Chosen
 
+- **ERSC live capture of `0x14263b720`** is no longer needed. That function creates the manager, not a per-peer
+  connection. The actual registrar is the plain manager vmethod `0x14263fd10`, and all of its live inputs can be
+  observed or formed in the local synthetic session.
 - **Seamlessness disconnect-suppression gate — ALREADY SHIPPED (2026-07-04), don't rebuild.**
   `gameplay.stay_connected` (default off): hooks both charted sites, settings toggle, host-tested core, toast,
   install+arm rig-validated solo (`7ad9000`/`38917c0`/`1981f70`). Remaining is rig-gated only: live 2-player
@@ -146,6 +114,11 @@ directly alongside the bit-2 OR once a session establishes.
 
 ## Learned Recently (Pointers Only)
 
+- **Connection registrar implementation + local result** → [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Correction and
+  Local Runtime Lead (2026-07-12)" and "Worker-Thread Registrar Result (2026-07-12)": `0x14263fd10` is the registrar;
+  the native descriptor tail mapping avoids the raw-copy callback crash; local registration passed free `5 -> 4`,
+  active `0 -> 1`; offline retirement reason 4 is Steam P2P timeout. `peek-socketmgr.py` dumps the vectors, and both
+  hardware-watch helpers cleanly clear DR7 before detach.
 - **The whole type-5 / handshake trail** → [SESSION-DRIVE.md](SESSION-DRIVE.md): "▶ RIG RESULT (run 16)" (the
   hand-frame sender proven bidirectional; the delivery-side wall pinned to the missing connection registration) is
   the current head; then "★ TYPE-5 PRODUCER + INJECTION" (validator `0x142402ee0`, the recv chart Q1 with the

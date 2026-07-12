@@ -252,6 +252,11 @@ instrument_type5_recv = true # ★ RECEIVE-SIDE TYPE-5 DE-RISK (2026-07-06, run-
                            # connection registration). If it FIRES but member+0x152 stays 0 (capture-endpoint.py) ⇒
                            # delivery works, the wall is VALIDATION (BeginAuthSession rejects — ticket-timing or a
                            # conn+0x80 identity mismatch). Role-independent (both machines receive). See docs/STATE.md > Next.
+register_peer_connection = true # ★ LOCAL DELIVERY LEVER (2026-07-12): capture the peer endpoint's callback
+                           # descriptor using the native builder's endpoint-field mapping, then call the live manager's
+                           # 0x14263fd10 registrar once at the next 0x142640bc0 worker entry. Solo verifier:
+                           # returned slot non-null, free 5->4, active 0->1, slot owner/key/vtable correct,
+                           # and the game remains stable. Off in normal configs; see docs/STATE.md > Next.
 suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host forms (protocol=Ingame, player,
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether

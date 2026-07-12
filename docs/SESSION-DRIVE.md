@@ -4429,3 +4429,79 @@ pattern that blocked the type-5 send `0x142400df0`). ⇒ Static analysis cannot 
 the factory `0x14263b720` (or the register write to `[sm+0xc0]`) — its caller/return address names the establishment
 function to drive.** Hand the capture these addrs: factory `0x14263b720`, init `0x142640560`, ctor `0x142643b50`, conn
 size `0x1b8`, key `+0x138`, vtable `0x143278358/70`.
+
+### Correction and Local Runtime Lead (2026-07-12)
+
+The final static conclusion above mislabeled the object at `0x14263b720`. A full re-read of the
+function and its known vtable resolves the creation and registration path without ERSC:
+
+- `0x14263b720` allocates the **`0x1b8`-byte `SteamConnectionManager`**, runs manager ctor
+  `0x14263f700`, then initializes it through `0x142640560`. It is not a per-peer
+  `SteamConnection` factory.
+- `0x142640560` allocates `count * 0x140` bytes at `[manager+0x78]`, constructs every
+  `SteamConnection` pool slot with `0x142643b50`, and fills the free-pointer vector
+  `[manager+0x90..+0x98]`. It leaves the active connection vector `[+0xb8..+0xc0]` empty.
+- The per-peer registrar is manager vtable slot 1, **`0x14263fd10(manager, peer_id,
+  descriptor)`**. It takes the last free slot, calls `0x142643d50` to set `conn+0x138=peer_id`
+  and initialize `conn+0x20`, appends the pointer to `[manager+0xb8..+0xc0]`, then shrinks
+  the free vector. `0x142640e30` reaches it through `call [manager_vtable+8]`; no Arxan
+  target capture is needed.
+
+The local rig then confirmed the static layout on the real receive manager. The manager used by
+worker `0x142640bc0` was distinct from the probe's early orphan manager. It had five constructed
+free slots, each with vtable `0x143278358`, `slot+0x18=manager`, zero reassembler state, and zero
+peer key; the active vector was empty with capacity for five pointers. `peek-socketmgr.py` now
+dumps both vectors and every slot so this can be rechecked after an update.
+
+A hardware watchpoint on the configured Deck member's transient `+0x130` endpoint also worked
+without the Deck. At the set writer `0x14203efc3`, the endpoint was a valid
+`MTInternalThreadSteamConnection` and contained the session callback bundle at `endpoint+0x20`:
+the four static callbacks `0x142400a20/a40/a30/a50`, member back-pointer, transport context, and
+peer id. This is the local source for the registrar descriptor. Do not pass `endpoint+0x20`
+unchanged: its later fields are endpoint-specific, while `0x1426425f0` interprets descriptor
+`+0x50/+0x58` as an optional interface pair. Build a registrar-compatible copy or use
+`0x14263d060` to produce one.
+
+One diagnostic side effect is useful but not yet conclusive. An old `watch-write.py` cleanup bug
+left DR7 armed after the last hit, producing a Windows single-step exception at the endpoint set.
+During the roughly 2.3-second crashdump window, the native worker registered the fifth free slot
+for the Deck id and the active vector became one entry. A controlled one-second writer hold did
+not reproduce that promotion, so this is evidence that the current graph can register natively,
+not proof that delay alone is the fix. Both watchpoint helpers now use `PTRACE_SEIZE` plus
+`PTRACE_INTERRUPT` and clear DR7 while every traced thread is stopped; a standalone native test
+confirmed clean detach.
+
+**Next local experiment:** at the endpoint-set hook, copy the transient endpoint's callback bundle
+into stable storage and form the descriptor expected by `0x142643d50`. At the next
+`0x142640bc0` worker entry, call `0x14263fd10` once on that live manager and peer id. Running on the
+worker preserves the manager's ownership boundary. The solo acceptance predicate is exact: registrar
+returns a non-null pool slot, free count changes 5 to 4, active count changes 0 to 1, and the active
+slot has `+0x138=peer_id` with no crash. A later Deck run only has to test the already-armed downstream
+predicate: inbound type-5 reaches `TYPE5-VALIDATOR FIRED`, then `member+0x152=1` and `players=2`.
+
+### Worker-Thread Registrar Result (2026-07-12)
+
+The local registrar lever is implemented behind `[debug.probes] register_peer_connection` and its
+bounded acceptance predicate passes. The endpoint hook copies a stable descriptor, and the next
+`0x142640bc0` worker entry validates the manager, free slot, vector spans, vtables, owner, and peer key
+before calling `0x14263fd10` once. The successful run returned the selected pool slot, changed free
+`5 -> 4` and active `0 -> 1`, appended that same pointer, and left
+`vtable=0x143278358`, `+0x18=manager`, `+0x138=peer_id`.
+
+The first descriptor shape exposed one important correction. A contiguous copy of
+`endpoint+0x20..+0x80` passes `0x1426425f0`'s immediate checks and registers, but the worker later
+calls descriptor `+0x38` as a reassembler notification callback. The contiguous copy puts
+`endpoint+0x58` there (`0x101` in the captured endpoint), causing a DEP execute fault in
+`0x142643100`. The native descriptor-builder mapping fixes the tail: descriptor
+`+0x38/+0x40/+0x48/+0x50/+0x58` comes from endpoint
+`+0x40/+0x48/+0x50/+0x60/+0x68`. On this endpoint the callback pair is both null (explicitly
+supported by the reassembler) and the final interface pair is both non-null. The corrected run stayed
+crash-free through hundreds of worker ticks.
+
+The active entry retired 6.57 seconds later with manager event reason `0x4`. The vendored Steamworks
+header names `EP2PSessionError` value 4 `k_EP2PSessionErrorTimeout` (target not responding), which is
+expected because the Deck was offline. `0x1426411d0` dequeued that `{peer, reason}` event and removed
+the connection through `0x142640f20`; this is normal transport cleanup, not descriptor corruption.
+Therefore the solo work is complete. The remaining verifier genuinely needs the Deck online: each
+side registers the other's connection, inbound type-5 reaches `TYPE5-VALIDATOR FIRED`, then
+`member+0x152=1` and `players=2`.

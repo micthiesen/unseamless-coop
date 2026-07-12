@@ -46,21 +46,27 @@ import signal
 import struct
 import subprocess
 import sys
+import time
 
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 
 # ptrace requests
 PTRACE_CONT = 7
-PTRACE_ATTACH = 16
 PTRACE_DETACH = 17
 PTRACE_POKEUSER = 6
 PTRACE_GETREGS = 12  # x86-64: fills struct user_regs_struct
 PTRACE_PEEKUSER = 3
+PTRACE_SEIZE = 0x4206
+PTRACE_INTERRUPT = 0x4207
 
 # struct user: u_debugreg[0] lives at offset 848 on x86-64; DRi at 848 + i*8.
 DEBUGREG_OFF = 848
-# struct user_regs_struct field order (x86-64): rip is index 16 -> byte offset 128.
-RIP_OFF = 16 * 8
+# struct user_regs_struct field order on x86-64.
+REG_NAMES = (
+    "r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8",
+    "rax", "rcx", "rdx", "rsi", "rdi", "orig_rax", "rip", "cs", "eflags",
+    "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs",
+)
 
 # DR7: enable a local 4-byte data watch in slot 0.
 #   L0  = bit 0            (local enable, slot 0)
@@ -116,20 +122,30 @@ def list_threads(pid):
     return [int(t) for t in os.listdir(f"/proc/{pid}/task")]
 
 
-def get_rip(tid):
+def get_regs(tid):
     buf = (ctypes.c_ubyte * 256)()
     libc.ptrace.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p]
     ctypes.set_errno(0)
     res = libc.ptrace(PTRACE_GETREGS, tid, None, ctypes.cast(buf, ctypes.c_void_p))
     if res == -1 and ctypes.get_errno() != 0:
         raise OSError(ctypes.get_errno(), "PTRACE_GETREGS failed")
-    return struct.unpack_from("<Q", bytes(buf), RIP_OFF)[0]
+    values = struct.unpack_from(f"<{len(REG_NAMES)}Q", bytes(buf))
+    return dict(zip(REG_NAMES, values))
+
+
+def format_dump(addr, data):
+    lines = []
+    for off in range(0, len(data), 16):
+        chunk = data[off:off + 16]
+        lines.append(f"  {addr + off:#x}: " + " ".join(f"{b:02x}" for b in chunk))
+    return "\n".join(lines)
 
 
 def arm_thread(tid, addr, dr7=DR7_WRITE_4B_SLOT0):
     """Attach to one thread and arm DR0/DR7 for a 4-byte data watch on addr."""
-    ptrace(PTRACE_ATTACH, tid, 0, 0)
-    os.waitpid(tid, __WALL)  # wait for the attach-stop
+    ptrace(PTRACE_SEIZE, tid, 0, 0)
+    ptrace(PTRACE_INTERRUPT, tid, 0, 0)
+    os.waitpid(tid, __WALL)  # wait for the interrupt-stop
     ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 0 * 8, addr)            # DR0 = addr
     ptrace(PTRACE_POKEUSER, tid, DEBUGREG_OFF + 7 * 8, dr7)             # DR7
     ptrace(PTRACE_CONT, tid, 0, 0)
@@ -143,7 +159,33 @@ def disarm_thread(tid):
         pass
 
 
-def watch(pid, addr, max_hits, access="write"):
+def stop_and_disarm(armed, already_stopped):
+    """Stop every traced thread before clearing DR7 and detaching."""
+    stopped = set(already_stopped)
+    for tid in armed:
+        if tid in stopped:
+            continue
+        try:
+            ptrace(PTRACE_INTERRUPT, tid, 0, 0)
+        except OSError:
+            pass
+    for tid in armed:
+        if tid in stopped:
+            continue
+        try:
+            _, status = os.waitpid(tid, __WALL)
+            if os.WIFSTOPPED(status):
+                stopped.add(tid)
+        except (ChildProcessError, OSError):
+            pass
+    for tid in armed:
+        if tid in stopped:
+            disarm_thread(tid)
+        else:
+            print(f"  warn: tid {tid} did not stop for DR7 cleanup", file=sys.stderr)
+
+
+def watch(pid, addr, max_hits, access="write", follow_qword=0, hold_ms=0):
     dr7 = DR7_RW_4B_SLOT0 if access == "rw" else DR7_WRITE_4B_SLOT0
     if addr % 4 != 0:
         print(f"warning: addr {addr:#x} is not 4-byte aligned; a LEN=4 watch needs alignment",
@@ -163,6 +205,7 @@ def watch(pid, addr, max_hits, access="write"):
           f"(Ctrl-C to stop)...", file=sys.stderr)
 
     hits = 0
+    stopped = set()
     stop = {"flag": False}
     signal.signal(signal.SIGINT, lambda *_: stop.update(flag=True))
     try:
@@ -173,17 +216,32 @@ def watch(pid, addr, max_hits, access="write"):
                 break
             if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
                 try:
-                    rip = get_rip(tid)
+                    regs = get_regs(tid)
+                    rip = regs["rip"]
                     static_va = rip - IMAGE_BASE
                     hits += 1
                     # RIP is the instruction AFTER the store; the writer is just before it.
                     print(f"\nHIT {hits}: tid={tid}  RIP={rip:#x}  "
                           f"static_va(rip-imgbase)={static_va:#x}  "
                           f"writer≈ just before {static_va:#x}")
+                    watched = struct.unpack("<Q", read_mem(pid, addr, 8))[0]
+                    print(f"  watched_qword={watched:#x}  "
+                          f"rax={regs['rax']:#x} rbx={regs['rbx']:#x} rcx={regs['rcx']:#x} "
+                          f"rdx={regs['rdx']:#x} r8={regs['r8']:#x} r9={regs['r9']:#x} "
+                          f"r14={regs['r14']:#x} rsp={regs['rsp']:#x}")
+                    if follow_qword and watched:
+                        print(f"  pointee dump ({follow_qword:#x} bytes from {watched:#x}):")
+                        print(format_dump(watched, read_mem(pid, watched, follow_qword)))
                     sys.stdout.flush()
+                    if hold_ms:
+                        print(f"  holding writer thread for {hold_ms}ms", file=sys.stderr)
+                        time.sleep(hold_ms / 1000.0)
                 except OSError as e:
                     print(f"  (could not read regs for tid {tid}: {e})", file=sys.stderr)
-                # re-arm DR6 is auto-cleared by hw; just continue this thread
+                if hits >= max_hits:
+                    stopped.add(tid)
+                    break
+                # Re-arm DR6 is auto-cleared by hardware; continue this thread.
                 ptrace(PTRACE_CONT, tid, 0, 0)
             elif os.WIFSTOPPED(status):
                 # forward other signals transparently
@@ -194,8 +252,7 @@ def watch(pid, addr, max_hits, access="write"):
                 if not armed:
                     break
     finally:
-        for tid in armed:
-            disarm_thread(tid)
+        stop_and_disarm(armed, stopped)
         print(f"\ndetached; {hits} hit(s).", file=sys.stderr)
 
 
@@ -216,6 +273,10 @@ def main():
                     help="read --peek-len bytes at this absolute address and exit (no watch)")
     ap.add_argument("--peek-len", type=int, default=1)
     ap.add_argument("--max-hits", type=int, default=20)
+    ap.add_argument("--follow-qword", type=lambda s: int(s, 0), default=0,
+                    help="on each hit, treat the watched qword as a pointer and dump this many bytes")
+    ap.add_argument("--hold-ms", type=int, default=0,
+                    help="hold the writer thread this many milliseconds at each hit")
     args = ap.parse_args()
 
     pid = args.pid or find_pid()
@@ -246,7 +307,7 @@ def main():
         return
 
     if args.addr is not None:
-        watch(pid, args.addr, args.max_hits, args.access)
+        watch(pid, args.addr, args.max_hits, args.access, args.follow_qword, args.hold_ms)
         return
 
     ap.error("pick a mode: --read-base | --watch-lobby | --addr ADDR")

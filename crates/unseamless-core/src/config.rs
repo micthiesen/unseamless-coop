@@ -431,6 +431,16 @@ pub struct DebugProbes {
     /// Role-independent (both machines receive); pair with `send_type5`. Off by default. STATE.md > Next.
     pub instrument_type5_recv: bool,
 
+    /// **EXPERIMENTAL rung-3 delivery lever** (2026-07-12). Capture the transient peer endpoint's
+    /// callback descriptor, then call the live `SteamConnectionManager` registrar once from its own
+    /// `0x142640bc0` worker thread. This installs a peer-keyed transport connection in the manager's
+    /// active table so already-arriving type-5 packets can reach the endpoint pump. The captured
+    /// descriptor tail is formed with the same endpoint-field mapping used by the game's native
+    /// descriptor builder; all manager, pool-slot, vector, callback, vtable, owner, and peer-id
+    /// invariants are checked before the call. Off by default; a bounded rig experiment, not shipping
+    /// behavior. See `docs/SESSION-DRIVE.md` > "Correction and Local Runtime Lead (2026-07-12)".
+    pub register_peer_connection: bool,
+
     /// **EXPERIMENTAL rung-3 JOIN driver** (the joiner counterpart to [`drive_create`]). Drives the join
     /// wrapper `0x140cae640` so a second machine goes `None -> TryToJoinSession -> Client` and joins the
     /// driven host. The join payload is peer-directed (a host blob our synthesized host doesn't produce), so
@@ -822,6 +832,10 @@ mod tests {
     fn session_probe_defaults_off_and_round_trips() {
         // The rung-3 RE probe must be opt-in (off by default)...
         assert!(!DebugProbes::default().session_probe, "session_probe must default off");
+        assert!(
+            !DebugProbes::default().register_peer_connection,
+            "register_peer_connection must default off"
+        );
 
         // ...it must default off when [debug.probes] is present but omits the key (the realistic shape
         // of a config that predates this flag — guards #[serde(default)] on the field, not just Default).
@@ -833,8 +847,13 @@ mod tests {
         // skip_serializing / key-rename that would silently drop the value when config is persisted).
         let mut cfg = Config::default();
         cfg.debug.probes.session_probe = true;
+        cfg.debug.probes.register_peer_connection = true;
         let (reparsed, w) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
         assert!(reparsed.debug.probes.session_probe, "session_probe must survive round-trip");
+        assert!(
+            reparsed.debug.probes.register_peer_connection,
+            "register_peer_connection must survive round-trip"
+        );
         assert!(w.is_empty(), "{w:?}");
     }
 

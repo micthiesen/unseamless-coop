@@ -19,14 +19,16 @@ for _ in range(20000):
     ep = rq(member+0x130)
     if ep and ep != -1:
         break
+    time.sleep(0.0002)
 if not ep or ep == -1:
     print("endpoint +0x130 stayed 0 (never caught it non-zero this window)")
 else:
     vt = rq(ep)
     print(f"CAUGHT endpoint @{ep:#x}  vtable[ep]={vt:#x}  (0x143277750 = MTInternalThreadSteamConnection)")
     print(f"  [ep+0x18](transport_ctx)={rq(ep+0x18):#x}")
-    print(f"  [ep+0x20]={rq(ep+0x20):#x}  [ep+0x28]={rq(ep+0x28):#x}")
-    print(f"  [ep+0x60](token_src)={rq(ep+0x60):#x}")
+    print("  descriptor sources:")
+    for off in (0x20, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78):
+        print(f"    [ep+{off:#04x}]={rq(ep+off):#x}")
     print(f"  [ep+0x128]={rq(ep+0x128):#x}  [ep+0x130]={rq(ep+0x130):#x}  [ep+0x138](key?)={rq(ep+0x138):#x}")
     print(f"  [ep+0x90](queue?)={rq(ep+0x90):#x}")
     # follow transport ctx
