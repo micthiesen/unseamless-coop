@@ -135,11 +135,10 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
     role. Solo `CreateLobby` is rig-proven, and the **joiner-finds-host leg is now CONFIRMED** in the
     2026-06-27 friend test (the host resolved the joiner's lobby and linked) — rung 4 is fully verified
     end-to-end (see [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
-- **Rung-3 RE prep (diagnostic DLL).** *Scaffold shipped* (`coop/session_probe`, gated by
-  `[debug.probes] session_probe`): the FSM rising-edge logger works solo; the create/join entry hooks
-  are in place but **inert until the initiation-function AOBs are charted on the rig** (a precise TODO).
-  Accelerates the co-op core below. See [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md),
-  [COOP-CONNECTION.md](COOP-CONNECTION.md), the [`/reverse-engineer`] skill.
+- **Rung-3 RE/drive surface (diagnostic DLL).** `coop/session_probe` now carries the charted create/join
+  drivers, transport standup, endpoint/type-5 instrumentation, and the worker-thread peer registrar,
+  each independently gated under `[debug.probes]`. See [SESSION-DRIVE.md](SESSION-DRIVE.md),
+  [SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md), and the [`/reverse-engineer`] skill.
 - **Overhead nameplates** — **shipped: a native per-player colored dot, on by default**
   (`[nameplates] enabled`), drawn by the game's own `CSEzDraw` renderer (world-space, depth-tested, no
   present-hook) over each player and your own head — so it's verifiable solo. The earlier imgui
@@ -160,11 +159,14 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **★ CURRENT DIRECTION (2026-07-04): pivot to "let the game establish it" — see the DECISION in the Wave-2
-  > intro above and [SESSION-DRIVE.md](SESSION-DRIVE.md) > "★ DECISION (2026-07-04)".** Next action is a live
-  > `watch-write.py` capture of a real ERSC establishment at the charted offsets, then reproduce the sequence.
-  > **The blocks below are the historical hand-synthesis trail (2026-07-02..04) — read them as "ground already
-  > explored / why offline was ruled out," not as the current plan.** Reference docs, so we don't re-tread:
+  > **★ CURRENT DIRECTION (2026-07-12): validate the worker-thread peer registrar with the Deck online.**
+  > The local lever is implemented and solo-proven: `0x14263fd10` registers the selected connection pool slot
+  > with free `5 -> 4`, active `0 -> 1`, correct owner/key/vtable, and no crash. Its only solo retirement was
+  > Steam P2P timeout because the Deck was offline. Next is the two-machine delivery chain:
+  > `peer-register SUCCESS` -> `TYPE5-VALIDATOR FIRED` -> `member+0x152=1` -> `players=2`. See
+  > [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Worker-Thread Registrar Result (2026-07-12)".
+  > **The blocks below are the historical hand-synthesis trail (2026-07-02..04). Read them as ground already
+  > explored, not as the current plan.** Reference docs, so we don't re-tread:
   > - **[ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) — READ FIRST.** A real 2-player ERSC
   >   session captured in memory: the full live object graph + offsets, and the two corrections (`+0x168` is
   >   the reject-stub even when co-op works; the DLNR3D/DLNW3D graph is the real mechanism).
@@ -180,8 +182,9 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   >   RE + drive procedures (watch-write, the probe flags); [OFFLINE-ITEMS-FINDINGS.md](OFFLINE-ITEMS-FINDINGS.md)
   >   — the item-grey-gate hunt, rig-eliminated + now moot.
 
-  > **State (2026-07-04 night) — ★ SOLO HOST STICKS + JOINER SYN REACHES HOST ADMIT two-machine; gap = the
-  > host context member-lookup stub.** Two-machine (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the
+  > **Historical state (2026-07-04 night, superseded by the current direction above): ★ SOLO HOST STICKS +
+  > JOINER SYN REACHES HOST ADMIT two-machine; gap = the host context member-lookup stub.** Two-machine
+  > (rig host + Deck joiner): rig = stable `Host`/`Ingame` (in the
   > co-op world), Deck reaches `Client`; the joiner's synthetic 14-byte DLNW3D SYN on channel 30 reaches the
   > host's admit path `0x142640e30` and is rejected only at gate c (the context member-lookup `[context+0x168]`
   > is a stub `0x1423fdf00`), so no host-side connection is created and roster stays 1. NEXT: make the host
