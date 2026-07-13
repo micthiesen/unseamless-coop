@@ -9,7 +9,7 @@
 # Behavior:
 #   - No rig flag present (you press Play normally): gamescope runs FULLSCREEN at the display's
 #     native resolution — same as a plain `gamescope -f … -- %command%`. Gaming is unchanged.
-#   - Rig flag present: gamescope renders at the rig size via `-w/-h` (the actual render resolution,
+#   - Live rig owner's flag present: gamescope renders at the rig size via `-w/-h` (the actual render resolution,
 #     so the GPU really does less work) and outputs at the same size, windowed. `scripts/rig.sh`
 #     writes the flag right before its own launches; this wrapper consumes and deletes it, so the
 #     flag is one-shot and a later manual launch is always fullscreen.
@@ -19,7 +19,8 @@
 # clean way to keep a single launch-options string for both uses.
 set -euo pipefail
 
-# Must match RIG_GS_FLAG in scripts/rig.sh (same env override, same default path).
+# Must match RIG_GS_FLAG in scripts/rig.sh (same env override, same default path). The file contains
+# the owning rig.sh PID plus width/height, so a stale flag can never alter a later normal Play.
 FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
 COMMON=(--immediate-flips)
 # Gaming (fullscreen) resolution. gamescope's -W/-H default to 1280x720 when omitted, so a bare
@@ -28,11 +29,17 @@ GAMING_W="${UNSEAMLESS_GAMING_WIDTH:-3440}"
 GAMING_H="${UNSEAMLESS_GAMING_HEIGHT:-1440}"
 
 if [[ -f "$FLAG" ]]; then
-  W=1440 H=900                     # defaults match RIG_WINDOW_WIDTH/HEIGHT in scripts/rig.sh
-  read -r W H < "$FLAG" || true   # "WIDTH HEIGHT"; fall back to defaults if malformed/empty
-  rm -f "$FLAG"                    # one-shot: consume it so manual launches stay fullscreen
-  : "${W:=1440}" "${H:=900}"
-  exec gamescope -w "$W" -h "$H" -W "$W" -H "$H" "${COMMON[@]}" "$@"
+  OWNER="" W=1440 H=900                  # defaults match RIG_WINDOW_WIDTH/HEIGHT in scripts/rig.sh
+  read -r OWNER W H < "$FLAG" || true    # "rig-pid WIDTH HEIGHT"
+  # A killed/abandoned rig.sh can leave its flag behind. Honor it only while the owning rig process
+  # is alive; otherwise fall through to normal fullscreen Play. The cmdline check prevents PID reuse.
+  if [[ "$OWNER" =~ ^[0-9]+$ ]] \
+     && grep -qa 'scripts/rig.sh' "/proc/$OWNER/cmdline" 2>/dev/null; then
+    rm -f "$FLAG"                        # consume only after validating while the owner still waits
+    : "${W:=1440}" "${H:=900}"
+    exec gamescope -w "$W" -h "$H" -W "$W" -H "$H" "${COMMON[@]}" "$@"
+  fi
+  rm -f "$FLAG"                          # stale/invalid: consume, then use normal fullscreen below
 fi
 
 # Gaming default: true fullscreen at the display's native resolution (must be explicit — see above).

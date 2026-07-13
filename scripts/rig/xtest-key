@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Inject held key presses into a specific X display via XTEST."""
+
+import argparse
+import os
+import signal
+import sys
+import time
+
+try:
+    from Xlib import X, XK, display
+    from Xlib.ext import xtest
+except ImportError as exc:
+    print(f"xtest-key: python-xlib unavailable: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+
+
+def fail(message: str) -> None:
+    print(f"xtest-key: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="inject key presses into an X display via XTEST"
+    )
+    parser.add_argument("--display", required=True, help="target X display, for example :1")
+    parser.add_argument("keysyms", nargs="+", help="X keysyms, for example Return or e")
+    return parser.parse_args()
+
+
+def display_endpoint(name: str) -> tuple[str, str]:
+    """Normalize local X display aliases and ignore the optional screen suffix."""
+    host, separator, display_number = name.rpartition(":")
+    if not separator:
+        return name, ""
+    display_number = display_number.split(".", 1)[0]
+    if host in ("", "unix", "localhost"):
+        host = "local"
+    return host, display_number
+
+
+def main() -> None:
+    args = parse_args()
+    host_display = os.environ.get("DISPLAY")
+    if not host_display:
+        fail("host DISPLAY is unset; refusing an unverified target display")
+    if display_endpoint(args.display) == display_endpoint(host_display):
+        fail(f"refusing to inject into host display {args.display}")
+
+    # Validate names before connecting so a typo is reported independently of display health.
+    resolved = []
+    for name in args.keysyms:
+        keysym = XK.string_to_keysym(name)
+        if keysym == 0:
+            fail(f"unknown keysym: {name}")
+        resolved.append((name, keysym))
+
+    try:
+        target = display.Display(args.display)
+    except Exception as exc:
+        fail(f"cannot open display {args.display}: {exc}")
+
+    try:
+        stop_signal = None
+
+        def request_stop(signum: int, _frame: object) -> None:
+            nonlocal stop_signal
+            stop_signal = signum
+
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
+        signal.signal(signal.SIGHUP, request_stop)
+
+        for name, keysym in resolved:
+            if stop_signal is not None:
+                fail(f"interrupted by {signal.Signals(stop_signal).name}")
+
+            keycode = target.keysym_to_keycode(keysym)
+            if keycode == 0:
+                fail(f"keysym {name!r} has no keycode on display {args.display}")
+
+            pressed = False
+            injection_error = None
+            release_error = None
+            try:
+                xtest.fake_input(target, X.KeyPress, keycode)
+                pressed = True
+                target.sync()
+                time.sleep(0.05)
+            except Exception as exc:
+                injection_error = exc
+            finally:
+                if pressed:
+                    try:
+                        xtest.fake_input(target, X.KeyRelease, keycode)
+                        target.sync()
+                    except Exception as exc:
+                        release_error = exc
+
+            if release_error is not None:
+                fail(
+                    f"failed to release {name!r} on display {args.display}: "
+                    f"{release_error}"
+                )
+            if injection_error is not None:
+                fail(
+                    f"failed to inject {name!r} on display {args.display}: "
+                    f"{injection_error}"
+                )
+            if stop_signal is not None:
+                fail(f"interrupted by {signal.Signals(stop_signal).name}")
+    finally:
+        target.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -46,22 +46,23 @@ WINDOW_MARGIN="${WINDOW_MARGIN:-24}"
 # the terminal/logs alongside the game; the gamescope wrapper renders at this real resolution.
 RIG_WINDOW_WIDTH="${RIG_WINDOW_WIDTH:-1440}"
 RIG_WINDOW_HEIGHT="${RIG_WINDOW_HEIGHT:-900}"
-# One-shot flag handed to gamescope-wrapper.sh. MUST match the wrapper's FLAG (same env, same default).
+# Owner-validated one-shot flag handed to gamescope-wrapper.sh. MUST match the wrapper's FLAG.
 RIG_GS_FLAG="${UNSEAMLESS_RIG_GAMESCOPE_FLAG:-${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-gamescope}"
 # Minimize the game window the moment it appears and keep it hidden until reposition_window places it,
-# so you don't see the centered/loading window before it snaps to the corner. Set 0 to disable (e.g.
-# if a minimized window ever throttles the load). The reveal always runs, so this can't strand it.
+# so you don't see the centered/loading window before it snaps to the corner. Set 0 to disable the
+# minimize (e.g. if a minimized window ever throttles the load); the no-focus-steal guard still runs.
+# The reveal always runs, so this can't strand it.
 RIG_HIDE_UNTIL_PLACED="${RIG_HIDE_UNTIL_PLACED:-1}"
 # Re-blank the display after a launch that woke it. If the screen was DPMS-off (blanked via the
 # Blank Screen tool) when a launch started, launching forces the monitor back on; a transient
 # idle-watcher (`rig.sh reblank-watch`: swayidle + a DPMS poll) then keeps it dark for the rest of
-# the run. A fixed post-launch timer can't do this reliably — cycle's ydotool injection is
-# uinput-level input that re-wakes the panel at unpredictable times — so instead the watcher blanks
-# whenever the session has been INPUT-IDLE for RIG_REBLANK_IDLE seconds (injection resets the idle
-# clock, so it can never race the automation; real typing holds the screen awake), and its poll
-# catches wakes that carry no input at all (the game/gamescope mode-set when the world loads). The
-# watcher self-expires after RIG_REBLANK_WINDOW seconds. Set RIG_REBLANK=0 to disable. Only spawned
-# when the screen was already blanked at launch.
+# the run. A fixed post-launch timer could blank over real desktop activity, so the watcher waits
+# until the HOST session has been input-idle for RIG_REBLANK_IDLE seconds. Popup automation uses
+# XTEST inside gamescope's nested Xwayland and neither wakes the panel nor resets the host idle clock;
+# real typing still holds the screen awake. The poll catches wakes that carry no input at all (the
+# game/gamescope mode-set when the world loads). The watcher self-expires after
+# RIG_REBLANK_WINDOW seconds. Set RIG_REBLANK=0 to disable. Only spawned when the screen was already
+# blanked at launch.
 RIG_REBLANK="${RIG_REBLANK:-1}"
 RIG_REBLANK_IDLE="${RIG_REBLANK_IDLE:-20}"       # blank after this many seconds of input-idle
 RIG_REBLANK_WINDOW="${RIG_REBLANK_WINDOW:-600}"  # watcher lifetime; sized to outlast the slowest cycle+load
@@ -69,26 +70,23 @@ RIG_REBLANK_POLL="${RIG_REBLANK_POLL:-7}"        # how often the poll re-checks 
 RIG_REBLANK_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-reblank.pid"
 RIG_REBLANK_IDLEFLAG="${XDG_RUNTIME_DIR:-/tmp}/unseamless-rig-reblank.idle"
 # Auto-dismiss the startup popups (the offline-mode / connection-error dialogs we can't suppress in
-# code — they're Arxan-hardened, see docs/OFFLINE-TITLE-SCREEN.md) by injecting key presses via
-# ydotool. `cycle` does this by default so a solo smoke test lands at the menu unattended; opt out
-# with `cycle --no-dismiss`, or trigger it yourself with `rig.sh dismiss`.
-RIG_YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
+# code — they're Arxan-hardened, see docs/OFFLINE-TITLE-SCREEN.md) by injecting XTEST key presses
+# directly into gamescope's nested Xwayland. The game always holds focus inside that server, so the
+# desktop gamescope window can stay unfocused and host input cannot leak into the game. `cycle` does
+# this by default so a solo smoke test lands at the menu unattended; opt out with
+# `cycle --no-dismiss`, or trigger it yourself with `rig.sh dismiss`.
 # How fast `dismiss` clicks through the startup popups, and how long the whole sequence runs. The
 # popups are MODAL (persist until confirmed), so the loop only needs to (a) press fast enough that
 # each one dies the moment it appears, and (b) keep going long enough to outlast the slowest popup's
 # *appearance* — the "offline mode" popup (#3) fires after a connection attempt times out (~10-15s),
-# well after the first two. Total span ≈ PRESSES × INTERVAL (+ a focus settle every REFOCUS_EVERY
-# presses). Defaults: 22 × 0.4s ≈ 11s span (measured ~0.52s/press incl. the periodic re-focus),
-# long enough to outlast popup #3's ~10-15s timeout. The popups are *in-engine* dialogs, not OS
-# windows, so they can't steal X focus between presses — re-focusing every single press was wasted
-# time, hence REFOCUS_EVERY (focus once, then only re-assert occasionally). Dial these in live with
-# the per-press desktop toasts (RIG_DISMISS_NOTIFY=1): watch when each press fires vs. when a popup
-# actually shows, then raise PRESSES/INTERVAL if popup #3 still slips through, or drop them to go
-# shorter. Set RIG_DISMISS_NOTIFY=0 to silence the toasts once dialed in.
+# well after the first two. Total span is PRESSES × (INTERVAL + the helper's ~50ms key hold), so the
+# defaults span about 10s. Dial these in live with the per-press desktop toasts
+# (RIG_DISMISS_NOTIFY=1): watch when each press fires vs. when a popup actually shows, then raise
+# PRESSES/INTERVAL if popup #3 still slips through, or drop them to go shorter. Set
+# RIG_DISMISS_NOTIFY=0 to silence the toasts once dialed in. Because injection stays inside the
+# nested server, the host desktop remains safe to use throughout the dismiss sequence.
 RIG_DISMISS_PRESSES="${RIG_DISMISS_PRESSES:-22}"
 RIG_DISMISS_INTERVAL="${RIG_DISMISS_INTERVAL:-0.4}"
-RIG_DISMISS_REFOCUS_EVERY="${RIG_DISMISS_REFOCUS_EVERY:-4}"   # re-focus the game window every Nth press (1 = every press, old behavior)
-RIG_DISMISS_FOCUS_SETTLE="${RIG_DISMISS_FOCUS_SETTLE:-0.25}"  # pause after activating the window before injecting (was a hardcoded 0.5)
 RIG_DISMISS_NOTIFY="${RIG_DISMISS_NOTIFY:-1}"                 # per-press desktop toast for visually dialing in the timing
 # Seconds to wait after the framework comes up before the FIRST dismiss press (cycle/friend-test). The
 # offline/connection popups don't appear until ~10-18s after the title renders, so a too-short settle
@@ -173,11 +171,11 @@ applied()       { [[ -f "$MARKER" ]]; }
 # (scripts/re/*) takes the game's `eldenring.exe` *path* as a command-line argument, so a bare
 # `pgrep -f eldenring.exe` also matches it — a false "game is running" that misfires the apply/seed
 # guards and, worse, would let `kill`'s `pkill` terminate a running decompile. So: match the exe,
-# then drop any hit whose command line is our decompile/ghidra helper. (`pgrep` already excludes its
-# own pid, so there's no self-match to bracket-trick around.)
+# then drop any hit whose command line is our decompile/ghidra helper. The bracket trick also keeps
+# the search text out of the invoking shell's command line.
 game_pids() {
   local pid cmd
-  for pid in $(pgrep -f 'eldenring\.exe' 2>/dev/null); do
+  for pid in $(pgrep -f '[e]ldenring\.exe' 2>/dev/null); do
     cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
     case "$cmd" in
       *decompile*|*ghidra*) continue ;;   # our RE tooling referencing the exe path, not the game
@@ -187,6 +185,45 @@ game_pids() {
 }
 # Is the actual game running? (Excludes the decompile — see `game_pids`.)
 game_running() { [[ -n "$(game_pids)" ]]; }
+
+# Prove that an X display is gamescope's nested server, not Plasma's host Xwayland. Gamescope starts
+# its Xwayland directly (or through a short-lived helper), so accept only a local :N display whose
+# server process reaches gamescope within a few parent links. Fail closed if /proc cannot prove it.
+display_is_gamescope_nested() {
+  local nested_display="$1" server xpid parent parent_cmd
+  [[ "$nested_display" =~ ^:[0-9]+([.][0-9]+)?$ ]] || return 1
+  server="${nested_display%%.*}"
+  for xpid in $(pgrep -f "[X]wayland ${server}( |$)" 2>/dev/null); do
+    parent="$xpid"
+    for _ in 1 2 3 4; do
+      parent="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$parent/status" 2>/dev/null)"
+      [[ "$parent" =~ ^[0-9]+$ && "$parent" -gt 1 ]] || break
+      parent_cmd="$(tr '\0' ' ' < "/proc/$parent/cmdline" 2>/dev/null || true)"
+      [[ "$parent_cmd" == *gamescope* ]] && return 0
+    done
+  done
+  return 1
+}
+
+# The game's environment carries gamescope's nested Xwayland display. Read it from the process
+# instead of assuming :1, which can shift when another Xwayland server already owns that number.
+# Reuse game_pids() so an RE helper mentioning eldenring.exe cannot redirect input to the host, and
+# require gamescope ancestry so an unset/aliased host DISPLAY cannot weaken the guard.
+game_display() {
+  local pid nested_display pids=()
+  mapfile -t pids < <(game_pids)
+  for pid in "${pids[@]}"; do
+    nested_display="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
+      | sed -n 's/^DISPLAY=//p')" || continue
+    [[ -n "$nested_display" ]] || continue
+    display_is_gamescope_nested "$nested_display" || continue
+    # Fail closed if the game was launched without gamescope and inherited the host X display.
+    [[ -z "${DISPLAY:-}" || "$nested_display" != "$DISPLAY" ]] || continue
+    printf '%s\n' "$nested_display"
+    return 0
+  done
+  return 1
+}
 
 # ---- backup --------------------------------------------------------------------------------------
 cmd_backup() {
@@ -243,6 +280,7 @@ cmd_backup() {
 cmd_restore() {
   need_game_dir
   backup_exists || die "no snapshot at $BACKUP_DIR — nothing to restore."
+  cleanup_rig_launch
   say "Restoring the original ERSC + Elden Mod Loader stack from $BACKUP_DIR"
   for f in "${MANAGED_FILES[@]}"; do
     if [[ -f "$BACKUP_DIR/$f" ]]; then
@@ -466,8 +504,9 @@ reblank_watch_kill() {
 
 # The screen was blanked before this launch and starting the game forced it back on. Keep it dark:
 # spawn the detached idle-watcher (cmd_reblank_watch below) via setsid so it survives this script
-# exiting (the no-wait `launch` path returns immediately). Fallback when swayidle is missing: the
-# old one-shot delayed blank — racy vs. cycle's injection, but better than leaving the panel lit.
+# exiting after launch/placement. Fallback when swayidle is missing: a
+# one-shot delayed blank. It cannot detect real host activity, but nested input injection cannot
+# wake the panel or interfere with its timing.
 schedule_reblank() {
   [[ "$RIG_REBLANK" == 1 ]] || return 0
   command -v kscreen-doctor >/dev/null 2>&1 || return 0
@@ -476,7 +515,7 @@ schedule_reblank() {
     setsid -f "$ROOT/scripts/rig.sh" reblank-watch >/dev/null 2>&1 || true
     say "display was blanked before launch — idle-watcher will keep it dark for ${RIG_REBLANK_WINDOW}s (RIG_REBLANK=0 to disable)"
   else
-    warn "swayidle not installed (pacman -S swayidle) — falling back to a one-shot ${RIG_REBLANK_IDLE}s re-blank (racy vs. cycle's key injection)"
+    warn "swayidle not installed (pacman -S swayidle) — falling back to a one-shot ${RIG_REBLANK_IDLE}s re-blank (may blank during real host activity)"
     setsid -f bash -c '
       sleep "$1"
       if command -v notify-send >/dev/null 2>&1; then
@@ -493,9 +532,9 @@ schedule_reblank() {
 # was blanked pre-launch. Two cooperating parts, both scoped to RIG_REBLANK_WINDOW seconds:
 #   - swayidle (the ext-idle-notify protocol; KWin implements it): after RIG_REBLANK_IDLE seconds
 #     with no input, mark the session idle (the flag file) and blank; on any input, clear the mark.
-#     ydotool injects at the uinput level — real input to the compositor — so cycle's popup-dismiss
-#     and enter-world presses reset the idle clock and the blank lands only once the automation has
-#     actually quiesced, however long the run takes. A real user typing likewise holds the panel on.
+#     Popup-dismiss and enter-world inject only into gamescope's nested Xwayland, so they do not
+#     affect the host idle clock or wake the panel. Real host input still clears the mark and holds
+#     the panel on while the machine is in use.
 #   - the poll loop: a wake WITHOUT input (the game/gamescope mode-set when the world finishes
 #     loading) doesn't reset the idle clock, so swayidle won't fire again for it; whenever the idle
 #     mark is up but the panel is lit, the poll puts it back to sleep.
@@ -531,28 +570,53 @@ cmd_launch() {
   local do_wait=0; [[ "${1:-}" == "--wait" ]] && do_wait=1
   need_game_dir
   applied || warn "our mod isn't applied (no marker) — launching whatever is currently installed."
+  cleanup_rig_launch
   # Capture display-blank state BEFORE handing off to Steam: the launch wakes the panel, so we must
   # sample it now to know whether to put it back to sleep afterwards (schedule_reblank at the end).
   local was_blanked=0; display_is_blanked && was_blanked=1
   local before; before="$(latest_log || true)"  # capture BEFORE launch so --wait spots the new run
   # Tell gamescope-wrapper.sh (if it's your launch options) to render at the rig size this launch. The
   # wrapper consumes + deletes the flag; if you haven't switched to the wrapper yet it's just ignored.
-  printf '%s %s\n' "$RIG_WINDOW_WIDTH" "$RIG_WINDOW_HEIGHT" > "$RIG_GS_FLAG"
-  # Hide the window as it appears so the centered/loading window isn't seen before we place it. Only
-  # when --wait (reposition below reveals it); reveal always runs, so it can't get stranded minimized.
-  [[ $do_wait -eq 1 && "$RIG_HIDE_UNTIL_PLACED" == 1 ]] && hide_window_until_placed
+  printf '%s %s %s\n' "$$" "$RIG_WINDOW_WIDTH" "$RIG_WINDOW_HEIGHT" > "$RIG_GS_FLAG"
+  # Rig launches never take host focus. The temporary KWin watcher restores the current host window
+  # if gamescope activates itself; by default it also hides gamescope until placement. Normal Steam
+  # Play never runs rig.sh and therefore never loads this watcher.
+  local have_kwin=0
+  trap cleanup_rig_launch EXIT
+  if kwin_available; then
+    have_kwin=1
+    guard_window_until_placed
+  fi
   say "Launching ELDEN RING via Steam (appid $APPID; rig render size ${RIG_WINDOW_WIDTH}x${RIG_WINDOW_HEIGHT} via wrapper)"
   steam -applaunch "$APPID" >/dev/null 2>&1 &
   ok "handed off to Steam. Our launcher sets UNSEAMLESS_LAUNCH and starts the game outside EAC."
+  # The shared Steam launch channel cannot distinguish a later manual Play while this request is
+  # still armed. Bound that ambiguity tightly: if our wrapper has not consumed the owner flag within
+  # 15s, disarm the rig launch before doing any longer framework/window wait.
+  if ! wait_for_rig_flag_consumed 15; then
+    warn "gamescope did not consume the rig-size flag within 15s — disarming this rig launch"
+    cleanup_rig_launch
+    trap - EXIT
+    return 0
+  fi
   if [[ $do_wait -eq 1 ]]; then
     wait_for_framework 150 "$before" || true  # reveal/place regardless, so the window is never stuck hidden
-    rm -f "$RIG_GS_FLAG"                       # no-op if the wrapper already consumed it
     sleep 1                                    # let gamescope finish mapping its window
     reposition_window                          # reveal (unminimize) + move to top-left
+  elif [[ $have_kwin -eq 1 ]]; then
+    # Without --wait, block only until the outer window can be safely placed. Keeping this short wait
+    # in-process gives EXIT cleanup ownership and avoids a stale detached guard affecting normal Play.
+    if wait_for_gamescope_window 60; then
+      reposition_window
+    else
+      warn "no gamescope window appeared within 60s — removing the focus guard"
+    fi
   fi
+  cleanup_rig_launch
+  trap - EXIT
   # If the screen was blanked before this launch, keep it dark (the game woke it): spawn the
-  # idle-gated watcher. It blanks only at input-quiescence, so cycle's later key injection can't
-  # race it — no timing anchor needed here beyond "after we've handed off to Steam".
+  # host-idle-gated watcher. Nested game input neither wakes the panel nor touches the host idle
+  # clock, while real desktop activity keeps the panel on.
   [[ $was_blanked -eq 1 ]] && schedule_reblank
   # Always succeed once we've handed off to Steam. Without this, the `&& schedule_reblank` above is the
   # function's last statement, so when the screen ISN'T blanked (the normal interactive case) it
@@ -567,7 +631,10 @@ latest_log() { ls -1t "$LOG_DIR"/unseamless_coop-*.log 2>/dev/null | head -1; }
 # KWin has no CLI to move/minimize windows; you load a tiny JS snippet over D-Bus and it runs inside
 # the compositor. kwin_run loads + starts a script file (leaves it loaded); kwin_unload tears it down
 # (also dropping any signal it connected). Best-effort — a no-op off KDE so the rig still runs elsewhere.
-kwin_available() { command -v gdbus >/dev/null 2>&1; }
+kwin_available() {
+  command -v gdbus >/dev/null 2>&1 || return 1
+  gdbus introspect --session --dest org.kde.KWin --object-path /Scripting >/dev/null 2>&1
+}
 kwin_run() {  # $1 = .js file, $2 = plugin name
   kwin_available || return 1
   gdbus call --session --dest org.kde.KWin --object-path /Scripting \
@@ -581,50 +648,148 @@ kwin_unload() {  # $1 = plugin name
     --method org.kde.kwin.Scripting.unloadScript "$1" >/dev/null 2>&1 || true
 }
 
-# Plugin name of the hide watcher, so launch can load it and reposition_window can tear it down.
+# Fixed plugin names let every exit/kill/restore path remove a stale focus guard deterministically.
 HIDE_PLUGIN="unseamless-rig-hide"
+REPOSITION_PLUGIN="unseamless-rig-reposition"
+
+cleanup_window_guards() {
+  kwin_unload "$HIDE_PLUGIN"
+  kwin_unload "$REPOSITION_PLUGIN"
+}
+
+cleanup_rig_launch() {
+  cleanup_window_guards
+  rm -f "$RIG_GS_FLAG"
+}
 
 # Minimize the game window the instant it appears (and any already up), and keep watching so it stays
 # hidden until reposition_window reveals + places it — no centered/loading window flashing first.
-# Leaves the watcher loaded (it holds the windowAdded connection); reposition_window unloads it.
-hide_window_until_placed() {
+# KWin's normal new-window policy may activate gamescope as it maps, so remember the latest non-game
+# active window and immediately restore it on every gamescope activation. This watcher only exists for
+# rig launches and only matches non-fullscreen gamescope windows; the wrapper's normal `-f` Play path
+# keeps normal game-focus behavior even if a failed rig handoff is still waiting for its window.
+guard_window_until_placed() {
   kwin_available || return 0
   local js; js="$(mktemp /tmp/er-win-hide.XXXXXX.js)"
-  cat > "$js" <<'EOF'
-function hide(w) { if (w && w.resourceClass == "gamescope" && !w.minimized) w.minimized = true; }
+  cat > "$js" <<EOF
+function isRigGamescope(w) { return w && w.resourceClass == "gamescope" && !w.fullScreen; }
+const minimizeBeforePlacement = ${RIG_HIDE_UNTIL_PLACED};
+let hostWindow = isRigGamescope(workspace.activeWindow) ? null : workspace.activeWindow;
+function restoreHostFocus() {
+  if (hostWindow && workspace.activeWindow !== hostWindow) {
+    workspace.activeWindow = hostWindow;
+    print("ERDEFOCUS | restored host window before placement");
+  }
+}
+function hide(w) {
+  if (!isRigGamescope(w)) return;
+  if (minimizeBeforePlacement && !w.minimized) w.minimized = true;
+  restoreHostFocus();
+  print("ERHIDE | gamescope guarded before placement (minimize=" + minimizeBeforePlacement + ")");
+}
+function onActivated(w) {
+  if (isRigGamescope(w)) {
+    hide(w);
+  } else if (w) {
+    hostWindow = w;
+  }
+}
 const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
 for (const w of ws) hide(w);
 workspace.windowAdded.connect(hide);
+workspace.windowActivated.connect(onActivated);
+workspace.windowRemoved.connect(function(w) { if (w === hostWindow) hostWindow = null; });
 EOF
   kwin_run "$js" "$HIDE_PLUGIN"
   rm -f "$js"
 }
 
-# Move the game window to the top-left and reveal it (if hide_window_until_placed minimized it). We
+# Is a gamescope window visible to KWin yet? This read-only probe lets `rig.sh launch` keep its focus
+# watcher installed until there is actually something to place, without guessing at startup timing.
+gamescope_window_available() {
+  kwin_available || return 1
+  local plugin="er-window-probe-$$-$SECONDS-$RANDOM" js stamp token
+  token="ERWINDOW-$plugin"
+  js="$(mktemp /tmp/er-win-probe.XXXXXX.js)"
+  cat > "$js" <<EOF
+const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
+for (const w of ws) if (w.resourceClass == "gamescope" && !w.fullScreen) print("$token");
+EOF
+  stamp="$(date '+%Y-%m-%d %H:%M:%S')"
+  kwin_run "$js" "$plugin"
+  sleep 0.1
+  kwin_unload "$plugin"
+  rm -f "$js"
+  journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "$token"
+}
+
+# Wait only for gamescope's outer KWin window, not for the game framework. Used by plain `launch` so
+# it can place/reveal safely before returning without growing a detached cleanup lifecycle.
+wait_for_gamescope_window() {
+  local timeout="${1:-60}"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    gamescope_window_available && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Keep the flag owner alive until the wrapper consumes its one-shot file, both for owner validation
+# and to bound how long a failed Steam handoff remains armed.
+wait_for_rig_flag_consumed() {
+  local timeout="${1:-15}"
+  local deadline=$((SECONDS + timeout))
+  while (( SECONDS < deadline )); do
+    [[ ! -f "$RIG_GS_FLAG" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Move the game window to the top-left and reveal it (if the pre-placement watcher minimized it). We
 # only MOVE, never resize: gamescope already renders at the right size (gamescope-wrapper.sh sets it),
 # and forcing a KWin resize makes gamescope scale its buffer into the new frame -> blurry text. gamescope
 # centers its window and has no position flag / honors no KWin rule, so we set the position directly.
 # Best-effort: a no-op note if gdbus/KWin aren't around. KDE Plasma 6 (Wayland).
 reposition_window() {
-  kwin_available || { warn "gdbus not found — skipping window reposition"; return 0; }
-  local plugin="er-reposition-$$-$SECONDS" js stamp
+  kwin_available || { warn "KWin scripting unavailable — skipping window reposition"; return 0; }
+  local plugin="$REPOSITION_PLUGIN" js stamp
   js="$(mktemp /tmp/er-win-move.XXXXXX.js)"
   cat > "$js" <<EOF
+function isRigGamescope(w) { return w && w.resourceClass == "gamescope" && !w.fullScreen; }
+let hostWindow = isRigGamescope(workspace.activeWindow) ? null : workspace.activeWindow;
+function keepHostActive(w) {
+  if (isRigGamescope(w)) {
+    if (hostWindow && workspace.activeWindow !== hostWindow) {
+      workspace.activeWindow = hostWindow;
+      print("ERDEFOCUS | restored host window during reveal");
+    }
+  } else if (w) {
+    hostWindow = w;
+  }
+}
+workspace.windowActivated.connect(keepHostActive);
 const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
 for (const w of ws) {
-  if (w.resourceClass == "gamescope") {
+  if (isRigGamescope(w)) {
     const g = w.frameGeometry;
-    w.minimized = false;  // reveal if the hide watcher had it minimized
     w.frameGeometry = { x: ${WINDOW_MARGIN}, y: ${WINDOW_MARGIN}, width: g.width, height: g.height };  // move only — keep gamescope's native size (no scaling/blur)
+    w.minimized = false;  // reveal only after moving; never assign gamescope as active
+    if (isRigGamescope(workspace.activeWindow)) keepHostActive(workspace.activeWindow);
     print("ERMOVE | gamescope " + g.x + "," + g.y + " -> ${WINDOW_MARGIN},${WINDOW_MARGIN} (" + g.width + "x" + g.height + ")");
   }
 }
 EOF
   stamp="$(date '+%Y-%m-%d %H:%M:%S')"
+  # Stop the minimizing watcher before reveal, then have the reposition script itself guard focus
+  # across the un-minimize. KWin timing is integration-gated: ERHIDE/ERDEFOCUS/ERMOVE journal lines
+  # identify the initial-map and reveal paths to inspect during the orchestrator's live validation.
+  kwin_unload "$HIDE_PLUGIN"
+  trap cleanup_window_guards EXIT
   kwin_run "$js" "$plugin"
   sleep 0.6
   kwin_unload "$plugin"
-  kwin_unload "$HIDE_PLUGIN"  # stop holding the window minimized now that it's placed + revealed
   rm -f "$js"
   # KWin script print() lands in the journal; use it to report whether a gamescope window was found.
   if journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "ERMOVE"; then
@@ -632,76 +797,34 @@ EOF
   else
     warn "no gamescope window found yet (give it a moment, then: rig.sh reposition)"
   fi
+  trap - EXIT
 }
 
-# ---- startup-popup auto-dismiss (ydotool) -------------------------------------------------------
+# ---- in-game input via gamescope's nested Xwayland ----------------------------------------------
 # The offline-mode + connection-error popups can't be killed in code (Arxan-hardened path, parked —
-# docs/OFFLINE-TITLE-SCREEN.md), so for unattended solo runs we just click through them: inject the
-# menu-confirm key into the focused game window. ydotool injects at the uinput level (a virtual
-# input device), so the gamescope window must be focused — focus_game_window handles that. Linux
-# input event codes: Enter = 28, E = 18 (ER's keyboard menu-accept), so we send both to cover
-# whichever a given dialog wants.
-ydo() { YDOTOOL_SOCKET="$RIG_YDOTOOL_SOCKET" ydotool "$@"; }
-
-# Raise + focus the gamescope window so injected keys land in the game, not the terminal. Returns 0
-# if a gamescope window was found and activated, 1 if not — so the caller can refuse to inject keys
-# into whatever else has focus. Off KDE (no gdbus) we can't enumerate windows, so return 0 and let the
-# caller proceed (best-effort, same posture as reposition_window). Same KWin-over-D-Bus mechanism, and
-# we detect the match via the script's print() landing in the journal (like reposition_window).
-focus_game_window() {
-  kwin_available || return 0
-  local js plugin="er-focus-$$-$SECONDS" stamp
-  js="$(mktemp /tmp/er-win-focus.XXXXXX.js)"
-  cat > "$js" <<'EOF'
-const ws = (typeof workspace.windowList === "function") ? workspace.windowList() : workspace.clientList();
-for (const w of ws) if (w.resourceClass == "gamescope") { w.minimized = false; workspace.activeWindow = w; print("ERFOCUS | gamescope"); }
-EOF
-  stamp="$(date '+%Y-%m-%d %H:%M:%S')"
-  kwin_run "$js" "$plugin"; sleep "$RIG_DISMISS_FOCUS_SETTLE"; kwin_unload "$plugin"; rm -f "$js"
-  journalctl --user -t kwin_wayland --since "$stamp" --no-pager 2>/dev/null | grep -q "ERFOCUS"
-}
-
+# docs/OFFLINE-TITLE-SCREEN.md), so unattended runs click through them with XTEST. Injecting into
+# the nested server makes the events core X input that Wine's polling sees, but cannot reach the
+# host desktop. The game always owns nested focus even when gamescope is unfocused on the host.
 cmd_dismiss() {
-  local presses="${1:-$RIG_DISMISS_PRESSES}"
+  local presses="${1:-$RIG_DISMISS_PRESSES}" nested_display
   # Degrade (warn + return), never `die`: cmd_cycle calls us with `|| warn` to keep going, and `die`
   # exits the whole script (can't be trapped by `||`), which would abort cycle after the game launched.
-  command -v ydotool >/dev/null 2>&1 || { warn "ydotool not installed (pacman -S ydotool; enable ydotoold) — skipping auto-dismiss"; return 1; }
   [[ "$presses" =~ ^[0-9]+$ ]] || { warn "dismiss: press count must be a number, got '$presses'"; return 1; }
-  [[ -S "$RIG_YDOTOOL_SOCKET" ]] || warn "ydotool socket $RIG_YDOTOOL_SOCKET missing — is the ydotoold user service running?"
-  game_running || warn "eldenring.exe doesn't look like it's running yet"
-  local refocus="$RIG_DISMISS_REFOCUS_EVERY"
-  [[ "$refocus" =~ ^[0-9]+$ && "$refocus" -gt 0 ]] || refocus=1
-  say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart, re-focusing every ${refocus})…"
-  local i focused=0 start now elapsed
+  nested_display="$(game_display)" || { warn "dismiss: couldn't find the game's nested Xwayland DISPLAY — is eldenring.exe running?"; return 1; }
+  [[ -x "$ROOT/scripts/rig/xtest-key" ]] || { warn "dismiss: missing executable scripts/rig/xtest-key"; return 1; }
+  say "Dismissing startup popups: $presses confirm presses (Enter, ${RIG_DISMISS_INTERVAL}s apart on $nested_display; desktop focus is unaffected)…"
+  local i start now elapsed
   start="${EPOCHREALTIME/,/.}"
   for ((i = 0; i < presses; i++)); do
-    # The popups are *in-engine* dialogs, not separate OS windows, so focus can't be stolen between
-    # presses — we re-assert it on the first press and every Nth after (insurance against KWin
-    # reshuffling), not every single press. Only inject once we actually hold the game window.
-    if (( i % refocus == 0 )); then
-      if focus_game_window; then
-        focused=1
-      elif (( focused == 0 )); then
-        warn "couldn't focus the gamescope window — skipping this press"
-        notify "rig: dismissing popups" "press $((i + 1))/$presses skipped — no game-window focus" 1500
-        sleep "$RIG_DISMISS_INTERVAL"
-        continue
-      fi
-    fi
-    (( focused == 0 )) && { sleep "$RIG_DISMISS_INTERVAL"; continue; }
-    ydo key 28:1 28:0 || { warn "ydotool failed — is ydotoold running and YDOTOOL_SOCKET correct?"; return 1; }
+    "$ROOT/scripts/rig/xtest-key" --display "$nested_display" Return \
+      || { warn "dismiss: XTEST Return failed on $nested_display"; return 1; }
     now="${EPOCHREALTIME/,/.}"
     elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN { printf "%.1f", b - a }')"
     notify "rig: dismissing popups" "press $((i + 1))/$presses · ${elapsed}s elapsed"
     sleep "$RIG_DISMISS_INTERVAL"
   done
-  if [[ $focused -eq 0 ]]; then
-    warn "never managed to focus the game window — nothing dismissed; clear popups manually or: scripts/rig.sh dismiss"
-    notify "rig: dismiss failed" "never got game-window focus — nothing sent" 3000
-    return 1
-  fi
-  focus_game_window || true     # one more focus before the fallback key
-  ydo key 18:1 18:0 || true     # one E too, in case a dialog wants the menu-accept key over Enter
+  "$ROOT/scripts/rig/xtest-key" --display "$nested_display" e \
+    || warn "dismiss: fallback XTEST e failed on $nested_display"
   now="${EPOCHREALTIME/,/.}"
   elapsed="$(LC_ALL=C awk -v a="$start" -v b="$now" 'BEGIN { printf "%.1f", b - a }')"
   notify "rig: popups dismissed" "$presses presses over ${elapsed}s — re-run dismiss if one lingers" 2500
@@ -779,7 +902,7 @@ cmd_kill() {
   # path) so a concurrent Ghidra run is never caught; the launcher is a `pkill` on its own pattern
   # (nothing else references `start_protected_game`, so it's collision-free — bracket trick avoids
   # pkill's own command line).
-  rm -f "$RIG_GS_FLAG"  # clear any stale rig-size flag so the next manual launch is fullscreen
+  cleanup_rig_launch
   local gpids; gpids="$(game_pids)"
   if [[ -z "$gpids" ]] && ! pgrep -f '[s]tart_protected_game' >/dev/null; then
     warn "game not running"
@@ -845,18 +968,18 @@ launch_and_dismiss() {
   fi
 }
 
-# Load into the world from the main menu and wait until gameplay is live. `cycle`/`launch` only reach
-# the MENU (popups dismissed); this selects "Continue" (the menu-accept key E, keycode 18) to load the
-# last save, then polls the log until a diag snapshot reports `in_gameplay = true`. Re-presses E every
-# ~18s in case the first didn't land on a settled menu; returns the moment we're in-world. Best-effort:
-# warns + returns 1 on timeout (the one-shot in-world drivers gate on the world themselves, so a miss
-# is safe). This is the piece that was missing for autonomous in-world rig runs (cycle stopped at the menu).
+# Load into the world from the main menu and wait until gameplay is live. Dismiss is intended to land
+# at the menu, though its required fallback e may already advance Continue; this explicitly re-asserts
+# the menu-accept keysym e, then polls the log until a diag snapshot reports `in_gameplay = true`.
+# Re-presses E every ~18s in case the first didn't land on a settled menu; returns the moment we're
+# in-world. Best-effort: warns + returns 1 on timeout (the one-shot in-world drivers gate on the world
+# themselves, so a miss is safe). This is the verified path for autonomous in-world rig runs.
 cmd_enter_world() {
-  local timeout="${1:-150}" log start now elapsed last_press=-100
-  command -v ydotool >/dev/null 2>&1 || { warn "enter-world: ydotool not installed — load the save manually"; return 1; }
+  local timeout="${1:-150}" log nested_display start now elapsed last_press=-100
   log="$(latest_log || true)"
   [[ -n "$log" ]] || { warn "enter-world: no log yet — launch the game first"; return 1; }
-  game_running || { warn "enter-world: game not running"; return 1; }
+  nested_display="$(game_display)" || { warn "enter-world: couldn't find the game's nested Xwayland DISPLAY"; return 1; }
+  [[ -x "$ROOT/scripts/rig/xtest-key" ]] || { warn "enter-world: missing executable scripts/rig/xtest-key"; return 1; }
   say "Loading into the world (Continue) — waiting up to ${timeout}s for in_gameplay…"
   start="${EPOCHREALTIME/,/.}"
   while :; do
@@ -872,7 +995,8 @@ cmd_enter_world() {
     # (Re)assert "Continue" sparsely (every ~18s) so we don't spam the action key once in-world (E is
     # also the in-game interact key; a stray press during the snapshot-lag window is harmless).
     if (( elapsed - last_press >= 18 )); then
-      focus_game_window && { ydo key 18:1 18:0 || warn "enter-world: ydotool E failed (is ydotoold up?)"; }
+      "$ROOT/scripts/rig/xtest-key" --display "$nested_display" e \
+        || { warn "enter-world: XTEST e failed on $nested_display"; return 1; }
       last_press=$elapsed
     fi
     sleep 4
@@ -1147,12 +1271,13 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
   status                 Show snapshot state, what's installed, and the latest run log.
   launch [--wait]        steam -applaunch (uses your gamescope launch options). Renders at the rig
                          size if you've set launch options to scripts/rig/gamescope-wrapper.sh.
-                         --wait blocks until the framework comes up and prints the install lines.
+                         Rig launches preserve desktop focus and wait for safe window placement;
+                         --wait additionally blocks until the framework comes up and prints lines.
   log [-f]               Print (or -f follow) the latest run log.
   kill                   Stop the game + launcher (by resolved pid; a running RE decompile is spared).
   reposition             Move the running game window to the top-left (and reveal it if hidden). Only
                          moves, never resizes (size comes from gamescope-wrapper.sh, so no scaling
-                         blur). Auto-run by 'launch --wait' / 'cycle'; run it again here if needed.
+                         blur). Auto-run by 'launch' / 'cycle'; run it again here if needed.
   reblank-watch          (internal) Keep the panel dark after a launch woke a blanked screen: blanks
                          at input-quiescence (swayidle) + re-blanks input-less wakes (DPMS poll),
                          self-expires after RIG_REBLANK_WINDOW s. Spawned detached by 'launch' when
@@ -1165,8 +1290,9 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          so only run this on initial apply or when you want to reset/refresh it.
                          Game must be closed.
   dismiss [N]            Click through the startup popups (offline-mode / connection-error) by
-                         injecting N confirm presses (default 22, RIG_DISMISS_PRESSES) into the focused game window via
-                         ydotool, re-focusing the window periodically. Run if a popup is still up.
+                         injecting N confirm presses (default 22, RIG_DISMISS_PRESSES) into
+                         gamescope's nested Xwayland via XTEST. Desktop focus is unaffected, so the
+                         host remains safe to use throughout. Run if a popup is still up.
   enter-world [secs]     From the main menu, select "Continue" and wait (default 150s) until the log
                          reports in_gameplay = true. Also 'cycle --in-world' does this after launch.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
@@ -1193,8 +1319,8 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          before starting the game; --no-dismiss leaves the popups for you.
 
 Env overrides: GAME_DIR, BACKUP_DIR, APPID, SAVE_DIR, WINDOW_MARGIN, RIG_WINDOW_WIDTH,
-               RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_YDOTOOL_SOCKET, RIG_DISMISS_PRESSES,
-               RIG_DISMISS_INTERVAL, RIG_REBLANK, RIG_REBLANK_IDLE, RIG_REBLANK_WINDOW,
+               RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_DISMISS_PRESSES, RIG_DISMISS_INTERVAL,
+               RIG_REBLANK, RIG_REBLANK_IDLE, RIG_REBLANK_WINDOW,
                DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
 EOF
 }

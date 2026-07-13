@@ -43,6 +43,50 @@ marker: launched any other way it aborts the process (the EAC guard), so always 
 after deploying. On first run it writes a default `unseamless-coop/unseamless_coop.toml` and a run log
 under `unseamless-coop/logs/`.
 
+## In-Game Input Injection
+
+`rig.sh dismiss` and `rig.sh enter-world` inject XTEST events directly into gamescope's nested
+Xwayland server. Inside that server the game owns input focus even when the gamescope window is
+unfocused on the Plasma desktop. Synthetic input therefore reaches Wine's core input stream without
+requiring a focus dance, cannot leak into a host terminal, and does not reset the host idle clock.
+Michael can keep using the desktop while popup dismissal runs. The helper requires Python 3 and
+`python-xlib` (the Arch package is also named `python-xlib`).
+
+The nested display number is not stable. Re-derive it from the running game's own environment, which
+contains `DISPLAY=:N`, rather than assuming `:1`:
+
+```bash
+pid="$(pgrep -af '[e]ldenring\.exe' | awk '$0 !~ /decompile|ghidra/ { print $1; exit }')"
+tr '\0' '\n' < "/proc/$pid/environ" | grep '^DISPLAY='
+```
+
+On the live 2026-07-12 check, gamescope 3.16.23 launched `Xwayland :N -rootless` without an `-auth`
+argument, so same-user connections needed no xauth cookie, and the nested server advertised XTEST
+2.2. `rig.sh` fails closed unless that display's Xwayland process has gamescope in its ancestor
+chain, so an unset or aliased host `DISPLAY` cannot redirect injection. Re-check the Xwayland command
+line and extension list after a gamescope update. To prove the game still owns nested focus,
+substitute the detected display in this probe (`:1` is only an example):
+
+```bash
+python3 -c "from Xlib import display; print(hex(display.Display(':1').get_input_focus().focus.id))"
+```
+
+XTEST matters here: it creates server-core input events that Wine's polling sees. `XSendEvent` and
+window-targeting wrappers only send synthetic client events, which many games ignore.
+
+Rig-mode launches also load temporary KWin scripts from `rig.sh`: the first keeps gamescope minimized
+and restores the last active host window while the game maps, and the second moves the hidden window
+before revealing it while guarding against activation. These scripts are never loaded by the
+no-flag gaming branch of `gamescope-wrapper.sh`, so pressing Play normally retains normal fullscreen
+focus behavior. The guards also ignore fullscreen gamescope windows, failing closed if a rig handoff
+is abandoned while a normal Play begins. The rig-size flag carries its owning `rig.sh` PID, and the
+wrapper rejects it once that owner is gone, so even an interrupted rig launch cannot resize the next
+normal Play.
+
+The Deck deliberately stays on its existing `/dev/uinput` tapper. SteamOS Game Mode keeps the game as
+the focused surface, that path is already proven over SSH, and it remains independent of the local
+rig's XTEST helper and nested-display detection.
+
 ## What to confirm first (harness sanity + the new install layer)
 
 The install layer (proxy / launcher / EAC guard / mod loader) is built and export-verified
@@ -184,10 +228,12 @@ runtime instrumentation per [RUNTIME-RE.md](RUNTIME-RE.md): a diagnostic build o
   GPU-light, so concurrent release/clippy/diag builds across worker sessions spike all 16 threads and
   the game lags exactly during that window. Before treating an FPS drop as a bug, check whether workers
   are mid-build; for a clean framerate read, quiesce the fleet and retest on an idle machine.
-- **`rig.sh cycle` reaches in-game autonomously** (apply + launch + a ydotool popup-dismiss that
-  overshoots into Continue → a loaded save), which makes the drive-probe / in-game RE solo-runnable. It
-  needs the KWin + ydotool stack healthy; if a run sticks at the popups, a manual `scripts/rig.sh
-  dismiss` clears them. Tune with `RIG_DISMISS_PRESETTLE` / `RIG_DISMISS_PRESSES`.
+- **`rig.sh cycle --in-world` reaches in-game autonomously** (apply + launch + XTEST popup dismissal,
+  then explicit Continue retries and an `in_gameplay` check), which makes the drive-probe / in-game
+  RE solo-runnable without taking desktop focus. Plain dismissal retains a final fallback `e`, so it
+  may advance Continue too; `--in-world` is what verifies arrival. If a run sticks at the popups, a
+  manual `scripts/rig.sh dismiss` clears them. Tune with `RIG_DISMISS_PRESETTLE` /
+  `RIG_DISMISS_PRESSES`.
 - **Re-cycling onto a NEW build while the old game is still up: `kill` first, then `cycle`.** `cycle`'s
   `apply` step refuses over a live install (the correct "is Michael playing?" guard), so a bare re-cycle
   on a still-running rig **silently doesn't re-apply** — the old build keeps running. And a
