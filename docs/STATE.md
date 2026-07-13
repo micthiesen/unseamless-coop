@@ -28,22 +28,23 @@ Last updated: **2026-07-13** (native auth and two-player game roster proven on r
 
 ## Next
 
-**Verify actual in-world presence and control on the current two-machine session.** This is the last check
+**Verify actual in-world presence and control in a two-machine session.** This is the last check
 before calling rung 3 playable and genuinely needs Michael's eyes: confirm each character renders on the
-other machine and movement replicates. Keep the current run alive; both observers already report the correct
-remote identity in slot 2. If presence works, the next implementation chunk is to replace configured debug
-peer ids and symmetric probe roles with the peer and Open/Join lifecycle supplied by rungs 4 and 2. If the
-roster is present but the character is not, instrument the post-roster game packets and `join_wait`/ChrIns
-spawn transition instead of revisiting transport or auth. Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) >
-"Native Transport and Two-Player Roster Result (2026-07-13)".
+other machine and movement replicates. If presence works, the next implementation chunk is to replace
+configured debug peer ids and symmetric probe roles with the peer and Open/Join lifecycle supplied by rungs
+4 and 2. If the roster is present but the character is not, instrument the post-roster game packets and
+`join_wait`/ChrIns spawn transition instead of revisiting transport or auth. Evidence:
+[SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result (2026-07-13)".
 
 ## Candidates Not Chosen
 
 - **Productize the proven rung-3 path immediately.** Highest-value implementation after the presence check,
   but doing it before knowing whether the roster produces a visible peer would hide the remaining gate.
-- **Harden orphaned lobby cleanup after a killed test process.** This run's private side-channel reported an
-  old world still open, while rung 3 proceeded through configured peer ids. Real lifecycle issue, but it does
-  not invalidate the native session result and is smaller than Open/Join integration.
+- **Harden orphaned lobby cleanup after a killed test process.** A forced-kill cycle left the private
+  side-channel reporting an old world still open, while rung 3 proceeded through configured peer ids. This
+  is a real lifecycle issue, but it does not invalidate the native session result and is smaller than
+  Open/Join integration. See
+  [COOP-CONNECTION.md](COOP-CONNECTION.md) > "Rung 4".
 - **Stay-connected and area-transition validation.** Now unblocked and suitable for the same two-player rig,
   but only after basic presence and movement are confirmed.
 - **Remove the dense RE probes.** Keep them until Open/Join productization reproduces `players=2`; then retain
@@ -55,6 +56,7 @@ spawn transition instead of revisiting transport or auth. Evidence: [SESSION-DRI
   success** -> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result
   (2026-07-13)".
 - **Current rung-3 gating map and historical dead ends** -> [ROADMAP.md](ROADMAP.md) > "Rung 3".
+- **Forced-kill lobby cleanup residual** -> [COOP-CONNECTION.md](COOP-CONNECTION.md) > "Rung 4".
 - **Reproducible runtime inspection** -> `scripts/re/peek-socketmgr.py`, `catch-endpoint.py`,
   `watch-write.py`, and `watch-bt.py`; the watchpoint helpers stop every traced thread before clearing DR7.
 - **Prior code on `main`** -> commit `4371c3c` (`register_peer_connection`, worker-thread registrar,

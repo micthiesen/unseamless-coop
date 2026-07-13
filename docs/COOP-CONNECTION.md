@@ -392,6 +392,14 @@ explicit actions drive it:
 - **Leave world**: tear the session down (leave the Steam lobby, stop the driver thread), re-enabling
   Open/Join.
 
+**Known forced-kill residual (observed 2026-07-13).** The driver's `Drop` path leaves an established
+lobby and has a bounded cleanup for an in-flight create, but a process kill cannot run either path. After
+repeated rig kills, a later host existence check found a password-matching world and refused to open while
+the opposite join attempt found no usable world before timing out. Rung 3 still succeeded through its
+configured peer IDs, so this did not affect the native-session result. Open/Join productization must include
+a two-machine kill/reopen check and either tolerate Steam's eventual cleanup or add an explicit stale-lobby
+recovery policy; do not diagnose this symptom as a native transport or roster failure.
+
 The role is the user's **choice** (`steam::LobbyIntent::Host` / `Join`), **not derived** from a
 create-or-join race — only the host ever creates a lobby, so there is no both-create race and no
 owner/lobby-id tiebreak. The actions are **gated**: disabled until Steam networking is ready
