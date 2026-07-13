@@ -4505,3 +4505,52 @@ the connection through `0x142640f20`; this is normal transport cleanup, not desc
 Therefore the solo work is complete. The remaining verifier genuinely needs the Deck online: each
 side registers the other's connection, inbound type-5 reaches `TYPE5-VALIDATOR FIRED`, then
 `member+0x152=1` and `players=2`.
+
+### Native Transport and Two-Player Roster Result (2026-07-13)
+
+The online Deck run completed the entire transport, authentication, and roster chain on both
+machines. The worker registrar experiment first exposed two corrections that supersede the
+endpoint-derived descriptor above:
+
+- Generic initializer `0x1426425f0` captured the game's native descriptor as callbacks
+  `0x142644530/570/550/600/650/590`, followed by a live `FsdpConnection@DLNW3D` context, two
+  zero words, the member, and the optional interface pair. Endpoint callback four
+  `0x142400a50` has a different five-argument contract; supplying it to the four-argument generic
+  worker consumed stale stack data as the member and faulted. A Rust bridge fixed that ABI, but the
+  native descriptor proved the endpoint-derived connection was the wrong abstraction.
+- Retaining the native descriptor after its original connection tore down was also unsafe. Its
+  `FsdpConnection` context is session-owned and cleared during teardown; reusing it produced null or
+  stale lower-transport dereferences. Once a native descriptor appears, the probe now suppresses the
+  synthetic registrar instead of trying to outlive the native connection.
+
+The native send path is `FsdpConnection` slot 6, **`0x142644b80(context, plaintext, len, flag)`**.
+It accepts the plain DLNR3D message, prepends the route byte, performs the protected transport
+encoding, and submits through the lower connection. Calling it from the frame task raced teardown;
+calling it from manager worker `0x142640bc0` is stable. The send is gated on the exact
+`FsdpConnection` vtable `0x143278868`, a non-null lower pointer at `+0x10`, and connection state
+`+0x78 == 3`. The old manually guessed 11-bit wrapper is retired; core now produces only
+`[type=5][token][ticket length][Steam auth ticket]`.
+
+Bounded function-boundary probes then proved the receive chain without perturbing it:
+
+1. native delivery `0x142644600` receives route-zero plus the type-5 message;
+2. route adapter `0x14263cf50` removes that byte;
+3. endpoint receiver `0x14203f850` queues the type-5;
+4. pump case `0x142400924` calls validator `0x142402ee0`;
+5. `BeginAuthSession` returned `0` (`OK`) against the sender's real SteamID64 on both machines.
+
+The final one-player result was not an auth failure. Live memory showed the token copied to
+`member+0x148` and `member+0x152 == 1`. Static control flow identified the missed promotion:
+`drive_add_peer`'s final argument is copied to `member+0x151`; completion phase `0x142400f40`
+skips the type-1 session event whenever that byte is nonzero. The driver had hardcoded `flag=1`.
+Changing it to `flag=0` left the event enabled. In the next single two-machine run, both sides
+logged this sequence within the same second:
+
+`TYPE5-VALIDATOR FIRED` -> `BeginAuthSession returned 0 (OK)` ->
+`host-roster-add` with prior count 1 -> `Host/Ingame players=2`.
+
+Both processes remained alive and repeated diagnostics held `players=2`; the remote entry was
+identity-correct with connection id 2 and the scaling feature immediately switched to its two-player
+rates. This proves rung 3 through the game roster. The next verifier is in-world presence and control:
+confirm the two characters render and movement replicates, then replace the debug peer ids and probe
+roles with the peer and Open/Join lifecycle supplied by rungs 4 and 2.

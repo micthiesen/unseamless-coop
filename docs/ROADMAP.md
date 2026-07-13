@@ -159,12 +159,14 @@ longer needed as a mitigation). See [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md)
   `CSSessionManager` to `Host`/`Client` for a given peer (the password derives the session AES key),
   so players see each other in-world. This is the apply layer the rest of the UI is already waiting on.
 
-  > **★ CURRENT DIRECTION (2026-07-12): validate the worker-thread peer registrar with the Deck online.**
-  > The local lever is implemented and solo-proven: `0x14263fd10` registers the selected connection pool slot
-  > with free `5 -> 4`, active `0 -> 1`, correct owner/key/vtable, and no crash. Its only solo retirement was
-  > Steam P2P timeout because the Deck was offline. Next is the two-machine delivery chain:
-  > `peer-register SUCCESS` -> `TYPE5-VALIDATOR FIRED` -> `member+0x152=1` -> `players=2`. See
-  > [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Worker-Thread Registrar Result (2026-07-12)".
+  > **★ CURRENT DIRECTION (2026-07-13): two-machine roster is proven; verify presence, then productize.**
+  > Both rig and Deck now reach stable `Host`/`Ingame` with the remote peer in slot 2. The native
+  > `FsdpConnection` path carries a real Steam auth ticket, `BeginAuthSession` returns `OK`, and clearing the
+  > add-peer suppress flag lets the member completion phase post the type-1 roster event. Both observers changed
+  > to `players=2` and held there without a crash. Next is a visual/control check that the remote character is
+  > actually present, followed by replacing debug peer ids and probe roles with the rung-4 peer and real Open/Join
+  > lifecycle. See [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result
+  > (2026-07-13)".
   > **The blocks below are the historical hand-synthesis trail (2026-07-02..04). Read them as ground already
   > explored, not as the current plan.** Reference docs, so we don't re-tread:
   > - **[ERSC-LIVE-CAPTURE-FINDINGS.md](ERSC-LIVE-CAPTURE-FINDINGS.md) — READ FIRST.** A real 2-player ERSC

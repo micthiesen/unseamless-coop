@@ -429,17 +429,16 @@ const ADD_MEMBER_OFFSET: usize = 0x1_423f_df20 - 0x1_4000_0000;
 /// remains; if it never fires for the Deck, the add-peer *event* was never posted (post it ourselves).
 const ADD_PEER_OFFSET: usize = 0x1_423f_dc80 - 0x1_4000_0000;
 
-// --- ★ Type-5 producer (option b, 2026-07-06) — drive the game's own handshake-completion send -----------
+// --- ★ Type-5 producer — native plaintext send through the captured FsdpConnection -----------------------
 //
 // Charted by the `type5-chart` lane (docs/SESSION-DRIVE.md > "★ TYPE-5 PRODUCER + INJECTION"): the DLNW3D
 // handshake completes when the peer receives a **type-5** message = a real Steam auth ticket the host
-// validates (`0x142402ee0`/`BeginAuthSession` against `member+0x80`) → sets `member+0x152=1`. Rather than
-// hand-frame it (the inner transport frame is Arxan-opaque, no external inject bypass), we drive the game's
-// OWN send `0x142400df0(endpoint)`: given the member's built endpoint it writes type 5, pulls the 8B token
-// from `[[endpoint+0x60]+0x548]`, calls the endpoint vtable slot 14 = `GetAuthSessionTicket`, appends
-// `[4B len][ticket]`, and `SendP2PPacket`s it on ch30. To get the endpoint we latch the peer member off the
-// `+0x130` writer `0x14203ef70` (`endpoint=[rdx]`, `member=[endpoint+0x50]`), then read the member's LIVE
-// `+0x130` each tick (0 between the pump's build/drop cycles → we skip, so we never call on a freed endpoint).
+// validates (`0x142402ee0`/`BeginAuthSession` against `member+0x80`) → sets `member+0x152=1`. With the
+// add-peer suppress flag clear, the completed member then posts the type-1 event consumed by the
+// CSSessionManager roster. The endpoint's protected send is not callable cold. The registrar captures the
+// session-owned `FsdpConnection`; its plain slot-6 send accepts the type-5 payload and owns route + transport
+// encoding.
+// The older `drive_type5` endpoint probe below remains observe-only documentation of the retired path.
 /// `0x142400df0` — the game's own type-5 send. `(rcx = endpoint)`; single arg.
 const TYPE5_SEND_OFFSET: usize = 0x1_4240_0df0 - 0x1_4000_0000;
 /// `0x14203ef70` — the `member+0x130` endpoint-holder writer. `(rcx = &holder, rdx = &src)`; `[rdx]` = endpoint.
@@ -452,13 +451,32 @@ const ENDPOINT_VTABLE_RVA: usize = 0x3277750;
 /// mutating registrar experiment pinned to the two charted object types after a game update.
 const CONNECTION_MANAGER_VTABLE_RVA: usize = 0x3278020;
 const STEAM_CONNECTION_VTABLE_RVA: usize = 0x3278358;
+/// `FsdpConnection@DLNW3D` vtable and its plaintext send slot. The send prepends the native route byte,
+/// encodes the transport frame, and hands it to the connection worker.
+const FSDP_CONNECTION_VTABLE_RVA: usize = 0x3278868;
+const FSDP_PLAINTEXT_SEND_OFFSET: usize = 0x1_4264_4b80 - 0x1_4000_0000;
 /// Manager vtable slot 1, `0x14263fd10(manager, peer_id, descriptor)`. It pops one free pool slot,
 /// initializes it through `0x142643d50`, and appends it to the active vector.
 const PEER_REGISTER_OFFSET: usize = 0x1_4263_fd10 - 0x1_4000_0000;
-/// The callback quartet at the front of the endpoint's registrar-compatible 0x60-byte descriptor.
-/// These are stable code pointers; checking all four distinguishes the expected endpoint layout from
-/// another object passing through the generic holder writer.
-const PEER_DESCRIPTOR_CALLBACK_RVAS: [usize; 4] = [0x2400a20, 0x2400a40, 0x2400a30, 0x2400a50];
+/// Generic connection initializer `0x1426425f0(connection+0x20, descriptor, mode_a, mode_b)`.
+/// Its entry is the deterministic runtime capture point for both native and probe-built descriptors.
+const PEER_CONNECTION_INIT_OFFSET: usize = 0x1_4264_25f0 - 0x1_4000_0000;
+/// Native descriptor callback four, its route-zero adapter, and the endpoint receiver it invokes.
+/// These function-boundary probes localize a framed type-5 between the connection worker and endpoint.
+const PEER_NATIVE_DELIVERY_OFFSET: usize = 0x1_4264_4600 - 0x1_4000_0000;
+const PEER_ROUTE_ADAPTER_OFFSET: usize = 0x1_4263_cf50 - 0x1_4000_0000;
+const PEER_ENDPOINT_RECV_OFFSET: usize = 0x1_4203_f850 - 0x1_4000_0000;
+/// The callback quartet at the front of the endpoint descriptor. The first three are compatible with
+/// the connection manager; the fourth is a five-argument endpoint adapter and must be bridged below.
+const PEER_DESCRIPTOR_CALLBACK_RVAS: [usize; 3] = [0x2400a20, 0x2400a40, 0x2400a30];
+/// Endpoint delivery adapter `fn(type, payload, len, flag, member) -> bool`. The endpoint constructor
+/// at `0x142401110` installs it as descriptor callback four. The generic connection worker instead calls
+/// callback four as `fn(framed_payload, len, flag, context)`, so [`peer_delivery_bridge`] supplies the
+/// missing split type and fifth member argument.
+const ENDPOINT_DELIVERY_ADAPTER_OFFSET: usize = 0x1_4240_0a50 - 0x1_4000_0000;
+/// Session message callback installed by params builder `0x140cb20d0` together with its delivery-enable
+/// byte (`params+0x70 = 1`). In the live endpoint owner those land at `+0xb0` and `+0xb8` respectively.
+const SESSION_MESSAGE_CALLBACK_OFFSET: usize = 0x1_40ca_e930 - 0x1_4000_0000;
 const PEER_DESCRIPTOR_QWORDS: usize = 0x60 / size_of::<usize>();
 /// Resolved absolute `0x142400df0` (set at install when `drive_type5`).
 static TYPE5_SEND_FN: AtomicUsize = AtomicUsize::new(0);
@@ -475,8 +493,27 @@ static REGISTER_PEER_CONNECTION: AtomicBool = AtomicBool::new(false);
 /// Resolved executable base and registrar entry for descriptor/vtable guards and the one native call.
 static PEER_REGISTER_EXE_BASE: AtomicUsize = AtomicUsize::new(0);
 static PEER_REGISTER_FN: AtomicUsize = AtomicUsize::new(0);
-/// Process-lifetime one-shot latch. A failed native registrar call is not retried in the same run.
+/// Attempt latch. A matching timeout retirement clears it only after the registered slot is identified.
 static PEER_REGISTER_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+/// Most recent unknown sender observed at the manager's admit entry. Registration waits for this fresh
+/// liveness signal so staggered two-machine launches do not consume a connection slot for an offline peer.
+static PEER_INBOUND_SEEN_ID: AtomicU64 = AtomicU64::new(0);
+/// Connection returned by our registrar call. A matching timeout retirement re-arms the experiment and
+/// clears the liveness signal; unrelated native connection retirements do not affect it.
+static REGISTERED_PEER_CONNECTION: AtomicUsize = AtomicUsize::new(0);
+/// Session-owned native transport context retained from the peer's runtime descriptor.
+static PEER_NATIVE_FSDP_CONNECTION: AtomicUsize = AtomicUsize::new(0);
+/// Once the native connection supplies its live Fsdp context, never replace it with a synthetic slot;
+/// the copied context is cleared on native teardown and is not independently reusable.
+static PEER_NATIVE_DESCRIPTOR_READY: AtomicBool = AtomicBool::new(false);
+/// Suppress per-worker-tick duplicate logs while a native connection temporarily owns the peer key.
+static PEER_REGISTER_SKIP_LOGGED: AtomicBool = AtomicBool::new(false);
+/// One-shot capture of the game's own connection descriptor, whether it appears before or after ours.
+static PEER_NATIVE_DESCRIPTOR_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Bounded descriptor-initializer trace. Native traffic can rebuild a connection, so retain a few events.
+static PEER_CONNECTION_INIT_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Bounded receive-chain trace shared by the three native function-boundary probes.
+static PEER_NATIVE_RECEIVE_LOGS: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy)]
 struct PendingPeerRegistration {
@@ -487,17 +524,67 @@ struct PendingPeerRegistration {
 /// Cross-thread handoff from the endpoint writer to the connection-manager worker. The descriptor is
 /// copied, not borrowed from the transient endpoint, and the lock is never held across the native call.
 static PENDING_PEER_REGISTRATION: Mutex<Option<PendingPeerRegistration>> = Mutex::new(None);
+/// Frame task publishes plaintext type-5 here; the connection-manager worker consumes and sends it.
+static PENDING_NATIVE_TYPE5_PAYLOAD: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// Log latch for the type-5 drive (fires on a throttle; log the first several, then quiet).
 static TYPE5_DRIVE_LOGS: AtomicU32 = AtomicU32::new(0);
-/// Log latch for the hand-frame type-5 send (fires on a throttle; log the first several, then quiet).
+/// Log latch for the native plaintext type-5 send (fires on a throttle; log the first several, then quiet).
 static TYPE5_SEND_LOGS: AtomicU32 = AtomicU32::new(0);
 /// `0x142402ee0` — the type-5 **validator** (DLNW3D connection vtable slot 17), called ONLY from the pump's
 /// type-5 dispatch case. The receive-side de-risk hook (`instrument_type5_recv`) fires here iff a delivered
 /// type-5 reached the pump. Re-derive after a game update: it's the fn reached by `call [rdi+0x88]` in the
 /// pump's type-5 case `0x142400924` (reads 4B len then `BeginAuthSession`; see SESSION-DRIVE.md > Q2).
 const TYPE5_VALIDATOR_OFFSET: usize = 0x1_4240_2ee0 - 0x1_4000_0000;
+/// Instruction immediately after `BeginAuthSession`, where `eax` is `EBeginAuthSessionResult`.
+const TYPE5_VALIDATOR_RESULT_OFFSET: usize = 0x1_4240_2f7e - 0x1_4000_0000;
+const TYPE5_VALIDATOR_RESULT_PROLOGUE: [u8; 5] = [0xA9, 0xFD, 0xFF, 0xFF, 0xFF];
 /// Log latch for the type-5 validator hook (fires per delivered type-5; log the first several, then quiet).
 static TYPE5_VALIDATOR_LOGS: AtomicU32 = AtomicU32::new(0);
+static TYPE5_VALIDATOR_RESULT_LOGS: AtomicU32 = AtomicU32::new(0);
+/// Bounded trace for the generic-connection to endpoint delivery bridge.
+static PEER_DELIVERY_LOGS: AtomicU32 = AtomicU32::new(0);
+
+/// Adapt the generic connection worker's reassembled-frame callback to the endpoint protocol callback.
+///
+/// Re-derived from the online-peer fault at `0x142400d14`: `0x142642cbb` passes four arguments to the
+/// descriptor callback, while endpoint adapter `0x142400a50` loads its member from a fifth stack argument.
+/// Calling that adapter directly therefore consumed stale stack data (`0x19`) as the member. The worker has
+/// already removed the two-byte transport header here, so the remaining first byte is the protocol type.
+unsafe extern "win64" fn peer_delivery_bridge(
+    framed_payload: *const u8,
+    len: u32,
+    flag: u8,
+    member: usize,
+) -> u8 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        if framed_payload.is_null() || len == 0 || member == 0 {
+            return 0;
+        }
+
+        let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
+        if exe_base == 0 {
+            return 0;
+        }
+
+        let message_type = framed_payload.read_volatile();
+        let payload = framed_payload.add(1);
+        let payload_len = len - 1;
+        let n = PEER_DELIVERY_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n < 16 {
+            log::info!(
+                "session-probe: peer-delivery bridge #{n} — type={message_type} framed_len={len} \
+                 payload_len={payload_len} flag={flag} member={member:#x}"
+            );
+        }
+        let deliver: unsafe extern "win64" fn(u8, *const u8, u32, u8, usize) -> u8 =
+            std::mem::transmute(exe_base + ENDPOINT_DELIVERY_ADAPTER_OFFSET);
+        deliver(message_type, payload, payload_len, flag, member)
+    }))
+    .unwrap_or_else(|_| {
+        log::error!("session-probe: peer-register delivery bridge panicked; dropping frame");
+        0
+    })
+}
 
 /// endpoint-set latch: `0x14203ef70(rcx=&member+0x130 holder, rdx=&src)`. Reads `endpoint=[rdx]`, then the
 /// endpoint's member back-ptr `[endpoint+0x50]`, and latches that member iff its `+0x80` == our peer — so the
@@ -533,12 +620,11 @@ fn latch_type5_peer_member(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
-/// Form the remote endpoint's registrar descriptor in process-stable storage. The first seven qwords
-/// come from `endpoint+0x20..+0x58`; the native builder `0x14263d060` then sources descriptor
-/// `+0x38/+0x40/+0x48/+0x50/+0x58` from endpoint `+0x40/+0x48/+0x50/+0x60/+0x68`. The repeated
-/// callbacks and member context are intentional: the reassembler calls descriptor `+0x38` while using
-/// `+0x48` as its context. Copying a contiguous 0x60 bytes instead puts endpoint `+0x58` in that callback
-/// slot and crashes when the worker services the connection.
+/// Form the remote endpoint's registrar descriptor in process-stable storage. The endpoint constructor
+/// `0x142401110` lays out its callback descriptor at `endpoint+0x20`; the native builder `0x14263d060`
+/// confirms the tail's non-contiguous field mapping. Callback four needs an ABI adapter: the endpoint's
+/// `0x142400a50` expects five arguments, while the generic connection worker at `0x142642cbb` supplies four.
+/// [`peer_delivery_bridge`] splits the protocol type from the reassembled payload and supplies the member.
 unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64) {
     if !REGISTER_PEER_CONNECTION.load(Ordering::Relaxed)
         || PEER_REGISTER_ATTEMPTED.load(Ordering::Relaxed)
@@ -561,6 +647,7 @@ unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64
             ((endpoint + 0x20 + i * size_of::<usize>()) as *const usize).read_volatile()
         };
     }
+    let endpoint_delivery_adapter = descriptor[3];
     for (i, endpoint_offset) in [0x40, 0x48, 0x50, 0x60, 0x68].into_iter().enumerate() {
         descriptor[7 + i] = unsafe {
             ((endpoint + endpoint_offset) as *const usize).read_volatile()
@@ -570,6 +657,8 @@ unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64
         .iter()
         .enumerate()
         .all(|(i, rva)| descriptor[i] == exe_base + rva);
+    let endpoint_delivery_matches =
+        endpoint_delivery_adapter == exe_base + ENDPOINT_DELIVERY_ADAPTER_OFFSET;
     let is_game_code = |address: usize| {
         address >= exe_base && address.wrapping_sub(exe_base) < 0x0300_0000
     };
@@ -578,6 +667,7 @@ unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64
     let optional_pair_matches = (descriptor[10] == 0) == (descriptor[11] == 0);
     // descriptor+0x30 and +0x48 are the member context used by the two callback groups.
     if !callbacks_match
+        || !endpoint_delivery_matches
         || !downstream_callbacks_match
         || descriptor[6] != member
         || descriptor[7] != descriptor[4]
@@ -588,6 +678,27 @@ unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64
         return;
     }
 
+    let delivery_owner = unsafe { ((member + 0x60) as *const usize).read_volatile() };
+    if delivery_owner == 0
+        || unsafe { ((delivery_owner + 0xb0) as *const usize).read_volatile() }
+            != exe_base + SESSION_MESSAGE_CALLBACK_OFFSET
+    {
+        return;
+    }
+    let delivery_enabled = (delivery_owner + 0xb8) as *mut u8;
+    let delivery_was = unsafe { delivery_enabled.read_volatile() };
+    if delivery_was & 1 == 0 {
+        // SAFETY: the callback-pointer guard above identifies the exact session params layout. The native
+        // builder writes this byte to 1 at `0x140cb2250`; our reproduced establishment omitted that copy.
+        unsafe { delivery_enabled.write_volatile(delivery_was | 1) };
+        log::info!(
+            "session-probe: peer-register restored session delivery-enable byte \
+             [{delivery_owner:#x}+0xb8] {delivery_was:#x}->{:#x} (native params+0x70 value)",
+            delivery_was | 1,
+        );
+    }
+    descriptor[3] = peer_delivery_bridge as *const () as usize;
+
     let pending = PendingPeerRegistration { peer_id, descriptor };
     let mut slot = PENDING_PEER_REGISTRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if slot.is_some() {
@@ -596,8 +707,9 @@ unsafe fn capture_peer_registration(endpoint: usize, member: usize, peer_id: u64
     *slot = Some(pending);
     log::info!(
         "session-probe: peer-register captured descriptor from endpoint {endpoint:#x}, member {member:#x}, \
-         peer {} — native-builder field mapping valid; callbacks ({:#x}, {:#x}), optional pair ({:#x}, {:#x})",
+         peer {} — native-builder field mapping valid; delivery callback bridged {endpoint_delivery_adapter:#x}->{:#x}; callbacks ({:#x}, {:#x}), optional pair ({:#x}, {:#x})",
         unseamless_core::diagnostics::peer_tag(peer_id),
+        descriptor[3],
         descriptor[7],
         descriptor[8],
         descriptor[10],
@@ -961,7 +1073,10 @@ fn log_join_conn_entry(_name: &'static str, regs: *mut Registers) {
         log::info!(
             "session-probe: join-conn-entry — 0x1423f62e0(registry={:#x}, descriptor={:#x}, blob_begin={:#x}, \
              blob_len={}) — the joiner's [G+0x28] handle source (returns 0 => joiner stuck at TryToJoinSession)",
-            r.rcx, r.rdx, r.r8, r.r9 as u32,
+            r.rcx,
+            r.rdx,
+            r.r8,
+            r.r9 as u32,
         );
     }));
 }
@@ -978,7 +1093,9 @@ fn log_join_blob_parse(_name: &'static str, regs: *mut Registers) {
         log::info!(
             "session-probe: join-blob-parse REACHED — 0x1423fb260(conn={conn:#x}, blob_begin={:#x}, \
              blob_len={}, arg={}); [conn+0x58]={c58:#x} (connection WAS created; failure is at/after the parse)",
-            r.rdx, r.r8 as u32, r.r9 as u32,
+            r.rdx,
+            r.r8 as u32,
+            r.r9 as u32,
         );
     }));
 }
@@ -1039,6 +1156,9 @@ fn log_host_admit(_name: &'static str, regs: *mut Registers) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: ilhook entry registers; rdx/r9d are by-value scalars (sender id, size), logged not derefed.
         let r = unsafe { &*regs };
+        if REGISTER_PEER_CONNECTION.load(Ordering::Relaxed) {
+            PEER_INBOUND_SEEN_ID.store(r.rdx, Ordering::Relaxed);
+        }
         log::info!(
             "session-probe: host-admit — 0x142640e30 admit-new-peer from sender {} (msgSize={}) \
              — the joiner's game-P2P REACHED the host admit path (size 14 => real SYN; else rejected by the shape gate)",
@@ -1067,7 +1187,10 @@ fn log_host_admit(_name: &'static str, regs: *mut Registers) {
             let resolve_cb = rd(mgr + 0x40);
             let s = rd(mgr + 0x48);
             if s == 0 {
-                log::info!("session-probe: host-admit S-chain #{n} — mgr={mgr:#x} resolve_cb rva={:#x} (want {MEMBER_RESOLVE_RVA:#x}); S=[mgr+0x48] is NULL", rva(resolve_cb));
+                log::info!(
+                    "session-probe: host-admit S-chain #{n} — mgr={mgr:#x} resolve_cb rva={:#x} (want {MEMBER_RESOLVE_RVA:#x}); S=[mgr+0x48] is NULL",
+                    rva(resolve_cb)
+                );
                 return;
             }
             let lookup_fn = rd(s + 0x168);
@@ -1082,8 +1205,16 @@ fn log_host_admit(_name: &'static str, regs: *mut Registers) {
                  S=[mgr+0x48]={s:#x} lookup[S+0x168] rva={lookup_rva:#x} => {} | collection[S+0x98..0xa0]={begin:#x}..{end:#x} \
                  span={coll_bytes:#x}B ({}) root[S+0x170]={root:#x} — {}",
                 rva(resolve_cb),
-                if is_stub { "STUB 0x1423fdf00 (always not-found)" } else { "REAL lookup" },
-                if coll_bytes == 0 { "EMPTY" } else { "has members" },
+                if is_stub {
+                    "STUB 0x1423fdf00 (always not-found)"
+                } else {
+                    "REAL lookup"
+                },
+                if coll_bytes == 0 {
+                    "EMPTY"
+                } else {
+                    "has members"
+                },
                 if is_stub {
                     "⇒ lever 3a INERT: registering a member won't help; need a fuller service/context init (3b)"
                 } else {
@@ -1149,7 +1280,11 @@ fn log_host_admit_gatec(_name: &'static str, regs: *mut Registers) {
             "session-probe: host-admit-gate-c #{n} — identity callback [socketmgr+0x40] returned {orig} \
              ({}){} — 0 ACCEPTS (admit proceeds), non-zero REJECTS the new peer",
             if orig == 0 { "ACCEPT" } else { "REJECT" },
-            if forced { " -> FORCED to ACCEPT (rax=0)" } else { "" },
+            if forced {
+                " -> FORCED to ACCEPT (rax=0)"
+            } else {
+                ""
+            },
         );
     }));
 }
@@ -1172,6 +1307,8 @@ fn log_host_admit_success(_name: &'static str, _regs: *mut Registers) {
 fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
     let sm = unsafe { (&*regs).rcx as usize };
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        log_native_peer_descriptor(sm);
+        try_send_native_type5_on_worker();
         try_register_peer_connection(sm);
     }));
 
@@ -1206,7 +1343,11 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
             "session-probe: host-worker-drain #{n} — 0x142640bc0 socketmgr={sm:#x} reads channel={channel} \
              conn_table[sm+0xb8..0xc0]={begin:#x}..{end:#x} entries={} (worker RUNS offline; recv delivers to a \
              table entry whose [conn+0x138]==senderID, else falls to admit)",
-            if count == usize::MAX { -1i64 } else { count as i64 },
+            if count == usize::MAX {
+                -1i64
+            } else {
+                count as i64
+            },
         );
         // Walk the table entries (bounded to 32) — the empirical picture of what's registered.
         if count != usize::MAX && count > 0 && count <= 32 {
@@ -1248,8 +1389,9 @@ fn log_host_worker_drain(_name: &'static str, regs: *mut Registers) {
     }));
 }
 
-/// Observe why the manager retires a registered peer connection. Read-only and bounded; the event's
-/// second qword is preserved in `rbp` by `0x1426411d0` before it marks and removes the connection.
+/// Observe why the manager retires a registered peer connection. The event's second qword is preserved
+/// in `rbp` by `0x1426411d0` before it marks and removes the connection. A timeout for the connection this
+/// probe registered clears its liveness signal and re-arms the guarded registrar for a later fresh packet.
 fn log_peer_connection_retire(_name: &'static str, regs: *mut Registers) {
     let n = PEER_CONNECTION_RETIRE_LOGS.fetch_add(1, Ordering::Relaxed);
     if n >= 8 {
@@ -1268,15 +1410,27 @@ fn log_peer_connection_retire(_name: &'static str, regs: *mut Registers) {
             unseamless_core::diagnostics::peer_tag(r.rsi),
             r.rbp,
         );
+        if r.rbp == 4
+            && REGISTERED_PEER_CONNECTION
+                .compare_exchange(r.rdi as usize, 0, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            PEER_INBOUND_SEEN_ID.store(0, Ordering::Relaxed);
+            PEER_REGISTER_ATTEMPTED.store(false, Ordering::Release);
+            log::info!(
+                "session-probe: peer-register re-armed after timeout; waiting for a fresh inbound datagram"
+            );
+        }
     }));
 }
 
 /// Run the one mutating experiment at the receive manager's worker entry. Every object/vector check
-/// happens before the latch flips; once the native call starts, this process will not retry it even if
-/// initialization returns null. This preserves the test-loop's one-lever-per-cycle boundary.
+/// happens before the latch flips. A successful connection can retry only after its own timeout hook sees
+/// retirement and a fresh inbound datagram restores peer liveness.
 unsafe fn try_register_peer_connection(manager: usize) {
     if !REGISTER_PEER_CONNECTION.load(Ordering::Relaxed)
         || PEER_REGISTER_ATTEMPTED.load(Ordering::Relaxed)
+        || PEER_NATIVE_DESCRIPTOR_READY.load(Ordering::Acquire)
         || manager == 0
     {
         return;
@@ -1286,11 +1440,15 @@ unsafe fn try_register_peer_connection(manager: usize) {
         *slot
     };
     let Some(pending) = pending else { return };
+    if PEER_INBOUND_SEEN_ID.load(Ordering::Relaxed) != pending.peer_id {
+        return;
+    }
 
     let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
     let register_fn = PEER_REGISTER_FN.load(Ordering::Relaxed);
     if exe_base == 0
         || register_fn == 0
+        || pending.descriptor[3] != peer_delivery_bridge as *const () as usize
         || unsafe { (manager as *const usize).read_volatile() }
             != exe_base + CONNECTION_MANAGER_VTABLE_RVA
     {
@@ -1311,15 +1469,17 @@ unsafe fn try_register_peer_connection(manager: usize) {
         if connection != 0
             && unsafe { ((connection + 0x138) as *const u64).read_volatile() } == pending.peer_id
         {
-            PEER_REGISTER_ATTEMPTED.store(true, Ordering::Relaxed);
-            log::info!(
-                "session-probe: peer-register skipped — manager {manager:#x} already has active connection \
-                 {connection:#x} for peer {}",
-                unseamless_core::diagnostics::peer_tag(pending.peer_id),
-            );
+            if !PEER_REGISTER_SKIP_LOGGED.swap(true, Ordering::Relaxed) {
+                log::info!(
+                    "session-probe: peer-register skipped — manager {manager:#x} already has active connection \
+                     {connection:#x} for peer {}; retained descriptor will remain eligible if it retires",
+                    unseamless_core::diagnostics::peer_tag(pending.peer_id),
+                );
+            }
             return;
         }
     }
+    PEER_REGISTER_SKIP_LOGGED.store(false, Ordering::Relaxed);
     if free_count == 0 {
         return;
     }
@@ -1340,11 +1500,6 @@ unsafe fn try_register_peer_connection(manager: usize) {
     {
         return;
     }
-    {
-        let mut slot = PENDING_PEER_REGISTRATION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *slot = None;
-    }
-
     let mode_a = unsafe { ((manager + 0x61) as *const u8).read_volatile() };
     let mode_b = unsafe { ((manager + 0x62) as *const u8).read_volatile() };
     log::info!(
@@ -1383,6 +1538,7 @@ unsafe fn try_register_peer_connection(manager: usize) {
         && owner == manager
         && key == pending.peer_id;
     if success {
+        REGISTERED_PEER_CONNECTION.store(connection, Ordering::Release);
         log::info!(
             "session-probe: peer-register SUCCESS — connection={connection:#x}, free {free_count}->{}, \
              active {active_count}->{}, appended={appended:#x}, vtable={vtable:#x}, owner={owner:#x}, peer={} \
@@ -1398,6 +1554,197 @@ unsafe fn try_register_peer_connection(manager: usize) {
              vtable={vtable:#x}, owner={owner:#x}, key={key:#x}"
         );
     }
+}
+
+/// Capture the descriptor copied into a native connection for our peer. `0x1426425f0` stores the
+/// twelve-word descriptor at `connection+0x28`; unlike the endpoint's high-level bundle, this is the
+/// exact lower-level callback contract consumed by the generic receive worker.
+unsafe fn log_native_peer_descriptor(manager: usize) {
+    if PEER_NATIVE_DESCRIPTOR_LOGGED.load(Ordering::Relaxed) || manager == 0 {
+        return;
+    }
+    let pending = {
+        let slot = PENDING_PEER_REGISTRATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot
+    };
+    let Some(pending) = pending else { return };
+    let active_begin = unsafe { ((manager + 0xb8) as *const usize).read_volatile() };
+    let active_end = unsafe { ((manager + 0xc0) as *const usize).read_volatile() };
+    let Some(active_count) = pointer_vector_count(active_begin, active_end, 32) else {
+        return;
+    };
+    let registered = REGISTERED_PEER_CONNECTION.load(Ordering::Relaxed);
+    for index in 0..active_count {
+        let connection = unsafe {
+            ((active_begin + index * size_of::<usize>()) as *const usize).read_volatile()
+        };
+        if connection == 0
+            || connection == registered
+            || unsafe { ((connection + 0x138) as *const u64).read_volatile() } != pending.peer_id
+        {
+            continue;
+        }
+        let mut descriptor = [0usize; PEER_DESCRIPTOR_QWORDS];
+        for (word_index, word) in descriptor.iter_mut().enumerate() {
+            *word = unsafe {
+                ((connection + 0x28 + word_index * size_of::<usize>()) as *const usize)
+                    .read_volatile()
+            };
+        }
+        let retained = unsafe { retain_native_peer_descriptor(pending.peer_id, descriptor) };
+        if !PEER_NATIVE_DESCRIPTOR_LOGGED.swap(true, Ordering::Relaxed) {
+            log::info!(
+                "session-probe: peer-register native descriptor — connection={connection:#x} \
+                 peer={} retained={retained} words={descriptor:#x?}",
+                unseamless_core::diagnostics::peer_tag(pending.peer_id),
+            );
+        }
+        return;
+    }
+}
+
+/// Validate and retain the game's own lower-level descriptor. Its context is a session-owned
+/// `FsdpConnection`, whose plaintext send method also becomes the type-5 producer.
+unsafe fn retain_native_peer_descriptor(
+    peer_id: u64,
+    descriptor: [usize; PEER_DESCRIPTOR_QWORDS],
+) -> bool {
+    let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
+    let context = descriptor[6];
+    if exe_base == 0
+        || context == 0
+        || unsafe { (context as *const usize).read_volatile() }
+            != exe_base + FSDP_CONNECTION_VTABLE_RVA
+    {
+        return false;
+    }
+    let mut retained = false;
+    {
+        let mut slot = PENDING_PEER_REGISTRATION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(pending) = slot.as_mut()
+            && pending.peer_id == peer_id
+        {
+            pending.descriptor = descriptor;
+            retained = true;
+        }
+    }
+    if retained || TYPE5_PEER_ID.load(Ordering::Relaxed) == peer_id {
+        PEER_NATIVE_FSDP_CONNECTION.store(context, Ordering::Release);
+        PEER_NATIVE_DESCRIPTOR_READY.store(true, Ordering::Release);
+    }
+    retained
+}
+
+/// Consume one frame-task-published type-5 payload on the connection manager's worker thread. This is
+/// the native ownership boundary for `FsdpConnection`; its lower transport pointer can be cleared during
+/// teardown, so a frame-thread call races and is unsafe.
+unsafe fn try_send_native_type5_on_worker() {
+    let payload = {
+        let mut slot = PENDING_NATIVE_TYPE5_PAYLOAD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.take()
+    };
+    let Some(payload) = payload else { return };
+    let context = PEER_NATIVE_FSDP_CONNECTION.load(Ordering::Acquire);
+    let exe_base = PEER_REGISTER_EXE_BASE.load(Ordering::Relaxed);
+    let state = if context != 0 {
+        unsafe { ((context + 0x78) as *const u32).read_volatile() }
+    } else {
+        0
+    };
+    let ready = context != 0
+        && exe_base != 0
+        && unsafe { (context as *const usize).read_volatile() }
+            == exe_base + FSDP_CONNECTION_VTABLE_RVA
+        && unsafe { ((context + 0x10) as *const usize).read_volatile() } != 0;
+    let ready = ready && state == 3;
+    if !ready {
+        let mut slot = PENDING_NATIVE_TYPE5_PAYLOAD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(payload);
+        return;
+    }
+    let send: extern "win64" fn(usize, *const u8, u32, u8) -> u8 =
+        unsafe { std::mem::transmute(exe_base + FSDP_PLAINTEXT_SEND_OFFSET) };
+    let ok = send(context, payload.as_ptr(), payload.len() as u32, 0);
+    let n = TYPE5_SEND_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n < 16 {
+        log::info!(
+            "session-probe: type5-native — worker FsdpConnection {context:#x} sent {}B plaintext \
+             type-5 to peer {} = {ok} at state={state} (native encoder owns route + transport framing)",
+            payload.len(),
+            unseamless_core::diagnostics::peer_tag(TYPE5_PEER_ID.load(Ordering::Relaxed)),
+        );
+    }
+}
+
+/// Observe the exact descriptor passed to the generic connection initializer. At this entry `rcx` is
+/// `connection+0x20` and `rdx` points at the twelve-word descriptor that will be copied to `connection+0x28`.
+fn log_peer_connection_init(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let r = &*regs;
+        let connection_body = r.rcx as usize;
+        let descriptor_ptr = r.rdx as usize;
+        if connection_body < 0x20 || descriptor_ptr == 0 {
+            return;
+        }
+        let n = PEER_CONNECTION_INIT_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n >= 12 {
+            return;
+        }
+        let connection = connection_body - 0x20;
+        let peer_id = ((connection + 0x138) as *const u64).read_volatile();
+        let mut descriptor = [0usize; PEER_DESCRIPTOR_QWORDS];
+        for (word_index, word) in descriptor.iter_mut().enumerate() {
+            *word = ((descriptor_ptr + word_index * size_of::<usize>()) as *const usize)
+                .read_volatile();
+        }
+        let is_probe = descriptor[3] == peer_delivery_bridge as *const () as usize;
+        let source = if is_probe { "probe" } else { "native" };
+        let retained = !is_probe && retain_native_peer_descriptor(peer_id, descriptor);
+        log::info!(
+            "session-probe: peer-connection-init #{n} source={source} connection={connection:#x} \
+             peer={} modes=({},{}) retained={retained} descriptor={descriptor:#x?}",
+            unseamless_core::diagnostics::peer_tag(peer_id),
+            r.r8 as u8,
+            r.r9 as u8,
+        );
+    }));
+}
+
+/// Trace one boundary of the native receive chain. The hook name identifies the ABI: native delivery
+/// and route adapter receive `(bytes, len, flag, context)`, while endpoint receive gets
+/// `(endpoint, bytes, len, flag, ...)`.
+fn log_native_receive_boundary(name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let n = PEER_NATIVE_RECEIVE_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n >= 24 {
+            return;
+        }
+        let r = &*regs;
+        let (bytes_ptr, len, owner) = if name == "peer-endpoint-recv" {
+            (r.rdx as usize, r.r8 as u32, r.rcx as usize)
+        } else {
+            (r.rcx as usize, r.rdx as u32, r.r9 as usize)
+        };
+        if bytes_ptr == 0 || len == 0 {
+            return;
+        }
+        let dump_len = usize::min(len as usize, 8);
+        let bytes: Vec<u8> = (0..dump_len)
+            .map(|offset| ((bytes_ptr + offset) as *const u8).read_volatile())
+            .collect();
+        log::info!(
+            "session-probe: native-receive #{n} {name} len={len} owner/context={owner:#x} \
+             first={bytes:02x?}"
+        );
+    }));
 }
 
 /// Validate a pointer-vector span before the registrar experiment reads an entry from it.
@@ -1434,13 +1781,17 @@ fn install_host_accept_trace(config: &Config) {
         PEER_REGISTER_EXE_BASE.store(exe_base, Ordering::Relaxed);
         PEER_REGISTER_FN.store(exe_base + PEER_REGISTER_OFFSET, Ordering::Relaxed);
     }
+    if instrument || register_peer {
+        install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
+    }
     if instrument {
         ADMIT_EXE_BASE.store(exe_base, Ordering::Relaxed);
         FORCE_GATEC_ACCEPT.store(config.debug.probes.force_gatec_accept, Ordering::Relaxed);
         if config.debug.probes.force_gatec_accept {
-            log::info!("session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c");
+            log::info!(
+                "session-probe: host-admit gate-c FORCE-ACCEPT armed (joiner-admit lever) — inbound SYNs pass gate-c"
+            );
         }
-        install_offset_hook("host-admit", exe_base + HOST_ADMIT_OFFSET, log_host_admit);
         install_offset_hook("host-admit-gate-c", exe_base + HOST_ADMIT_GATEC_OFFSET, log_host_admit_gatec);
         install_offset_hook("host-admit-success", exe_base + HOST_ADMIT_SUCCESS_OFFSET, log_host_admit_success);
         install_offset_hook("host-roster-add", exe_base + HOST_ROSTER_ADD_OFFSET, log_host_roster_add);
@@ -1459,9 +1810,30 @@ fn install_host_accept_trace(config: &Config) {
             exe_base + PEER_CONNECTION_RETIRE_OFFSET,
             log_peer_connection_retire,
         );
+        install_offset_hook(
+            "peer-connection-init",
+            exe_base + PEER_CONNECTION_INIT_OFFSET,
+            log_peer_connection_init,
+        );
+        install_offset_hook(
+            "peer-native-delivery",
+            exe_base + PEER_NATIVE_DELIVERY_OFFSET,
+            log_native_receive_boundary,
+        );
+        install_offset_hook(
+            "peer-route-adapter",
+            exe_base + PEER_ROUTE_ADAPTER_OFFSET,
+            log_native_receive_boundary,
+        );
+        install_offset_hook(
+            "peer-endpoint-recv",
+            exe_base + PEER_ENDPOINT_RECV_OFFSET,
+            log_native_receive_boundary,
+        );
         log::info!(
             "session-probe: peer-register worker lever armed — 0x142640bc0 will call registrar \
-             0x14263fd10 once after a guarded remote endpoint descriptor is captured"
+             0x14263fd10 once after a guarded remote endpoint descriptor is captured; \
+             0x1426425f0 descriptor initializer trace armed"
         );
     }
 }
@@ -1471,10 +1843,8 @@ fn install_host_accept_trace(config: &Config) {
 // Charted 2026-07-06 (SESSION-DRIVE.md > "★ TYPE-5 PRODUCER + INJECTION" > Q2). The type-5 validator
 // `0x142402ee0(rcx=conn, rdx=reader)` is the DLNW3D connection's vtable slot 17, reached ONLY from the
 // pump's type-5 dispatch case `0x142400924` (`call [rdi+0x88]`). So a hook on its entry fires iff a
-// delivered type-5 reached the pump AND was dispatched — the decisive receive-side signal. It separates
-// the two candidate walls from run 16: validator never fires ⇒ the type-5 is never DELIVERED (falls
-// through to find-or-create admit; fix = register the peer's SteamConnection); validator fires but
-// member+0x152 stays 0 ⇒ delivery works and the wall is VALIDATION (BeginAuthSession rejects). Read-only.
+// delivered type-5 reached the pump AND was dispatched. The result hook below distinguishes Steam auth
+// acceptance from rejection; the caller sets `member+0x152` only when the validator returns true. Read-only.
 
 /// type-5 validator tracer: `0x142402ee0(rcx=conn, rdx=reader)`. Fires per delivered+dispatched type-5.
 /// Logs `conn`, the reader, and `conn+0x80` (the identity `BeginAuthSession` validates the ticket against —
@@ -1491,10 +1861,34 @@ fn log_type5_validator(_name: &'static str, regs: *mut Registers) {
         if n < 16 {
             log::info!(
                 "session-probe: ★★ TYPE5-VALIDATOR FIRED #{n} — 0x142402ee0(conn={conn:#x}, reader={reader:#x}) \
-                 [conn+0x80](identity)={identity:#x} ({}) — a type-5 WAS DELIVERED + dispatched to the pump; the \
-                 wall is now VALIDATION (watch member+0x152: still 0 ⇒ BeginAuthSession rejected — ticket-timing \
-                 or the identity above != the sender's SteamID64)",
+                 [conn+0x80](identity)={identity:#x} ({}) — a type-5 WAS DELIVERED + dispatched to the pump; \
+                 TYPE5-AUTH-RESULT records whether Steam accepted it",
                 unseamless_core::diagnostics::peer_tag(identity),
+            );
+        }
+    }));
+}
+
+/// Post-call validator tracer. `eax` is the Steam auth result and `rdi` is still the peer member.
+fn log_type5_validator_result(_name: &'static str, regs: *mut Registers) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let r = unsafe { &*regs };
+        let result = r.rax as u32;
+        let result_name = match result {
+            0 => "OK",
+            1 => "InvalidTicket",
+            2 => "DuplicateRequest",
+            3 => "InvalidVersion",
+            4 => "GameMismatch",
+            5 => "ExpiredTicket",
+            _ => "Unknown",
+        };
+        let n = TYPE5_VALIDATOR_RESULT_LOGS.fetch_add(1, Ordering::Relaxed);
+        if n < 16 {
+            log::info!(
+                "session-probe: TYPE5-AUTH-RESULT #{n} — member={:#x} BeginAuthSession returned \
+                 {result} ({result_name}); 0 or 2 completes validation",
+                r.rdi,
             );
         }
     }));
@@ -1514,9 +1908,21 @@ fn install_type5_recv_trace(config: &Config) {
         }
     };
     install_offset_hook("type5-validator", exe_base + TYPE5_VALIDATOR_OFFSET, log_type5_validator);
+    let result_site = exe_base + TYPE5_VALIDATOR_RESULT_OFFSET;
+    if prologue_ok(
+        "type5-validator-result",
+        result_site,
+        &TYPE5_VALIDATOR_RESULT_PROLOGUE,
+    ) {
+        install_offset_hook(
+            "type5-validator-result",
+            result_site,
+            log_type5_validator_result,
+        );
+    }
     log::info!(
-        "session-probe: type5-recv trace installed (validator 0x142402ee0) — fires iff a delivered type-5 \
-         reaches the pump; pair with a capture-endpoint.py read of member+0x152 to localize the wall"
+        "session-probe: type5-recv trace installed (validator 0x142402ee0 + auth result 0x142402f7e) — \
+         fires iff a delivered type-5 reaches the pump"
     );
 }
 
@@ -1671,15 +2077,28 @@ fn log_game_send(_name: &'static str, regs: *mut Registers) {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // SAFETY: ilhook entry registers; rdx = a by-value SteamID64, r8/r9d by-value scalars.
+        // SAFETY: ilhook entry registers; rdx = a by-value SteamID64, r8 points at the `r9d`-byte
+        // packet for the duration of this call. The byte dump is debug-only because framing fields may
+        // contain session identifiers; it is an RE artifact, not part of a shareable info-level log.
         let r = unsafe { &*regs };
+        let len = r.r9 as u32;
         log::info!(
             "session-probe: ★ GAME-SENDP2P #{n} — 0x142640b20 to {} (len={}) — the GAME emitted a real \
              DLNW3D packet (NOT our probe's synthetic send); target = the joiner ⇒ the send phase works \
              and the bootstrap is downstream (joiner recv)",
             unseamless_core::diagnostics::peer_tag(r.rdx),
-            r.r9 as u32,
+            len,
         );
+        if r.r8 != 0 {
+            let dump_len = usize::min(len as usize, 32);
+            let bytes: Vec<u8> = (0..dump_len)
+                .map(|offset| unsafe { ((r.r8 as usize + offset) as *const u8).read_volatile() })
+                .collect();
+            log::debug!(
+                "session-probe: GAME-SENDP2P #{n} first {dump_len} byte(s) = {bytes:02x?} \
+                 (RE-only; may contain session identifiers, do not share verbatim)"
+            );
+        }
     }));
 }
 
@@ -1894,7 +2313,8 @@ fn log_p2p_socket_callback(name: &'static str, regs: *mut Registers) {
             "session-probe: P2P-CALLBACK-REGISTRAR {name} #{n} — ctx={:#x} callback_fn={:#x} — the \
              session standup registering its P2P callback (the fn pointer is the REAL connect-event \
              target; the p2p-evt-* hooks watch those)",
-            r.rcx, r.rdx,
+            r.rcx,
+            r.rdx,
         );
     }));
 }
@@ -1918,7 +2338,9 @@ fn log_p2p_event_callback(name: &'static str, regs: *mut Registers) {
             "session-probe: ★ P2P-EVENT {name} #{n} — rcx={:#x} rdx={:#x} r8={:#x} — a REAL P2P \
              connect/session event reached the DLNW3D socket layer (the connection-creation door; \
              on the host this is what builds the joiner's connection so init-data can be sent)",
-            r.rcx, r.rdx, r.r8,
+            r.rcx,
+            r.rdx,
+            r.r8,
         );
     }));
 }
@@ -1995,7 +2417,7 @@ fn log_teardown_handler(_name: &'static str, regs: *mut Registers) {
 /// error string on failure. Used by `suppress_leave` to force host-setup's online-availability gate true.
 fn patch_bytes(addr: usize, bytes: &[u8]) -> Result<(), String> {
     use windows::Win32::System::Memory::{
-        VirtualProtect, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS,
+        PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, VirtualProtect,
     };
     // SAFETY: `addr` is a charted, resident function entry in our own process image. We flip its page(s) to
     // RWX, overwrite the leading bytes, restore the old protection, and flush the icache — the standard
@@ -2305,7 +2727,11 @@ fn log_builder_entry(_name: &'static str, regs: *mut Registers) {
             "session-probe: builder-entry REACHED — vtable[0x80] builder thunk 0x1423f46b0 \
              (container={container:#x}, &local={local:#x}, [local]={first:#x}, selector [desc+0x3d]={sel} => \
              {}) — the handler passed gate1+gate2+the 0xa0 bit; any create failure now is builder-internal",
-            if sel != 0 { "0x1426372e0" } else { "0x142637440" },
+            if sel != 0 {
+                "0x1426372e0"
+            } else {
+                "0x142637440"
+            },
         );
     }));
 }
@@ -2558,7 +2984,9 @@ fn land_socket_holder(container: usize) {
     let alloc: extern "win64" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(alloc_fn) };
     let buf = alloc(0x18, 8, heap);
     if buf == 0 {
-        log::warn!("session-probe: land-socket-holder — 0x18B alloc off container heap returned null; skipping");
+        log::warn!(
+            "session-probe: land-socket-holder — 0x18B alloc off container heap returned null; skipping"
+        );
         return;
     }
     // Run the socket-manager's FULL init (`0x14263a9d0`) so its service stands up the game's way — the
@@ -2656,7 +3084,11 @@ fn dump_conn_graph(conn: usize) {
              [+8]sub={sub:#x}{} sub.vtable={sub_vt:#x} sub.vt[+0x10]={slot10:#x} \
              sub.vt[+0x18]={slot18:#x} (host-setup jmps HERE; 0 => the fault) sub.vt[+0x20]={slot20:#x} \
              [+0x120]ifaceholder={f120:#x} [+0x128]peer={peer:#x}",
-            if sub_is_embedded { " (=conn+0x20 embedded)" } else { " (separate obj)" },
+            if sub_is_embedded {
+                " (=conn+0x20 embedded)"
+            } else {
+                " (separate obj)"
+            },
         );
     }
 }
@@ -2688,7 +3120,10 @@ fn log_initiation(name: &'static str, regs: *mut Registers) {
         log::debug!(
             "session-probe: {name} initiated | rcx={:#018x} rdx={:#018x} r8={:#018x} r9={:#018x} \
              (rdx/r8/r9 may carry a raw peer SteamID64 — do not share this log verbatim)",
-            r.rcx, r.rdx, r.r8, r.r9
+            r.rcx,
+            r.rdx,
+            r.r8,
+            r.r9
         );
     }));
 }
@@ -2764,11 +3199,18 @@ impl Feature for SessionFsmProbe {
             // be matched against this known `CSSessionManager` pointer).
             None => log::info!(
                 "session-probe: FSM live @frame {} — CSSessionManager @{:#x} lobby={:?} protocol={:?}",
-                tick.frame, base, fsm.lobby, fsm.protocol,
+                tick.frame,
+                base,
+                fsm.lobby,
+                fsm.protocol,
             ),
             Some(old) => log::info!(
                 "session-probe: FSM @frame {} lobby {:?}->{:?} protocol {:?}->{:?}",
-                tick.frame, old.lobby, fsm.lobby, old.protocol, fsm.protocol,
+                tick.frame,
+                old.lobby,
+                fsm.lobby,
+                old.protocol,
+                fsm.protocol,
             ),
         }
     }
@@ -2984,12 +3426,18 @@ impl Feature for SessionCreateDriver {
                 );
             }
         } else {
-            log::info!("session-probe: drive-create — NetworkSession ptr (*(this+0x60)) null; skipping reject#1 probe");
+            log::info!(
+                "session-probe: drive-create — NetworkSession ptr (*(this+0x60)) null; skipping reject#1 probe"
+            );
         }
 
         log::info!(
             "session-probe: drive-create @frame {} — calling create wrapper {:#x}(this={:#x}, flag={}, mode={}, settings={{0,2}}); lobby was None",
-            tick.frame, fn_addr, base, DRIVE_FLAG, DRIVE_MODE,
+            tick.frame,
+            fn_addr,
+            base,
+            DRIVE_FLAG,
+            DRIVE_MODE,
         );
         let ret = unsafe { create(base as *mut CSSessionManager, DRIVE_FLAG, DRIVE_MODE, &settings) };
         let after = crate::sdk::with_instance::<CSSessionManager, _>(|s| {
@@ -3410,13 +3858,13 @@ pub struct TransportStandupDriver {
     /// Last endpoint pointer seen at `member+0x130` — the type-5 drive only fires on an endpoint that was
     /// stable across two ticks (skips the pump's mid-build transients that crashed run 13).
     last_type5_ep: usize,
-    /// ★ Hand-frame type-5 sender (the primary producer): frame `[len-hdr][5][token][len][ticket]` ourselves
-    /// and `SendP2PPacket` it on channel 30 — never touching the Arxan-locked game send. See `send_type5`.
+    /// ★ Primary type-5 producer: frame `[5][token][len][ticket]` and hand it to the peer's captured
+    /// `FsdpConnection`, which performs the protected transport encoding. See `send_type5`.
     send_type5: bool,
     /// Cached Steam auth ticket (the type-5 blob). `GetAuthSessionTicket` allocates a handle per call, so we
     /// fetch once and retry the send — the ticket only goes valid after Steam's async callback, not on fetch.
     type5_ticket: Option<Vec<u8>>,
-    /// Throttle the hand-framed type-5 send (~1s) so a run's log stays legible and we don't flood the peer.
+    /// Throttle the native type-5 send (~1s) so a run's log stays legible and we don't flood the peer.
     type5_send_throttle: FrameThrottle,
 }
 
@@ -3480,10 +3928,6 @@ const ISTEAM_READ_SLOT: usize = 0x10;
 const ISTEAM_ACCEPT_SLOT: usize = 0x18;
 /// `k_EP2PSendReliable`.
 const P2P_SEND_RELIABLE: u32 = 2;
-/// `k_EP2PSendUnreliable` — the game's own type-5 send uses unreliable delivery (charted `0x142400df0`
-/// → `SendP2PPacket(..., unreliable, ch30)`). We match it so the hand-framed type-5 is as close to a
-/// real one as possible; the receiver's `ReadP2PPacket(ch30)` drains both modes identically anyway.
-const P2P_SEND_UNRELIABLE: u32 = 0;
 /// P2P channel for our game-transport probe pings (0; the game's own transport is dormant offline).
 const P2P_PROBE_CHANNEL: i32 = 0;
 /// The channel the game's socket-manager worker thread actually reads (`ReadP2PPacket(nChannel=
@@ -3561,7 +4005,11 @@ impl Feature for TransportStandupDriver {
             log::info!(
                 "session-probe: transport-standup — ContextInit ret={ret:#x} holder[+0]={h0:#x} (should stay \
                  pFn 0x142640b90) holder[+8]={h8:#x} => ISteamNetworking006 = {iface:#x} ({})",
-                if iface == 0 { "NULL — P2P interface unavailable offline!" } else { "resolved OK" },
+                if iface == 0 {
+                    "NULL — P2P interface unavailable offline!"
+                } else {
+                    "resolved OK"
+                },
             );
 
             // DIAGNOSTIC (2026-07-04 pm): the socketmgr worker thread crashes calling the Steam import at
@@ -3619,7 +4067,9 @@ impl Feature for TransportStandupDriver {
             let alloc: extern "win64" fn(usize, usize, usize) -> usize =
                 std::mem::transmute(exe_base + GAME_ALLOC_OFFSET);
             let mgr_buf = alloc(MANAGER_SIZE, 8, heap);
-            log::info!("session-probe: transport-standup — manager buf ({MANAGER_SIZE:#x}B off game heap) = {mgr_buf:#x}");
+            log::info!(
+                "session-probe: transport-standup — manager buf ({MANAGER_SIZE:#x}B off game heap) = {mgr_buf:#x}"
+            );
             if mgr_buf == 0 {
                 log::error!("session-probe: transport-standup — manager alloc returned NULL; aborting");
                 return;
@@ -3650,13 +4100,17 @@ impl Feature for TransportStandupDriver {
                 "session-probe: transport-standup — connection-creator 0x142640560(manager, params{{count=1}}) = {created}",
             );
             if !created {
-                log::error!("session-probe: transport-standup — connection-creator returned false; array not built");
+                log::error!(
+                    "session-probe: transport-standup — connection-creator returned false; array not built"
+                );
                 return;
             }
             // First connection slot: [manager+0x78] holds the array base; slot 0 = *(manager+0x78) + 0.
             let array_base = ((mgr + CONN_ARRAY_PTR_OFF) as *const usize).read_volatile();
             if array_base == 0 {
-                log::error!("session-probe: transport-standup — manager connection array [+0x78] null; aborting");
+                log::error!(
+                    "session-probe: transport-standup — manager connection array [+0x78] null; aborting"
+                );
                 return;
             }
             let conn = array_base;
@@ -3688,7 +4142,9 @@ impl Feature for TransportStandupDriver {
             // (no init → no null standup); then the wrapper. Publish the WRAPPER to the seam.
             let sm_buf = alloc(SOCKMGR_SIZE, 8, heap);
             if sm_buf == 0 {
-                log::error!("session-probe: transport-standup — socket-manager alloc returned NULL; aborting wrapper build");
+                log::error!(
+                    "session-probe: transport-standup — socket-manager alloc returned NULL; aborting wrapper build"
+                );
                 return;
             }
             let sm_ctor: extern "win64" fn(usize) -> usize =
@@ -3751,6 +4207,9 @@ impl TransportStandupDriver {
         let Some(peer) = self.target_peer() else {
             return; // no linked peer and no usable override yet
         };
+        if self.send_type5 {
+            TYPE5_PEER_ID.store(peer, Ordering::Relaxed);
+        }
         let iface = self.iface;
         // Accept-unmask: the host role leaves the inbound session un-accepted so the game's own
         // P2PSessionRequest callback dispatch (the registered 0x1423fd5xx callbacks) sees the request.
@@ -3774,12 +4233,10 @@ impl TransportStandupDriver {
         let symmetric = self.symmetric;
         let suppress_syn = self.suppress_syn;
         let mut accepted_ok = false;
-        // ★ Hand-frame type-5: build the framed auth-ticket packet ourselves (on a throttle) so the closure
-        // below just SendP2PPackets it on channel 30 — the Arxan-locked game send `0x142400df0` is never
-        // touched. `None` until Steam yields a ticket (fetched-once + cached inside). Sent by BOTH peers in
-        // symmetric mode (each completes the other's member); no role gate.
-        let type5_packet = if self.send_type5 && self.type5_send_throttle.tick() {
-            self.prepare_type5_packet()
+        // Build the plaintext type-5 payload on a throttle. The retained native FsdpConnection encodes and
+        // sends it after the legacy-P2P maintenance block below.
+        let type5_payload = if self.send_type5 && self.type5_send_throttle.tick() {
+            self.prepare_type5_payload()
         } else {
             None
         };
@@ -3874,33 +4331,13 @@ impl TransportStandupDriver {
                     unseamless_core::diagnostics::peer_tag(peer),
                 );
             }
-            // ★ Hand-frame type-5 send: push the framed auth-ticket packet on channel 30 (the channel the
-            // peer's socket-manager worker drains). The peer's recv → routes by our sender id → its endpoint
-            // queue → the type-5 case → validator (BeginAuthSession vs member+0x80) → member+0x152=1 → roster.
-            // Unreliable to match the game's own send; retried on a throttle (the ticket only goes valid after
-            // Steam's async callback, so the first sends may bounce as InvalidTicket).
-            if let Some(pkt) = type5_packet.as_ref() {
-                let ok = send(
-                    iface,
-                    peer,
-                    pkt.as_ptr(),
-                    pkt.len() as u32,
-                    P2P_SEND_UNRELIABLE,
-                    GAME_WORKER_CHANNEL,
-                );
-                let n = TYPE5_SEND_LOGS.fetch_add(1, Ordering::Relaxed);
-                if n < 16 {
-                    log::info!(
-                        "session-probe: type5-handframe — sent {}B type-5 to peer {} on channel {GAME_WORKER_CHANNEL} = {ok} \
-                         [hdr {:#04x} {:#04x}] (watch the peer's member+0x152 → 1 / flags (0,0,1,0) / players → 2)",
-                        pkt.len(),
-                        unseamless_core::diagnostics::peer_tag(peer),
-                        pkt[0],
-                        pkt[1],
-                    );
-                }
-            }
         }));
+        if let Some(payload) = type5_payload {
+            let mut slot = PENDING_NATIVE_TYPE5_PAYLOAD
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = Some(payload);
+        }
         if accepted_ok {
             self.accepted = true;
         }
@@ -3921,7 +4358,7 @@ impl TransportStandupDriver {
         }
         // ★ Type-5 producer (option b): once the peer member's endpoint is built, drive the game's own type-5
         // send on its LIVE +0x130 so the game frames + SendP2PPackets a real auth-ticket message. The peer's
-        // pump validates it → member+0x152=1 → roster → players=2. Throttled retry (the auth ticket only goes
+        // pump validates it → member+0x152=1 → type-1 roster event → players=2. Throttled retry (the auth ticket only goes
         // valid after Steam's GetAuthSessionTicketResponse_t callback, ~ms; the endpoint also cycles
         // build/drop, so re-read +0x130 each tick and skip when 0). The latch hook publishes the peer member.
         if self.drive_type5 {
@@ -3930,18 +4367,17 @@ impl TransportStandupDriver {
         }
     }
 
-    /// Build the hand-framed type-5 packet: `[len-hdr][5][8B token=0][4B ticket_len][ticket]`. The Steam auth
+    /// Build the plaintext type-5 payload: `[5][8B token=0][4B ticket_len][ticket]`. The Steam auth
     /// ticket is the only validated field (the token is stored unvalidated by the peer, so we send zeros); it's
     /// fetched once and cached — `GetAuthSessionTicket` allocates a fresh handle per call, and re-fetching would
     /// leak handles and reset the ~ms validity clock. Returns `None` until Steam yields a ticket (retried each
-    /// throttle tick until it does), or if framing/length gates reject it. The transport length-header wrap is
-    /// host-tested in `core::dlnw3d`.
-    fn prepare_type5_packet(&mut self) -> Option<Vec<u8>> {
+    /// throttle tick until it does), or if the type-5 length gate rejects it.
+    fn prepare_type5_payload(&mut self) -> Option<Vec<u8>> {
         if self.type5_ticket.is_none() {
             self.type5_ticket = crate::steam::get_auth_session_ticket();
             if let Some(t) = self.type5_ticket.as_ref() {
                 log::info!(
-                    "session-probe: type5-handframe — fetched Steam auth ticket ({}B), caching for the type-5 send \
+                    "session-probe: type5-native — fetched Steam auth ticket ({}B), caching for the type-5 send \
                      (retried on a throttle until it validates on the peer)",
                     t.len(),
                 );
@@ -3949,8 +4385,7 @@ impl TransportStandupDriver {
         }
         let ticket = self.type5_ticket.as_ref()?;
         // Token = 0: the peer's validator (`0x142402ee0`) stores it at conn+0x148 unvalidated, so any 8 bytes pass.
-        let payload = unseamless_core::dlnw3d::frame_type5(0, ticket)?;
-        unseamless_core::dlnw3d::wrap_transport_frame(&payload)
+        unseamless_core::dlnw3d::frame_type5(0, ticket)
     }
 
     /// Drive the game's own type-5 send `0x142400df0(endpoint)` on the latched peer member's live endpoint
@@ -4015,7 +4450,7 @@ impl TransportStandupDriver {
     /// from the session's pool, sets `member+0x80` =
     /// the peer SteamID64, initialises it, and enqueues it on the session's pending-conn queue — the exact
     /// thing the game's own event-drain does for a natural join, which never fires for our driven Deck. The
-    /// game's running per-frame session update then pumps the new member's handshake. One-shot; logs the member
+    /// game's running per-frame session update then pumps the new member's handshake. Logs the member
     /// pool + pending-conn queue before and after so a new populated slot is visible. Firewalled; a hard fault
     /// surfaces via crashdump (we're calling a game function on the main thread with a live session).
     fn try_drive_add_peer(&mut self, peer: u64) {
@@ -4055,12 +4490,15 @@ impl TransportStandupDriver {
                 (rq(session + 0x538), rq(session + 0x4f0), rq(session + 0x4f8));
             // peerInfo = &{peer SteamID64}; key = &{self SteamID64}. 0x1423fdc80 reads [peerInfo] as the
             // member identity (→ member+0x80) and [key] for the is-self compare (peer != self ⇒ remote).
-            // Both are single-qword structs on our stack; the callee only reads [+0]. flag=1 (announce).
+            // Both are single-qword structs on our stack; the callee only reads [+0]. The final flag must
+            // remain zero: `0x1423fdc80` copies it to `member+0x151`, and completion phase `0x142400f40`
+            // skips the type-1 session/roster event when that byte is nonzero. Re-derived after the first
+            // successful BeginAuthSession left the roster at one player despite `member+0x152 == 1`.
             let peer_info: u64 = peer;
             let key: u64 = self_id;
             let add: extern "win64" fn(usize, *const u64, *const u64, u8) -> u8 =
                 std::mem::transmute(add_peer);
-            let ret = add(session, &peer_info, &key, 1);
+            let ret = add(session, &peer_info, &key, 0);
             let (pend_a0, pend_a1) = (rq(session + 0x4f0), rq(session + 0x4f8));
             // Log the first fire, plus any time the pending queue grew (a fresh member was actually enqueued
             // this call — vs a dedup no-op once the member persists). Keeps the re-fire throttle quiet.

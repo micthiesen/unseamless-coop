@@ -3,58 +3,59 @@
 Fast-moving work state and chosen next step. This records the work, not live workers, rig state, or
 uncommitted changes. Durable findings live in the linked docs.
 
-Last updated: **2026-07-12** (worker-thread registrar implemented and solo-proven).
+Last updated: **2026-07-13** (native auth and two-player game roster proven on rig plus Deck).
 
 ## Now
 
 - **Rungs 1, 2, and 4 plus the Steam P2P transport are shipped and two-machine-proven.** Password-keyed
   lobby discovery resolves the peer, the private side-channel authenticates, and legacy game P2P exchanges
   packets bidirectionally by SteamID64.
-- **The rung-3 session graph reaches a stable `Host`/`Ingame` session with one remote member endpoint.**
-  `drive_add_peer` queues the peer; the game's pump builds the real `MTInternalThreadSteamConnection` at
-  `member+0x130`; the synthetic SYN is suppressed because it is unnecessary noise.
-- **The type-5 producer and wire format are solved.** The hand-frame sender uses a real cached Steam auth
-  ticket and the charted 11-bit transport header. Prior two-machine runs proved each peer's type-5 crosses
-  Steam and reaches the receiver's channel-30 admit path. Driving the game's protected sender remains retired.
-- **The delivery-side registrar is implemented behind `register_peer_connection` and passes locally.** At
-  the transient endpoint set, the probe forms the descriptor using the native builder's field mapping; at
-  the next `0x142640bc0` worker entry it calls `0x14263fd10`. Runtime result: free `5 -> 4`, active `0 -> 1`,
-  correct connection vtable/owner/peer key, and no crash. A raw contiguous endpoint copy is invalid because
-  it puts `endpoint+0x58` in callable descriptor `+0x38`.
-- **The only solo retirement is expected remote timeout.** With the Deck offline, the manager removes the
-  valid connection after 6.57 seconds with `EP2PSessionError::Timeout` (reason 4). The remaining unknown is
-  downstream behavior with a responding peer, not local construction or manager insertion.
+- **Rung 3 reaches the two-player game roster on both real machines.** Rig and Deck each held
+  `Host`/`Ingame`, validated the other peer's Steam ticket, posted the native type-1 roster event, and
+  changed from `players=1` to `players=2` within the same second. Repeated diagnostics held at two and both
+  processes stayed alive.
+- **The native type-5 path is solved end to end.** The frame task prepares plaintext type 5; manager worker
+  `0x142640bc0` sends it through `FsdpConnection` slot 6 only in connected state 3. Native delivery
+  `0x142644600`, route adapter `0x14263cf50`, endpoint receiver `0x14203f850`, pump dispatch, and
+  `BeginAuthSession` are all runtime-proven.
+- **Synthetic descriptor reuse is retired.** The native descriptor owns a session-lifetime Fsdp context;
+  retaining it after native teardown dereferences cleared state. Once the native descriptor appears, the
+  probe suppresses its synthetic registrar. The endpoint callback's five-argument ABI also cannot be used
+  directly by the generic four-argument worker.
+- **The last roster blocker was the add-peer suppress flag.** `flag=1` copied to `member+0x151`, causing
+  completion phase `0x142400f40` to skip the type-1 session event even though auth set `member+0x152=1`.
+  `flag=0` enables the event and immediately grows the roster.
 
 ## Next
 
-**Run the registrar lever with the Deck online.** This is orchestrator-serial and directly gates rung 3;
-no independent code lane outranks it. Use the existing symmetric two-machine configuration with
-`register_peer_connection`, `send_type5`, and `instrument_type5_recv` enabled on both machines.
-
-Acceptance on each receiver: `peer-register SUCCESS`; active connection remains while peer traffic is live;
-`TYPE5-VALIDATOR FIRED`; then `member+0x152=1` and the session observer reports `players=2`. If an online peer
-still retires with reason 4, inspect legacy P2P accept state before changing the descriptor. If the validator
-fires without completion, inspect `BeginAuthSession` ticket timing and identity. Plan and evidence:
-[SESSION-DRIVE.md](SESSION-DRIVE.md) > "Worker-Thread Registrar Result (2026-07-12)".
+**Verify actual in-world presence and control on the current two-machine session.** This is the last check
+before calling rung 3 playable and genuinely needs Michael's eyes: confirm each character renders on the
+other machine and movement replicates. Keep the current run alive; both observers already report the correct
+remote identity in slot 2. If presence works, the next implementation chunk is to replace configured debug
+peer ids and symmetric probe roles with the peer and Open/Join lifecycle supplied by rungs 4 and 2. If the
+roster is present but the character is not, instrument the post-roster game packets and `join_wait`/ChrIns
+spawn transition instead of revisiting transport or auth. Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) >
+"Native Transport and Two-Player Roster Result (2026-07-13)".
 
 ## Candidates Not Chosen
 
-- **Batch stay-connected two-player validation into the same Deck session after `players=2`.** Small and
-  serial, but it cannot precede the registrar acceptance chain.
-- **Post-rung-3 adoption sweep** (session toggles, identity-keyed nameplate color, presence surfaces). This is
-  delegable once real two-player state exists, but implementing against `players=1` would not validate it.
-- **More static registrar/descriptor RE.** The native call contract, endpoint mapping, insertion, service loop,
-  and timeout cleanup are already observed. More static work does not answer the responding-peer question.
-- **ERSC factory capture or gate-c/member-lookup work.** Ruled out: `0x14263b720` creates the manager, not a
-  peer connection, and `[context+0x168]` is the reject stub even in a working ERSC session.
+- **Productize the proven rung-3 path immediately.** Highest-value implementation after the presence check,
+  but doing it before knowing whether the roster produces a visible peer would hide the remaining gate.
+- **Harden orphaned lobby cleanup after a killed test process.** This run's private side-channel reported an
+  old world still open, while rung 3 proceeded through configured peer ids. Real lifecycle issue, but it does
+  not invalidate the native session result and is smaller than Open/Join integration.
+- **Stay-connected and area-transition validation.** Now unblocked and suitable for the same two-player rig,
+  but only after basic presence and movement are confirmed.
+- **Remove the dense RE probes.** Keep them until Open/Join productization reproduces `players=2`; then retain
+  only bounded milestone logging and the re-derivation comments.
 
 ## Learned Recently
 
-- **Registrar chart, descriptor failure/correction, local success, and timeout cleanup** ->
-  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Correction and Local Runtime Lead (2026-07-12)" and
-  "Worker-Thread Registrar Result (2026-07-12)".
+- **Native descriptor, Fsdp sender, receive chain, auth result, roster flag correction, and two-machine
+  success** -> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result
+  (2026-07-13)".
 - **Current rung-3 gating map and historical dead ends** -> [ROADMAP.md](ROADMAP.md) > "Rung 3".
 - **Reproducible runtime inspection** -> `scripts/re/peek-socketmgr.py`, `catch-endpoint.py`,
   `watch-write.py`, and `watch-bt.py`; the watchpoint helpers stop every traced thread before clearing DR7.
-- **Code on `main`** -> commit `4371c3c` (`register_peer_connection`, worker-thread registrar, diagnostics,
-  RE helper hardening, and seed configuration).
+- **Prior code on `main`** -> commit `4371c3c` (`register_peer_connection`, worker-thread registrar,
+  diagnostics, RE helper hardening, and seed configuration).
