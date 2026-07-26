@@ -481,6 +481,26 @@ pub struct DebugProbes {
     pub p2p_test_peer_a: u64,
     /// Second peer for [`Self::p2p_test_peer_a`] (see there).
     pub p2p_test_peer_b: u64,
+
+    /// **In-world phantom presence probe** (`coop/features/presence_probe`): sample
+    /// `WorldChrMan::player_chr_set` and log, under the greppable `presence-probe:` prefix, a ~1/sec
+    /// roster (phantom count; per phantom a stable tag, load status, update type, world position, map
+    /// block, and distance moved since the last sample) plus immediate spawn/despawn/load-status edge
+    /// lines. Answers, from a log rather than by looking at the screen, whether a `players=2` session
+    /// roster actually produces a **remote character standing in the world** and whether its movement
+    /// replicates. Pure observation; off by default. Enable on both machines of a two-machine rig run.
+    pub presence_probe: bool,
+
+    /// **Look-at-phantom camera lever** (`coop/features/presence_probe::LookAtPhantom`), the screenshot
+    /// half of [`presence_probe`](Self::presence_probe): while a remote phantom is loaded, point the
+    /// game's camera at it (the first `Active` non-local `player_chr_set` entry, deterministically),
+    /// re-asserted each frame, so a presence screenshot doesn't depend on where the save happens to
+    /// leave the local character facing. Rides the same `chr_cam.death_cam_target` + `DeathCam` lever the
+    /// spectate feature uses, and **doubles as the verification for `docs/SPECTATE.md` > "Rig asks" #1**
+    /// (does writing that field actually make the camera follow?), which needs only a loaded phantom
+    /// here rather than a 2-player session plus a local death. Off by default. Don't enable alongside
+    /// `gameplay.always_spectate_on_death` — both drive the same two camera fields.
+    pub look_at_phantom: bool,
 }
 
 /// Upper bound on [`DebugProbes::event_flag_scan_count`] — scanning more than this many flags every
@@ -793,6 +813,19 @@ impl Config {
             self.debug.probes.event_flag_scan_count = MAX_FLAG_SCAN;
         }
 
+        // Two levers, one pair of fields. The look-at-phantom probe and spectate-on-death both write
+        // `chr_cam.death_cam_target` + `camera_type` from the same task phase, so with both on the
+        // winner is feature-registration order and a rig capture is confusing rather than wrong. Warn
+        // rather than clamp: which one to drop is the tester's call.
+        if self.debug.probes.look_at_phantom && self.gameplay.always_spectate_on_death {
+            warnings.push(ConfigWarning {
+                field: "debug.probes.look_at_phantom".into(),
+                message: "conflicts with gameplay.always_spectate_on_death; both drive the same \
+                          chr_cam death-camera fields. Turn one off for a clean rig capture."
+                    .into(),
+            });
+        }
+
         if self.world_time.hour > 23 {
             warnings.push(ConfigWarning {
                 field: "world_time.hour".into(),
@@ -854,6 +887,29 @@ mod tests {
             reparsed.debug.probes.register_peer_connection,
             "register_peer_connection must survive round-trip"
         );
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn presence_probe_defaults_off_and_round_trips() {
+        // The in-world phantom presence probe and its camera lever must be opt-in (off by default)...
+        assert!(!DebugProbes::default().presence_probe, "presence_probe must default off");
+        assert!(!DebugProbes::default().look_at_phantom, "look_at_phantom must default off");
+
+        // ...including when [debug.probes] is present but omits the key (a config predating the flag,
+        // which guards #[serde(default)] on the field, not just Default)...
+        let (old, w) = Config::from_toml_str("[debug.probes]\nsnapshot_secs = 5\n").unwrap();
+        assert!(!old.debug.probes.presence_probe, "missing key must default off");
+        assert!(!old.debug.probes.look_at_phantom, "missing key must default off");
+        assert!(w.is_empty(), "{w:?}");
+
+        // ...and a hand-set `true` must survive a real serialize -> parse round-trip.
+        let mut cfg = Config::default();
+        cfg.debug.probes.presence_probe = true;
+        cfg.debug.probes.look_at_phantom = true;
+        let (reparsed, w) = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
+        assert!(reparsed.debug.probes.presence_probe, "presence_probe must survive round-trip");
+        assert!(reparsed.debug.probes.look_at_phantom, "look_at_phantom must survive round-trip");
         assert!(w.is_empty(), "{w:?}");
     }
 

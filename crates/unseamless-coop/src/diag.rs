@@ -288,6 +288,14 @@ pub fn probe_features(config: &Config) -> Vec<Box<dyn Feature>> {
     if p.event_flag_scan_count > 0 {
         features.push(Box::new(FlagScanProbe::new(p.event_flag_scan_start, p.event_flag_scan_count)));
     }
+    if p.presence_probe {
+        // Lives with the other `WorldChrMan`-reading features (it shares the phantom-iteration
+        // guards with the nameplates); registered here because `[debug.probes]` is the switchboard.
+        features.push(Box::new(crate::features::presence_probe::PresenceProbe::new()));
+    }
+    if p.look_at_phantom {
+        features.push(Box::new(crate::features::presence_probe::LookAtPhantom::new()));
+    }
     features
 }
 

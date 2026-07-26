@@ -11,6 +11,7 @@ pub mod native_nameplates;
 pub mod notifications;
 pub mod observer;
 pub mod playstate;
+pub mod presence_probe;
 /// The rig-testing guide binding (debug-only; see `crate::rig_guide` / `unseamless_core::guide`).
 #[cfg(debug_assertions)]
 pub mod rig_guide;

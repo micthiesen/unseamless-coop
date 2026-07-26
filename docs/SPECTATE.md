@@ -49,6 +49,15 @@ follow hook, which is why this rides it rather than building a free cam.
 Static work can reach and write the lever but can't see the result. Precise asks for the orchestrator
 (toggle `always_spectate_on_death = true`, get into a 2-player session, die):
 
+> **Ask #1 has a cheaper instrument now:** `[debug.probes] look_at_phantom`
+> (`coop/features/presence_probe::LookAtPhantom`, sibling to the presence probe) rides the same
+> `death_cam_target` + `DeathCam` lever but needs only a **loaded phantom** — no local death, no
+> `always_spectate_on_death`. It logs `presence-probe: look-at` on acquire and
+> `presence-probe: look-at CONFIRM` ~1s later with the `camera_type` the game left in place before our
+> re-assert (`7 (DeathCam)` = the write survives; anything else = the game reverts us and the
+> phase/field set is wrong). Don't enable it and `always_spectate_on_death` together — they drive the
+> same two fields.
+
 1. **Does it pan to the partner?** With the toggle on, on local death the debug build logs one
    `spectate probe (first death): ...` `info!` line (chr_cam present + Active entry count) and then
    `spectate: following partner 0x… (N living of M)`. Watch whether the view actually frames the living
