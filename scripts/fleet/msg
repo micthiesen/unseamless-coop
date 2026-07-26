@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# msg <tmux-session> <text...>   (or pipe text on stdin)
+# msg <tmux-session> <text...>   (or `-`/no args to read the message from stdin)
 #
 # Deliver a message to another fleet Claude session. The message lands as a normal
 # user turn in the target, delivered in-process through its inspector socket by the
@@ -39,7 +39,16 @@ if ! [[ "$sess" =~ ^usc-(orch|worker-[a-z0-9][a-z0-9_-]*)$ ]]; then
   echo "msg: refusing target '$sess' -- only fleet sessions (usc-orch, usc-worker-<name>) allowed" >&2
   exit 2
 fi
-if [ "$#" -gt 0 ]; then text="$*"; else text="$(cat)"; fi
+# Text source: args, or stdin. `-` is the explicit stdin sentinel, matching worker-new — without it
+# a `msg <sess> - <<'EOF'` heredoc (the documented way to pass a brief with backticks/quotes) sends
+# the literal "-" and silently drops the heredoc, which is exactly what it looks like: nothing.
+if [ "$#" -eq 1 ] && [ "$1" = "-" ]; then
+  text="$(cat)"
+elif [ "$#" -gt 0 ]; then
+  text="$*"
+else
+  text="$(cat)"
+fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 
 # Resolve the TARGET's harness: a worker's .harness marker (spawn pin, global

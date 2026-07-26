@@ -151,9 +151,16 @@ any session without killing it via `F10`/`F11`/`F12`, or `Ctrl-b d`.)
 
 ```
 scripts/fleet/msg usc-worker-<name> "[orchestrator] <text>"
+
+scripts/fleet/msg usc-worker-<name> - <<'EOF'      # multi-line, or any text with backticks/quotes
+[orchestrator] <text>
+EOF
 ```
 
 - Always prefix `[orchestrator]` so the worker knows it's you and not Michael typing.
+- For anything multi-line or containing backticks/`$(...)`/quotes, use the `-` stdin form with a
+  **single-quoted** heredoc, same convention as `worker-new` — a `"..."` arg gets mangled by the
+  shell before `msg` sees it.
 - Just use the CLI; `msg` injects the message as a live turn in the target through its inspector
   socket (you never manage waking anything). To an idle worker it arrives instantly; to a busy one it
   queues and runs at the end of its current turn. A draft sitting in the target's input box is
