@@ -186,11 +186,12 @@ game_pids() {
 # Is the actual game running? (Excludes the decompile — see `game_pids`.)
 game_running() { [[ -n "$(game_pids)" ]]; }
 
-# Prove that an X display is gamescope's nested server, not Plasma's host Xwayland. Gamescope starts
-# its Xwayland directly (or through a short-lived helper), so accept only a local :N display whose
-# server process reaches gamescope within a few parent links. Fail closed if /proc cannot prove it.
+# Prove that an X display is gamescope's nested server, not Plasma's host Xwayland. Prefer process
+# ancestry when the caller can see the Steam-owned process namespace. Sandboxed orchestrators may
+# share the X sockets without seeing those processes, so fall back to the nested server's own WM
+# identity (gamescope's XWM is steamcompmgr). Both paths fail closed rather than risk host input.
 display_is_gamescope_nested() {
-  local nested_display="$1" server xpid parent parent_cmd
+  local nested_display="$1" server xpid parent parent_cmd wm_window
   [[ "$nested_display" =~ ^:[0-9]+([.][0-9]+)?$ ]] || return 1
   server="${nested_display%%.*}"
   for xpid in $(pgrep -f "[X]wayland ${server}( |$)" 2>/dev/null); do
@@ -202,7 +203,16 @@ display_is_gamescope_nested() {
       [[ "$parent_cmd" == *gamescope* ]] && return 0
     done
   done
-  return 1
+
+  # `_NET_SUPPORTING_WM_CHECK` points at the WM's own window. Plasma reports KWin there; gamescope's
+  # nested server reports steamcompmgr (older/current XWM name) or gamescope. Querying the display
+  # itself keeps this usable when /proc is PID-namespaced away from the already-running Steam client.
+  command -v xprop >/dev/null 2>&1 || return 1
+  wm_window="$(xprop -display "$server" -root _NET_SUPPORTING_WM_CHECK 2>/dev/null \
+    | sed -n 's/.*window id # \(0x[0-9a-fA-F]*\).*/\1/p')"
+  [[ "$wm_window" =~ ^0x[0-9a-fA-F]+$ ]] || return 1
+  xprop -display "$server" -id "$wm_window" _NET_WM_NAME WM_NAME 2>/dev/null \
+    | grep -Eq '"(steamcompmgr|gamescope)"'
 }
 
 # The game's environment carries gamescope's nested Xwayland display. Read it from the process
@@ -210,7 +220,7 @@ display_is_gamescope_nested() {
 # Reuse game_pids() so an RE helper mentioning eldenring.exe cannot redirect input to the host, and
 # require gamescope ancestry so an unset/aliased host DISPLAY cannot weaken the guard.
 game_display() {
-  local pid nested_display pids=()
+  local pid socket nested_display pids=()
   mapfile -t pids < <(game_pids)
   for pid in "${pids[@]}"; do
     nested_display="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null \
@@ -222,6 +232,16 @@ game_display() {
     printf '%s\n' "$nested_display"
     return 0
   done
+
+  # Steam may launch the game outside this caller's PID namespace. Enumerate only local X sockets,
+  # then apply the same strict gamescope identity check above. This cannot select Plasma's :0/KWin.
+  while IFS= read -r socket; do
+    nested_display=":${socket#X}"
+    [[ -z "${DISPLAY:-}" || "$nested_display" != "$DISPLAY" ]] || continue
+    display_is_gamescope_nested "$nested_display" || continue
+    printf '%s\n' "$nested_display"
+    return 0
+  done < <(find /tmp/.X11-unix -maxdepth 1 -type s -name 'X[0-9]*' -printf '%f\n' 2>/dev/null | sort -V)
   return 1
 }
 
