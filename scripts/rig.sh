@@ -851,6 +851,48 @@ cmd_dismiss() {
   ok "sent ($presses presses, ${elapsed}s). If a popup is still up, run: scripts/rig.sh dismiss"
 }
 
+# ---- screenshot the game (rig.sh shot) ----------------------------------------------------------
+# Capture what the game is actually rendering, so a visual claim ("the peer's character is there",
+# "the overlay drew") is an image instead of a request for someone to look at the screen.
+#
+# Mechanism: gamescope's OWN `gamescopectl screenshot <path>` command, aimed at the game's instance
+# via the nested DISPLAY that `game_display` resolves (the same guarded lookup the input injection
+# uses, so this can only ever capture the game — never the host desktop).
+#
+# Why not a plain X11 grab (re-derivation note, 2026-07-25): `import`/`ffmpeg -f x11grab` against the
+# nested server return a 1440x900 frame that is entirely BLACK (`colors=1 mean=0`), and ImageMagick's
+# `x:root` yields a 1x1 image. gamescope composites the game's buffers itself and never paints them
+# into the nested Xwayland root, so there is nothing in the X framebuffer to grab. Don't "fix" this
+# back to import/ffmpeg; the black frame looks like a capture bug but is the architecture.
+#
+# Shots land in target/ (gitignored) — throwaway evidence for one run, not artifacts.
+RIG_SHOT_DIR="${RIG_SHOT_DIR:-$ROOT/target/rig-shots}"
+cmd_shot() {
+  local out="${1:-}" nested_display stamp i
+  game_running || die "shot: the game isn't running — nothing to capture."
+  nested_display="$(game_display)" \
+    || die "shot: couldn't find the game's nested Xwayland DISPLAY (gamescope not up?)."
+  command -v gamescopectl >/dev/null 2>&1 \
+    || die "shot: need 'gamescopectl' (ships with gamescope)."
+  if [[ -z "$out" ]]; then
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    out="$RIG_SHOT_DIR/$stamp.png"
+  fi
+  mkdir -p "$(dirname "$out")"
+  # Absolutize: gamescope writes the file from ITS cwd, not ours, so a relative path would land
+  # somewhere unpredictable (and then look like a failed capture).
+  out="$(cd "$(dirname "$out")" && pwd)/$(basename "$out")"
+  rm -f "$out"
+  DISPLAY="$nested_display" gamescopectl screenshot "$out" >/dev/null 2>&1 \
+    || die "shot: gamescopectl refused the request on $nested_display"
+  # The write happens on gamescope's next composited frame, so the command returns before the file
+  # exists. Poll briefly rather than sleeping a fixed amount.
+  for ((i = 0; i < 40; i++)); do [[ -s "$out" ]] && break; sleep 0.25; done
+  [[ -s "$out" ]] || die "shot: gamescope accepted the request but wrote nothing to $out"
+  ok "captured $nested_display -> $out ($(stat -c '%s bytes' "$out"))"
+  printf '%s\n' "$out"
+}
+
 # ---- seed the test save from a real save (rig.sh seed-save) ------------------------------------
 # Resolve the Elden Ring save directory (…/EldenRing/<SteamID64>). Honors SAVE_DIR; otherwise derives
 # it from the Steam library holding GAME_DIR. Prints the path on success, returns 1 if not found.
@@ -1313,6 +1355,10 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
                          injecting N confirm presses (default 22, RIG_DISMISS_PRESSES) into
                          gamescope's nested Xwayland via XTEST. Desktop focus is unaffected, so the
                          host remains safe to use throughout. Run if a popup is still up.
+  shot [outfile]         Screenshot what the game is rendering (gamescope's nested root window) to a
+                         PNG, so a visual check is an image rather than someone watching the screen.
+                         Defaults to target/rig-shots/<timestamp>.png; prints the path. Captures the
+                         nested display only — never the host desktop. Game must be running.
   enter-world [secs]     From the main menu, select "Continue" and wait (default 150s) until the log
                          reports in_gameplay = true. Also 'cycle --in-world' does this after launch.
   cycle [apply-opts]     apply -> launch -> wait for the install/heartbeat lines (solo smoke test).
@@ -1340,7 +1386,7 @@ rig.sh — drive the local Elden Ring rig for unseamless-coop testing.
 
 Env overrides: GAME_DIR, BACKUP_DIR, APPID, SAVE_DIR, WINDOW_MARGIN, RIG_WINDOW_WIDTH,
                RIG_WINDOW_HEIGHT, RIG_HIDE_UNTIL_PLACED, RIG_DISMISS_PRESSES, RIG_DISMISS_INTERVAL,
-               RIG_REBLANK, RIG_REBLANK_IDLE, RIG_REBLANK_WINDOW,
+               RIG_REBLANK, RIG_REBLANK_IDLE, RIG_REBLANK_WINDOW, RIG_SHOT_DIR,
                DIST_DIR, FRIEND_SAVE_EXT, SHARED_PASSWORD_FILE, SHARE_TAG.
 EOF
 }
@@ -1358,6 +1404,7 @@ case "$cmd" in
   reblank-watch) cmd_reblank_watch ;;
   seed-save) cmd_seed_save "$@" ;;
   dismiss) cmd_dismiss "$@" ;;
+  shot)    cmd_shot "$@" ;;
   enter-world) cmd_enter_world "$@" ;;
   cycle)   cmd_cycle "$@" ;;
   package) cmd_package "$@" ;;

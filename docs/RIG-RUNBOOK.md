@@ -87,6 +87,39 @@ The Deck deliberately stays on its existing `/dev/uinput` tapper. SteamOS Game M
 the focused surface, that path is already proven over SSH, and it remains independent of the local
 rig's XTEST helper and nested-display detection.
 
+## Screenshotting the Game (`rig.sh shot`)
+
+`rig.sh shot [outfile]` captures what the game is actually rendering, so a visual claim ("the peer's
+character is on screen", "the overlay drew") is an image an agent can read instead of a request for
+Michael to watch the screen. Output defaults to `target/rig-shots/<timestamp>.png` (gitignored) and
+the path is printed on stdout. It reuses `game_display`, so it can only ever capture the game's
+nested display, never the host desktop.
+
+**Use gamescope's own screenshot command, not an X11 grab.** The capture is
+`DISPLAY=<nested> gamescopectl screenshot <abs-path>`. A plain X11 grab of the nested server looks
+like it should work and silently doesn't:
+
+| Attempt | Result |
+|---|---|
+| `import -window root` / `import -display :N` | fails outright (`missing an image filename`) |
+| `magick x:root` | a **1x1** image |
+| `ffmpeg -f x11grab -video_size 1440x900 -i :N` | full-size frame, **entirely black** (`colors=1 mean=0`) |
+
+gamescope composites the game's buffers itself and never paints them into the nested Xwayland root,
+so there is nothing in the X framebuffer to grab — the black frame is the architecture, not a bug.
+XTEST input injection still works on that same display because input and composition are separate
+concerns; don't infer from working input that a grab will work.
+
+Two gotchas worth keeping: gamescope writes the file from **its own cwd**, so a relative path lands
+somewhere unpredictable (`rig.sh shot` absolutizes before asking); and the command returns *before*
+the file exists, because the write happens on gamescope's next composited frame (`rig.sh shot` polls
+for the file rather than sleeping a fixed amount). Verified 2026-07-25 on gamescope 3.16.23: a live
+in-world capture at 1440x900 with the debug panel and rig-guide overlay legible, and the frame
+counter advancing between two shots.
+
+No Deck equivalent yet. For a two-machine presence check the local rig's camera is the one that
+matters (it looks *at* the remote player), so this was deliberately scoped to `rig.sh`.
+
 ## What to confirm first (harness sanity + the new install layer)
 
 The install layer (proxy / launcher / EAC guard / mod loader) is built and export-verified
