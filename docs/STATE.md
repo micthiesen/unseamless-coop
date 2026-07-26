@@ -3,7 +3,8 @@
 Fast-moving work state and chosen next step. This records the work, not live workers, rig state, or
 uncommitted changes. Durable findings live in the linked docs.
 
-Last updated: **2026-07-13** (native auth and two-player game roster proven on rig plus Deck).
+Last updated: **2026-07-25** (presence check run: roster reaches 2, no character spawns — the gap is
+join-wait -> spawn).
 
 ## Now
 
@@ -28,29 +29,29 @@ Last updated: **2026-07-13** (native auth and two-player game roster proven on r
 
 ## Next
 
-**Verify in-world presence and control in a two-machine session — and make that check objective
-instead of eyeball-only.** This is the last gate before rung 3 counts as playable: does the proven
-`players=2` roster actually put a remote character in the world, and does its movement replicate? Two
-observation gaps blocked answering that autonomously, and both are being closed now:
+**Chart the post-roster `join_wait` -> `ChrIns` spawn transition.** The presence check ran and came
+back negative in a useful way: `players=2` on both machines, both characters in the same block ~4.6m
+apart, and **zero phantoms in `player_chr_set` on either side** for 90+ seconds, no spawn edges. The
+remote roster entry reads `join_wait=true`, so the game admits and authenticates the peer but never
+leaves join-wait — which is exactly why no character spawns. Transport, auth, and the roster are each
+now proven twice on two machines; **don't re-litigate them.** The lever is whatever clears `join_wait`
+and drives the spawn: find what the game sends/does after roster-add in a real session, and what reads
+that flag. Serial (rig + Deck + live RE). Evidence:
+[SESSION-DRIVE.md](SESSION-DRIVE.md) > "In-World Presence Result (2026-07-25)".
 
-- *(delegated, worker `presence-probe`)* a `[debug.probes]` phantom-presence probe that logs the
-  `player_chr_set` roster — count, handle, `chr_load_status`, position — plus spawn/despawn edges.
-  Position precision matters: the movement check is "inject input on one machine, diff the remote
-  phantom's position on the other".
-- *(serial, orchestrator)* screenshot capture off gamescope's nested Xwayland in `rig.sh`/`deck.sh`,
-  so a visual claim is an image rather than a request for Michael's eyes.
-
-Then the two-machine run itself (serial: rig + Deck). If presence works, the next implementation chunk
-is replacing configured debug peer ids and symmetric probe roles with the peer and Open/Join lifecycle
-supplied by rungs 4 and 2. If the roster is present but the character is not, instrument the post-roster
-game packets and the `join_wait`/ChrIns spawn transition rather than revisiting transport or auth.
-Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result
-(2026-07-13)".
+Rig cost is ~5 minutes per two-machine run before the roster converges (see the operational note in
+that section) — batch probes into a single session rather than cycling per question.
 
 ## Candidates Not Chosen
 
-- **Productize the proven rung-3 path immediately.** Highest-value implementation after the presence check,
-  but doing it before knowing whether the roster produces a visible peer would hide the remaining gate.
+- **Productize the proven rung-3 path immediately** (replace debug peer ids + symmetric probe roles with
+  the rung-4 peer and Open/Join lifecycle). Still the highest-value implementation chunk, and now
+  *unblocked* in the sense that the roster is twice-proven — but a session that reaches `players=2` with
+  nobody in the world isn't yet worth productizing. Do it once join-wait clears.
+- **Unify the two unsafe `ChrSetEntry` walks.** `presence_probe::walk_entries` and
+  `native_nameplates::active_characters` are now two implementations of the same unsafe walk with
+  different safety properties (raw `u8` status vs. materialized discriminants). Worth one shared audited
+  helper; deliberately not done mid-run, and it touches nameplates' unsafe. Delegable.
 - **Harden orphaned lobby cleanup after a killed test process.** A forced-kill cycle left the private
   side-channel reporting an old world still open, while rung 3 proceeded through configured peer ids. This
   is a real lifecycle issue, but it does not invalidate the native session result and is smaller than
@@ -62,6 +63,15 @@ Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Playe
   only bounded milestone logging and the re-derivation comments.
 
 ## Learned Recently
+
+- **Roster 2 does not imply presence; `join_wait=true` is the stuck flag** ->
+  [SESSION-DRIVE.md](SESSION-DRIVE.md) > "In-World Presence Result (2026-07-25)". Same section carries
+  the ~4-minute convergence note (a 2-minute poll wrongly reads as failure).
+- **`rig.sh shot` screenshots the game** (gamescope's own `gamescopectl screenshot`; an X11 grab of the
+  nested display returns black by construction) -> [RIG-RUNBOOK.md](RIG-RUNBOOK.md) > "Screenshotting the
+  Game".
+- **`docs/SPECTATE.md` > "Rig asks" #1 is still unanswered.** The look-at-phantom lever shipped but never
+  fired this run — it needs a loaded phantom to aim at, and there wasn't one.
 
 - **Native descriptor, Fsdp sender, receive chain, auth result, roster flag correction, and two-machine
   success** -> [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result

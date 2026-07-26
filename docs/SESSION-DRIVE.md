@@ -4554,3 +4554,34 @@ identity-correct with connection id 2 and the scaling feature immediately switch
 rates. This proves rung 3 through the game roster. The next verifier is in-world presence and control:
 confirm the two characters render and movement replicates, then replace the debug peer ids and probe
 roles with the peer and Open/Join lifecycle supplied by rungs 4 and 2.
+
+### In-World Presence Result (2026-07-25) — Roster Reaches 2, No Character Spawns
+
+The two-machine run reproduced `players=2` on both machines and then answered the presence
+question in the negative: **the session roster grows, but no remote character enters the world.**
+
+Evidence, rig (host) and Deck both on build `2c1c34f`, both `Host`/`Ingame`:
+
+- Roster grew on both sides within one second (`TYPE5-VALIDATOR FIRED` -> `host-roster-add` ->
+  `players=2`), same chain as 2026-07-13. Scaling switched to two-player rates (`party_size = 2`,
+  enemy x1.35 / boss x2.00), so the session layer genuinely believes there are two players.
+- `presence-probe` reported `phantoms=0 (active=0 remote=0)` continuously on **both** machines for
+  90+ seconds after the roster grew, with **zero** spawn/status edge lines. Not a timing miss: the
+  probe logs edges immediately and would have caught a phantom that appeared and died.
+- Both characters were in the **same block** (`m18_00_00_00`) about **4.6m apart**
+  (rig `(-0.61, 6.01, 5.56)`, Deck `(-4.70, 5.82, 3.71)`), so this is not an area/distance
+  explanation — they should have been standing next to each other.
+- A `rig.sh shot` confirms it visually: `session = Host, 2/6 players` in the debug panel, empty room.
+
+**The pointer to the next lever is in the roster entry itself:** the remote player logs as
+`player[1] peer-cf17b9f9 host=false local=false cid=2 join_wait=true`. The peer is admitted and
+authenticated but the game still considers it **in join-wait**, which is consistent with no `ChrIns`
+being spawned for it. So the remaining gap is the post-roster **join-wait -> spawn** transition, not
+transport, not auth, and not the roster — those are all now proven twice on two machines.
+
+**Operational note for the next run: convergence took ~4 minutes.** The rig's session was up at
+02:50:25 and the Deck's at 02:52:39, but the type-5 exchange and roster growth didn't land until
+02:56:37. A 2-minute polling window calls this a failure; it isn't one. The single successful
+`worker FsdpConnection ... sent 253B plaintext type-5 ... at state=3` fires once, when the
+connection reaches state 3, and that took minutes here. Wait ~5 minutes before diagnosing a stall,
+and note that repeated `stall-B poll` lines during that window are the normal in-between state.
