@@ -261,6 +261,17 @@ suppress_leave = true      # HOLD-HOST test (2026-07-04 pm): the driven host for
                            # warp) then resets via host-setup's OWN online-availability gate 0x140de2620. When on,
                            # force that gate true (mov al,1; ret) to bypass the online signal — testing whether
                            # the host then STICKS + warps into the co-op map. See SESSION-DRIVE.md > "HOST-SETUP DRIVE".
+presence_probe = true      # ★ PRESENCE CHECK (2026-07-25): does the proven `players=2` session roster actually put
+                           # a remote CHARACTER in the world? Logs a ~1/sec player_chr_set roster (tag, load status,
+                           # update type, Havok position, block, distance moved) + spawn/despawn/status edges, all
+                           # under the `presence-probe:` prefix. Enable on BOTH machines: inject movement on one and
+                           # diff `moved=`/`dist=` on the other to prove replication. Positions are Havok space, so
+                           # dist/moved print `n/a` across a block change rather than a misleading number.
+look_at_phantom = true     # ★ PAIRS WITH presence_probe: aim the game's camera at a loaded phantom (via
+                           # chr_cam.death_cam_target + DeathCam) so `rig.sh shot` frames the peer wherever the save
+                           # left the local character facing. Its `look-at CONFIRM` line also answers
+                           # docs/SPECTATE.md > "Rig asks" #1 from the log. Conflicts with
+                           # gameplay.always_spectate_on_death (same two fields) — that's false above, so no clash.
 
 # Death-debuff stacking tuning (the on/off toggle is gameplay.death_debuffs). Each death adds the next
 # tier up to max_tiers; deaths past that intensify potency by intensity_step_percent each, capped at
