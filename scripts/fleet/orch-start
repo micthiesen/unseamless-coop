@@ -105,7 +105,7 @@ if [ "$harness" = "codex" ]; then
   tmux new-session -d -s "$sess" -c "$REPO" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     "${codex_cmd[@]}" \
-    -c "sandbox_mode=\"workspace-write\"" \
+    -c "sandbox_mode=\"danger-full-access\"" \
     -c "sandbox_workspace_write.network_access=true" \
     -c "sandbox_workspace_write.writable_roots=[\"$REPO/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" "$@" \
     "${seed_args[@]}"
