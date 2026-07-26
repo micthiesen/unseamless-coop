@@ -28,13 +28,24 @@ Last updated: **2026-07-13** (native auth and two-player game roster proven on r
 
 ## Next
 
-**Verify actual in-world presence and control in a two-machine session.** This is the last check
-before calling rung 3 playable and genuinely needs Michael's eyes: confirm each character renders on the
-other machine and movement replicates. If presence works, the next implementation chunk is to replace
-configured debug peer ids and symmetric probe roles with the peer and Open/Join lifecycle supplied by rungs
-4 and 2. If the roster is present but the character is not, instrument the post-roster game packets and
-`join_wait`/ChrIns spawn transition instead of revisiting transport or auth. Evidence:
-[SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result (2026-07-13)".
+**Verify in-world presence and control in a two-machine session — and make that check objective
+instead of eyeball-only.** This is the last gate before rung 3 counts as playable: does the proven
+`players=2` roster actually put a remote character in the world, and does its movement replicate? Two
+observation gaps blocked answering that autonomously, and both are being closed now:
+
+- *(delegated, worker `presence-probe`)* a `[debug.probes]` phantom-presence probe that logs the
+  `player_chr_set` roster — count, handle, `chr_load_status`, position — plus spawn/despawn edges.
+  Position precision matters: the movement check is "inject input on one machine, diff the remote
+  phantom's position on the other".
+- *(serial, orchestrator)* screenshot capture off gamescope's nested Xwayland in `rig.sh`/`deck.sh`,
+  so a visual claim is an image rather than a request for Michael's eyes.
+
+Then the two-machine run itself (serial: rig + Deck). If presence works, the next implementation chunk
+is replacing configured debug peer ids and symmetric probe roles with the peer and Open/Join lifecycle
+supplied by rungs 4 and 2. If the roster is present but the character is not, instrument the post-roster
+game packets and the `join_wait`/ChrIns spawn transition rather than revisiting transport or auth.
+Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Native Transport and Two-Player Roster Result
+(2026-07-13)".
 
 ## Candidates Not Chosen
 
