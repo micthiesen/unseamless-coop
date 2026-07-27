@@ -13,6 +13,10 @@
       "path": "~/.dotfiles",
       "layout": "rulesync",
       "notes": "Shares only the sync skill itself."
+    },
+    "stillair": {
+      "path": "../stillair",
+      "notes": "Custom ceiling fan project (docs + Rust ESP32 firmware). Took the next/wrap session-continuity skills from here, stripped of fleet/rig; it runs solo."
     }
   },
   "resources": [
@@ -61,6 +65,18 @@
       "peers": ["er-crit-coop"],
       "mode": "judgment",
       "notes": "Shared toolchain/build story (cross-compile from Linux, mingw, .text-size equivalence check); workflow and repo specifics are owned."
+    },
+    {
+      "path": ".claude/skills/next/",
+      "peers": ["stillair"],
+      "mode": "judgment",
+      "notes": "Shared shape only (gather ground truth -> enumerate candidates -> recommend -> record in docs/STATE.md). This repo's version adds fleet/worker spawning and rig batching; stillair's is solo and points at its own gating docs. Port procedure improvements, never the fleet/rig steps."
+    },
+    {
+      "path": ".claude/skills/wrap/",
+      "peers": ["stillair"],
+      "mode": "judgment",
+      "notes": "Shared shape only (sweep learnings -> decide next -> rewrite STATE.md wholesale -> commit -> sign off). This repo's version has fleet/rig rules; stillair's is solo with its own learning-routing table."
     },
     {
       "path": ".claude/skills/release/",
