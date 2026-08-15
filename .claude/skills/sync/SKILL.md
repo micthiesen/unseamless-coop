@@ -39,7 +39,7 @@ rulesync-managed project (like the dotfiles) the canonical copy is the
 *source* at `.rulesync/skills/sync/` and the generated output is derived -
 always sync the source, then run that project's `generate` command. Projects
 that expose skills to other harnesses via symlinks
-(`.codex/skills -> .claude/skills`) need nothing extra.
+(`.agents -> .claude`) need nothing extra.
 
 ## The map (`sync-map.json`)
 
