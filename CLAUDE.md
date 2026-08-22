@@ -112,6 +112,8 @@ Two crates, split by what can be verified where (full design in
 
 ## Workflow
 
+For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
+
 This is a personal project: **commit and push directly to `main` as needed** — no draft PRs, no
 stacked branches, no PR descriptions. Keep commits small and well-described, keep `main` green
 (`cargo build --release`, `scripts/test-core.sh`, `cargo clippy --release -- -D warnings` all
