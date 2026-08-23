@@ -126,6 +126,11 @@ can't copy code you can't read.
   instruction. This is how the session-FSM store sites were found (see
   `docs/SESSION-RE-RUNBOOK.md`). Runs as the normal user on this box (Yama `ptrace_scope=0` via
   `/etc/sysctl.d/10-ptrace.conf`); on a default `ptrace_scope=1` box it needs root.
+- **x64dbg MCP** (`scripts/re/x64dbg-mcp.sh`) — an optional project-scoped live debugger surface for
+  agent-driven breakpoints, registers, memory, threads, and stacks. The setup pins and verifies the
+  upstream archives, binds only to loopback, and keeps its bearer token under `.re-tools/`. It is staged
+  for CachyOS evaluation, not yet a proven replacement for the native watchpoint. Full setup and keep/drop
+  gate: [X64DBG-MCP.md](X64DBG-MCP.md).
 - **Frida** (frida-gadget under Proton) — heavier dynamic instrumentation for fast iterative
   hooking when the native watchpoint isn't enough. Host CLI installed (`pipx install frida-tools`),
   a version-matched gadget + config staged at `.re-tools/frida/`; placing it in the rig's `mods/`

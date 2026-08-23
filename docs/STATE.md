@@ -3,8 +3,7 @@
 Fast-moving work state and chosen next step. This records the work, not live workers, rig state, or
 uncommitted changes. Durable findings live in the linked docs.
 
-Last updated: **2026-07-25** (presence check run: the roster reaches 2, no character spawns — the gap
-is join-wait -> spawn).
+Last updated: **2026-08-23** (CachyOS evaluation tooling staged for faster join-wait work).
 
 ## Now
 
@@ -26,18 +25,25 @@ is join-wait -> spawn).
 - **The rig can now see and be seen.** `rig.sh shot` captures the game's frame, and the `presence-probe`
   probes report the in-world phantom roster — so presence questions are answered from logs and images
   instead of from someone watching the screen.
+- **A local two-client loop and x64dbg MCP are staged, but not yet CachyOS-validated.** The local loop
+  runs two independent Steam/Proton/game stacks, drives both into world, and turns visible-peer presence
+  into a symmetric log assertion. The debugger setup is project-scoped, authenticated, and loopback-only.
+  Evaluation gates: [LOCAL-DUO.md](LOCAL-DUO.md) and [X64DBG-MCP.md](X64DBG-MCP.md).
 
 ## Next
 
-**Chart the post-roster `join_wait` -> `ChrIns` spawn transition.** This is the one thing between a
+**On CachyOS, validate the staged local-duo and x64dbg MCP loops, then chart the post-roster
+`join_wait` -> `ChrIns` spawn transition.** This is the one thing between a
 session that *counts* two players and a session where you can *see* the other player, and the presence
 run localized it precisely: transport, auth, and the roster are each proven twice on two machines, so
 **don't re-litigate them.** The lever is whatever clears `join_wait` and drives the spawn — what the game
 does after roster-add in a real session, and what reads that flag. Serial (rig + Deck + live RE).
 Evidence: [SESSION-DRIVE.md](SESSION-DRIVE.md) > "In-World Presence Result (2026-07-25)".
 
-Batch probes into one rig session: a two-machine run costs ~5 minutes before the roster converges (see
-the operational note in that section — a short polling window reads as a false failure).
+Use local duo for the fast inner loop if it reproduces the known `players=2, join_wait=true` baseline;
+retain desktop + Deck as the final two-machine proof. Batch probes into one run: roster convergence can
+still take ~5 minutes (see the operational note in that section, a short polling window reads as a false
+failure).
 
 ## Candidates Not Chosen
 

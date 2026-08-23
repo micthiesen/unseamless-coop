@@ -1,6 +1,6 @@
 ---
 name: reverse-engineer
-description: How to study the behavior of a game we own (Elden Ring) and an existing co-op mod in order to clean-room reimplement that mod in Rust — interoperability RE on our own machine, not anti-cheat or DRM circumvention. Covers the behavioral-observation strategy, the static-triage and diagnostic patterns, and the tool decision table for inspecting your own game process (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/frida/capstone", "diagnostic mode", "what offset is".
+description: How to study the behavior of a game we own (Elden Ring) and an existing co-op mod in order to clean-room reimplement that mod in Rust — interoperability RE on our own machine, not anti-cheat or DRM circumvention. Covers the behavioral-observation strategy, the static-triage and diagnostic patterns, and the tool decision table for inspecting your own game process (rizin, capstone+numpy scans, the Ghidra/PyGhidra decompile wrapper, the native ptrace watchpoint, x64dbg MCP, Frida). Use when figuring out an unknown game behavior or memory layout, deciding how to find a field the SDK doesn't name, or reaching for a disassembler/decompiler/instrumentation. TRIGGER on "reverse engineer", "how does ERSC do X", "find this flag/field", "use rizin/ghidra/x64dbg/frida/capstone", "diagnostic mode", "what offset is".
 ---
 
 # Reverse-Engineering for unseamless-coop
@@ -44,6 +44,7 @@ rows do more work than the top ones.
 | "Quick decompile while I'm already in rizin" | **rz-ghidra** `pdg` (installed) | `rizin -q -c 'aaa; s <addr>; pdg' bin`. Ghidra decompiler core, no JVM; rizin-fed analysis (lower fidelity). |
 | "I need to *read* a hard function as good C" | **Ghidra/PyGhidra** (installed) | `scripts/re/ghidra-decompile.sh <bin> [func]`. Best fidelity; clean targets only (not `ersc.dll`). |
 | "What instruction writes this live address?" | **`scripts/re/watch-write.py`** | Native ptrace HW watchpoint (exe at `0x140000000` under Wine). Same-uid, no sudo (this box sets Yama `ptrace_scope=0`). No Frida. |
+| "Interactively watch a live call, registers, memory, or stack with an agent" | **x64dbg MCP** (evaluation) | Project-scoped, authenticated, loopback-only setup in [`X64DBG-MCP.md`](../../../docs/X64DBG-MCP.md). Not yet Proton-validated; prefer read-only observation until the CachyOS gate passes. |
 | "What flag/field flips when event X happens?" | **diagnostic DLL** | Our own mod, rising-edge bit observer (below). The default for unknown game state. |
 | "Map an unknown call graph / hook live, iterating fast" | **Frida** (frida-gadget) | Host CLI + matching gadget staged (`.re-tools/frida/`); placing it in the rig is a rig action ([RUNTIME-RE.md](../../../docs/RUNTIME-RE.md) > B). |
 | "What's on the wire?" (shape/timing) | **`ss` / `tcpdump` / `tshark`** | Payloads are Steam-framed/encrypted; pair with a hook for contents. |
@@ -130,8 +131,10 @@ This is how you locate a flag/field the SDK doesn't expose without ever reading 
 ## Dynamic RE on the Rig
 
 Live observation (the game running) is the real RE channel here, and it happens on the rig with
-the game running. The full playbook — our own diagnostic DLL (preferred), Frida-gadget under Proton, and
-network capture — is in [`docs/RUNTIME-RE.md`](../../../docs/RUNTIME-RE.md). The first concrete
+the game running. The full playbook — our own diagnostic DLL (preferred), the x64dbg MCP evaluation,
+Frida-gadget under Proton, and network capture — is in
+[`docs/RUNTIME-RE.md`](../../../docs/RUNTIME-RE.md), with x64dbg's setup in
+[`docs/X64DBG-MCP.md`](../../../docs/X64DBG-MCP.md). The first concrete
 target (observing the session FSM to unblock the co-op core) is the
 [`/test-loop`](../test-loop/SKILL.md) skill's layer 4 + [`docs/RIG-RUNBOOK.md`](../../../docs/RIG-RUNBOOK.md).
 

@@ -223,9 +223,16 @@ runs the session observer, and stays stable — i.e. the RIG-RUNBOOK "first rig"
 solo-verifiable: anything needing a loaded save / co-op session — those need layer 5. Handoff is the
 log file.
 
-## Layer 5 — Real Co-op (Ongoing, Manual)
+## Layer 5 — Real Co-op (Local Duo Development, Two-Machine Acceptance)
 
-Two or more real players. **Player 2 can be assistant-driven over SSH** — a Steam Deck / second Linux box
+For rapid development on the CachyOS desktop, `scripts/local-duo.sh cycle` runs two fully simulated
+clients with separate Steam identities, prefixes, saves, installs, nested displays, and logs. P2 uses a
+tiny displayless gamescope backend; the script drives both clients and asserts an **active remote
+phantom on both sides**, not merely `players=2`. See
+[`docs/LOCAL-DUO.md`](../../../docs/LOCAL-DUO.md). This path is staged but not yet CachyOS-validated, so
+do not claim it as evidence until its evaluation gate passes.
+
+The acceptance gate remains two real machines. **Player 2 can be assistant-driven over SSH** — a Steam Deck / second Linux box
 on a throwaway account, via `scripts/deck.sh` (the [`/steam-deck`](../steam-deck/SKILL.md) skill): the
 assistant builds here, pushes the mod + the *same* seed config + save to the Deck, launches it, and pulls
 its logs, so a two-player run no longer needs a human at the second machine for the mechanics (only an
@@ -257,7 +264,8 @@ acceptance loop and the only one that proves real co-op.
   (`rig.sh` + `harness bridge-host`).
 - Need to know it actually affects the game (params, session state, loading)? → **layer 4**
   (`rig.sh`, this machine).
-- Co-op behavior with real partners? → **layer 5**.
+- Co-op behavior with real partners? → **layer 5**. Prefer local duo for fast development once its
+  CachyOS gate passes; use desktop + Deck before calling the behavior two-machine-proven.
 
 The layers above are the stable machinery; what's *proven vs pending* moves fast — read
 [`docs/STATE.md`](../../../docs/STATE.md) for the current frontier rather than trusting any snapshot

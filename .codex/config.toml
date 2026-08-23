@@ -1,0 +1,11 @@
+# Project-scoped live debugger for the CachyOS rig. The server is optional so this repository still
+# opens normally on macOS and whenever x64dbg is not running. Run `scripts/re/x64dbg-mcp.sh env`
+# before starting Codex on the rig, then launch the debugger with the same helper.
+[mcp_servers.x64dbg]
+url = "http://127.0.0.1:9094/"
+bearer_token_env_var = "X64DBG_MCP_TOKEN"
+enabled = true
+required = false
+startup_timeout_sec = 3
+tool_timeout_sec = 120
+default_tools_approval_mode = "writes"
