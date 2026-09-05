@@ -20,8 +20,9 @@ Optional argument: an explicit version (e.g. `v0.2.0`). If omitted, propose one.
 1. **Preflight.**
    - Ensure `gh` is installed and authed: `gh auth status`. If `gh` is missing, install it
      (`pacman -S github-cli`).
-   - Confirm we're on `main` with a clean tree (`git status --porcelain`). If there are
-     uncommitted changes, stop and tell the user.
+   - Confirm we're on `main` and inspect `git status --porcelain`. Do not tag uncommitted release
+     content. Preserve unrelated concurrent changes and proceed only when the release commit can be
+     isolated without overwriting or accidentally including them.
    - Sanity-build so we never tag something that doesn't compile:
      `cargo build --release --target x86_64-pc-windows-gnu`.
 

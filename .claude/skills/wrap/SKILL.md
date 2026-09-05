@@ -32,10 +32,10 @@ to its proper home (per CLAUDE.md > "Project knowledge lives in the repo"):
 Write the **content** there — STATE.md gets only pointers. A dead end is a finding too: recording
 why something was ruled out is what stops the next session from re-treading it.
 
-## 2. Decide Or Confirm Next
+## 2. Decide Next
 
-- Previous Next still the plan (done partially, or untouched)? Confirm and carry it forward,
-  updated to reflect progress.
+- Previous Next still the plan (done partially, or untouched)? Carry it forward, updated to reflect
+  progress; verify this from repo and fleet state rather than asking.
 - Previous Next completed, or the session changed the picture? Run **`/next`** to decide and
   record properly. Don't freehand a big direction change here — that's what `/next`'s candidate
   analysis is for.
@@ -68,7 +68,7 @@ Print, roughly:
 
 > Session wrapped: learnings encoded, STATE.md rewritten, committed. Safe to end this session.
 > Restart with `scripts/fleet/orch-start` — it boots the fresh orchestrator with a prompt that
-> reads STATE.md and briefs you, then waits for direction (it won't start work on its own).
+> reads STATE.md, briefs you, and continues the recorded Next when launched for that purpose.
 
 A wrap does **not** change the normal fleet lifecycle. A worker that has already signaled done
 still gets integrated (+ `worker-rm`'d) exactly as usual. What a wrap must never do is proactively

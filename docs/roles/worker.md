@@ -17,11 +17,9 @@ your workspace path, and your branch `worker/<name>`.
   forked from (`git merge-base main HEAD`) is your shared base with `main`: never `amend`, `reset`,
   or `rebase` *into or past* it. Rewriting that base makes the orchestrator's integration conflict
   and trips the teardown safety check.
-- **Before you report done, consolidate your branch to a single clean commit on that base** — e.g.
-  `git reset --soft "$(git merge-base main HEAD)" && git commit`, or an interactive squash down to
-  one. Messy WIP is for *while* you work; hand off exactly one commit. One clean commit on top keeps
-  the orchestrator's squash-merge trivial and lets it tear you down without a force flag (it
-  recognizes your patch as already landed on `main`).
+- **Before done, leave exactly one patch-equivalent commit on top of the base.** This is required by
+  `worker-rm`'s `git cherry` teardown check after the orchestrator squash-merges the lane. Consolidate
+  only this isolated rift branch and preserve the working tree; never rewrite the shared base.
 - **Stage only the files your task changed.** Your workspace is a copy of the orchestrator's working
   tree, so it may already contain its unrelated in-flight edits. Avoid `git add -A` / `git add .`;
   add the specific paths you touched, so you don't commit the orchestrator's work onto your branch.
@@ -66,8 +64,8 @@ says; if it says nothing, use this rule. **State in your done message which you 
 "`/check`", or "none — experiment") so the orchestrator knows what it's inheriting; it won't re-review
 your lane, only the cross-lane integration.
 
-Then **consolidate your branch to one clean commit on your base** (above) and message the
-orchestrator: done (with a one-line summary + which review you ran) or blocked (with why). Do **not**
+Then verify the branch has one commit on its base and message the orchestrator: done (with a one-line
+summary + which review you ran) or blocked (with why). Do **not**
 tear yourself down; the orchestrator manages your lifecycle and integrates your branch.
 
 Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room

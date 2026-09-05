@@ -90,8 +90,9 @@ the matching `[debug.probes]`, extend the diag snapshot, or add a one-shot miles
 relevant toast (as `coop.rs` does with `coop: linked` / `coop: adopted host config` for `two-player-join`),
 then `log_contains` it. Pin the **stable substring** the guide matches (not a variable id/version part)
 and leave a comment at the log site so a reword can't silently break the predicate. Adding *engine
-surface* (a new `RigState` field, a new control) is a bigger step — check with the orchestrator first;
-adding a normal one-shot `info!` milestone next to an existing toast is not. When even that isn't
+surface* (a new `RigState` field, a new control) is a bigger step. If it is required by the assigned
+lane, implement and test it; otherwise request that scoped dependency from the orchestrator. Adding
+a normal one-shot `info!` milestone next to an existing toast stays within guide work. When even that isn't
 available yet (the work is RE-gated), commit the step as a `.stub(...)` — never a "tell me it worked" step.
 
 ## Branching on a Result

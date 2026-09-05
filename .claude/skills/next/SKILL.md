@@ -4,7 +4,7 @@ description: >
   Decide what the project's next step should be. Reads docs/STATE.md, docs/ROADMAP.md, and recent
   git history, enumerates 2-4 candidate next steps with a gating analysis (what each unblocks,
   rig-serial vs delegable, size, risk), recommends one, and records the decision + runners-up in
-  docs/STATE.md — spawning workers for the delegable ones once the direction is set. Use when unsure
+  docs/STATE.md, then starts authorized work through the existing fleet. Use when unsure
   what to work on next, when the previous Next step completed, or from /wrap when concluding a
   session. TRIGGER on "what's next", "what should we do next", "pick the next step", "/next".
 user_invocable: true
@@ -13,8 +13,9 @@ user_invocable: true
 # Next (Decide The Next Step)
 
 Turn "what should we do now?" from an open-ended re-derivation into a short, recorded decision.
-The output is always two things: a **recommendation with its why**, and an **updated
-`docs/STATE.md`** so the decision survives this session.
+The output is a **recommendation with its why** and an updated `docs/STATE.md`. If `/next` is part
+of an active request to continue, begin the chosen work after recording it. Ask only at a
+consequential choice or a human-only gate.
 
 ## 1. Gather Ground Truth (Cheap, Parallel)
 
@@ -60,8 +61,8 @@ Pick with these biases, in order:
    building on the unproven plan.
 3. **Keep the rig batched.** If several candidates need the rig, prefer the one that can absorb
    the others' probes in a single play session (ORCHESTRATION.md > "Batch rig passes").
-4. **Parallelize the delegable.** The recommendation can be "start X on the rig AND spawn workers
-   for Y, Z" — serial and delegable candidates aren't mutually exclusive.
+4. **Parallelize work that advances the authorized objective.** The recommendation can combine one
+   rig lane with independent worker lanes. Do not start runners-up merely because they are delegable.
 
 State the recommendation in two sentences: what, and why it beats the runner-up. For a genuinely
 contentious or expensive direction (a pivot, a multi-session bet), escalate to `/devils-advocate`
@@ -81,8 +82,8 @@ Commit if you're the orchestrator mid-session; leave it for `/wrap` if wrapping 
 
 In the proposal itself, keep each delegable candidate to a one-line "what the lane would do" —
 don't print full worker briefs before the direction is chosen (they bloat the decision and
-usually get revised anyway). Once the recommendation is confirmed (or you're proceeding
-autonomously), write the `worker-new` heredoc brief per ORCHESTRATION.md > "Writing a worker
+usually get revised anyway). When proceeding, write the `worker-new` heredoc brief per
+ORCHESTRATION.md > "Writing a worker
 assignment" (lane + boundary, where to look, collision map, review depth) and **spawn it
 directly** — the delegate-by-default posture (CLAUDE.md > "Orchestrator / worker fleet") means
 spawning, not pasting instructions for Michael to relay.

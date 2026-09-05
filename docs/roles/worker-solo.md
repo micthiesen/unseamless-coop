@@ -57,10 +57,9 @@ When the user tells you you're done / to integrate / to hand off to the orchestr
    **`/tricheck`** (three agents) for something larger, and apply the surviving findings. Follow the
    user's steer if they gave one. Say which you ran ("`/tricheck`", "`/check`", or "none — experiment")
    when you hand off.
-2. **Consolidate your branch to one clean commit on your base** — e.g.
-   `git reset --soft "$(git merge-base main HEAD)" && git commit`, or squash down to one. One clean
-   commit on top keeps the orchestrator's squash-merge trivial and lets it tear you down without a
-   force flag.
+2. **Leave exactly one patch-equivalent commit on top of your base.** This is required by
+   `worker-rm`'s `git cherry` teardown check after integration. Consolidate only this isolated rift
+   branch and preserve the working tree; never rewrite the shared base.
 3. **Then hand off:**
    - If a `usc-orch` session is running, message it once:
      `scripts/fleet/msg usc-orch "[worker:<name>] done: <one-line summary>; branch worker/<name> ready to integrate"`

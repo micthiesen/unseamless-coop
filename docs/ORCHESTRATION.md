@@ -304,7 +304,7 @@ lane its values together. Probes are designed inert-by-default, so they coexist 
 | `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
 | `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
 | `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
-| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read STATE → brief Michael and wait, no auto-start and no machine-state audit; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
+| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read STATE and brief Michael; continue Next only when the launch carried that user intent, otherwise wait; no machine-state audit; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
 | `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
 | `notify-human "<reason>"` | high-priority Pushover push to Michael's phone — run once when *stopping*: done, giving up, or blocked on something only he can do (see "Away Notifications" below). Same-stop dedup vs the fleet-quiet backstop ping; fails soft without keys. |
 
@@ -368,12 +368,11 @@ makes stop-and-restart cheap:
   each unblocks, rig-serial vs delegable, size, risk), a recommendation, and the decision recorded
   in STATE.md — with ready-to-paste worker briefs for the delegable candidates (this is what makes
   delegate-by-default cheap to act on).
-- **`orch-start`** seeds a fresh orchestrator with a boot prompt: read STATE.md, then **brief
-  Michael and wait**. The boot orients from the work picture and gets moving; it doesn't audit
-  machine state first (that's `worker-ls` on demand, and re-applying the rig if a rig task comes
-  up). It never auto-starts work — Michael may continue Next, run `/next`, or do something else
-  entirely. Restarting the orchestrator is therefore three motions: `/wrap` → kill the session →
-  `orch-start`, with the new session landing oriented but idle.
+- **`orch-start`** seeds a fresh orchestrator with a boot prompt that reads STATE.md and briefs
+  Michael without auditing machine state first. The boot prompt alone is orientation and leaves the
+  session idle. When the user launches it with an instruction to continue the project, it begins the
+  recorded Next without asking again. Otherwise Michael may continue Next, run `/next`, or choose
+  something else. Restarting remains `/wrap` → kill the session → `orch-start`.
 
 ## Away Notifications (Pushover)
 
