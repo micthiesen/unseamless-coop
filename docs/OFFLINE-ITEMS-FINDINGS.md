@@ -11,12 +11,12 @@ unblock: with the items selectable, an item-use can drive the game's own `CSSess
 > this isn't an anti-cheat bypass — it's re-enabling UI the game greys out purely because FromSoft
 > matchmaking is unreachable offline, so our own private co-op side-channel can use it. All RE is on
 > our own legitimately-owned binary, on the developer's own machine; behavioral notes only, no
-> upstream code copied. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> upstream code copied. See AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 **Binary:** static RE on our own legitimately-owned **2026-06-02 `eldenring.exe`** (image base
 `0x140000000`, two `.text` sections at `0x140001000` + `0x144c0e000`, `.pdata` at `0x144863000`; the
 exe loads at its preferred base, so static VA == live VA — SESSION-RE-FINDINGS confirmed). Behavioral
-notes are in my own words; no upstream ERSC code or decompiler output is reproduced (CLAUDE.md >
+notes are in my own words; no upstream ERSC code or decompiler output is reproduced (AGENTS.md >
 Clean-room). Static inference has now **failed three times** on this exact problem, so every static
 claim is paired with the runtime check that settles it.
 
@@ -298,7 +298,7 @@ using Tarnished's Furled Finger should move `CSSessionManager.lobby_state` off `
 (log entry + return value + return-address) and scrolling onto the greyed item is how the chain was
 shown off-path. Re-run only to re-confirm the family after a game update.
 
-## Re-derivation After a Game Update (per CLAUDE.md)
+## Re-derivation After a Game Update (per AGENTS.md)
 
 Addresses shift on a patch; re-find each target from its landmark.
 

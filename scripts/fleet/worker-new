@@ -1,73 +1,24 @@
 #!/usr/bin/env bash
-# worker-new [--solo] [--harness claude|codex] [--model <id>] <name> [guidance... | -]
-#
-# Materialize a worker: a rift copy-on-write workspace on its own branch, with a
-# Claude Code session running in a detached tmux session (popped open in
-# Alacritty), seeded to read its assignment. See docs/ORCHESTRATION.md.
-#
-#   worker-new boot-volume "Implement the boot_volume feature; see docs/FEATURES.md."
-#
-# For any brief with backticks, $(...), or quotes, pass '-' and pipe it via a
-# SINGLE-quoted heredoc — the shell would otherwise command-substitute/mangle
-# those in a "..." arg before this script sees them:
-#   worker-new scaling - <<'EOF'
-#   Implement `ScalingFeature`; write the absolute rate via `set_max_hp_rate(...)`.
-#   EOF
-#
-# --solo: a USER-DRIVEN worker. Michael drives the session interactively; it stays
-# silent toward the orchestrator until he hands off, revives with the worker-solo.md
-# overlay, and has no assignment file (guidance, if given, is its first prompt directly).
-#   worker-new --solo scratch
-#   worker-new --solo scratch "Start by refactoring the config loader."
-#
-# --harness: spawn THIS worker on a specific CLI harness instead of the fleet
-# default (scripts/fleet/harness). Opt-in only — with no flag, behavior is
-# exactly as before. The spawn harness is pinned in the worker's .harness
-# marker, so revive/msg/ls keep reaching it correctly in a mixed fleet.
-#   worker-new --harness codex port-scan "..."
-#
-# --model: launch the worker's session on a specific model instead of the
-# harness default. Passed through UNVALIDATED (claude: `--model`, still a normal
-# interactive session; codex: `-m`) — any alias/ID the CLI accepts works. List
-# known-good IDs with `scripts/fleet/models`. Pinned in a .model marker so a
-# worker-open revive keeps the same model.
-#   worker-new --model haiku boilerplate "..."
-#   worker-new --harness codex --model gpt-5.4-mini sweep "..."
+# Create a rift worker, persist Codex trust, and launch with its role and assignment.
+# Pass multiline guidance through stdin with `-` and a quoted heredoc.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
-# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
-# source so a future merge that drops the helper can't break a spawn -- with no
-# helper, fleet_color_name yields nothing and coloring is simply skipped.
-if [ -f "$SELF/_color" ]; then
-  # shellcheck source=scripts/fleet/_color
-  source "$SELF/_color"
-else
-  fleet_color_name() { :; }
-fi
-
-# Which CLI harness to spawn: the fleet default (see _harness and
-# `scripts/fleet/harness`), unless --harness overrides it for this one worker.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
 harness="$(fleet_harness)"
-# Codex plumbing (workspace trust); see _codex.
 # shellcheck source=scripts/fleet/_codex
 source "$SELF/_codex"
 
 usage() {
-  echo "usage: worker-new [--solo] [--harness claude|codex] [--model <id>] <name> [guidance... | -]" >&2
+  echo "usage: worker-new [--solo] [--harness codex] [--model <id>] <name> [guidance... | -]" >&2
   echo "       ('-' reads guidance from stdin; model IDs: scripts/fleet/models)" >&2
   exit 2
 }
 
-# Optional LEADING flags, any order; everything after is the normal <name> [guidance...].
-#   --solo               user-driven worker (see header)
-#   --harness <h>        per-worker harness override (claude|codex)
-#   --model <id>         model for the session, passed through to the harness CLI
 solo=0
 model=""
 while [ "$#" -gt 0 ]; do
@@ -75,13 +26,11 @@ while [ "$#" -gt 0 ]; do
     --solo) solo=1; shift ;;
     --harness)
       case "${2:-}" in
-        claude|codex) harness="$2" ;;
-        *) echo "worker-new: --harness must be 'claude' or 'codex', got '${2:-}'" >&2; exit 2 ;;
+        codex) harness="$2" ;;
+        *) echo "worker-new: --harness must be 'codex', got '${2:-}'" >&2; exit 2 ;;
       esac
       shift 2 ;;
     --model)
-      # Reject a flag-like value: `--model --solo x` would otherwise swallow the
-      # flag as the model ID and silently drop it (no model starts with '-').
       case "${2:-}" in
         ""|-*) echo "worker-new: --model needs a value (see scripts/fleet/models)" >&2; exit 2 ;;
       esac
@@ -97,8 +46,6 @@ if [ -z "$name" ]; then
   usage
 fi
 
-# Role overlay (injected via --append-system-prompt-file) + the .role marker below:
-# solo (user-driven) vs the default orchestrator-driven worker.
 overlay_rel="docs/roles/worker.md"
 if [ "$solo" -eq 1 ]; then
   overlay_rel="docs/roles/worker-solo.md"
@@ -107,15 +54,6 @@ if ! [[ "$name" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
   echo "worker-new: name must be kebab-case [a-z0-9_-], got '$name'" >&2
   exit 2
 fi
-# Guidance source. A single `-` reads the whole assignment body from STDIN, so a caller can pass it
-# through a single-quoted heredoc — the ONLY hazard-free way to send text with backticks / `$(...)` /
-# quotes, which the shell would otherwise command-substitute or mangle in a double-quoted `"..."` arg
-# *before* this script ever sees it (that bit an orchestrator once — a `` `word` `` in the guidance
-# ran `word` as a command and vanished from the assignment). Recommended for any non-trivial brief:
-#   scripts/fleet/worker-new my-lane - <<'EOF'
-#   ...brief with `identifiers`, $(cmds), "quotes" all literal...
-#   EOF
-# Otherwise guidance is the remaining args joined (fine for short, punctuation-free briefs).
 if [ "${1:-}" = "-" ]; then
   guidance="$(cat)"
 else
@@ -141,7 +79,6 @@ log="$(mktemp)"
 if ! rift create --name "$name" >"$log" 2>&1; then
   echo "worker-new: rift create failed:" >&2
   cat "$log" >&2
-  # a failed postcreate hook can still leave the workspace registered; clean up
   [ -d "$ws" ] && { rift remove --force "$ws" >/dev/null 2>&1 || true; rift gc >/dev/null 2>&1 || true; }
   exit 1
 fi
@@ -155,65 +92,23 @@ echo "    workspace: $ws"
 echo "==> branch $branch"
 git -C "$ws" switch -c "$branch"
 
-# Trust the new workspace path so the worker's COW-copied .claude/settings.json
-# allow rules + additionalDirectories actually load. Claude Code drops a project's
-# permissions on an untrusted path, and each new rift workspace path is untrusted
-# by default. ~/.claude.json is live, not git-tracked; edit it atomically.
-# (codex: same idea, different file -- the trust entry must be PERSISTED in
-# $CODEX_HOME/config.toml or the TUI shows its "do you trust this folder?"
-# gate; a session `-c` trust flag is ignored by that gate. See _codex.)
-if [ "$harness" = "claude" ]; then
-  echo "==> trust workspace in ~/.claude.json"
-  trust_json="$HOME/.claude.json"
-  if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
-    cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
-    if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      mv "$tmp" "$trust_json"
-      echo "    trusted $ws"
-    else
-      rm -f "${tmp:-}"
-      echo "    WARNING: could not set workspace trust; worker may drop its allow rules until you accept its trust dialog once." >&2
-    fi
-  else
-    echo "    NOTE: jq or ~/.claude.json missing; accept the worker's trust dialog once so its permissions load." >&2
-  fi
-else
-  echo "==> trust workspace in codex config"
-  fleet_codex_trust_add "$ws"
-fi
+echo "==> trust workspace in codex config"
+fleet_codex_trust_add "$ws"
 
-# Role marker (outside the workspace, so it survives the COW copy): lets worker-open
-# revive with the right overlay and worker-ls/worker-prune tell solo from orchestrator.
 mkdir -p "$FLEET_DIR/assignments"
 if [ "$solo" -eq 1 ]; then echo solo; else echo worker; fi >"$FLEET_DIR/assignments/$name.role"
-# Harness marker, same idea: pin the harness this worker was SPAWNED with (fleet
-# default or a --harness override), so a global toggle between spawn and revive
-# can't make worker-open revive a claude worker with `codex resume` (which would
-# find no codex session in the workspace) or vice versa — and so msg/worker-ls
-# pick the right transport for this worker in a mixed fleet.
-# worker-rm/worker-prune clean it with the .role marker.
 echo "$harness" >"$FLEET_DIR/assignments/$name.harness"
-# Model marker (only when --model was given): lets worker-open revive the session
-# on the same model instead of silently falling back to the harness default.
 rm -f "$FLEET_DIR/assignments/$name.model"
 if [ -n "$model" ]; then
   printf '%s\n' "$model" >"$FLEET_DIR/assignments/$name.model"
 fi
 
-# The ROLE reaches the two harnesses differently. claude: the overlay file is a
-# launch flag (--append-system-prompt-file, below), so the seed only points at the
-# assignment. codex: there is no append-system-prompt equivalent, so the role is
-# the FIRST THING in the seed prompt -- it lands as turn 1, which also means a
-# `codex resume` revive keeps it (it's in the conversation, not a launch flag).
 role_seed=""
 if [ "$harness" = "codex" ]; then
   role_seed="Read $ws/$overlay_rel and adopt it as your role for this entire session; it overrides the default orchestrator framing in AGENTS.md."
 fi
 
 if [ "$solo" -eq 1 ]; then
-  # Solo: user-driven, no assignment-file indirection. Guidance (if any) is the first
-  # prompt directly; with none, the session launches waiting for Michael's first turn
-  # (claude) or with just the role turn (codex -- the role must still be delivered).
   echo "==> solo (user-driven) worker; no assignment file"
   seed="$guidance"
   if [ -n "$role_seed" ]; then
@@ -252,55 +147,13 @@ if [ ! -f "$ws/$overlay_rel" ]; then
   echo "            Commit $overlay_rel so rift copies it into workspaces, then retry." >&2
   exit 1
 fi
-# The seed (set above per solo/non-solo) launches as a prompt ARG so it's never dropped.
-# Optional via seed_args so an empty solo seed passes nothing (not an empty "") and the
-# session launches waiting for the user's first turn.
 seed_args=()
 if [ -n "$seed" ]; then seed_args=("$seed"); fi
-# Optional model override (--model), passed through to the harness CLI verbatim:
-# `claude --model <id>` / `codex -m <id>`. Both are plain launch flags on a normal
-# INTERACTIVE session (not -p/exec), so the worker stays conversational.
-claude_model_args=()
 codex_model_args=()
 if [ -n "$model" ]; then
-  claude_model_args=(--model "$model")
   codex_model_args=(-m "$model")
 fi
-# tmux runs the command directly (no shell), so no quoting hazard on the seed.
-# The seed stays a LAUNCH ARG so it can never be dropped; coloring (below) is
-# layered on separately and is purely best-effort.
 if [ "$harness" = "codex" ]; then
-  # codex: no inspector socket (msg delivers over tmux paste), the role rides in
-  # the seed (built above), and workspace trust was persisted into the codex
-  # config above (fleet_codex_trust_add -- a `-c` trust flag does NOT suppress
-  # the trust prompt; see _codex). FLEET_DIR is propagated so the
-  # worker's own `msg` calls agree with the orchestrator on fleet state.
-  # network_access=true: codex's workspace-write sandbox otherwise blocks unix
-  # sockets (seccomp), which breaks the worker's own `msg` (the tmux client
-  # can't reach /tmp/tmux-1000/default -- verified live; the network keys under
-  # `network.*` do NOT lift it). Also lets `cargo fetch/build` reach the network,
-  # matching what claude workers already have.
-  # sandbox_mode is pinned so the network_access override is load-bearing even if
-  # the stowed ~/.codex/config.toml ever changes its default sandbox.
-  # approval_policy=never: the codex analog of the claude worker's pre-approved
-  # allow rules (.claude/settings.json, unlocked by the ~/.claude.json trust
-  # write). Without it codex prompts for approval/escalation, which a fleet
-  # worker must never do: nobody is watching the pane, and a `msg` delivery
-  # (tmux paste + Enter) landing on a pending approval modal would answer it
-  # blind. With `never`, out-of-sandbox commands just fail back to the model,
-  # which surfaces the blocker per its role -- the sandbox IS the permission
-  # boundary, so widen writable_roots below rather than loosening this.
-  # writable_roots: the codex analog of claude's additionalDirectories --
-  # ~/.cargo so `cargo fetch/build` can write the registry cache (verified
-  # live: workspace-write mounts it read-only, so every fetch otherwise fails
-  # or begs escalation), plus FLEET_DIR to match the claude worker's grant.
-  # $ws/.git: workspace-write deliberately carves the workspace's .git out of
-  # the writable cwd (anti-tampering for git config/hooks), so `git add/commit`
-  # dies with "Unable to create .git/index.lock: Read-only file system" -- but
-  # a worker that can't WIP-commit to its branch is invisible to
-  # worker-integrate. Naming the .git dir as its own writable root lifts the
-  # carve-out (verified live: add+commit succeed with it, index.lock error
-  # without; there is no allow_git_writes-style key).
   tmux new-session -d -s "$sess" -c "$ws" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     codex \
@@ -308,33 +161,12 @@ if [ "$harness" = "codex" ]; then
     -c "sandbox_workspace_write.network_access=true" \
     -c "sandbox_workspace_write.writable_roots=[\"$ws/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
     -c "approval_policy=\"never\"" \
-    "${codex_model_args[@]}" "${seed_args[@]}"
-else
-  # claude:
-  # `--name` is a display badge only (prompt box / window title / resume picker); it
-  # never resumes, so every spawn is a fresh session regardless of the badge.
-  # `BUN_INSPECT=ws+unix://...` opens this session's inspector socket -- the one
-  # transport `msg`/`_inject`/coloring deliver through (the socket path is derived
-  # from $sess on both ends). Opening it is inert until something connects; clear any
-  # stale socket from a prior same-named session first. FLEET_DIR is propagated so the
-  # session and msg agree on the socket dir.
-  mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
-  rm -f "$FLEET_DIR/insp/$sess.sock"
-  tmux new-session -d -s "$sess" -c "$ws" \
-    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-    BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-    claude --name "usc-$name" \
-    --append-system-prompt-file "$ws/$overlay_rel" \
-    "${claude_model_args[@]}" "${seed_args[@]}"
+    ${codex_model_args[@]+"${codex_model_args[@]}"} ${seed_args[@]+"${seed_args[@]}"}
 fi
 
 if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
   setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
   echo "    opened Alacritty attached to $sess"
-  # Drop the new terminal into the next free Alacritty tile-slot (bottom-right
-  # first), best-effort and fully decoupled: a DETACHED injector waits for the
-  # window to map, derives the current grid from the other tiled windows, and
-  # places this one. Never blocks or breaks the spawn; no-op without the tiler.
   if [ -x "$SELF/_place-inject" ]; then
     setsid -f "$SELF/_place-inject" "$sess" >/dev/null 2>&1 || true
   fi
@@ -342,26 +174,11 @@ else
   echo "    no display detected; attach with:  tmux attach -t $sess"
 fi
 
-# Per-session prompt-bar color, fully decoupled from the seed above. A DETACHED
-# injector waits for the session's inspector socket + prompt to be ready, then sends
-# `/color` through it (queued behind the seed turn); if it never becomes injectable,
-# or the helper is missing, the worker just goes uncolored -- never unseeded.
-# claude-only: `/color` and the inspector transport are Claude Code features.
-color=""
-if [ "$harness" = "claude" ]; then
-  color="$(fleet_color_name "$name" 2>/dev/null || true)"
-fi
-if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
-  echo "    coloring session $color (best-effort, once injectable)"
-  setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
-fi
-
 echo
 if [ "$solo" -eq 1 ]; then
   echo "solo (user-driven) worker '$name' is up. Drive it directly in its window."
   echo "  integrate:   scripts/fleet/worker-integrate $name   (when you hand it off)"
   echo "  remove:      scripts/fleet/worker-rm $name"
-  # No usc-orch nag: a solo worker intentionally stays silent toward the orchestrator.
 else
   echo "worker '$name' is up."
   echo "  message it:  scripts/fleet/msg $sess \"[orchestrator] ...\""

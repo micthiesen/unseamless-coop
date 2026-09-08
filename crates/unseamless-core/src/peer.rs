@@ -119,7 +119,7 @@ pub const CONFIG_SYNCED_MESSAGE: &str = "Session settings synced from host";
 
 /// ER-voiced in-world presence toast shown when a co-op partner's handshake lands — the lore-register
 /// counterpart to the plain "connected" confirmation, emitted *alongside* it (see `coop/coop.rs`).
-/// Player join/leave is an *effect*, so per CLAUDE.md's "Message voice" rule it's worded in
+/// Player join/leave is an *effect*, so per AGENTS.md's "Message voice" rule it's worded in
 /// FromSoft's terse, weighty register and carries **no raw mechanical values** — no SteamID, no peer
 /// tag: presence reads fine without an identity, and leaving it out keeps a player's id off the
 /// overlay. Single-sourced like [`CONFIG_SYNCED_MESSAGE`] so core and the overlay can't drift.
@@ -1510,7 +1510,7 @@ mod tests {
     // product* of drop / duplicate / reorder (the whole `FaultModel`) across several fixed seeds, so
     // a regression in the self-heal shows up as a specific reproducible `drop/dup/reorder/seed` case
     // rather than a lucky-or-unlucky single configuration. Determinism comes from the transport's
-    // seeded PRNG; no proptest or other dep (CLAUDE.md: hand-rolled deterministic cases preferred).
+    // seeded PRNG; no proptest or other dep (AGENTS.md: hand-rolled deterministic cases preferred).
 
     /// A shared-settings profile that differs from `Config::default()` in **every** host-enforced
     /// field (all six scaling percents off their defaults, all four shared bools flipped off their

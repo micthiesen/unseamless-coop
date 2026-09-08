@@ -9,7 +9,7 @@
 //! The save path is built and opened deep in the game's IO, with no typed SDK field to point
 //! elsewhere. The robust, version-stable interception is the Win32 call every save open funnels
 //! through — `kernel32!CreateFileW` — exactly the lever the MIT `vswarte/alt-saves` mod uses
-//! (mechanism re-derived here per CLAUDE.md > Clean-room; we do **not** port its `regulation.bin`
+//! (mechanism re-derived here per AGENTS.md > Clean-room; we do **not** port its `regulation.bin`
 //! patch). Because it's a *system* DLL export, this is **not** Arxan-protected game `.text`, so it's
 //! safe the way the `input.rs` user32/dinput8 hooks are.
 //!

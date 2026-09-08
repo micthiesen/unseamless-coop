@@ -11,7 +11,7 @@ game's request/transport machinery, replace the peer-brokering).
 > — as prior lanes confirmed on the rig). We study
 > how a game we bought behaves so we can reimplement co-op behavior in clean Rust, co-op-only and
 > *outside* anti-cheat. Behavioral notes are in my own words; **no decompiler/disassembler output is
-> reproduced** (CLAUDE.md > Clean-room hygiene). Addresses are facts about the binary.
+> reproduced** (AGENTS.md > Clean-room hygiene). Addresses are facts about the binary.
 
 ## TL;DR
 

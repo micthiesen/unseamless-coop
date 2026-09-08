@@ -145,11 +145,11 @@ fn gather(wcm: &WorldChrMan) -> Vec<(HavokPosition, [u8; 4])> {
 }
 
 /// Iterate a `ChrSet` yielding only **fully loaded** (`ChrLoadStatus::Active`) characters. The SDK's
-/// `ChrSet::characters()` yields a `ChrIns` *regardless* of load status (the CLAUDE.md UAF caveat), and
+/// `ChrSet::characters()` yields a `ChrIns` *regardless* of load status (the AGENTS.md UAF caveat), and
 /// a `player_chr_set` phantom mid-join transits `Initializing`/`NetworkInitializing`/`ReadyForActivation`
 /// with its `modules` pointers not yet wired — so reading `modules.physics.position` off such an entry
 /// is a segfault `catch_unwind` can't catch. We gate on the **entry's** `chr_load_status` (the robust
-/// form CLAUDE.md prescribes), not the in-`ChrIns` `is_active` flag, because the two aren't guaranteed
+/// form AGENTS.md prescribes), not the in-`ChrIns` `is_active` flag, because the two aren't guaranteed
 /// to flip in lockstep for a joining network peer (a rig-confirm item). Mirrors the SDK's own entry
 /// walk, reading the status alongside the pointer.
 pub(crate) fn active_characters<T>(set: &ChrSet<T>) -> impl Iterator<Item = &mut T> + '_

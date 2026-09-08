@@ -23,7 +23,7 @@
 //!
 //! # Clean-room / scope
 //! This is our own repro of a collision *we* diagnosed, built from the public WER datum + our own
-//! shipped fix — no upstream bytes, no anti-cheat/DRM interaction (see CLAUDE.md > Clean-room hygiene).
+//! shipped fix — no upstream bytes, no anti-cheat/DRM interaction (see AGENTS.md > Clean-room hygiene).
 //!
 //! # One divergence from the wild, called out
 //! In the wild, the bytes at `entry+5` were the ASLR-random tail of our 14-byte abs-jmp patch (address

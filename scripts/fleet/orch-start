@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# orch-start [claude args...]
-#
-# Start (or attach to) the orchestrator Claude Code session. It runs in a tmux
-# session named `usc-orch` so workers can reach it with `msg usc-orch ...`, and
-# launches with `--add-dir` over the rifts tree so it can fetch/integrate worker
-# branches. No worker role overlay -> it is the orchestrator by default
-# (CLAUDE.md). See docs/ORCHESTRATION.md.
+# Launch or attach the Codex orchestrator. --continue resumes its last session.
+# Fresh sessions receive the STATE.md orientation prompt unless --no-seed is given.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,27 +9,10 @@ RIFTS="$HOME/Code/.rifts/$(basename "$REPO")"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 sess="usc-orch"
 
-# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
-# source so a future merge that drops the helper can't break a spawn.
-if [ -f "$SELF/_color" ]; then
-  # shellcheck source=scripts/fleet/_color
-  source "$SELF/_color"
-else
-  fleet_color_name() { :; }
-fi
-
-# Which CLI harness to launch (claude default, or codex); see _harness.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
 harness="$(fleet_harness)"
 
-# Boot seed: a FRESH orchestrator starts by reading docs/STATE.md and continuing from
-# it (docs/ORCHESTRATION.md > "Session Continuity"). Passed as the CLI's positional
-# initial prompt, which auto-submits (the same mechanism worker-new's assignment seed
-# uses). Skipped with --no-seed (e.g. when passing your own positional prompt), and
-# never seeded on a resumed session (--continue/-c/--resume already carry the
-# context). NOTE: -c means "continue" only for claude; for codex it's the config
-# override flag, so the codex branch skips only on --continue (mapped to resume).
 BOOT_PROMPT='Boot: read docs/STATE.md -- it is about the work (Now / Next / candidates), not machine state. Give Michael a short brief: where things stand and what Next is. Do NOT audit machine state to orient (no worker-ls / rig-status sweep -- workers are on worker-ls only if you need it, and the rig is cheap to re-apply if a rig task comes up). This boot prompt alone is orientation, not a request to start work: wait after the brief unless the user launched this session with an instruction to continue the project. When they did, begin the recorded Next without asking again; pause only at a real human gate or consequential unresolved choice.'
 seed=1
 args=()
@@ -43,14 +21,10 @@ for a in "$@"; do
     seed=0
     continue
   fi
-  if [ "$harness" = "codex" ]; then
-    case "$a" in --continue) seed=0 ;; esac
-  else
-    case "$a" in -c|--continue|-r|--resume) seed=0 ;; esac
-  fi
+  case "$a" in --continue) seed=0 ;; esac
   args+=("$a")
 done
-set -- "${args[@]}"
+set -- ${args[@]+"${args[@]}"}
 seed_args=()
 if [ "$seed" = 1 ]; then
   seed_args=("$BOOT_PROMPT")
@@ -58,11 +32,6 @@ fi
 
 mkdir -p "$RIFTS"
 
-# Drop the orchestrator's terminal into the next free Alacritty tile-slot, same as
-# the workers. orch-start `exec`s `tmux attach` into the CURRENT terminal rather than
-# popping a new window, so the placer targets that terminal's Alacritty (resolved by
-# _place-inject from the tmux client's parent pid). Detached so the exec below is never
-# delayed; best-effort + no-op without a display / the tiler / an Alacritty host.
 place_self() {
   [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] || return 0
   [ -x "$SELF/_place-inject" ] || return 0
@@ -70,6 +39,7 @@ place_self() {
 }
 
 if tmux has-session -t "$sess" 2>/dev/null; then
+  fleet_orchestrator_harness >/dev/null
   echo "orchestrator session '$sess' already running; attaching."
   place_self
   exec tmux attach -t "$sess"
@@ -77,16 +47,6 @@ fi
 
 cd "$REPO"
 if [ "$harness" = "codex" ]; then
-  # codex: `--continue` (the orch-continue .desktop item / the claude flag) maps to
-  # `codex resume --last`, which cwd-filters to this repo. Trust must be
-  # PERSISTED in the codex config (the trust gate ignores a `-c` flag; see
-  # _codex). No BUN_INSPECT (msg
-  # delivers over tmux paste), no /color, no /remote-control (Claude Code
-  # features). No --add-dir either: integration only READS worker repos
-  # (`git fetch <path>` writes to this repo's .git), and codex's workspace-write
-  # sandbox already reads the whole disk.
-  # Only the long flag maps: `-c` is codex's own config-override flag, so it must
-  # pass through untouched (it only means "continue" in claude's CLI).
   # shellcheck source=scripts/fleet/_codex
   source "$SELF/_codex"
   fleet_codex_trust_add "$REPO"
@@ -95,43 +55,15 @@ if [ "$harness" = "codex" ]; then
     shift
     codex_cmd=(codex resume --last)
   fi
-  # network_access=true: the sandbox otherwise blocks unix sockets (seccomp), so
-  # the orchestrator's own `msg` to workers (a tmux client) would fail.
-  # writable_roots: $REPO/.git because workspace-write carves .git out of the
-  # writable cwd -- without it the orchestrator can't commit to main or even
-  # `git fetch` a worker branch (fetch writes FETCH_HEAD/refs); ~/.cargo for
-  # the registry cache; FLEET_DIR because spawning workers writes assignment
-  # files there. Same grants the worker launch lines carry (see worker-new).
   tmux new-session -d -s "$sess" -c "$REPO" \
     env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
     "${codex_cmd[@]}" \
     -c "sandbox_mode=\"danger-full-access\"" \
     -c "sandbox_workspace_write.network_access=true" \
     -c "sandbox_workspace_write.writable_roots=[\"$REPO/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" "$@" \
-    "${seed_args[@]}"
+    ${seed_args[@]+"${seed_args[@]}"}
+  mkdir -p "$FLEET_DIR"
+  printf 'codex\n' >"$FLEET_DIR/orchestrator.harness"
   place_self
   exec tmux attach -t "$sess"
 fi
-# `--name` is a display badge only (never resumes); "$@" comes last so a
-# user-supplied --name overrides this default. `BUN_INSPECT=...` opens the
-# orchestrator's inspector socket so workers can `msg usc-orch` into it (the same
-# transport workers use); inert until connected. Clear any stale socket first.
-mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
-rm -f "$FLEET_DIR/insp/$sess.sock"
-tmux new-session -d -s "$sess" -c "$REPO" \
-  env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-  BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-  claude --name "usc-orch" --add-dir "$RIFTS" "$@" "${seed_args[@]}"
-# Reserved orchestrator color (red) + the `/remote-control` bootstrap, both best-effort
-# and ONLY on a fresh start (this branch) -- the attach-existing path above leaves a
-# running session untouched. Two detached injectors over the same inspector transport
-# `msg` uses, so the attach below is never delayed while they wait for the socket; each
-# queues as its own turn once the prompt UI mounts. `/remote-control` is orchestrator-only
-# (workers stay color-only).
-color="$(fleet_color_name "usc-orch" 2>/dev/null || true)"
-if [ -x "$SELF/_cmd-inject" ]; then
-  [ -n "$color" ] && setsid -f "$SELF/_cmd-inject" "$sess" "/color $color" >/dev/null 2>&1 || true
-  setsid -f "$SELF/_cmd-inject" "$sess" "/remote-control" >/dev/null 2>&1 || true
-fi
-place_self
-exec tmux attach -t "$sess"

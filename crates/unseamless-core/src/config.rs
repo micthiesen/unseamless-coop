@@ -135,7 +135,7 @@ pub enum AutoSession {
 }
 
 /// Debugging / diagnostics. Off by default so normal play does no extra disk or network work
-/// (see CLAUDE.md / ARCHITECTURE.md). When `enabled`, logging drops to `level` and, if
+/// (see AGENTS.md / ARCHITECTURE.md). When `enabled`, logging drops to `level` and, if
 /// `forward_to_host`, this client also ships its records to the host for one-place inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

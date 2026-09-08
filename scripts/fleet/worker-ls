@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# worker-ls
-#
-# List active workers, derived live from `rift list` + tmux (no registry file to
-# drift). Also flags orphan tmux sessions with no matching workspace.
+# List live rift workspaces and tmux workers, including branch and commit state.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,28 +10,6 @@ source "$SELF/_harness"
 
 cd "$REPO"
 
-# AHEAD = commits on the worker branch beyond the workspace's own copy of `main`
-# (the create point) -- the at-a-glance "has this worker produced anything yet?"
-# signal. Worker branches live in the independent workspace clones, not here, so
-# this is computed per-workspace (`git -C "$ws"`), not from the orchestrator repo.
-# ROLE (worker|solo|-) comes from the `.role` marker; solo workers are the ones
-# `worker-prune` sweeps up.
-# HARNESS = which CLI the worker was spawned with (its .harness marker, fleet
-# default for markerless pre-marker spawns) -- the at-a-glance mixed-fleet view,
-# and what msg/worker-open resolve through for this worker.
-# SOCK = whether `msg` can reach a live session, judged per-worker by that same
-# harness. claude worker: its inspector socket (worker-new/orch-start set
-# BUN_INSPECT to $FLEET_DIR/insp/<sess>.sock) is present -- the cheap mirror of
-# msg's first gate (`[ -S "$sock" ]`); it does NOT prove something is *accepting*
-# on it (a restarted session can leave a stale file -- msg's deeper rc=8 check
-# catches that). codex worker: the tmux session itself is the transport (msg
-# pastes into the pane), so live == reachable. `up` = reachable, `off` = live but
-# no socket (claude msg would fail), `-` = no live session. We don't spawn a
-# per-worker `_inject --selftest` probe here; that'd fork a bun per row and make
-# `ls` slow.
-# LAST_COMMIT = the worker branch tip's subject -- *what* each worker is building, not
-# just that it's ahead. `(no commits yet)` when AHEAD is 0 (tip is still the base), so a
-# base-commit subject never reads as the worker's own work.
 printf '%-18s %-5s %-5s %-6s %-7s %-22s %-6s %-6s %s\n' NAME TMUX SOCK ROLE HARNESS BRANCH DIRTY AHEAD LAST_COMMIT
 found=0
 while IFS= read -r ws; do
@@ -42,14 +17,10 @@ while IFS= read -r ws; do
   found=1
   name="$(basename "$ws")"
   sess="usc-worker-$name"
-  harness="$(fleet_worker_harness "$name")"
+  harness="$(fleet_worker_harness "$name" 2>/dev/null)" || harness="retired"
   if tmux has-session -t "$sess" 2>/dev/null; then tstate="live"; else tstate="-"; fi
   if [ "$tstate" = "live" ]; then
-    if [ "$harness" = "codex" ]; then
-      sstate="up"   # tmux itself is the codex transport; live session == reachable
-    else
-      [ -S "$FLEET_DIR/insp/$sess.sock" ] && sstate="up" || sstate="off"
-    fi
+    if [ "$harness" = "codex" ]; then sstate="up"; else sstate="off"; fi
   else
     sstate="-"
   fi
@@ -76,7 +47,6 @@ if [ "$found" -eq 0 ]; then
   echo "(no worker workspaces)"
 fi
 
-# Flag orphans: a live tmux session with no matching workspace.
 while IFS= read -r sess; do
   [ -n "$sess" ] || continue
   name="${sess#usc-worker-}"

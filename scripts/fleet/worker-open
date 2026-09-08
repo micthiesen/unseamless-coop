@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
-# worker-open <name>
-#
-# (Re)open a worker's Claude Code session in an Alacritty window:
-#   - session live      -> pop a window attached to it
-#   - session dead but
-#     workspace remains  -> revive it in tmux with `claude -c` (continue its last
-#                           conversation, so it keeps context) and pop a window
-#   - nothing there      -> tell you to use worker-new
+# Attach to a live worker or resume its last Codex conversation and model pin.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 
-# Distinct, stable per-session coloring (see scripts/fleet/_color). Guard the
-# source so a future merge that drops the helper can't break a revive.
-if [ -f "$SELF/_color" ]; then
-  # shellcheck source=scripts/fleet/_color
-  source "$SELF/_color"
-else
-  fleet_color_name() { :; }
-fi
-
-# Which CLI harness to revive with: the worker's own spawn harness (its .harness
-# marker, global fallback -- reviving a claude worker with codex would find no
-# codex session in the workspace, and vice versa). See _harness.
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
-# Codex plumbing (workspace trust); see _codex.
 # shellcheck source=scripts/fleet/_codex
 source "$SELF/_codex"
 
@@ -44,10 +24,6 @@ pop_window() {
   if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && command -v alacritty >/dev/null 2>&1; then
     setsid -f alacritty -e tmux attach -t "$sess" >/dev/null 2>&1 || true
     echo "opened Alacritty attached to $sess"
-    # Drop the reopened terminal into the next free Alacritty tile-slot, same as
-    # worker-new does on first spawn. Best-effort + fully decoupled: a DETACHED
-    # injector waits for the window to map and places it; never blocks or breaks
-    # the open, and no-ops without a display / the tiler / the Alacritty host.
     if [ -x "$SELF/_place-inject" ]; then
       setsid -f "$SELF/_place-inject" "$sess" >/dev/null 2>&1 || true
     fi
@@ -60,43 +36,16 @@ if tmux has-session -t "$sess" 2>/dev/null; then
   echo "$sess is live; opening a window."
   pop_window
 elif [ -d "$ws" ]; then
-  # Revive with the SAME overlay this worker spawned with (the .role marker worker-new
-  # wrote outside the workspace): a solo worker must not come back orchestrator-driven.
-  # Absent marker == default worker (back-compat).
   role="$(cat "$FLEET_DIR/assignments/$name.role" 2>/dev/null || true)"; [ -n "$role" ] || role="worker"
-  overlay_rel="docs/roles/worker.md"
-  if [ "$role" = "solo" ]; then overlay_rel="docs/roles/worker-solo.md"; fi
-  # The worker's own spawn harness wins over the current global setting (see the
-  # sourcing comment above); an absent/garbage marker keeps the global fallback.
   harness="$(fleet_worker_harness "$name")"
-  # Re-apply the worker's model pin (--model at spawn), if any: the model is a
-  # launch-time setting, not conversation state, so a bare revive would silently
-  # fall back to the harness default. Same pass-through flags worker-new used.
   model="$(cat "$FLEET_DIR/assignments/$name.model" 2>/dev/null || true)"
-  claude_model_args=()
   codex_model_args=()
   if [ -n "$model" ]; then
-    claude_model_args=(--model "$model")
     codex_model_args=(-m "$model")
   fi
   if [ "$harness" = "codex" ]; then
     echo "$sess is dead; reviving the $role worker in $ws (codex resume --last)."
-    # Re-persist workspace trust first: the codex trust gate only believes the
-    # config FILE (a dotfiles restow/reset between spawn and revive would have
-    # dropped the entry, and a `-c` trust flag can't paper over it; see _codex).
     fleet_codex_trust_add "$ws"
-    # `codex resume` cwd-filters by default, so --last inside the workspace
-    # continues THIS worker's own most recent conversation. No overlay re-injection
-    # needed: worker-new delivered the role as the first user turn, which resume
-    # keeps (it's conversation history, not a launch flag). The `-c` flags are
-    # launch-time (not conversation state), so a revive must re-pass the SAME
-    # set worker-new uses -- sandbox pin, network_access (lets the
-    # worker's own `msg`/tmux reach its unix socket from inside the sandbox),
-    # writable_roots ($ws/.git so git add/commit work at all -- workspace-write
-    # carves .git out of the writable cwd -- plus ~/.cargo for the registry
-    # cache + FLEET_DIR), and approval_policy=never (a worker must never sit on
-    # an approval modal; see worker-new for the full rationale). No inspector
-    # socket under codex.
     tmux new-session -d -s "$sess" -c "$ws" \
       env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
       codex resume --last \
@@ -104,43 +53,9 @@ elif [ -d "$ws" ]; then
       -c "sandbox_workspace_write.network_access=true" \
       -c "sandbox_workspace_write.writable_roots=[\"$ws/.git\",\"$HOME/.cargo\",\"$FLEET_DIR\"]" \
       -c "approval_policy=\"never\"" \
-      "${codex_model_args[@]}"
+      ${codex_model_args[@]+"${codex_model_args[@]}"}
     pop_window
     exit 0
-  fi
-  echo "$sess is dead; reviving the $role worker in $ws (claude -c)."
-  # Re-trust the workspace path so the worker's .claude/settings.json allow rules
-  # load (an untrusted path drops them).
-  trust_json="$HOME/.claude.json"
-  if command -v jq >/dev/null 2>&1 && [ -f "$trust_json" ]; then
-    cp "$trust_json" "$trust_json.bak" 2>/dev/null || true
-    if tmp="$(mktemp)" && jq --arg p "$ws" '.projects[$p].hasTrustDialogAccepted = true' "$trust_json" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      mv "$tmp" "$trust_json"
-    else
-      rm -f "${tmp:-}"
-    fi
-  fi
-  # Re-apply the worker overlay: --append-system-prompt-file is a launch-time
-  # system prompt, NOT stored in the conversation, so `claude -c` alone would drop
-  # it and the revived session would fall back to the orchestrator default.
-  # BUN_INSPECT must also be re-set (launch-time, not stored) so the revived worker
-  # reopens its inspector socket and stays reachable by `msg`; clear any stale one.
-  mkdir -p "$FLEET_DIR/insp" && chmod 700 "$FLEET_DIR/insp"
-  rm -f "$FLEET_DIR/insp/$sess.sock"
-  tmux new-session -d -s "$sess" -c "$ws" \
-    env UNSEAMLESS_FLEET_DIR="$FLEET_DIR" \
-    BUN_INSPECT="ws+unix://$FLEET_DIR/insp/$sess.sock" \
-    claude -c --append-system-prompt-file "$ws/$overlay_rel" \
-    "${claude_model_args[@]}"
-  pop_window
-  # The revived instance is a fresh client, so its prompt-bar color was lost
-  # (/color is per-session, never persisted) -- re-apply the worker's stable
-  # color, best-effort + detached. Only on revive: a still-live session (branch
-  # above) keeps its color and must not be typed into while the user may be
-  # mid-conversation.
-  color="$(fleet_color_name "$name" 2>/dev/null || true)"
-  if [ -n "$color" ] && [ -x "$SELF/_color-inject" ]; then
-    setsid -f "$SELF/_color-inject" "$sess" "$color" >/dev/null 2>&1 || true
   fi
 else
   echo "worker-open: no worker '$name' (no live session, no workspace at $ws)." >&2

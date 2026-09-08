@@ -1,6 +1,6 @@
 # Orchestration
 
-How we run concurrent development on this repo: a single **orchestrator** Claude Code session
+How we run concurrent development on this repo: a single **orchestrator** Codex session
 plus N **worker** sessions, each in its own [rift](https://github.com/anomalyco/rift) workspace,
 coordinated over tmux. This is the contract and the naming; the operational procedure lives in the
 `/fleet` skill, the way the global `/triage` skill documents `wt`.
@@ -25,15 +25,14 @@ touching the rig is holding a chunk that should have been a worker.
 ## Roles
 
 Roles are injected at **launch**, never by mutating tracked files (a rift workspace is a full git
-repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integration).
+repo, so editing `AGENTS.md` there would be a tracked diff that pollutes integration).
 
-- **Orchestrator** is the **default**. `CLAUDE.md` states "you are the orchestrator unless a
+- **Orchestrator** is the **default**. `AGENTS.md` states "you are the orchestrator unless a
   worker role is injected," so a normal interactive session in the canonical repo *is* the
   orchestrator with no special flag. It owns: planning with the human, the rig, RE/validation,
   integration, the only commits to `main`, and the worker lifecycle (create, message, remove).
 - **Worker** is an overlay. A worker session is launched with
-  `--append-system-prompt-file docs/roles/worker.md` (claude; under codex the same file is instead
-  delivered as the first thing in the seed prompt — see Harness), which overrides the default
+  a seed prompt that reads `docs/roles/worker.md`, which overrides the default
   framing. A worker owns: one lane of feature work, WIP commits to its own
   branch, and asking the orchestrator (by message) for anything serial. A worker **never** drives
   the rig and **never** commits to `main`.
@@ -46,64 +45,22 @@ repo, so editing `CLAUDE.md` there would be a tracked diff that pollutes integra
   fleet dir, outside every workspace, so it never COW-diverges) — `worker-open` reads it to revive
   with the right overlay; `worker-rm`/`worker-prune` clean it.
 
-## Harness (Claude Code Or Codex)
+## Codex
 
-The fleet runs on **Claude Code** (`claude`, the default) or **Codex** (`codex`) — same scripts,
-same lifecycle, same roles. The **default** is a single machine-global state file,
-`$UNSEAMLESS_FLEET_DIR/harness` (shared fleet dir, outside every workspace, for the same
-no-COW-divergence reason as the `.role` markers; missing file == claude):
+The fleet runs Codex using native `AGENTS.md`, `.agents/skills/`, and
+`.codex/config.toml`. Edit those files directly. No generated copies or AI-config
+symlinks are needed.
 
-```
-scripts/fleet/harness              # print current default: claude | codex
-scripts/fleet/harness codex        # set
-scripts/fleet/harness toggle       # flip (also the unseamless-toggle-harness .desktop item)
-```
+`worker-new --model <id>` pins a user-requested model; otherwise the user's Codex
+default applies. `scripts/fleet/models` lists the local Codex model cache.
+`worker-open` resumes the workspace's last Codex session and preserves the model pin.
+The role is delivered in the initial prompt and remains in conversation history.
 
-Every set/toggle fires a desktop notification with the new value (the .desktop item runs with no
-terminal, so that's its feedback). The **orchestrator always runs the default** (it has no
-override), and sessions already running keep the harness they launched with.
-
-**Per-worker overrides (opt-in).** A single worker can be spawned off-default with
-`worker-new --harness <claude|codex>`, and/or on a specific model with `worker-new --model <id>`
-(passed through unvalidated — `claude --model` / `codex -m`, both plain flags on a normal
-interactive session; `scripts/fleet/models` lists known-good IDs from local data only). What makes
-the mixed fleet safe is that **everything downstream resolves per worker, not globally**:
-`worker-new` pins each worker's spawn harness in `assignments/<name>.harness` (and its model, if
-overridden, in `assignments/<name>.model`), and `msg` (transport choice), `worker-open` (revive
-CLI), and `worker-ls` (HARNESS column, SOCK logic) all read the harness marker via
-`fleet_worker_harness`, falling back to the global default only for markerless pre-marker spawns
-(`worker-open` additionally re-applies the separate `.model` pin on revive).
-The same pinning is why a global toggle can't strand running workers (it can't make `worker-open`
-`codex resume` a claude worker's workspace, which would have no codex session to continue).
-
-What differs per harness (all encapsulated in the scripts; verified end to end with a live codex
-ping worker, both message directions):
-
-| | claude | codex |
-|---|---|---|
-| Role injection | `--append-system-prompt-file` overlay at launch | the role instruction is the **first thing in the seed prompt** (no system-prompt flag exists; being turn 1, it survives `resume` revives for free) |
-| Messaging (`msg`) | inspector-socket injection (`_inject`): instant, draft-preserving | tmux **bracketed paste + Enter** into the pane: lands as a user turn, queues mid-turn like typing, but a draft in the composer is **not** preserved and a still-booting TUI can drop the paste |
-| Workspace trust | `~/.claude.json` `hasTrustDialogAccepted` (jq edit) | `[projects."<ws>"] trust_level = "trusted"` **persisted into `$CODEX_HOME/config.toml`** by `fleet_codex_trust_add` (`scripts/fleet/_codex`), removed again by `worker-rm`. A session `-c projects...trust_level` flag parses but the "do you trust this folder?" gate ignores it (verified on codex-cli 0.142.5), so the file write — the same entry codex persists on a manual "Yes" — is the only way to skip the prompt. The config is a stowed dotfiles symlink; the helper writes *through* it (`>>`/`cat >`, never `mv`) |
-| Sandbox | `.claude/settings.json` allowlist | workspace-write **+ `-c sandbox_workspace_write.network_access=true`** — without it codex's seccomp blocks unix sockets, so the session's own `msg` (a tmux client) can't reach the tmux server (verified; the `network.*` keys do NOT lift it) |
-| Pre-approved work (no prompts) | `.claude/settings.json` `allow` rules + `additionalDirectories`, unlocked by the trust write | **`-c approval_policy="never"`** (a worker must never sit on an approval modal — nobody watches the pane, and a `msg` paste + Enter would answer it blind; out-of-sandbox commands fail back to the model, which surfaces the blocker) **+ `-c sandbox_workspace_write.writable_roots=["<ws>/.git", "~/.cargo", FLEET_DIR]`** (all verified with `codex sandbox`: workspace-write **carves the workspace's own `.git` out of the writable cwd** — git config/hooks anti-tampering; there's no `allow_git_writes`-style key — so without the explicit `.git` root every `git add/commit` dies with `Unable to create .git/index.lock: Read-only file system` and the worker can't WIP-commit to its branch; `~/.cargo` is mounted read-only, so `cargo fetch/build` registry writes otherwise fail/escalate; the sandbox, not approvals, is the permission boundary, so widen `writable_roots` rather than loosening the policy) |
-| Revive (`worker-open`) | `claude -c` + re-overlay + re-`BUN_INSPECT` | `codex resume --last` (cwd-filters to the workspace, so it continues that worker's own conversation) |
-| `/color`, `/rc` remote control | yes | not available (Claude Code features; codex sessions go uncolored) |
-| Repo instructions & skills | `CLAUDE.md`, `.claude/skills/` | same content via tracked symlinks: `AGENTS.md -> CLAUDE.md`, `.codex/skills -> .claude/skills` (codex does **not** read `.claude/skills` at project level; it does pick up user-level `~/.claude/skills` natively, and it reads only `name`+`description` frontmatter, tolerating the extra claude fields) |
-
-**Workers vs. `Agent`/`Task` subagents.** Fanning out a *chunk of buildable work* (a feature lane, a
-big *static* RE search, a migration — anything whose result is a branch to integrate) is **always** a fleet
-worker, never an `Agent`-tool subagent, even for a single lane. A worker is visible (`worker-ls`),
-watchable by the human, branch-isolated, and integrated through the normal review path; a subagent is an
-invisible black box that produces no integrable branch and can't be watched or reviewed. Subagents stay
-valid only for **supporting** tasks that feed the orchestrator's own work and return *findings, not a
-deliverable*: running tests, locating code (`Explore`), grep-and-summarize research, review agents
-(`/check`, `/tricheck`). Litmus: *would the result be a branch merged to `main`?* → worker; *just
-informing your own work?* → subagent. This is the orchestrator-specific override of the global "spawn
-subagents aggressively" guidance.
-
-The overlay files (`docs/roles/worker.md`, `docs/roles/worker-solo.md`, and any orchestrator-specific
-notes) are **tracked and read-only at runtime** (consumed via `--append-system-prompt-file`), so they
-COW into a workspace without ever being mutated there.
+`scripts/fleet/harness` prints `codex`. Old `toggle` shortcuts are harmless no-ops.
+Workers with missing or retired harness markers fail with an explanation instead of
+resuming an unrelated Codex conversation. Finish or recreate those workers first.
+A live orchestrator predating this migration must be restarted with `orch-stop`
+and `orch-start`; new launches record `orchestrator.harness` before attaching.
 
 ## Why rift, Not Git Worktrees
 
@@ -123,66 +80,24 @@ under a tenth of a second at near-zero disk cost. Verified properties that the d
 
 ## Layout
 
-```
-~/Code/unseamless-coop                      canonical repo  -> orchestrator (tmux: usc-orch)
-~/Code/.rifts/unseamless-coop/<name>        worker workspace -> worker (tmux: usc-worker-<name>)
-~/.local/share/unseamless-fleet/            shared dir (OUTSIDE all workspaces)
-  ├─ assignments/<name>.md                  per-worker assignment (orchestrator-driven; read at launch)
-  ├─ assignments/<name>.role                role marker: "worker" | "solo" (picks the overlay on revive)
-  ├─ assignments/<name>.harness             harness marker: what the worker was SPAWNED with (msg/revive/ls pin)
-  ├─ assignments/<name>.model               model marker: --model override at spawn, if any (revive pin)
-  ├─ harness                                fleet DEFAULT harness: "claude" (default) | "codex" (see Harness)
-  └─ insp/<session>.sock                    per-session inspector socket (messaging endpoint, 0700 dir)
-```
+- `~/Code/unseamless-coop`: canonical repo and `usc-orch` tmux session.
+- `~/Code/.rifts/unseamless-coop/<name>`: worker workspace and `usc-worker-<name>` session.
+- `~/.local/share/unseamless-fleet/assignments/<name>.md`: assignment.
+- Beside it, `.role`, `.harness`, and optional `.model` record the worker's launch settings.
 
-The shared dir must live **outside** every rift workspace. Anything inside a workspace is
-COW-copied per worker and diverges, so a shared endpoint in the tree would fork. Its absolute path
-goes in `.claude/settings.json` under `additionalDirectories`, which COW-propagates read/write
-access to every worker.
+The shared fleet directory stays outside workspaces so copy-on-write snapshots do
+not diverge. `UNSEAMLESS_FLEET_DIR` overrides its location.
 
 ## Messaging
 
-*(This section describes the **claude** transport. For a **codex** target, `msg` instead does a
-tmux bracketed paste + Enter into the target pane — see Harness above for the differences. `msg`
-picks the transport per target: the worker's `.harness` marker for `usc-worker-*`, the fleet
-default for `usc-orch`. The conventions — source prefixes, `usc-*`-only targets, no interrupting a
-busy session — apply to both.)*
+`scripts/fleet/msg <session> -` reads stdin and submits a tmux bracketed paste
+followed by Enter. It permits only `usc-orch` and `usc-worker-<name>` targets and
+fails when the session is offline. Use a quoted heredoc for multiline text.
 
-The claude transport is **direct in-process injection through each session's inspector socket** — not
-typing into the target's TTY, and not a polled mailbox. Every fleet session launches under
-`BUN_INSPECT=ws+unix://…/insp/<session>.sock` (worker-new / orch-start / worker-open), which exposes a
-JSC/WebKit inspector on a per-session unix socket. `msg <session> "<text>"` calls
-`scripts/fleet/_inject`, which connects to that socket, walks the live Ink/React fiber tree to the
-prompt-input component, and calls its `onSubmit` — so the message lands as a normal **user turn**,
-instantly, with nothing typed over the TTY. `_inject` is the one complex piece; `msg` is a thin
-wrapper over it.
-
-What this buys:
-
-- **Instant.** Delivery happens the moment `msg` runs. A *mid-turn* target is fine: `onSubmit` queues
-  the message and it runs when the current turn ends, exactly like typing would.
-- **Never clobbers a draft.** Before submitting, `_inject` reads the target's input-box draft (the
-  prompt's `value`) and re-asserts it via `onChange` after `onSubmit` clears the box, so a draft you
-  (or a worker's human) left sitting survives. This holds for **every session, the human-attended
-  `usc-orch` included** — there's no "empty box" gate and no special-casing the orchestrator.
-- **Receive is visible for free.** The message arrives as a user turn in the target, so anyone
-  watching that session sees it (and the response) appear — no separate notification layer.
-- **Resilient by structure.** `_inject`'s anchors are semantic React props (`onSubmit` +
-  `messagesRef`/`commands`; `value` + `onChange`), never minified names or offsets, so they survive
-  minifier churn. `_inject --selftest <session>` verifies them and exits nonzero if a Claude Code
-  update moved them — wire it into the smoke test. The `_inject` header documents the mechanism and how
-  to re-derive the anchors after an update.
-
-Still true: **prefix every cross-session message** with its source (`[orchestrator] ...` /
-`[worker:<name>] ...`) for attribution, and we don't script *interrupting* a busy session — for a hard
-redirect, attach and do it by hand. There is intentionally no "read another session's messages"
-command: a message is delivered into the target as a turn, not parked in a mailbox someone could rifle.
-A target with no live socket (offline, or mid-restart) can't be reached — `msg` fails loudly rather
-than queuing, since an offline fleet session is being torn down anyway.
-
-The same socket carries prompt-bar coloring: `_color-inject` sends `/color <name>` through `_inject`
-(a slash command is just a message whose text starts with `/`), so there's a single delivery path and
-no `send-keys` anywhere. The socket is an in-process code-exec surface, so its dir is mode `0700`.
+A paste appends to any draft already in the composer, and a booting TUI can miss
+it. Keep the destination composer empty and retry if a freshly launched worker
+does not respond. A message is ordinary user input; it queues while Codex works.
+Each call uses its own tmux buffer so overlapping senders cannot overwrite it.
 
 ## Writing a worker assignment
 
@@ -213,14 +128,14 @@ The only path code reaches `main`:
    it. `rerere` is enabled in this repo, so recurring conflicts across workers resolve once and
    replay.
 4. Orchestrator squashes to one clean commit on `main` with a proper message (per the repo's
-   commit conventions in [CLAUDE.md](../CLAUDE.md)).
+   commit conventions in [AGENTS.md](../AGENTS.md)).
 
 This is why "workers never commit" is really "workers never commit **to `main`**": git's 3-way
 merge and `rerere` need commits to operate on, so workers must commit to their own branch.
 
 ### Review happens here — light, and only when warranted
 
-Review in this project is deliberately light (CLAUDE.md > "Review is light here"). Most lanes are
+Review in this project is deliberately light (AGENTS.md > "Review is light here"). Most lanes are
 *experiments* — RE probes, rig instrumentation, diagnostic levers — and get **no formal review**: the
 worker keeps the build green, eyeballs its diff, and says "no review — experiment" in its done message.
 The orchestrator integrates those on the strength of the diff and the rig result.
@@ -266,51 +181,34 @@ and observing them in a single play session over launching per-lane. It costs on
 (rerere caches it for final integration) but collapses N launches into one and lets you feed every
 lane its values together. Probes are designed inert-by-default, so they coexist safely in one build.
 
-## Permissions and Directories
+## Permissions And Directories
 
-- **Shared, COW-propagated** (checked-in `.claude/settings.json`, so every worker inherits it):
-  - `additionalDirectories`: the absolute shared-dir path (`~/.local/share/unseamless-fleet`).
-  - a build-loop allowlist so workers don't prompt on every cycle: `cargo build`/`check`/`clippy`/
-    `test`/`fetch`, `scripts/test-core.sh`, `scripts/fleet/msg`, `scripts/fleet/worker-ls`, and git
-    incl. `add`/`commit`/`switch`/`stash`/`fetch`/`merge` (workers commit to their own branch;
-    `git push` is deliberately omitted so it still prompts).
-- **Workspace trust.** Claude Code drops a project's `allow`/`additionalDirectories` on an untrusted
-  path, and each new rift workspace path is untrusted by default, so `worker-new`/`worker-open` set
-  `projects["<ws>"].hasTrustDialogAccepted = true` in `~/.claude.json` (live, not git-tracked) before
-  launching the worker. Without it a worker silently loses its permissions.
-- **Orchestrator-only** (launch flag, kept OUT of settings files so workers stay isolated):
-  `--add-dir ~/Code/.rifts/unseamless-coop` so the orchestrator can reach worker repos to
-  integrate. Workers must not see each other's workspaces.
-- **Inspector socket** (launch flag on *both* orch and workers): `BUN_INSPECT=ws+unix://…/insp/<session>.sock`
-  opens the per-session inspector that `msg`/`_inject`/coloring deliver through (see Messaging). `env
-  UNSEAMLESS_FLEET_DIR=<dir>` is propagated so the session and `msg` agree on the socket dir. Opening
-  the inspector is inert until something connects, and the socket dir is mode `0700` (the socket is an
-  in-process code-exec surface). No `--settings` and no lifecycle hooks: the socket is the whole
-  transport.
+`_codex` persists workspace trust in the user's Codex config before launch and
+removes the worker trust entry on teardown. The existing worker launch policy is
+`workspace-write`, network access enabled, and `approval_policy="never"`. Writable
+roots include the workspace `.git`, `~/.cargo`, and the shared fleet directory so
+workers can commit, build, and coordinate. The orchestrator retains its existing
+`danger-full-access` launch policy for rig and integration work.
 
 ## Scripts (`scripts/fleet/`)
 
-| Script | Does |
-|--------|------|
-| `worker-new [--solo] [--harness claude\|codex] [--model <id>] <name> "<guidance>"` | `rift create` the workspace, run postcreate setup, branch `worker/<name>`, trust the path in `~/.claude.json`, write `.role`/`.harness` (and `.model`, if overridden) markers, launch the harness CLI in `tmux usc-worker-<name>` (claude: under `BUN_INSPECT` with the worker overlay), then pop an Alacritty window. Default: orchestrator-driven — writes an assignment file + seeds the session to read it. `--solo`: user-driven (`worker-solo.md`) — no assignment file; guidance (if any) is the first prompt directly, else launches waiting. `--harness`/`--model`: opt-in per-worker overrides of the fleet default (see Harness). |
-| `msg <session> "<text>"` | deliver the message as a live **user turn** in the target via its inspector socket (see Messaging): instant, queues if the target is mid-turn, preserves any draft in its box. Target restricted to `usc-*` sessions; fails loudly if the target has no live socket. |
-| `_inject` | internal: the one complex piece. Connects to a session's inspector socket, walks the live React tree to the prompt component, and calls `onSubmit` to submit a message (or a `/slash` command), saving+restoring the draft. `--selftest <session>` checks the structural anchors and exits nonzero if a Claude Code update moved them. |
-| `_color-inject <session> <color>` | internal, best-effort, detached: waits for the session's socket + prompt to be ready, then sends `/color <name>` through `_inject`. |
-| `worker-ls` | list workers, derived live from `rift list` + tmux (no registry file to drift); flags orphan sessions. A **ROLE** column (`worker`/`solo`/`-`, from the `.role` marker) shows which are solo; a **HARNESS** column (from the `.harness` marker, default fallback) shows each worker's CLI in a mixed fleet. |
-| `worker-open <name>` | reopen a worker's window: attach if the session is live, or revive a dead session with `claude -c` (re-applies the overlay, re-trusts the path) / `codex resume --last`, per the worker's `.harness` marker, re-applying its `.model` pin if one was set. |
-| `worker-rm <name> [-f]` | `tmux kill-session`, trash the workspace (`rift remove --force` + `gc`), drop the registry (assignment + `.role`/`.harness`/`.model` markers + inspector socket). Refuses without `-f` only if `worker/<name>` has a commit whose patch isn't on `main` (a `git cherry` check, so a squash-landed lane is recognized as integrated and needs **no** `-f`). `-f` is for abandoning unintegrated work, or a lane handed off as several commits squashed into one (workers consolidate to one commit before done, per the overlay). |
-| `worker-integrate <name>` | fetch the worker branch into `refs/fleet/<name>`, squash-merge, leave it staged for the orchestrator's `main` commit (fetch-only if the canonical tree is dirty). **First integration only** — for a follow-up on an already-landed lane, `git cherry-pick` the new commits instead (re-running this re-applies the squashed commits and conflicts). |
-| `worker-prune [--all] [-n]` | bulk-clean abandoned **solo** workers (Michael `ctrl+d`-exits and forgets them): trash workspace + kill tmux + drop registry (assignment + markers + inspector socket), for solo workers whose session is **dead** (spares live ones; `--all` includes live, `-n` dry-runs). Only ever touches `solo`-role workers; orchestrator-driven lanes use `worker-rm`. Low-safety bulk path — force-discards with no commit check. Also kills orphan `usc-worker-*` sessions whose workspace is gone. |
-| `rig-verify <worker>… [-- <cycle opts>]` | build `rig/verify` = `main` + the named lanes, then `rig.sh cycle` — the orchestrator's one-command multi-lane rig check. Don't hand-roll branch+merge+apply+launch. |
-| `harness [claude\|codex\|toggle]` | print or switch the DEFAULT CLI harness the fleet spawns (see Harness above; `worker-new --harness` overrides it per worker). Always fires a desktop notification on a switch; live sessions keep the harness they launched with. |
-| `models [claude\|codex]` | list known-good model IDs for `worker-new --model`, per harness, from local data only (claude: aliases + full IDs grepped from the installed binary, newest per family; codex: `~/.codex/models_cache.json` slugs). Informational — the flag is pass-through, so unlisted IDs the CLI accepts still work. |
-| `orch-start` (optional) | launch the orchestrator session with the `--add-dir` flag set, seeded with the STATE.md boot prompt (read STATE and brief Michael; continue Next only when the launch carried that user intent, otherwise wait; no machine-state audit; skip with `--no-seed`, auto-skipped on resume flags: `--continue`/`--resume`, plus `-c` on claude only — codex's `-c` is its config-override flag). |
-| `orch-stop` | fully tear down the orchestrator: kill the `usc-orch` tmux session (closing the window only detaches) + remove its inspector socket. Workers untouched. Terminal-less friendly (desktop notification is the feedback) — it backs the `unseamless-orch-stop.desktop` item and the OliveTin button. |
-| `notify-human "<reason>"` | high-priority Pushover push to Michael's phone — run once when *stopping*: done, giving up, or blocked on something only he can do (see "Away Notifications" below). Same-stop dedup vs the fleet-quiet backstop ping; fails soft without keys. |
+| Script | Purpose |
+| --- | --- |
+| `worker-new [--solo] [--model <id>] <name> [guidance]` | Create the rift workspace and branch, persist trust, write markers, launch Codex with role and assignment, open Alacritty. |
+| `worker-open <name>` | Attach to a live session or run `codex resume --last` in its workspace with the model pin. |
+| `worker-ls` | Inspect rift workspaces and tmux sessions, including branch, dirtiness, commits, and role. |
+| `msg <session> <text>` | Submit a normal user turn through tmux; `-` reads stdin. |
+| `worker-integrate <name>` | Fetch and squash-merge a first handoff for the orchestrator's main commit. For later deltas, cherry-pick new commits. |
+| `worker-rm <name> [-f]` | Remove a worker; refuse unintegrated commits unless explicitly forced. |
+| `worker-prune [--all] [-n]` | Clean abandoned solo workers; `-n` previews and `--all` includes live sessions. |
+| `rig-verify <worker>... [-- <options>]` | Build the combined verification branch and run the rig cycle. |
+| `harness [codex]` | Print the supported harness. |
+| `models [codex]` | List locally cached Codex model IDs. |
+| `orch-start [--no-seed] [--continue]` | Launch or attach the orchestrator; fresh sessions receive the STATE.md orientation prompt. |
+| `orch-stop` | Stop the orchestrator session; workers remain running. |
+| `notify-human <reason>` | Send the explicitly authorized stopping notification. |
 
-Detached-first tmux (`new-session -d`) is what makes "a worker lives until the orchestrator removes
-it" true: closing the Alacritty window detaches but does not kill the session, and the CC session
-inside stays resumable.
+Detached tmux sessions survive closing their Alacritty window.
 
 ## rift Postcreate Hooks
 
@@ -359,7 +257,7 @@ makes stop-and-restart cheap:
   pointers to what a session learned. It does **not** track machine state — no fleet/rig/git
   snapshot. Live workers are `worker-ls` (live, can't drift); rig/Deck state is cheap to re-derive
   and re-apply so it's not worth recording; workers integrate before a wrap so there's nothing
-  uncommitted to note. Durable knowledge goes to the proper doc (CLAUDE.md > "Project knowledge
+  uncommitted to note. Durable knowledge goes to the proper doc (AGENTS.md > "Project knowledge
   lives in the repo"); STATE.md holds pointers and decisions, never the content.
 - **`/wrap`** concludes a session: sweep un-encoded learnings into their homes, decide/confirm Next
   (via `/next` when open), rewrite STATE.md to reflect the current work, commit. Kill a session only
@@ -376,98 +274,10 @@ makes stop-and-restart cheap:
 
 ## Away Notifications (Pushover)
 
-Michael gets a push on his phone when the fleet **stops needing to run without him** — the
-orchestrator finished or gave up, a session is blocked on a permission prompt, or everything has
-gone quiet. Three layers, from precise to guaranteed (all in `scripts/notify/`, plus
-`scripts/fleet/notify-human`):
+`scripts/fleet/notify-human` sends the orchestrator's explicitly authorized stopping
+notification through `scripts/notify/pushover`. Configure keys in
+`~/.config/unseamless-notify/pushover.env`. Sending fails softly when keys are absent.
 
-1. **Explicit — `scripts/fleet/notify-human "<one-line reason>"`.** The orchestrator runs this
-   once when it's *stopping* — work done, giving up, or blocked on something only Michael can do
-   (rig/Deck/in-game validation, a judgment call) — never for progress updates. High-priority push
-   with a real reason — this is the message you *want* to receive. Its `.human-notified` marker
-   gives layer 3 **same-stop dedup**: the generic "fleet quiet" ping is skipped when the fleet's
-   last activity falls within `HUMAN_GRACE_SECS` (default 5 min) of the marker — a grace band
-   that absorbs the pinging turn's own tail (remaining tool calls, wrap-up commits, the Stop
-   hook). Honestly stated: a short work burst that starts *and* settles inside that band is also
-   absorbed; work that settles later pings normally. Concurrent explicit pings are allowed (set
-   `NOTIFY_HUMAN_RATE_SECS` > 0 to opt into a minimum gap), and a *failed* explicit push doesn't
-   write the marker, so the backstop still covers that stop. Model-dependent, hence layers 2–3.
-   Deliberately the ONLY layer agents are told about (one CLAUDE.md bullet); layers 2–3 are pure
-   infrastructure and stay agent-invisible.
-2. **Blocked-on-approval — the `Notification` hook** (`scripts/notify/notification-hook`). A
-   permission request means a session is stuck on Michael right now → immediate push, rate-limited
-   to one per session per 10 minutes. The per-session 60s idle nag is deliberately ignored (that
-   signal is aggregated fleet-wide by layer 3 instead).
-3. **Fleet-quiet backstop — hook sensors + a polling decider.** Claude Code hooks in
-   `.claude/settings.json` (inherited by every session launched in the repo or a rift workspace:
-   orchestrator, workers, solo workers) write per-session `busy`/`idle` state files to
-   `$UNSEAMLESS_FLEET_DIR/state/activity/` via `scripts/notify/activity-hook`. The
-   `unseamless-quiet-check` systemd **user timer** runs `scripts/notify/quiet-check` every 30s and
-   pushes **once** when every tracked session is idle and has been for ≥2 minutes (debounce covers
-   normal worker→orchestrator `msg` wake gaps; new work re-arms it). The quiet epoch is a
-   **monotonic high-water mark** of observed activity (persisted), so tearing down a worker after
-   a ping can't re-ping the same stop, and work by a session that later dies without a `Stop`
-   still re-arms the next one. A freshly opened session that never ran a turn is tracked but not
-   counted, so it can't trigger a "work stopped" push by itself, and a failed Pushover send is
-   retried on the next tick rather than dropped. The decider is a poller, not a pure hook chain,
-   for one reliability reason: a session killed mid-turn never fires its `Stop` hook, so stale
-   `busy` state must be cleared by cross-checking tmux liveness (`usc-*` keys, which also sweeps
-   the dead session's transcript stash) and by a 15-minute staleness cutoff (`PreToolUse`
-   refreshes the timestamp on every tool call, so a genuinely working session never goes stale).
-
-   The push **body** is enriched best-effort (the ping itself never depends on it): the `Stop`
-   hook stashes each session's `transcript_path`, and at push time quiet-check takes the last
-   assistant message of the lead session (`usc-orch` if tracked — the orchestrator narrates the
-   fleet — else the most recently active) and summarizes it to a one-liner via the local
-   **LM Studio** OpenAI-compatible server (`QUIET_LLM_URL`, default `127.0.0.1:1234`; model =
-   `QUIET_LLM_MODEL` or auto-picked as the first gemma in `/v1/models`; `QUIET_LLM_DISABLE=1`
-   turns it off). LM Studio down/slow → a raw truncated snippet of that message; no transcript →
-   the generic "fleet quiet: N sessions idle" line.
-
-**Setup (once per machine):** put keys in `~/.config/unseamless-notify/pushover.env`
-(`PUSHOVER_TOKEN`/`PUSHOVER_USER`, never committed), then run `scripts/notify/install` **from the
-main clone** (it copies the decider to `$UNSEAMLESS_FLEET_DIR/bin` — a stable path outside any
-worker workspace — and enables the timer; re-run it to roll out changes to `quiet-check`/
-`pushover`). Everything fails soft without keys, so hooks are inert on machines that don't want
-pushes. Claude Code only for now; a Codex sensor adapter can later hang off Codex's native
-`notify` config hook writing the same state files.
-
-## Open Items
-
-- **Agent Teams.** If Claude Code's experimental Agent Teams matures, its native lead/teammate
-  messaging could replace our inspector-injection transport; rift already supplies the isolation
-  Teams lacks. Pilot separately before betting the workflow on an experimental flag.
-- **Warm-cache measurement.** Confirm whether a copied `target/` ever gives cargo a usable cache
-  before reconsidering the "one cold build per worker" stance.
-
-## Status
-
-Implemented: the worker overlay (`docs/roles/worker.md`), `scripts/fleet/`
-(`worker-new`/`worker-ls`/`worker-open`/`worker-rm`/`worker-integrate`/`msg`/`orch-start`, plus the
-inspector-injection transport: `_inject`/`_color-inject`), `.rift.toml`, the
-`.claude/settings.json` allowlist + `additionalDirectories`, workspace-trust wiring, the `CLAUDE.md`
-role preamble, and the `/fleet` orchestrator skill. Dual-harness support (`_harness`/`harness`, the
-codex branches of spawn/revive/msg/ls, the `AGENTS.md` + `.codex/skills` symlinks) landed 2026-07
-and was verified end to end with a live codex ping worker: spawn with role+assignment seed, trusted
-launch with no dialog, `worker-open` revive via `codex resume --last`, and `msg` delivery in both
-directions (including the sandbox `network_access=true` fix that makes a worker's own `msg` work).
-Per-worker overrides (`worker-new --harness`/`--model`, the `.model` marker, per-target `msg`
-transport resolution via `fleet_worker_harness`, the `models` lister) landed 2026-07-03, turning
-the all-one-harness rule into a default-plus-opt-outs model. Also 2026-07-03: codex workers got
-pre-approved lane work (`approval_policy="never"` + `writable_roots` for the workspace `.git`
-— workspace-write carves it out of the writable cwd, which broke `git commit` — plus `~/.cargo`
-and the fleet dir; the analog of the claude allowlist), and workspace trust moved from the
-launch-line `-c` flag (which codex 0.142.5's trust gate ignores, re-prompting on every spawn) to
-a persisted config entry via `scripts/fleet/_codex`, cleaned up by `worker-rm`.
-
-Exercised end to end: a live ping worker confirmed spawn, the seeded prompt auto-submitting, the
-worker overlay applying, bidirectional `msg` (orchestrator <-> worker), and teardown.
-
-**First real run (2026-06, Wave 1 — 5 concurrent feature/polish workers).** Confirmed: parallel
-lanes build green in isolation; a worker handed back a precise rig recipe over `msg`. Fixes that
-came out of it: the restore postcreate hook
-(above), and a `worker-ls` **AHEAD** column = commits on `worker/<name>` beyond the workspace's own
-`main` (computed per-workspace, since the branches live in the independent clones, not the
-orchestrator repo) — the at-a-glance "has this worker produced anything yet?" signal. Still to
-prove: a feature worker integrated to `main` and a batched rig pass feeding values back to multiple
-lanes.
+The retired harness's activity hooks and fleet-quiet polling timer are no longer
+installed. On a Linux rig with the old timer, disable it with
+`systemctl --user disable --now unseamless-quiet-check.timer`.

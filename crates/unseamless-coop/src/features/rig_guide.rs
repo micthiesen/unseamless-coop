@@ -200,7 +200,7 @@ impl Feature for RigGuideFeature {
         if finished_now {
             log::info!("rig-guide: guide complete");
             // Plain/diagnostic voice (this is a debug tool, not gameplay); ASCII only (the overlay
-            // font is an ASCII subset), per CLAUDE.md.
+            // font is an ASCII subset), per AGENTS.md.
             crate::notify::toast(Severity::Info, "Rig guide complete. Testing done.");
         }
     }

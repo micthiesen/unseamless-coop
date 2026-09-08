@@ -874,7 +874,7 @@ against, not a record of a confirmed call.
 > session layer for our own co-op mod — co-op-only, *outside* anti-cheat, no DRM-cracking. Where the
 > text notes an "EAC / anti-tamper" check, that's us *identifying* why a function is encrypted so we
 > can reimplement around it on our own machine, not defeating protection to reach the official
-> servers. Behavioral notes only; no upstream code copied. See CLAUDE.md > Safety / legitimacy +
+> servers. Behavioral notes only; no upstream code copied. See AGENTS.md > Safety / legitimacy +
 > Clean-room hygiene.
 
 > **Scope.** This answers *"once we have the function address, how do we drive it?"* It does **not**
@@ -1158,7 +1158,7 @@ The peer identity and the call ordering are already solved by rungs 4 and 2.
 >    (`message/src/eldenring/{session,sign,matchingticket}.rs` + `wire/`); see the "Protocol reference:
 >    `waygate-server`" note in [COOP-CONNECTION.md](COOP-CONNECTION.md) > Rung 3. An **annotated**
 >    community / other-mod Ghidra DB of the session/network subsystem would short-cut identification.
->    *Clean-room (CLAUDE.md):* read it for
+>    *Clean-room (AGENTS.md):* read it for
 >    the **game's** behavior and reimplement from that — never transcribe pseudocode/annotations; if it's
 >    ERSC's own decompilation, study the game, not ERSC.
 >
@@ -1190,7 +1190,7 @@ something other than `is_offline()`.
 
 This pass traced the create chain's failure paths statically on the same pinned **2026-06-02
 `eldenring.exe`** (image base `0x140000000`). Behavior is in my own words; addresses are facts; no
-decompiler output reproduced (CLAUDE.md > Clean-room).
+decompiler output reproduced (AGENTS.md > Clean-room).
 
 ### The chain has exactly two synchronous reject points (the builder isn't one)
 
@@ -2277,7 +2277,7 @@ its **runtime-decoded** target.
    [rax+0x80]`, where `rax` = the live container vtable, so `[rax+0x80]` is the decoded builder pointer at
    call time) — or the trampoline's `test rbx,rbx` at `0x14251c4a5` (`rbx` = decoded target) — read + latch +
    log the address. Same technique as the veto `vmethod-target` probe (`log_vmethod_target`); see
-   [the `reverse-engineer` skill > "Capturing Arxan-decoded call targets at runtime"](../.claude/skills/reverse-engineer/SKILL.md).
+   [the `reverse-engineer` skill > "Capturing Arxan-decoded call targets at runtime"](../.agents/skills/reverse-engineer/SKILL.md).
 2. **Disassemble the decoded builder** offline (`python3 scripts/re/static.py fn <decoded-addr>` — it lands in
    clean, readable `.text`, not the trampoline) and read off which descriptor dwords/bytes it consumes, the
    buffer/count config it needs, and where the peer SteamID64 goes.

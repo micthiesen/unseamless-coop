@@ -7,7 +7,7 @@ talking to Steam.
 
 > **Scope & legitimacy.** Interop RE on a game we own, on the developer's own machine, to connect
 > two co-op players over our own private Steam side-channel — co-op-only, *outside* anti-cheat, no
-> DRM-cracking or reaching other players' systems. See CLAUDE.md > Safety / legitimacy +
+> DRM-cracking or reaching other players' systems. See AGENTS.md > Safety / legitimacy +
 > Clean-room hygiene.
 
 > **Status: rungs 1, 2, and 4 shipped; rung 3 is the remaining hard RE.** The mod loads, configures,
@@ -22,7 +22,7 @@ talking to Steam.
 > this yet puts players in one another's *world* — that's the
 > game-session RE (rung 3). This doc is the spec for the rest, written for session handoff. Everything
 > game-internal is grounded in the pinned `fromsoftware-rs` SDK or flagged as inference to confirm on the
-> rig (per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
+> rig (per [AGENTS.md](../AGENTS.md) > Clean-room hygiene).
 
 ## The one fact that makes a native path viable: "offline" ≠ no network
 
@@ -433,7 +433,7 @@ let ELDEN RING's own pump deliver them. The rig probe showed a cleaner path and 
   resolved the joiner on its password-keyed lobby and the side-channel linked (see
   [FRIEND-TEST-RUNBOOK.md](FRIEND-TEST-RUNBOOK.md)).
 
-> Re-derive note (per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results"): to re-confirm
+> Re-derive note (per [AGENTS.md](../AGENTS.md) > "Document how to re-derive RE results"): to re-confirm
 > the dispatch model after a game update, dump `eldenring.exe`'s imports
 > (`x86_64-w64-mingw32-objdump -p … | grep SteamAPI_`) and check for `RunCallbacks` (present) vs
 > `ManualDispatch` (absent). The `InvalidHandle`-on-poll symptom is the tell that a handle was also
@@ -599,7 +599,7 @@ now exists and lights up the moment two modded games link.
   pumping callbacks.
 - **Flat-API symbol versions.** Accessor names carry a version (`…_v002`, etc.) that must match the
   rig's `steam_api64.dll`. Resolve by name; re-derive after a Steam client update (document the names
-  next to the binding per [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results").
+  next to the binding per [AGENTS.md](../AGENTS.md) > "Document how to re-derive RE results").
 - **Rung 3 is the real gate.** In-world co-op blocks on the create/join RE. Rungs 1-2 work *around* it
   but don't eliminate it.
 - **Lobby async results (rung 4).** ✅ **Resolved on the rig (2026-06-26):** ER pumps Steam via legacy

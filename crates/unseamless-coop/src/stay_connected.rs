@@ -409,7 +409,7 @@ impl StayConnectedTick {
                 "stay-connected: suppressed {n} game-driven disconnect(s) (last: site A: leave_session, caller={caller:#x})"
             );
         }
-        // In-world effect → ER voice, no mechanical values (CLAUDE.md > message voice).
+        // In-world effect → ER voice, no mechanical values (AGENTS.md > message voice).
         crate::notify::with_mut(|notes| notes.info("The bond endures".to_string()));
     }
 }

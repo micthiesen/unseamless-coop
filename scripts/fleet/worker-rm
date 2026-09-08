@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
-# worker-rm <name> [-f|--force]
-#
-# Tear a worker down: kill its tmux session (and the Claude Code session in it),
-# trash its rift workspace, and garbage-collect. REFUSES (without -f) if the
-# worker has commits on worker/<name> that were never integrated, since the rift
-# workspace is the only copy of that branch and trashing it is unrecoverable.
+# Remove an integrated worker, its tmux session, markers, and Codex trust entry.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF/../.." && pwd)"
 FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
-# Pin UNSEAMLESS_FLEET_DIR to the resolved FLEET_DIR so the socket cleanup below
-# agrees with the launchers (worker-new/worker-open) that opened it.
 export UNSEAMLESS_FLEET_DIR="$FLEET_DIR"
 
 name=""
@@ -33,22 +26,6 @@ ws="$HOME/Code/.rifts/$(basename "$REPO")/$name"
 branch="worker/$name"
 
 if [ -d "$ws" ]; then
-  # Unintegrated COMMITS are the unrecoverable-loss signal (the working-tree dirt
-  # a worker inherits from the orchestrator is noise, not its own work). Refuse
-  # unless forced. Use `git cherry` (patch-id equivalence), NOT `git log main..`:
-  # after a normal squash-integrate the worker's pre-squash commit is patch-equal
-  # to the squashed commit on main, so cherry marks it '-' (already applied) and a
-  # safely-landed lane tears down with no -f. Only a commit with no patch-
-  # equivalent on main ('+') counts as unintegrated.
-  #
-  # Critically, compare against the CANONICAL main (this repo, $REPO) -- the one
-  # the orchestrator integrates onto -- NOT the workspace's `main`, which is the
-  # stale tip the worker forked from and lacks the just-landed squash commit
-  # (comparing there flags every integrated lane). So fetch the branch into the
-  # stable ref refs/fleet/<name> (cheap, COW-shared) and run cherry here.
-  # (Caveat: several worker commits squashed into ONE main commit won't patch-
-  # match individually -- which is why a worker consolidates to a single clean
-  # commit on top of its base before reporting done; see docs/roles/worker.md.)
   unmerged=""
   if git -C "$ws" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
     if git -C "$REPO" fetch "$ws" "+$branch:refs/fleet/$name" >/dev/null 2>&1; then
@@ -90,20 +67,11 @@ fi
 
 rm -f "$FLEET_DIR/assignments/$name.md" "$FLEET_DIR/assignments/$name.role" \
   "$FLEET_DIR/assignments/$name.harness" "$FLEET_DIR/assignments/$name.model"
-# Drop the workspace's codex trust entry (worker-new/worker-open persist it in
-# the dotfiles-tracked codex config; the workspace is gone, so it's drift now).
-# Unconditional: a no-op for claude workers / already-clean configs. Guarded
-# source so a merge that drops the helper can't break teardown.
 if [ -f "$SELF/_codex" ]; then
   # shellcheck source=scripts/fleet/_codex
   source "$SELF/_codex"
   fleet_codex_trust_remove "$ws"
 fi
-# Drop the worker's inspector socket (its messaging-transport endpoint). Killing the
-# tmux session above already closed it; remove the file so a stale socket can't
-# linger into a future same-named worker.
 rm -f "$FLEET_DIR/insp/$sess.sock"
-# Drop the integration ref (created here for the cherry check, or earlier by
-# worker-integrate) -- the lane is gone, so it's just cruft now.
 git -C "$REPO" update-ref -d "refs/fleet/$name" 2>/dev/null || true
 echo "worker '$name' removed."

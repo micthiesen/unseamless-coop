@@ -17,12 +17,12 @@ overwriting the player's vanilla save, which is the one thing this feature exist
 
 Originally a research note; the mechanism below is what shipped. Game-internal claims are grounded in the
 pinned `fromsoftware-rs` SDK (cited), in the **MIT-licensed `vswarte/alt-saves`** mod (the SDK author's
-own save-location changer — read for *mechanism*, re-derived here per [CLAUDE.md](../CLAUDE.md) >
+own save-location changer — read for *mechanism*, re-derived here per [AGENTS.md](../AGENTS.md) >
 Clean-room), or are behavioral observations confirmed on the rig. ERSC itself is closed + Themida, so its
 exact code is inference; the *behavior* (separate `.co2`) is well documented by its own FAQ.
 
 > Hard project rule this feature must respect: the mod **must not touch `regulation.bin`**
-> ([CLAUDE.md](../CLAUDE.md) > Safety/legitimacy). `alt-saves` ships a second, unrelated patch that
+> ([AGENTS.md](../AGENTS.md) > Safety/legitimacy). `alt-saves` ships a second, unrelated patch that
 > clears a regulation-check flag (`regulation.rs`); that is **not** part of the save mechanism and we do
 > **not** port it. Only the file-path interception below is in scope.
 
@@ -170,7 +170,7 @@ writing to your vanilla save file first."* That is precisely the corruption we c
   match and a stem-anchored one behave identically in practice while the broad one fails safer. The
   suffix set is single-sourced in `core::saves::VANILLA_SUFFIXES` and the cdylib's hot-path pre-filter
   consumes it (`wide_has_vanilla_suffix`), so the two can't drift. Re-verify the exact path the game
-  passes on the rig after each game update (per CLAUDE.md's re-derivation rule).
+  passes on the rig after each game update (per AGENTS.md's re-derivation rule).
 
 ### Failure Modes That Could Corrupt the Vanilla Save
 
@@ -216,7 +216,7 @@ All of this is **rig-only** (Linux + Proton; see [RIG-RUNBOOK.md](RIG-RUNBOOK.md
       from `save.file_extension`, installed early in `app::install` (before the title-screen save read),
       not a `Feature` task. Logic in host-tested `core::saves`; binding in `coop/saves.rs`.
 - [x] Fatal-vs-toast on install failure: **fatal** (`guard::fatal`) when isolation is wanted — refuse to
-      risk the vanilla save (matches CLAUDE.md's "can't install → close loudly").
+      risk the vanilla save (matches AGENTS.md's "can't install → close loudly").
 - [x] Rig: ran the verification plan — hook installs, read/backup/write all redirect to `.<ext>`, and the
       vanilla `ER0000.sl2` (and the rig's real ERSC `.co2`) were left untouched.
 - [x] Rig: confirmed the path the game passes — `C:\users\steamuser\AppData\Roaming\EldenRing\<id>\ER0000.sl2`

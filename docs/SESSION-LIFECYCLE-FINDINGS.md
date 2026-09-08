@@ -7,12 +7,12 @@ seamless-coop suppress game-driven disconnects (boss defeat, area transition, pl
 **one armed flag**, instead of hooking every event that can end a session?
 
 No game running; addresses are facts about the binary; all behavior is in my own words (CLEAN-ROOM,
-CLAUDE.md > Clean-room — no decompiler/disassembler output transcribed). Every result has a
+AGENTS.md > Clean-room — no decompiler/disassembler output transcribed). Every result has a
 re-derivation recipe at the bottom so a game update can be re-charted fast.
 
 > **Scope & legitimacy.** Interoperability RE on a game we own, on the developer's own machine, to
 > reimplement a co-op mod that loads *outside* anti-cheat. We study *what* the game does at session
-> teardown, then reimplement around it. See CLAUDE.md > Safety / legitimacy.
+> teardown, then reimplement around it. See AGENTS.md > Safety / legitimacy.
 
 > **Implemented (2026-07-04):** this gate shipped as `gameplay.stay_connected` (default off) —
 > `crates/unseamless-coop/src/stay_connected.rs` hooks both charted sites (A = `leave_session`

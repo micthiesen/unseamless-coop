@@ -38,7 +38,7 @@ def load():
     if not map_path.exists():
         fail(
             f"no sync-map.json in {SKILL_DIR} - this project isn't set up "
-            "for /sync; see SKILL.md 'Bootstrapping a new project'"
+            "for /sync; see SKILL.md 'Add or repair a sharing relationship'"
         )
     try:
         m = json.loads(map_path.read_text())
@@ -54,8 +54,14 @@ def peer_root(root, cfg):
 
 
 def peer_skill_dir(proot, cfg):
-    sub = ".rulesync/skills/sync" if cfg.get("layout") == "rulesync" else ".claude/skills/sync"
-    return proot / sub
+    if cfg.get("skillPath"):
+        path = Path(cfg["skillPath"]).expanduser()
+        return path if path.is_absolute() else proot / path
+    native = proot / ".agents/skills/sync"
+    legacy = proot / ".claude/skills/sync"
+    if native.is_dir() or not legacy.is_dir():
+        return native
+    return legacy
 
 
 def apply_tokens(text, tokens):
@@ -71,8 +77,8 @@ def strip_frontmatter(text):
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
         if end != -1:
-            # lstrip: generators (rulesync) may drop the blank line after the
-            # frontmatter block; that's environment noise, not drift.
+            # Ignore optional blank lines after the frontmatter block;
+            # formatting alone is not drift.
             return text[end + 5 :].lstrip("\n")
     return text
 

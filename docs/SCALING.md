@@ -8,7 +8,7 @@ multipliers, and how to do it idempotently* — and specs `features/scaling.rs`.
 
 This is a **research note + mechanism decision**, not yet an implemented feature. Game-internal
 claims are grounded in the pinned `fromsoftware-rs` SDK source (cited) or in datamined param
-definitions (cited), with inference hedged as such. Per [CLAUDE.md](../CLAUDE.md) > Clean-room
+definitions (cited), with inference hedged as such. Per [AGENTS.md](../AGENTS.md) > Clean-room
 hygiene: ERSC is closed + Themida-packed, so its exact code path is inference; we reimplement from
 the *vanilla mechanism* (public params + SDK), which is the honest clean-room substrate anyway.
 

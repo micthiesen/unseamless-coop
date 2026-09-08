@@ -10,7 +10,7 @@ password-peer for the FromSoft server.
 > confirmed on the rig) + reading vswarte's public MIT `waygate-server` for the **protocol shape**.
 > We study how a game we bought and its matchmaking wire *behave* so we can reimplement co-op
 > behavior in clean Rust, co-op-only and *outside* anti-cheat. Behavioral notes are in my own words;
-> **no decompiler/disassembler output is reproduced** and **no waygate code is copied** (CLAUDE.md >
+> **no decompiler/disassembler output is reproduced** and **no waygate code is copied** (AGENTS.md >
 > Clean-room hygiene). Addresses are facts about the binary.
 
 ## TL;DR

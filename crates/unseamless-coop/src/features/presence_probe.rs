@@ -32,7 +32,7 @@
 //! two coordinates are in different frames. Both `dist=` and `moved=` therefore refuse to print a
 //! number across a block change rather than print a plausible lie.
 //!
-//! ## Safety (the CLAUDE.md `characters()` load-status caveat, load-bearing here)
+//! ## Safety (the AGENTS.md `characters()` load-status caveat, load-bearing here)
 //! The probe deliberately reports **non-`Active`** entries too (a phantom mid-join sits in
 //! `Initializing`/`NetworkInitializing`/`ReadyForActivation` — precisely the transition we want to
 //! see), so it can't use `native_nameplates::active_characters`, which filters them out. Instead
@@ -781,7 +781,7 @@ fn detail(base: &ChrIns) -> Detail {
 /// This is deliberately not `native_nameplates::active_characters`: that one hands back a `&mut T`,
 /// which is only sound for `Active` entries, and so filters the mid-join statuses this probe exists
 /// to observe. Here the caller gets the raw pointer and the raw status, and dereferences only when the
-/// status says it may (the CLAUDE.md load-status caveat).
+/// status says it may (the AGENTS.md load-status caveat).
 ///
 /// Fields are read through `addr_of!` off the entry pointer rather than via `&ChrSetEntry`, and the
 /// two `#[repr(u8)]` enums are kept as raw `u8`. A never-initialized or torn-down slot is exactly

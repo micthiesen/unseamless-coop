@@ -12,7 +12,7 @@ docs; this is the map. Work proceeds in **waves** (one fleet batch each — see
 > machine, to reimplement a co-op mod — co-op-only, *outside* anti-cheat by construction, no
 > DRM-cracking or reaching other players' systems. Where an item mentions "bypassing a gate," it
 > means flipping a check in our own in-memory copy so our own private co-op path can proceed offline,
-> never defeating anti-cheat to touch the official servers. See CLAUDE.md > Safety / legitimacy +
+> never defeating anti-cheat to touch the official servers. See AGENTS.md > Safety / legitimacy +
 > Clean-room hygiene.
 
 ## Wave 1 — DONE (2026-06)
@@ -333,5 +333,5 @@ just be corrected when noticed.)
   stays in [OVERLAY-RENDERING.md](OVERLAY-RENDERING.md) for reference; we just won't ship it as a
   fallback.
 
-[`/reverse-engineer`]: ../.claude/skills/reverse-engineer
-[`/windows-test`]: ../.claude/skills/windows-test/SKILL.md
+[`/reverse-engineer`]: ../.agents/skills/reverse-engineer
+[`/windows-test`]: ../.agents/skills/windows-test/SKILL.md

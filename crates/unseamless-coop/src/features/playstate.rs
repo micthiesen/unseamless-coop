@@ -5,7 +5,7 @@
 //! [`GameState::classify`]. The result goes to [`crate::playstate`] for the overlay (install timing +
 //! watermark gating, Present thread) and any feature that gates on "actually in the game". We only test
 //! pointer/`Option` presence — never dereference `main_player` — so it stays safe across the load/
-//! teardown transitions that leave `ChrIns` pointers half-wired (CLAUDE.md > safety invariants). Writes
+//! teardown transitions that leave `ChrIns` pointers half-wired (AGENTS.md > safety invariants). Writes
 //! nothing to the game.
 
 use eldenring::cs::{CSMenuManImp, WorldChrMan};

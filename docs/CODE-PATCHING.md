@@ -11,11 +11,11 @@ path) and any other "the SDK charts no field for this, so we patch the instructi
 > (the mod runs *outside* EAC and never touches the official servers) or DRM. Rewriting your own
 > process's code is ordinary modding; where we neuter a code-integrity/anti-tamper check it is only
 > so our own in-memory patch can take effect on our own machine, never to redistribute a cracked
-> binary. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> binary. See AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 This is a **research/design note**, not yet implemented. Everything game-internal below is grounded
 in the pinned `fromsoftware-rs` SDK source (cited) or is a behavioral observation to confirm on the
-rig. Per [CLAUDE.md](../CLAUDE.md) > clean-room hygiene: we reimplement from the mechanism + the
+rig. Per [AGENTS.md](../AGENTS.md) > clean-room hygiene: we reimplement from the mechanism + the
 public SDK, never from ERSC's bytes. The open-source references cited here are permissively licensed
 (MIT/Apache) and read for *technique*; the actual byte patterns are version-specific and re-derived
 against our rig's game version regardless.
@@ -165,7 +165,7 @@ RVA would "work." The question is which locator to prefer for *our own* code pat
   wrong byte" is the worst failure mode — far worse than "didn't find it."
 - **An AOB fails *loud and safe*: no match → we don't patch, we log + toast, the game runs unmodded.**
   A stale hardcoded offset fails *silent and dangerous*: we patch garbage. Given our error policy
-  (degrade-and-notify for anything past install — [CLAUDE.md](../CLAUDE.md) > "Surfacing errors"), a
+  (degrade-and-notify for anything past install — [AGENTS.md](../AGENTS.md) > "Surfacing errors"), a
   scanner's "Option::None means skip the feature" maps onto that policy perfectly.
 - **It's the same machinery the SDK already trusts** (arxan), and the same approach veeenu's
   practice tool uses to *generate* its version offsets. We get to skip the offset-codegen step and
@@ -185,7 +185,7 @@ fail-safe.
 > was derived for. Treat that as the exception, document the derivation, and re-verify on every pin
 > bump.
 
-## Lifetime & Safety (cross-ref CLAUDE.md invariants)
+## Lifetime & Safety (cross-ref AGENTS.md invariants)
 
 A code patch is **applied once, at install, on the init thread** — and never undone. This mirrors the
 task-handle invariants, for the same underlying reason:
@@ -204,7 +204,7 @@ task-handle invariants, for the same underlying reason:
   ([OFFLINE-TITLE-SCREEN.md](OFFLINE-TITLE-SCREEN.md)) is for a *reversible data override during a
   live session*, not for a permanent boot-flow code patch — different lifetime, different rule.
 - **Timing window vs. the frame model.** Field writes are safe because they run in a chosen task
-  *phase* ordered against the game's reads/writes ([CLAUDE.md](../CLAUDE.md) > safety invariants). A
+  *phase* ordered against the game's reads/writes ([AGENTS.md](../AGENTS.md) > safety invariants). A
   one-shot boot patch isn't phased the same way; its safety comes from running *before the patched
   code path is first taken* (the logo gate hasn't fired yet at install) and from the patch being a
   self-contained instruction rewrite, not a cross-thread state mutation. If a future code patch

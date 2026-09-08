@@ -308,7 +308,7 @@ pub const CONNECTION_RESTORED_MESSAGE: &str = "Contact re-established.";
 /// and the co-op layer just fires the event. Drive every variant through
 /// [`Notifications::session_event`].
 ///
-/// **Voice** (per CLAUDE.md): in-world *presence* (join/leave/return) is an effect → terse FromSoft
+/// **Voice** (per AGENTS.md): in-world *presence* (join/leave/return) is an effect → terse FromSoft
 /// lore voice, **no** mechanical values (no peer id). Connection/version/auth are *diagnostics* →
 /// plain literal voice that names the peer.
 ///

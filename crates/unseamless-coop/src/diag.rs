@@ -62,7 +62,7 @@ pub fn build_report(title: &str) -> DiagnosticReport {
     // Borrow the roster size for the scaling section below before `session` is moved into the match.
     let party = session.as_ref().map_or(0, |v| v.players);
     // Live player vitals + status gauges, copied out of GameDataMan's main player. The registry can
-    // surface GameDataMan before its members are wired (the CLAUDE.md unwired-pointer caveat — same guard
+    // surface GameDataMan before its members are wired (the AGENTS.md unwired-pointer caveat — same guard
     // boot_volume uses on `game_settings`), so null-check the player-data pointer before dereferencing.
     // `Option<Option<Vitals>>`: outer `None` = no GameDataMan singleton; inner `None` = singleton up but
     // its player-data pointer not wired yet. Kept distinct (not flattened) so the section below reports

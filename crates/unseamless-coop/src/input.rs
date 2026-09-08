@@ -29,7 +29,7 @@
 //! there's no COM-vtable probe.)
 //!
 //! Technique mirrors the `fromsoftware-rs` SDK's `debug` crate (public SDK — our reference per
-//! CLAUDE.md > "Lean on the SDK"), reduced to a single "overlay open?" flag.
+//! AGENTS.md > "Lean on the SDK"), reduced to a single "overlay open?" flag.
 //!
 //! Threading: [`set_blocked`] is called from the Present thread (overlay); the detours run on whatever
 //! thread the game polls input on. Shared state is one [`AtomicBool`] (blocked), one

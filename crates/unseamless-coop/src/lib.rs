@@ -5,7 +5,7 @@
 //! waits for the game's task system, loads config, and registers each [`feature::Feature`] as a
 //! recurring frame task. The platform-independent decision logic lives in the `unseamless-core`
 //! crate (host-tested); this crate binds it to the live game. The upstream `ersc.dll` is kept
-//! locally under `reference/` (gitignored) for behavioral study — never copied (see CLAUDE.md).
+//! locally under `reference/` (gitignored) for behavioral study — never copied (see AGENTS.md).
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};

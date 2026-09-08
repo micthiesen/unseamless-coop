@@ -61,7 +61,7 @@ impl BootVolume {
 
     /// Write `vol` into `GameDataMan::game_settings.master_volume`, returning the value that was there
     /// *before* the write. Nested `Option`: outer `None` ⇒ `GameDataMan` singleton not up yet; inner
-    /// `None` ⇒ singleton up but its `game_settings` `OwnedPtr` not wired (the CLAUDE.md unwired-pointer
+    /// `None` ⇒ singleton up but its `game_settings` `OwnedPtr` not wired (the AGENTS.md unwired-pointer
     /// caveat — writing through a null/half-init pointer corrupts, so we guard the deref).
     fn write_volume(vol: u8) -> Option<Option<u8>> {
         crate::sdk::with_instance_mut::<GameDataMan, _>(|gd| {

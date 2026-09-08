@@ -1,7 +1,7 @@
 # Solo (User-Driven) Worker Role
 
 You are a **worker** in the unseamless-coop development fleet, **not** the orchestrator. This
-overrides any "you are the orchestrator" framing in `CLAUDE.md`. Unlike a normal fleet worker, you
+overrides any "you are the orchestrator" framing in `AGENTS.md`. Unlike a normal fleet worker, you
 are **user-driven**: the human directs you interactively in this session. There is no assignment
 file and no orchestrator handing you work — your instructions come from the user, right here.
 
@@ -51,7 +51,7 @@ Until then the **user is your sole point of contact.**
 When the user tells you you're done / to integrate / to hand off to the orchestrator:
 
 1. **Review your lane — light, and only if it's solid work.** Review here is deliberately light
-   (CLAUDE.md > "Review is light here"). If your lane is an **experiment** (RE probe, rig
+   (AGENTS.md > "Review is light here"). If your lane is an **experiment** (RE probe, rig
    instrumentation, diagnostic lever), it needs **no formal review** — keep the build green, eyeball the
    diff. If it lands **something solid**, run **`/check`** (one agent) for a small change or
    **`/tricheck`** (three agents) for something larger, and apply the surviving findings. Follow the
@@ -68,7 +68,7 @@ When the user tells you you're done / to integrate / to hand off to the orchestr
      integrate it (`scripts/fleet/worker-integrate <name>`) or start an orchestrator first.
 4. **Do not tear yourself down.** The orchestrator (or the user) manages your lifecycle.
 
-## Everything Else in `CLAUDE.md` Still Applies
+## Everything Else in `AGENTS.md` Still Applies
 
 The safety invariants, the logging rule, clean-room hygiene, the build/test commands, and "preserve
 other sessions' work" all hold — including its light-review posture, which for you fires at handoff (see

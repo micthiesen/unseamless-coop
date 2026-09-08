@@ -33,7 +33,7 @@ where
 }
 
 /// Run `f` with the local player, but only when it's fully active — skip a mid-load/teardown
-/// half-wired `ChrIns` (`chr_flags1c8.is_active()`), per the CLAUDE.md load-status caveat. Returns
+/// half-wired `ChrIns` (`chr_flags1c8.is_active()`), per the AGENTS.md load-status caveat. Returns
 /// `None` if there's no live, active main player. Game-thread only (call from a feature `on_frame`).
 pub fn with_active_main_player<R>(f: impl FnOnce(&mut PlayerIns) -> R) -> Option<R> {
     with_instance_mut::<WorldChrMan, _>(|w| {

@@ -12,21 +12,22 @@ necessarily drift. Existing user authorization applies throughout the workflow.
 ## Ownership
 
 - `SKILL.md` body and `sync-status.py` are shared identically across peers.
-  Frontmatter may differ for each harness, including rulesync `targets`.
-- `sync-map.json` belongs to its project. It records peers, resources, permanent
-  differences, and an optional generation command. Never copy another project's
-  map over it or put transient diff history in its notes.
-- In rulesync projects edit `.rulesync/skills/sync/`; otherwise use the existing
-  canonical skill directory, usually `.claude/skills/sync/`. Preserve discovery
-  symlinks such as `.agents -> .claude` and regenerate derived outputs.
+  Frontmatter may differ for each harness.
+- `sync-map.json` belongs to its project. It records peers, resources, and permanent
+  differences. Never copy another project's map over it or put transient diff
+  history in its notes.
+- Personal skills use `.agents/skills/`. Edit the canonical files directly. For
+  Stow-managed installations, edit the source package in its owning repository,
+  preserving discovery symlinks. Peer `skillPath` records a different source path.
 
 ## Reconcile
 
 1. Run `python3 <skill-dir>/sync-status.py`. Read each present peer's map for its
-   paths and generator. Missing checkouts are reported and skipped, not cloned.
+   paths and ownership. Missing checkouts are reported and skipped, not cloned.
 2. Resolve drift in this skill and its script first. Use history on both sides
    (`git log --oneline -- <path>`) to identify improvements and merge compatible
-   changes. Update every affected direct peer's canonical copy.
+   changes. Update each affected direct peer's canonical copy within the authorized
+   scope. Report excluded peers without modifying them.
 3. Inspect resource differences with
    `python3 <skill-dir>/sync-status.py diff <peer> <path>`; this normalizes identity
    tokens. Port useful changes in either direction. For `judgment` resources,
@@ -35,23 +36,30 @@ necessarily drift. Existing user authorization applies throughout the workflow.
    intent creates a consequential choice the existing instructions do not settle;
    continue unaffected resources. Record permanent divergence in map notes or
    `judgment` mode, not as an unresolved mechanical drift.
-5. Run each changed project's declared `generate` command from that project's
-   root, then recheck sync status and review source and generated diffs. Run
-   relevant code checks when executable resources changed; prose-only changes
-   need frontmatter, reference, and consistency checks.
+5. Recheck sync status and review the complete diffs. Run relevant code checks
+   when executable resources changed; prose-only changes need frontmatter,
+   reference, and consistency checks. This workflow edits native files directly
+   and does not generate derived copies.
 6. Commit and push under each repository's conventions and current authorization.
-   Report changed repos, meaningful intentional differences, and missing peers.
+   Report changed repos, meaningful intentional differences, and missing or
+   excluded peers.
 
 Sync direct peers only. A multi-project request may cover several peer pairs,
-but a normal sync does not recursively modify unrelated projects.
+but a normal sync does not recursively modify unrelated projects. An explicit
+exclusion takes precedence over the map and shared-copy propagation.
 
 ## Map fields
 
 `project` names this project. Optional `root` resolves installed skills outside
-its checkout (for example `~/.dotfiles`); optional `generate` is its generator.
-`peers` maps names to `{path, tokens?, layout?, notes?}`. Paths are relative to
+its checkout (for example `~/.dotfiles`). Without it, the script derives the root
+from its canonical `.agents/skills/sync/` directory.
+
+`peers` maps names to `{path, tokens?, skillPath?, notes?}`. Paths are relative to
 the project root or absolute/home-relative. `tokens` maps local identity strings
-to peer spellings. Use `layout: "rulesync"` for a rulesync peer.
+to peer spellings. `skillPath` is relative to the peer root or absolute/home-relative;
+for a Stow package, use `codex/.agents/skills/sync`. Without `skillPath`, discovery
+prefers `.agents/skills/sync`, falls back to an existing `.claude/skills/sync` for
+unmigrated peers, and reports the native path as missing if neither exists.
 
 `resources` contains `{path, peers, mode?, peerPath?, notes?}` entries:
 
@@ -62,6 +70,7 @@ to peer spellings. Use `layout: "rulesync"` for a rulesync peer.
 The sync skill and script are implicitly shared with every peer; do not list them
 as resources. Statuses are `ok`, `DRIFT`, `review`, `MISSING-*`, or `skipped`.
 Exit 0 means no mechanical reconciliation remains; `review` still needs judgment.
+The status and diff commands are read-only and never update either checkout.
 
 ## Add or repair a sharing relationship
 
@@ -70,10 +79,10 @@ adapting paths and identity tokens. Do not change a map for a routine sync that
 leaves the sharing relationship unchanged.
 
 If the receiving project lacks this skill, install its `SKILL.md` and
-`sync-status.py` in the canonical directory, create a project-owned map, add the
-reciprocal relationship, and verify status and any generation command. Repair
-missing or malformed maps within the requested scope. Preserve unrelated entries.
+`sync-status.py` in `.agents/skills/sync/`, create a project-owned map, add the
+reciprocal relationship, and verify status. Repair missing or malformed maps
+within the requested scope. Preserve unrelated entries.
 
 An improvement to this skill or script belongs in all its checked-out direct
-peers in the same change. Commit both sides of a port; report unavailable peers
-so a future sync can complete propagation.
+peers within the authorized scope. Commit both sides of a port; report unavailable
+or excluded peers so a future sync can complete propagation.

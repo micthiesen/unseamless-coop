@@ -96,7 +96,7 @@ pub fn is_ready() -> bool {
 /// confirms `ISteamNetworkingMessages` *and* the lobby interfaces (`ISteamMatchmaking` + `ISteamUtils`)
 /// resolve; on all, publishes [`Status::Ready`] (clears the banner, brief success toast); otherwise
 /// publishes [`Status::Failed`] (permanent error banner). The banner is diagnostic, so it stays in
-/// **plain voice** (CLAUDE.md > "Surfacing errors").
+/// **plain voice** (AGENTS.md > "Surfacing errors").
 pub fn start() {
     std::thread::spawn(|| {
         set_banner(Severity::Info, "Connecting to Steam...");

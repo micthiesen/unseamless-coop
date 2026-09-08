@@ -8,7 +8,7 @@ for *what* we're reproducing and [DEVELOPMENT.md](DEVELOPMENT.md) for the toolch
 > observe how ERSC and the game *behave*, then reimplement in clean Rust. The result is co-op-only
 > and loads *outside* anti-cheat by construction — the launcher marker + abort (below) exist so a
 > modded build **can't** run under EAC, i.e. it keeps us off the official servers rather than
-> sneaking past them. No DRM-cracking, no reaching any other system or player. See CLAUDE.md >
+> sneaking past them. No DRM-cracking, no reaching any other system or player. See AGENTS.md >
 > Safety / legitimacy + Clean-room hygiene.
 
 ## Shape: a workspace split by verifiability
@@ -40,7 +40,7 @@ A [`Feature`] is one unit of behavior with a `name`, a `phase` (`CSTaskGroupInde
 ticks one feature. Tasks run on the game's main thread, so the lock is effectively uncontended —
 it exists to satisfy the scheduler's `Fn + 'static` bounds, not for real concurrency. The
 no-DETACH / `mem::forget(handle)` invariants from er-crit-coop carry over unchanged (see
-CLAUDE.md > "safety invariants").
+AGENTS.md > "safety invariants").
 
 This gives clean, independent feature modules instead of one monolith, and lets each feature run
 in the frame phase ordered against the state it touches.

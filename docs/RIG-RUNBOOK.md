@@ -286,7 +286,7 @@ runtime instrumentation per [RUNTIME-RE.md](RUNTIME-RE.md): a diagnostic build o
 
 ## Feeding results back
 
-Record findings as behavioral notes **in our own words** (clean-room — see CLAUDE.md), update
+Record findings as behavioral notes **in our own words** (clean-room — see AGENTS.md), update
 FEATURES.md / ARCHITECTURE.md, and turn the confirmed mechanics into:
 - host-tested types/state-machines in `unseamless-core`, then
 - thin bindings in `unseamless-coop`.

@@ -140,7 +140,7 @@ can't copy code you can't read.
 
 **Clean-room rule:** never paste decompiler/disassembler output into source or commits, and
 never redistribute upstream bytes (`reference/` stays gitignored). Read to understand, record
-behavior in your own words, implement from that. See CLAUDE.md > "Clean-room hygiene".
+behavior in your own words, implement from that. See AGENTS.md > "Clean-room hygiene".
 
 When a behavior isn't a named SDK field, use a diagnostic loop that snapshots candidate byte
 regions per `ChrIns` and logs rising-edge bit flips (see `er-crit-coop/src/diagnostic.rs` for

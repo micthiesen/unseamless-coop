@@ -160,7 +160,7 @@ the trace recipe is: get 2-player, have the joiner leave (host stays), re-scan t
 
 ### 1. `[context+0x168]` is the reject-stub EVEN in a working session — the gate-c theory is dead
 
-Prior belief (CLAUDE.md status, SESSION-DRIVE Lane B, months of "avenue a"): admission fails offline
+Prior belief (AGENTS.md status, SESSION-DRIVE Lane B, months of "avenue a"): admission fails offline
 because the transport context's member-lookup at `+0x168` is a reject-stub `0x1423fdf00`, and the
 *online flow installs a real lookup* there. **False.** In the live working session:
 
@@ -280,7 +280,7 @@ precise and the `+0x168`/gate-c rabbit hole is closed:
    and stand up the service.
 
 Superseded by this doc: the "avenue (a) synthesize the member + real `+0x168`" plan and the "joiner SYN
-→ gate-c admit" framing in SESSION-DRIVE.md / CLAUDE.md status (both kept as history).
+→ gate-c admit" framing in SESSION-DRIVE.md / AGENTS.md status (both kept as history).
 
 ## ★ Endpoint capture (2026-07-05 follow-up) — catch the member's `+0x130` writer + the add-peer producer
 

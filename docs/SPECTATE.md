@@ -23,7 +23,7 @@ The whole path is named, typed SDK state at the pinned commit `8c67a84`; how eac
   Found in the SDK's `cs/chr_ins.rs` (`bitfield!` for `ChrInsFlags1c5`, doc'd "Controls whether the
   character is dead or not"). Debounced by the host-tested `DeathDebounce` (reused from death-debuffs)
   so a scripted/cutscene `death_flag` blip doesn't trip spectate. We gate on `chr_flags1c8.is_active()`
-  first (CLAUDE.md load-status caveat) and hold state across a load gap (no active main player).
+  first (AGENTS.md load-status caveat) and hold state across a load gap (no active main player).
 - **Pick a partner** — iterate `WorldChrMan.player_chr_set` via the shared `active_characters` helper
   (`coop/features/nameplates.rs`, gates on `chr_load_status == Active` so a mid-join phantom with
   unwired modules is never deref'd), skip the local player by `ChrIns` pointer identity, mark each

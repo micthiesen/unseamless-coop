@@ -938,7 +938,7 @@ impl Overlay {
     /// [`crate::notify`]'s blocking lock — the present thread must never block on the game thread (see
     /// notify.rs). Off the present hook there's no FFI boundary, so a panic in the worker just ends the
     /// worker (logged by the panic hook); no `catch_unwind` firewall is needed. Plain voice for this
-    /// diagnostic message (per CLAUDE.md), not ER tone.
+    /// diagnostic message (per AGENTS.md), not ER tone.
     fn export_diagnostics(&self) {
         // Snapshot the only present-thread-owned inputs, then hand off. `Config` is Clone, `module` is
         // Copy; everything else the worker reads is a process-global static reachable from any thread.

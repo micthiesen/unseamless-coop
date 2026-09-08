@@ -68,7 +68,7 @@ launches both sides, and reads the verdict out of the logs; nothing is left to d
 > **Scope & legitimacy.** Two machines the developer owns (or a friend who owns the game), running a
 > co-op mod over a private Steam side-channel, *outside* anti-cheat and never on the official servers.
 > "Bypassed gate" = a check flipped in our own in-memory copy so our own co-op create can proceed
-> offline — not an anti-cheat defeat and not redistributed. See CLAUDE.md > Safety / legitimacy +
+> offline — not an anti-cheat defeat and not redistributed. See AGENTS.md > Safety / legitimacy +
 > Clean-room hygiene.
 
 **Why this run exists (the confirmed root cause).** A solo driven create fires and passes *every*
@@ -208,7 +208,7 @@ The Deck rides the **same seed config** as the rig (`scripts/deck.sh apply` push
 `scripts/rig/seed-config.toml`), so the edits from Machine 1 cover both sides automatically —
 password included. The per-machine **role** is the exception: it's a per-invocation flag, never a
 seed edit (a role in the shared seed gets clobbered when the other machine cycles). Per the
-[`/steam-deck`](../.claude/skills/steam-deck/SKILL.md) skill:
+[`/steam-deck`](../.agents/skills/steam-deck/SKILL.md) skill:
 
 ```bash
 scripts/deck.sh seed-save                   # if the Deck needs a save
@@ -281,7 +281,7 @@ Two staging notes:
 
 Whatever the outcome, **collect everything**: the friend's Export file (or `deck.sh pull-logs`) +
 the rig's own log, then record the verdict + any new finding in SESSION-DRIVE.md per
-[CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results".
+[AGENTS.md](../AGENTS.md) > "Document how to re-derive RE results".
 
 > **Privacy:** a raw log carries your **own** SteamID64 even at the default `info` level (the
 > `steam: own SteamID …` line), so hand-collected raw logs (`deck.sh pull-logs`, the `--no-overlay`
@@ -300,5 +300,5 @@ the rig's own log, then record the verdict + any new finding in SESSION-DRIVE.md
   the `coop_connect` stage table, Export); its Part B is superseded by this doc.
 - [RIG-GUIDES.md](RIG-GUIDES.md) + the `rig-guides` skill — the guide engine + authoring API behind
   `rung3-create-drive`.
-- [RIG-RUNBOOK.md](RIG-RUNBOOK.md) / the [`/steam-deck`](../.claude/skills/steam-deck/SKILL.md)
+- [RIG-RUNBOOK.md](RIG-RUNBOOK.md) / the [`/steam-deck`](../.agents/skills/steam-deck/SKILL.md)
   skill — driving the local rig and the Deck.

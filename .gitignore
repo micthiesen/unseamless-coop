@@ -16,7 +16,7 @@ scripts/dist/.shared-password
 unseamless-fleet/
 
 # =============================================================================
-# Clean-room safety net  (see CLAUDE.md > "Clean-room hygiene")
+# Clean-room safety net  (see AGENTS.md > "Clean-room hygiene")
 #
 # This is an independent reimplementation. We must NEVER commit:
 #   (a) original bytes from ELDEN RING or Seamless Co-op — binaries, assets, config; or

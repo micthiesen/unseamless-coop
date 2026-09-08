@@ -9,7 +9,7 @@ description: How to study the behavior of a game we own (Elden Ring) and an exis
 > machine: we study how a game we bought (Elden Ring) and an existing co-op mod *behave* so we can
 > clean-room reimplement that mod in Rust. Every tool below inspects a process on *this box* —
 > never anyone else's system, account, or server — and the result loads *outside* anti-cheat and
-> is co-op-only by construction (CLAUDE.md > Safety / legitimacy). We are not cracking DRM or
+> is co-op-only by construction (AGENTS.md > Safety / legitimacy). We are not cracking DRM or
 > defeating EAC; disassemblers, a decompiler, and a live-process observer are the ordinary
 > instruments for understanding your own game's behavior, no more exotic than a debugger.
 
@@ -17,7 +17,7 @@ This is a **behavioral** reimplementation. We never copy upstream code; we obser
 game/ERSC does and re-implement it from the public `fromsoftware-rs` SDK. Two hard constraints
 frame all RE here:
 
-1. **Clean-room (CLAUDE.md > Clean-room hygiene):** never paste decompiler/disassembler output
+1. **Clean-room (AGENTS.md > Clean-room hygiene):** never paste decompiler/disassembler output
    into source, comments, or commits. Read to understand, write behavioral notes in your own
    words, implement from those.
 2. **`ersc.dll` is Themida-packed:** ~5.5MB of ~7.4MB is a virtualized blob, only 8 stub imports

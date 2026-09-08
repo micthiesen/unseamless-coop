@@ -20,12 +20,12 @@ earlier read that an immediate-store scan *couldn't* tie the write to an initiat
 All addresses are for the **2026-06-02 `eldenring.exe`** (size 86,998,096; image base
 `0x140000000`; two `.text` sections at VMA `0x140001000` and `0x144c0e000`; `.pdata` exception
 table at `0x144863000`). A game patch shifts these — every value below has its **re-derivation
-recipe** next to it (per CLAUDE.md > "Document how to re-derive RE results"), so a future session
+recipe** next to it (per AGENTS.md > "Document how to re-derive RE results"), so a future session
 re-finds them in minutes rather than rediscovering the method.
 
 This is behavioral RE on our own legitimately-owned game binary: addresses/offsets are facts about
 the binary, written in our own words. No upstream ERSC code or third-party decompiler output is
-reproduced (CLAUDE.md > Clean-room).
+reproduced (AGENTS.md > Clean-room).
 
 ## The keystone: the live `CSSessionManager` instance global
 
@@ -157,7 +157,7 @@ TryToCreateSession` / `None → TryToJoinSession` stores _are_ plain immediate s
 now skip the open hunt and go straight to a one-shot **call-the-function + write-watch confirm**.
 
 All addresses are for the same **2026-06-02 `eldenring.exe`** (image base `0x140000000`), facts
-about the binary; behavior is described in our own words (CLAUDE.md > Clean-room).
+about the binary; behavior is described in our own words (AGENTS.md > Clean-room).
 
 ## Tombstone: `0x141b8a470` was a red herring
 
@@ -360,7 +360,7 @@ precise meeting point.
 
 Static-only on the same pinned **2026-06-02 `eldenring.exe`** (image base `0x140000000`). Behavioral
 notes are in my own words; all addresses are facts about the binary; no decompiler output or upstream
-ERSC code is reproduced (CLAUDE.md > Clean-room). Grounded throughout in the pinned `fromsoftware-rs`
+ERSC code is reproduced (AGENTS.md > Clean-room). Grounded throughout in the pinned `fromsoftware-rs`
 SDK (`8c67a84`): `cs/sos_sign_man.rs`, `cs/multiplay_type.rs`, `cs/net_man.rs`.
 
 ## TL;DR — the headline finding

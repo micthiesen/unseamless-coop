@@ -9,7 +9,7 @@
 //! nothing else; the cdylib feeds it the live roster and applies the result to the game camera.
 //!
 //! Kept here (not in the cdylib) so the policy is unit-tested on the host, per the project's
-//! "decision logic in core" split (CLAUDE.md > Code layout).
+//! "decision logic in core" split (AGENTS.md > Code layout).
 
 /// One co-op partner the local (dead) player could spectate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

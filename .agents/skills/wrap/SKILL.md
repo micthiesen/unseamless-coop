@@ -6,7 +6,6 @@ description: >
   docs/STATE.md so it reflects the current work, commit, and print the restart instruction. Use
   when ending an orchestrator or solo-worker session, before killing a long-context session, or on
   "wrap up", "conclude the session", "save state and restart", "/wrap".
-user_invocable: true
 ---
 
 # Wrap (Conclude The Session)
@@ -18,7 +17,7 @@ into continuing. Never let a session's value live only in its context window.
 ## 1. Sweep Learnings Into Their Homes
 
 Review the whole session for anything durable that isn't yet written down, and write each piece
-to its proper home (per CLAUDE.md > "Project knowledge lives in the repo"):
+to its proper home (per AGENTS.md > "Project knowledge lives in the repo"):
 
 | Kind of learning | Home |
 |---|---|
@@ -26,8 +25,8 @@ to its proper home (per CLAUDE.md > "Project knowledge lives in the repo"):
 | RE findings (offsets, gates, charted functions, dead ends) | the relevant `docs/*-FINDINGS.md` / design doc |
 | How an address/AOB/result was derived | a comment next to the code that uses it |
 | Fleet/orchestration lessons | `docs/ORCHESTRATION.md` / the `/fleet` skill |
-| A repeatable procedure | the matching `.claude/skills/` skill |
-| Cross-cutting rules, preferences | `CLAUDE.md` |
+| A repeatable procedure | the matching `.agents/skills/` skill |
+| Cross-cutting rules, preferences | `AGENTS.md` |
 
 Write the **content** there — STATE.md gets only pointers. A dead end is a finding too: recording
 why something was ruled out is what stops the next session from re-treading it.

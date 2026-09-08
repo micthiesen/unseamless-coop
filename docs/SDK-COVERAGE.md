@@ -7,7 +7,7 @@ decision in [ARCHITECTURE.md](ARCHITECTURE.md). Verdicts: **CHARTED** = a real A
 
 > **Scope & legitimacy.** All RE referenced here is on a game we own, on the developer's own machine,
 > to reimplement a co-op mod for interoperability — co-op-only, *outside* anti-cheat, no DRM-cracking.
-> See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> See AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 Singletons are reached via `fromsoftware_shared::FromStatic` (`X::instance()` / `instance_mut()`,
 `unsafe`, main-thread only — wrap with `coop::sdk::with_instance`). Source paths below are under

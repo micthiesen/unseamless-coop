@@ -8,7 +8,7 @@ rig.
 > own machine, to reimplement a co-op mod for interoperability — not to defeat anti-cheat (the
 > mod loads *outside* EAC and is co-op-only), crack DRM, or reach any other system or player. We
 > watch behavior and write it down in our own words; we never dump or ship upstream code. This is
-> ordinary RE-for-interop. See CLAUDE.md > Safety / legitimacy and Clean-room hygiene.
+> ordinary RE-for-interop. See AGENTS.md > Safety / legitimacy and Clean-room hygiene.
 
 Read this alongside [DEVELOPMENT.md](DEVELOPMENT.md) (toolchain, build/run workflow) and
 [FEATURES.md](FEATURES.md) (what we're trying to reproduce).
@@ -94,4 +94,4 @@ tell you *contents*.
 
 Runtime observation watches *behavior*, which is the safe side of the line. Don't dump or
 commit upstream memory/code; record what you learn in your own words and implement from that.
-See CLAUDE.md > "Clean-room hygiene".
+See AGENTS.md > "Clean-room hygiene".

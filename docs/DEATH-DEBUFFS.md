@@ -10,7 +10,7 @@ registry; `c.gameplay.death_debuffs`).
 
 This is a **research note**, not an implemented feature. Game-internal claims are grounded in the
 pinned `fromsoftware-rs` SDK (rev `8c67a84`, paths cited) or flagged as behavioral inference to
-confirm on the rig. Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene, ERSC is closed and
+confirm on the rig. Per [AGENTS.md](../AGENTS.md) > Clean-room hygiene, ERSC is closed and
 Themida-packed, so the *exact* SpEffect IDs and stacking rules it uses are not readable and not
 copied here — we reimplement the effect from observed behavior + the public param/SpEffect system.
 
@@ -142,7 +142,7 @@ Cleanest signal: poll the **main player's HP** via `WorldChrMan`. `main_player` 
 
 - Phase: a `ChrIns`-ordered phase (the project's `WorldChrMan_PostPhysics` worked example) so HP is
   read after the game writes it — and respect the `characters()`/load-status caveat from
-  [CLAUDE.md](../CLAUDE.md): only deref `main_player` when its `load_state.is_active()`
+  [AGENTS.md](../AGENTS.md): only deref `main_player` when its `load_state.is_active()`
   (`cs/chr_ins.rs:486`) to avoid touching a mid-teardown `ChrIns`.
 - Alternative/confirmation signal: the "YOU DIED" status message is `STATUS_MESSAGE_YOU_DIED = 5`
   (`cs/menu_man.rs:14`) — that's a *display* constant, not a queryable event, so HP-edge is the
@@ -211,7 +211,7 @@ Notes:
 - Use `crate::sdk::with_instance_mut::<WorldChrMan, _>` for the player (mutable, since apply/remove
   take `&mut`) and `with_instance::<CSEventFlagMan, _>` for the flag — same accessors the existing
   features use.
-- Per the project's [error-surfacing rule](../CLAUDE.md): this is past install, so any failure here
+- Per the project's [error-surfacing rule](../AGENTS.md): this is past install, so any failure here
   **degrades + toasts**, never `guard::fatal`. If a SpEffect call panics, disable the feature for the
   session and notify via `unseamless-core/notifications.rs`.
 - Logging rule: the per-frame HP/flag reads must be `log::debug!`/`trace!`; only milestones

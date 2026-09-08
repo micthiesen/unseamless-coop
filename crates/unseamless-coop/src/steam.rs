@@ -232,7 +232,7 @@ pub fn get_auth_session_ticket() -> Option<Vec<u8>> {
 // callback queue — sending to a user auto-opens the session, and because we know the peer out of band
 // we also `AcceptSessionWithUser` proactively instead of waiting on the SessionRequest callback.
 //
-// Re-deriving the exports after a Steam update (per CLAUDE.md > "Document how to re-derive RE
+// Re-deriving the exports after a Steam update (per AGENTS.md > "Document how to re-derive RE
 // results"): the four flat methods are unversioned; only the interface accessor carries a version
 // (`…_v002`, confirmed in ELDEN RING's bundled DLL on 2026-06-25). Re-confirm with:
 //   x86_64-w64-mingw32-objdump -p "ELDEN RING/Game/steam_api64.dll" | grep SteamNetworkingMessages

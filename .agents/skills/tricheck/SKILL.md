@@ -17,16 +17,16 @@ single `/check` is enough; step up to `/tricheck` when the change is larger or l
 ## How To Run It
 
 Spawn **three fresh-context reviewers in parallel over the current branch diff**, in the background
-(`Agent` with `run_in_background: true`) so you keep working while they run:
+(using Codex reviewer agents) so you keep working while they run:
 
-1. One **general** reviewer — `subagent_type: "check"`. Give it a one-paragraph summary of the
+1. One **general** reviewer — the `check` agent. Give it a one-paragraph summary of the
    session's goal; it reads the diff itself.
-2. Two **focused** reviewers — `subagent_type: "check-focused"`, each with ONE lens chosen for *this*
+2. Two **focused** reviewers — the `check-focused` agent, each with ONE lens chosen for *this*
    change. Pick the two lenses that fit what landed. Common ones for this codebase:
    - **correctness** — logic bugs, off-by-one, wrong offsets/constants.
    - **safety** — the load-bearing invariants: no unwind across an FFI boundary, no use-after-free
      from a dropped task handle, frame-ordering vs thread-exclusivity, `ChrIns` load-status. (See
-     CLAUDE.md > "Architecture & hard safety invariants" and FFI-UNWIND-AUDIT.md.)
+     AGENTS.md > "Architecture & hard safety invariants" and FFI-UNWIND-AUDIT.md.)
    - **concurrency / frame-ordering** — task phase choice, shared-state reads.
    - **error-handling** — degrade-don't-crash, the fatal-vs-toast split.
    - **API-shape / simplification / test-coverage** — for core-crate logic.

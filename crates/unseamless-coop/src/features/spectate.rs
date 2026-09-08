@@ -11,7 +11,7 @@
 //!   game's own "is this character dead" toggle), debounced by the host-tested [`DeathDebounce`] so a
 //!   scripted/cutscene dip doesn't trip it.
 //! - **Choose** a partner — iterate `player_chr_set` (via [`active_characters`], which gates on
-//!   `chr_load_status == Active` so we never deref a half-wired joining phantom — CLAUDE.md UAF
+//!   `chr_load_status == Active` so we never deref a half-wired joining phantom — AGENTS.md UAF
 //!   caveat), skip the local player, and hand the living ones to [`select_target`].
 //! - **Drive** the camera — `WorldChrMan.chr_cam` (a `ChrCam`) exposes `death_cam_target:
 //!   Option<NonNull<ChrIns>>` and `camera_type: ChrCamType` with a `DeathCam = 7` variant. We point
@@ -110,7 +110,7 @@ impl SpectateFeature {
     /// load/teardown gap where there's no active main player, so a respawn transition doesn't false-revive.
     fn tick(&mut self, wcm: &mut WorldChrMan) {
         // Read the local player's liveness as copied scalars, then drop the borrow before touching
-        // `player_chr_set`/`chr_cam`. Presence + `is_active` guard per the CLAUDE.md load-status caveat
+        // `player_chr_set`/`chr_cam`. Presence + `is_active` guard per the AGENTS.md load-status caveat
         // (a half-wired `ChrIns` mid-transition has unwired modules; `death_flag`/pointer are in the base
         // struct but we still skip a non-active one so we only ever act on a settled state).
         let main_state = wcm.main_player.as_ref().and_then(|m| {
@@ -122,7 +122,7 @@ impl SpectateFeature {
         let Some((main_ptr, local_dead)) = main_state else {
             // No readable, settled main player (title / loading / half-wired). Hold spectate *state*
             // across the gap, but never leave a target pointer installed while we can't refresh it — a
-            // partner's `ChrIns` can be freed during the load (the CLAUDE.md UAF window). Clearing only
+            // partner's `ChrIns` can be freed during the load (the AGENTS.md UAF window). Clearing only
             // the target is safe: during a real load the game isn't running its death cam anyway.
             if self.active {
                 clear_death_cam_target(wcm);

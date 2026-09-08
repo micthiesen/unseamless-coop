@@ -14,7 +14,7 @@
 > a co-op mod's session handling for interoperability — co-op-only, *outside* anti-cheat, no
 > DRM-cracking or reaching other players' systems. The write-watch/observation tools inspect *our own*
 > process, no more exotic than a debugger; findings are in our own words, no upstream code copied. See
-> CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 The exact recipe for the **one networking gap the SDK doesn't chart**: the internal functions that
 start a co-op session. This is rig-gated RE — it can only be done with the game running, ideally with
@@ -155,7 +155,7 @@ Strategies, in the order that now actually pays off:
 - **C — ERSC accelerator (optional).** If blind RE stalls, restore the real ERSC stack
   (`scripts/rig.sh restore`) and Frida-watch the same `base + 0xc` write while ERSC connects, to see
   which function ERSC lets the game run for the initiation. Observe behavior only — never copy ERSC
-  bytes (CLAUDE.md > Clean-room).
+  bytes (AGENTS.md > Clean-room).
 
 The win64 prologue at the entry is typically `48 8B C4` (`mov rax, rsp`), `40 53` (`push rbx`), or
 `48 83 EC ..` (`sub rsp, ..`). (FINDINGS lists the concrete ~18-byte entry bytes for the current
@@ -184,7 +184,7 @@ which argument is the peer). The join hook mirrors this for `None->TryToJoinSess
 
 - **`hooked …` then `initiated …` then the matching FSM transition** → success: the entry is correct
   and the argument registers name the `this` + peer. Record the landmark + the register→meaning
-  mapping inline next to the const (per CLAUDE.md > "Document how to re-derive RE results"), and hand
+  mapping inline next to the const (per AGENTS.md > "Document how to re-derive RE results"), and hand
   the confirmed entries to the co-op core to *drive*.
 - **`hooked …` but no `initiated …` on a real connect** → the landmark resolved but to the wrong
   function; the store-site you walked back from wasn't the initiation entry. Re-do step 2 (prefer
@@ -198,6 +198,6 @@ which argument is the peer). The join hook mirrors this for `None->TryToJoinSess
 
 This is behavioral RE: we watch *what* writes the state and *which* function the game runs, then
 implement our own driver from that. Do not paste decompiler/disassembler output into source, comments,
-or commits — record findings in your own words (CLAUDE.md > Clean-room hygiene).
+or commits — record findings in your own words (AGENTS.md > Clean-room hygiene).
 
-[`/reverse-engineer`]: ../.claude/skills/reverse-engineer/SKILL.md
+[`/reverse-engineer`]: ../.agents/skills/reverse-engineer/SKILL.md

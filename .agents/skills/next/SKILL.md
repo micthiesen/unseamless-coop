@@ -7,7 +7,6 @@ description: >
   docs/STATE.md, then starts authorized work through the existing fleet. Use when unsure
   what to work on next, when the previous Next step completed, or from /wrap when concluding a
   session. TRIGGER on "what's next", "what should we do next", "pick the next step", "/next".
-user_invocable: true
 ---
 
 # Next (Decide The Next Step)
@@ -85,7 +84,7 @@ don't print full worker briefs before the direction is chosen (they bloat the de
 usually get revised anyway). When proceeding, write the `worker-new` heredoc brief per
 ORCHESTRATION.md > "Writing a worker
 assignment" (lane + boundary, where to look, collision map, review depth) and **spawn it
-directly** — the delegate-by-default posture (CLAUDE.md > "Orchestrator / worker fleet") means
+directly** — the delegate-by-default posture (AGENTS.md > "Orchestrator / worker fleet") means
 spawning, not pasting instructions for Michael to relay.
 
 ## If You're A Worker

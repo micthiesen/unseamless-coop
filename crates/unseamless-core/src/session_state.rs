@@ -16,7 +16,7 @@
 //!   enforces, extended to the state the action produces.
 //!
 //! Each realized transition carries an ER-voiced toast ([`ToggleChange::message`]): a toggle is an
-//! in-world *effect*, so per CLAUDE.md's message-voice rule the wording is lore-register and
+//! in-world *effect*, so per AGENTS.md's message-voice rule the wording is lore-register and
 //! value-free (the plain mechanical state still shows on the host's menu rows).
 
 use crate::menu::SessionContext;

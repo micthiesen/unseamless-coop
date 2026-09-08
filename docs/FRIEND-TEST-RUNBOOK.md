@@ -10,7 +10,7 @@
 
 > **Scope & legitimacy.** Two people who each own the game, on their own machines, connecting a
 > co-op mod over a private Steam side-channel — *outside* anti-cheat, never on the official servers,
-> no DRM-cracking. See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> no DRM-cracking. See AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 The recipe for the **one** thing the rig can't do alone: a real second player. It is built to move
 three rungs in a single friend session —
@@ -28,7 +28,7 @@ captures the lot; the friend is a low-effort peer (set a password, press Play, h
 send one file).
 
 > **Player 2 can be a Steam Deck you drive over SSH** (a throwaway account), not just a human friend — see
-> the [`/steam-deck`](../.claude/skills/steam-deck/SKILL.md) skill (`scripts/deck.sh`). It applies this
+> the [`/steam-deck`](../.agents/skills/steam-deck/SKILL.md) skill (`scripts/deck.sh`). It applies this
 > same seed config (same password) + save and reaches gameplay on the Deck, so the assistant handles the
 > player-2 *mechanics* and only a human-in-the-world is needed for actual co-op.
 
@@ -212,7 +212,7 @@ friend hits Export):**
 > scrubbed; the raw `session-probe:` lines are not. ([SESSION-RE-RUNBOOK.md](SESSION-RE-RUNBOOK.md) warns of this.)
 
 This stays behavioral RE — read *what the game does*, implement our own driver from that, never paste
-decompiler output into source/commits ([CLAUDE.md](../CLAUDE.md) > Clean-room hygiene).
+decompiler output into source/commits ([AGENTS.md](../AGENTS.md) > Clean-room hygiene).
 
 ## Part C — Native overlay-crash trace (solo friend, any NVIDIA box)
 
@@ -264,7 +264,7 @@ unreachable if the overlay crashed — README-FRIENDS tells them this):
 - Symbolicate our own frames: `x86_64-w64-mingw32-addr2line -f -C -e <diag dll/exe> $((ImageBase + offset))`
   (DLL ImageBase via `objdump -p`). Full recipe + the WARP self-test in the [`/windows-test`] skill.
 
-[`/windows-test`]: ../.claude/skills/windows-test/SKILL.md
+[`/windows-test`]: ../.agents/skills/windows-test/SKILL.md
 
 ## After the session
 
@@ -278,7 +278,7 @@ unreachable if the overlay crashed — README-FRIENDS tells them this):
   menu's `SessionContext` bits from the FSM. If **STILL fails**, the peer isn't sufficient — keep tracing
   leg B's registry chain (`0x1423fa1b0` →…) per [SESSION-DRIVE.md](SESSION-DRIVE.md) > "Leg B charted", or
   fall back to ERSC-style session neutralization. Document any new finding inline per
-  [CLAUDE.md](../CLAUDE.md) > "Document how to re-derive RE results".
+  [AGENTS.md](../AGENTS.md) > "Document how to re-derive RE results".
 
 ## Cross-references
 

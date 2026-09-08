@@ -18,7 +18,7 @@
 # Clean-room note: generic tooling. Point it at CLEAN targets (the game exe, our own builds, an
 # unpacked dump) — never commit decompiler output of an upstream closed binary, and don't bother
 # pointing it at ersc.dll (Themida-virtualized; you'd decompile the unpacker stub, not the logic).
-# See CLAUDE.md > "Clean-room hygiene".
+# See AGENTS.md > "Clean-room hygiene".
 
 import os
 import re

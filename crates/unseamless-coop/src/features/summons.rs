@@ -55,7 +55,7 @@
 //!   AOB code patch via `coop/app::apply_boot_patches`) drops into [`apply_gate`].
 //!
 //! Clean-room: everything above is behavioral observation in our own words + public-SDK field names —
-//! no upstream `ersc.dll` bytes, no decompiler output (CLAUDE.md > Clean-room hygiene).
+//! no upstream `ersc.dll` bytes, no decompiler output (AGENTS.md > Clean-room hygiene).
 //!
 //! [`QuickMatchSettings::spirit_ashes_allowed`]: eldenring::cs::QuickMatchSettings::spirit_ashes_allowed
 
@@ -103,7 +103,7 @@ impl Feature for Summons {
         // Host-enforced toggle (synced via SharedSettings). Read the live config each frame so a
         // ConfigSync from the host re-applies without rebuilding the feature. Announce only on the
         // enable/disable edge (debug, silent unless `[debug]` verbosity is on — never an info!/per-frame
-        // log on the hot path, per CLAUDE.md > Logging rule).
+        // log on the hot path, per AGENTS.md > Logging rule).
         let enabled = crate::state::with(|c| c.gameplay.allow_summons);
         if self.latch.changed(&enabled) {
             log::debug!(

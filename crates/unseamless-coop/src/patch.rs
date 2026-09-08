@@ -8,7 +8,7 @@
 //! uses for its RVA work), `Program::current()` over the mapped exe, and the `windows` crate for
 //! page protection. No new transport, no new hooking lib.
 //!
-//! ## Lifetime & safety (mirrors the task-handle invariants — see CLAUDE.md)
+//! ## Lifetime & safety (mirrors the task-handle invariants — see AGENTS.md)
 //! A code patch is **applied once, at install, on the init thread, and never undone**:
 //! - Not in `DllMain` (loader-lock hazard) — it runs inside `app::install` on the init thread.
 //! - Safety comes from running *before the patched code path is first taken* (the logo gate hasn't

@@ -27,7 +27,7 @@ How the game presents its "you're offline" state at boot. Two targets were consi
 
 This is a **research note**, not an implemented feature. Everything game-internal below is either
 grounded in the pinned `fromsoftware-rs` SDK source (cited as such) or is a behavioral
-observation/inference to confirm on the rig. Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene:
+observation/inference to confirm on the rig. Per [AGENTS.md](../AGENTS.md) > Clean-room hygiene:
 we reimplement from observed behavior + the public SDK, never from ERSC's code (it's closed and
 Themida-packed — there's nothing to copy here even if we wanted to).
 
@@ -218,7 +218,7 @@ with `Seamless Co-op X.Y.Z`; we'd want `unseamless-coop <version>` (+ maybe git 
   name and tack a version onto a label, FMG override alone may suffice. Decide after seeing the
   live layout on the rig.
 - **NOT** the UXM/`menu.msgbnd` asset-repack route — we don't ship or override FromSoft assets
-  ([CLAUDE.md](../CLAUDE.md) > Clean-room: don't redistribute upstream bytes). Runtime mutation
+  ([AGENTS.md](../AGENTS.md) > Clean-room: don't redistribute upstream bytes). Runtime mutation
   only.
 
 ## Shared substrate & SDK gaps (at our pin)
@@ -226,7 +226,7 @@ with `Seamless Co-op X.Y.Z`; we'd want `unseamless-coop <version>` (+ maybe git 
 - **`MsgRepository` is a marker singleton at rev `8c67a84`** — no FMG read/write. The FMG-override
   approach (B, and the display-intercept variant of A) needs either: (a) **bump the SDK pin** to a
   rev that exposes `get_msg`/`get_msg_disjoint_mut` (then re-verify *all* struct layouts —
-  [CLAUDE.md](../CLAUDE.md) > "pin both crates to the same commit"), or (b) RE the `get_msg` RVA
+  [AGENTS.md](../AGENTS.md) > "pin both crates to the same commit"), or (b) RE the `get_msg` RVA
   ourselves. Bumping the pin is the lower-risk path; check whether the SDK's other named fields we
   rely on shifted first.
 - **RVA-backed calls require the matching game version.** The SDK's RVA bundle (`rva.rs`) only

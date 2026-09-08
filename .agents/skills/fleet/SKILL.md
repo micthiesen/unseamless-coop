@@ -2,18 +2,17 @@
 name: fleet
 description: >
   Orchestrator playbook for running concurrent development as a one-orchestrator /
-  many-worker fleet of Claude Code sessions over rift copy-on-write workspaces,
+  many-worker fleet of Codex sessions over rift copy-on-write workspaces,
   coordinated over tmux. Use when spawning a worker to build a feature in parallel,
   messaging or answering a worker, integrating a worker's branch into main, or
   tearing a worker down. TRIGGER on "spawn a worker", "parallelize this", "kick off
   a worker for X", "what are my workers doing", "integrate <worker>", "remove the
   worker".
-user_invocable: true
 ---
 
 # Fleet (Orchestrator Playbook)
 
-You are the **orchestrator** (the default role; see [CLAUDE.md](../../../CLAUDE.md) >
+You are the **orchestrator** (the default role; see [AGENTS.md](../../../AGENTS.md) >
 "Orchestrator / worker fleet"). This is the operational how-to — everything you need to run the
 fleet is here.
 
@@ -41,25 +40,19 @@ the aggression goes to workers for chunks, subagents only for support.)
 
 All tooling is in `scripts/fleet/`. tmux sessions are `usc-orch` (you) and `usc-worker-<name>`.
 
-The fleet has a **default harness** — Claude Code or Codex (Michael toggles it with
-`scripts/fleet/harness`; the scripts handle every difference). You always run the default and never
-change it; individual workers can be spawned off-default when Michael asks (see
-[Harness and model overrides](#harness-and-model-overrides-opt-in-only)), and everything downstream
-(`msg` transport, revive, `worker-ls`) follows each worker's own spawn harness automatically. Only
-two things change for you when a session is **codex**: **`msg` to it is a tmux paste** — still a
-live user turn that queues if the target is mid-turn, but it does not preserve a draft in the
-target's composer, and a paste into a just-spawned (still booting) TUI can be dropped, so retry if a
-fresh worker doesn't react; and **`/color` and `/rc` don't exist** — skip them for that worker.
+The fleet runs Codex. `msg` submits a tmux paste as a normal user turn. Keep the
+target composer empty because a paste appends to drafts; retry if a newly started
+TUI has not become ready.
 
 ## Spawn A Worker
 
 ```
-scripts/fleet/worker-new [--harness claude|codex] [--model <id>] <name> "<guidance>"
+scripts/fleet/worker-new [--model <id>] <name> "<guidance>"
 ```
 
 `<name>` is kebab-case and becomes the workspace, the branch `worker/<name>`, and the tmux session
 `usc-worker-<name>`. It `rift create`s a copy-on-write workspace (runs `.rift.toml` postcreate),
-branches it, writes an assignment file, launches Claude there with the worker overlay
+branches it, writes an assignment file, launches Codex there with the worker overlay
 (`docs/roles/worker.md`), and pops it open in Alacritty.
 
 > **Backtick/quoting hazard — for any non-trivial brief, pass guidance via `-` + a single-quoted
@@ -95,24 +88,12 @@ Keep workers in genuinely independent lanes when you can. They *may* touch the s
 what `rerere`-assisted integration is for), but overlapping lanes mean more conflict resolution for
 you later.
 
-### Harness And Model Overrides (Opt-In Only)
+### Model Overrides (Opt-In Only)
 
-By default a worker spawns on the fleet's default harness with that harness's default model.
-**Never deviate on your own initiative** — these flags exist for when Michael explicitly asks:
-
-- **"Do this one in codex / in claude code"** → `worker-new --harness codex <name> …` (or
-  `--harness claude`). The spawn harness is pinned per worker, so a mixed fleet just works: `msg`
-  picks the right transport, `worker-open` revives with the right CLI, and `worker-ls` shows a
-  HARNESS column.
-- **"Use haiku / gpt-5.4-mini for this"** → `worker-new --model <id> <name> …`. The value is passed
-  through unvalidated (`claude --model` / `codex -m` — still a normal interactive session, never
-  print/exec mode), and revives keep it. A model implies its harness: a claude alias or `claude-*`
-  ID (`haiku`, `claude-sonnet-5`) needs the claude harness, a `gpt-*` slug needs codex — add
-  `--harness` too when that isn't the fleet default.
-- **`scripts/fleet/models`** lists known-good IDs for both harnesses (from local data — the claude
-  binary and codex's model cache; anything the CLI accepts works even if unlisted).
-
-The orchestrator itself is not configurable: you run the fleet default, full stop.
+Use the user's Codex default unless Michael requests a model. Pass the exact model
+with `worker-new --model <id>`; the marker preserves it on resume.
+`scripts/fleet/models` lists locally cached IDs. `--harness codex` is accepted for
+existing callers; Codex is the sole harness.
 
 ### Solo Workers
 
@@ -143,8 +124,8 @@ scripts/fleet/worker-open <name>
 
 If you (or Michael) closed a worker's window, the tmux session is still alive: this pops a fresh
 Alacritty attached to it. If the worker's session actually died (workspace still present, `TMUX`
-shows `-` in `worker-ls`), this revives it with `claude -c` so it continues its last conversation
-with context intact, re-applying the worker overlay and re-trusting the workspace path. (Detach from
+shows `-` in `worker-ls`), this revives it with `codex resume --last` so it continues its last conversation
+with context intact, preserving the initial role turn and re-trusting the workspace path. (Detach from
 any session without killing it via `F10`/`F11`/`F12`, or `Ctrl-b d`.)
 
 ## Message A Worker (And Answer Their Requests)
@@ -161,10 +142,9 @@ EOF
 - For anything multi-line or containing backticks/`$(...)`/quotes, use the `-` stdin form with a
   **single-quoted** heredoc, same convention as `worker-new` — a `"..."` arg gets mangled by the
   shell before `msg` sees it.
-- Just use the CLI; `msg` injects the message as a live turn in the target through its inspector
-  socket (you never manage waking anything). To an idle worker it arrives instantly; to a busy one it
-  queues and runs at the end of its current turn. A draft sitting in the target's input box is
-  preserved.
+- `msg` submits a normal turn using tmux paste and Enter. Keep the composer empty;
+  it does not preserve drafts. Retry if the target TUI is still starting.
+
 - Overview / who's running: `scripts/fleet/worker-ls`. There is no command to read another session's
   messages — a message is delivered into the target as a turn, not parked in a mailbox.
 - Don't *interrupt/redirect* a busy worker by message. For a hard redirect, attach
@@ -183,22 +163,7 @@ validation: run it yourself, serialized against the single rig (see the `/test-l
 `/reverse-engineer` skills), then reply with `msg usc-worker-<name> "[orchestrator] <result>"`. Never
 hand the rig to a worker.
 
-**Let Michael watch/control a worker from his phone.** When Michael asks to *watch*, *view*, *follow*,
-or *remote-control* a worker (especially "from my phone"), inject the remote-control command into that
-worker so he doesn't have to type a slash command on mobile:
-
-```
-scripts/fleet/msg usc-worker-<name> "/rc"
-```
-
-- **No `[orchestrator]` prefix** — this is the one exception to the always-prefix rule. `/rc` (alias
-  `/remote-control`) must arrive verbatim as the worker's input so it runs as a slash command; a prefix
-  turns it into plain text and it won't trigger. Send exactly `/rc` (or `/remote-control`), nothing else.
-- That command is what opens the worker for viewing/control from Michael's phone. Trigger on phrases
-  like "let me watch <name>", "I want to view the worker", "follow it from my phone", "remote into it".
-- It's just another `msg` injection (live turn), so the usual delivery rules apply (idle → instant,
-  busy → queued).
-- **Claude workers only.** A codex worker has no `/rc`; tell Michael that instead of sending it.
+To view a worker, open its Alacritty window with `scripts/fleet/worker-open <name>`.
 
 ## Review Is Light, And The Worker Owns Its Lane
 
@@ -251,7 +216,7 @@ After its work is integrated (or abandoned):
 scripts/fleet/worker-rm <name>
 ```
 
-Kills the tmux/Claude session, trashes the rift workspace, `gc`s, and removes the assignment file.
+Kills the tmux/Codex session, trashes the rift workspace, `gc`s, and removes the assignment file.
 It **refuses** (exit 1) only if the worker has commits whose patch isn't already on `main` (a
 `git cherry` check), since the workspace is the only copy of that branch; pass `-f` to discard them
 anyway. A worker you just integrated normally tears down **without `-f`**: its squash-integrated
@@ -271,14 +236,14 @@ If you need the orchestrator in its own tmux session (so workers can reach `usc-
 scripts/fleet/orch-start
 ```
 
-It launches Claude in tmux `usc-orch` with `--add-dir` over the rifts tree (so you can fetch worker
+It launches Codex in tmux `usc-orch` with `--add-dir` over the rifts tree (so you can fetch worker
 branches), no worker overlay (so it's the orchestrator by default), and attaches. A fresh start is
 **seeded with the STATE.md boot prompt** — read [`docs/STATE.md`](../../../docs/STATE.md) (which is
 about the work, not machine state), then brief Michael without auditing machine state. The boot
 prompt alone leaves the session idle; when the user launched it to continue the project, begin Next
 without asking again. Otherwise Michael may continue Next, run `/next`, or choose something else.
 (`--no-seed` skips it; a resumed start —
-`--continue`/`--resume`, or `-c` on claude — is never seeded, the context is already there.)
+`--continue` — is never seeded, the context is already there.)
 
 ## End A Session Cleanly (/wrap), Decide What's Next (/next)
 
@@ -306,8 +271,8 @@ without asking again. Otherwise Michael may continue Next, run `/next`, or choos
 - **The rig is single and yours.** All rig/RE/validation serializes through you. A worker that tries
   to drive the rig is a bug in its guidance or overlay.
 - **Only you commit to `main`.** Workers commit to their own branch; you integrate.
-- **Preserve concurrent work** (CLAUDE.md): when integrating, don't clobber a diverged file you
+- **Preserve concurrent work** (AGENTS.md): when integrating, don't clobber a diverged file you
   didn't expect; surface it.
-- **Seeded prompt:** `worker-new` seeds the worker by passing its assignment pointer as Claude's
-  first prompt, which auto-submits (confirmed by a live test). If a future Claude version ever
+- **Seeded prompt:** `worker-new` seeds the worker by passing its assignment pointer as Codex's
+  first prompt, which auto-submits (confirmed by a live test). If a future Codex version ever
   pre-fills instead, the popped Alacritty window shows it ready to send.

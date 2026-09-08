@@ -17,7 +17,7 @@
 #
 # Clean-room note: intended for CLEAN targets (the game exe, our own builds, an unpacked dump).
 # ersc.dll is Themida-virtualized, so this recovers the unpacker stub, not its logic — and never
-# commit decompiler output of an upstream closed binary. See CLAUDE.md > "Clean-room hygiene".
+# commit decompiler output of an upstream closed binary. See AGENTS.md > "Clean-room hygiene".
 set -euo pipefail
 
 BIN="${1:?usage: ghidra-decompile.sh <binary> [function-name-or-addr]}"

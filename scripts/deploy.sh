@@ -3,7 +3,7 @@
 # start_protected_game.exe. **No backup safety** — it overwrites those files in place. On a machine
 # that runs the real ERSC + Elden Mod Loader stack (the gaming PC) that clobbers it irrecoverably, so
 # `scripts/rig.sh apply` (which snapshots the original stack first; `rig.sh restore` reverts) is the
-# entrypoint everywhere and supersedes this script. See CLAUDE.md > "Where things run" and the
+# entrypoint everywhere and supersedes this script. See AGENTS.md > "Where things run" and the
 # /test-loop skill (layer 4).
 set -euo pipefail
 

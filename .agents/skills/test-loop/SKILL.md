@@ -168,7 +168,7 @@ the user's own DLL mods in `mods/`). Testing unseamless-coop means standing in f
 - `rig.sh restore` — roll back to the original stack (explicit).
 
 The seed config (`scripts/rig/seed-config.toml`) sets `[debug] enabled = true` so the run captures
-verbose lines; otherwise the CLAUDE.md logging rule keeps them silent. (`scripts/deploy.sh` is the
+verbose lines; otherwise the AGENTS.md logging rule keeps them silent. (`scripts/deploy.sh` is the
 bare install primitive `rig.sh apply` is built on — usable directly only on a clean rig with no real
 ERSC stack to protect, per RIG-RUNBOOK; otherwise prefer `rig.sh`.)
 

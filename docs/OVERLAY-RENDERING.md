@@ -10,7 +10,7 @@ the renderer those two host-tested models have always assumed but never had.
 > developer's own machine, to draw our own co-op overlay — the same way any legitimate overlay (Steam,
 > Discord, RivaTuner) does. The "inline-hook vs. IAT-hook" discussion is about coexisting cleanly with
 > the game and other overlays, not evading detection; nothing here is anti-cheat/DRM circumvention (the
-> mod runs *outside* EAC, co-op-only). See CLAUDE.md > Safety / legitimacy + Clean-room hygiene.
+> mod runs *outside* EAC, co-op-only). See AGENTS.md > Safety / legitimacy + Clean-room hygiene.
 
 **Status: the renderer shipped and is verified on the rig (vkd3d/Proton).** `coop/overlay.rs` draws
 the session-action menu, notification toasts/banners, the read-only settings view, and a live log tail
@@ -19,7 +19,7 @@ and wired). It renders correctly under vkd3d (rig baseline captured 2026-06-28).
 **native Windows**, where the present hook is fatal on NVIDIA hardware (see "Native-Windows Crash"
 below). The game-internal and Proton claims below are grounded in the pinned `fromsoftware-rs` SDK
 source (cited as such), in open-source overlay code we read and use (cited, license noted), or are
-behavioral inferences (hedged). Per [CLAUDE.md](../CLAUDE.md) > Clean-room hygiene: we reimplement from
+behavioral inferences (hedged). Per [AGENTS.md](../AGENTS.md) > Clean-room hygiene: we reimplement from
 behavior + public SDK/open-source, never from ERSC's bytes (it's closed + Themida-packed, nothing to
 copy here anyway; ERSC ships its own DX renderer hook we don't get to see).
 
@@ -200,7 +200,7 @@ machinery:
   our existing DLL**, the same way we install everything else. hudhook is a library; we call its hook
   setup at install time. There's no second DLL.
 - **Set up the hook at install, alongside task registration.** In `coop/app.rs` `install` (on the
-  short-lived init thread, off the loader lock — [CLAUDE.md](../CLAUDE.md) > safety invariants), after
+  short-lived init thread, off the loader lock — [AGENTS.md](../AGENTS.md) > safety invariants), after
   we get `CSTaskImp`, also kick off hudhook's hook installation. hudhook runs its draw on the **Present
   detour**, which is a *different thread/phase* than our `CSTaskGroupIndex` frame tasks. That's fine and
   even desirable: tasks **mutate game state** in a chosen frame phase (the safety model is frame

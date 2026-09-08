@@ -1,6 +1,6 @@
 //! The committed registry of rig-testing guides, selectable via `[debug] guide = "<name>"` (empty =
 //! off). Adding a guide is cheap: write a builder function and add one arm to [`by_name`] + one entry
-//! to [`NAMES`]. Authoring API + conventions are in `.claude/skills/rig-guides/SKILL.md`; the engine
+//! to [`NAMES`]. Authoring API + conventions are in `.agents/skills/rig-guides/SKILL.md`; the engine
 //! internals are in the parent [`crate::guide`] module and `docs/RIG-GUIDES.md`.
 
 use super::{Advance, Guide, LobbyState, Role, after_secs, game_state_is, lobby_is, log_contains};

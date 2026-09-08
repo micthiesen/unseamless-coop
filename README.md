@@ -49,7 +49,7 @@ cargo build --release      # -> target/x86_64-pc-windows-gnu/release/unseamless_
 scripts/test-core.sh       # run the platform-independent core's unit tests on the host
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`CLAUDE.md`](CLAUDE.md)
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and [`AGENTS.md`](AGENTS.md)
 for the SDK, safety invariants, and the build-and-verify-in-game workflow.
 
 ## Independent Reimplementation

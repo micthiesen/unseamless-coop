@@ -9,7 +9,7 @@ in MIT-licensed open source. No movie files, no Bink hooking.
 wired in `app::install` behind `skip_splash_screens`, default on) NOPs the boot-logo gate; on the rig
 the logos skip straight to the title screen. Game-internal claims are grounded in the pinned
 `fromsoftware-rs` SDK source (cited) or are behavioral observations confirmed on the rig. Clean-room
-posture per [CLAUDE.md](../CLAUDE.md): reimplemented from the mechanism, not copied bytes (the
+posture per [AGENTS.md](../AGENTS.md): reimplemented from the mechanism, not copied bytes (the
 reference is MIT so reading it is fine, but the patch pattern is version-specific anyway — ours was
 re-derived and verified live).
 
@@ -54,7 +54,7 @@ redistribute them.
 
 Replace the logo `.bk2`s with empty/stub videos (Nexus "No Startup Videos"), or UXM-unpack and
 delete them. Skips only the *video* logos, and requires shipping/overriding FromSoft assets — which
-this project does not do ([CLAUDE.md](../CLAUDE.md) > clean-room). Understand it; don't use it.
+this project does not do ([AGENTS.md](../AGENTS.md) > clean-room). Understand it; don't use it.
 
 ### Runtime patch (the chosen approach)
 

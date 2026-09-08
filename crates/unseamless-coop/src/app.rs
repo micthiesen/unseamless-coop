@@ -83,7 +83,7 @@ pub fn install() {
 
     // No task system means the mod cannot install a single feature — there's no degraded mode to
     // fall back to, so fail like the other startup guards: a modal box, then close the game (rather
-    // than leave it running silently unmodded). See CLAUDE.md > "Surfacing errors".
+    // than leave it running silently unmodded). See AGENTS.md > "Surfacing errors".
     let Some(cs_task) = wait_for_task_system() else {
         crate::guard::fatal(
             "unseamless-coop couldn't initialize: the game's task system never came up, so the \
@@ -159,7 +159,7 @@ fn init_subsystems(
 
 /// Everything that must run before we block on the game's task system, in the order it has to happen.
 /// Two of these are **fatal guards** (save isolation, co-op password) that close the game rather than
-/// continue in a wrong state — see CLAUDE.md > "Surfacing errors".
+/// continue in a wrong state — see AGENTS.md > "Surfacing errors".
 fn pre_task_startup(config: &unseamless_core::config::Config, base: &std::path::Path) {
     // Resolve our own SteamID off-thread (the identity rung of the co-op connection plan). Steam comes
     // up after our early dinput8 load, so this polls until ready, then publishes the ID for the overlay
@@ -398,7 +398,7 @@ fn spawn_overlay(module: usize) {
                     "input: hook install failed ({e}); game input won't be suppressed while the overlay is open"
                 );
                 // Surface it to the player rather than failing silently (in-session problems degrade
-                // + inform, per CLAUDE.md): the menu still works, but the game keeps reacting to input.
+                // + inform, per AGENTS.md): the menu still works, but the game keeps reacting to input.
                 crate::notify::with_mut(|n| {
                     n.set_banner(
                         "input-degraded",
@@ -686,7 +686,7 @@ fn disable_feature(index: usize) {
     slot.disabled.store(true, Ordering::Relaxed);
     log::error!("feature '{}' (index {index}) panicked; disabled for the rest of the session", slot.name);
     // Tell the player a feature went away — the game keeps running. This is a *diagnostic* message, so
-    // PLAIN voice, not ER lore (CLAUDE.md > "Surfacing errors"). Lock-safe: the panicked tick already
+    // PLAIN voice, not ER lore (AGENTS.md > "Surfacing errors"). Lock-safe: the panicked tick already
     // unwound its `APP` lock, and `notify` owns an independent, poison-recovering Mutex, so this can't
     // deadlock against the lock the panic released. Panic-safety is provided by the caller — the task
     // firewall wraps this whole recovery branch in its own `catch_unwind` (see `register_features`) —

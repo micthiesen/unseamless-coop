@@ -5,7 +5,7 @@
 # first launch. Edit freely; `apply --keep-config` leaves an existing on-disk config untouched.
 #
 # The one load-bearing choice here is [debug].enabled = true: it drops logging to `level` so a rig
-# run captures the verbose lines (CLAUDE.md's logging rule keeps these silent by default). The
+# run captures the verbose lines (AGENTS.md's logging rule keeps these silent by default). The
 # [session].password is now the co-op trigger: with it set, lobby discovery runs on launch (creates a
 # lobby + becomes host solo, finds + joins a partner's with two players), so a rig run exercises the
 # real connection path. It must be 8+ chars (the mod rejects a shorter one at startup).

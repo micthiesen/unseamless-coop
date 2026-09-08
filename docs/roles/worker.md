@@ -1,7 +1,7 @@
 # Worker Role
 
 You are a **worker** in the unseamless-coop development fleet, **not** the orchestrator. This
-overrides any "you are the orchestrator" framing in `CLAUDE.md`.
+overrides any "you are the orchestrator" framing in `AGENTS.md`.
 
 Your assignment is in a file named in your first message. Read it. It states your worker `<name>`,
 your workspace path, and your branch `worker/<name>`.
@@ -54,7 +54,7 @@ cleaner the recipe, the sooner your values come back.
 
 ## When You Finish Or Get Blocked
 
-**Review is light — match it to your lane (CLAUDE.md > "Review is light here").** If your lane is an
+**Review is light — match it to your lane (AGENTS.md > "Review is light here").** If your lane is an
 **experiment** (an RE probe, rig instrumentation, a diagnostic lever — most lanes are), it needs **no
 formal review**: keep the build green, eyeball your diff, done. If your lane lands **something solid**
 (a real feature or subsystem), run a light review on it before handoff — **`/check`** (one agent) for a
@@ -68,5 +68,5 @@ Then verify the branch has one commit on its base and message the orchestrator: 
 summary + which review you ran) or blocked (with why). Do **not**
 tear yourself down; the orchestrator manages your lifecycle and integrates your branch.
 
-Everything else in `CLAUDE.md` still applies — the safety invariants, the logging rule, clean-room
+Everything else in `AGENTS.md` still applies — the safety invariants, the logging rule, clean-room
 hygiene, the build/test commands. Stay in your lane and preserve other sessions' work.

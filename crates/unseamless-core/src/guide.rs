@@ -19,7 +19,7 @@
 //! player's hands. See `crate::lib` (the `#[cfg(debug_assertions)] pub mod guide;`).
 //!
 //! ## Voice
-//! A guide is a **debug tool**, so its banners are PLAIN/diagnostic, never ER lore tone (CLAUDE.md >
+//! A guide is a **debug tool**, so its banners are PLAIN/diagnostic, never ER lore tone (AGENTS.md >
 //! "Message voice"). Authors write only the instruction text; the engine auto-appends the control
 //! hints and the pending/stub markers.
 
@@ -338,7 +338,7 @@ pub struct Step {
     /// it shows a focused modal of preset options (each a label + the [`Advance`] confirming it takes)
     /// and waits for the tester to pick one (or skip). Selecting one captures the answer as a
     /// [`ChoiceMade`] (logged by the binding) and advances per that option's `Advance`. This is the
-    /// **last resort after logging** (CLAUDE.md / the rig-guides skill): only for an irreducibly
+    /// **last resort after logging** (AGENTS.md / the rig-guides skill): only for an irreducibly
     /// human-perceptual signal whose answer matters (it branches, or is worth recording). See
     /// [`Guide::choice`].
     choice: Option<Vec<(&'static str, Advance)>>,

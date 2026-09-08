@@ -9,7 +9,7 @@ machine's role is **derived** from what the tester does (Open World ⇒ host, Jo
 standard connect step — so two-player testing is "both run the same guide; each just opens or joins."
 
 This is the design + how it's wired. **Authoring** a guide (the API you actually write) is its own
-short skill: `.claude/skills/rig-guides/SKILL.md`. The engine is host-tested in
+short skill: `.agents/skills/rig-guides/SKILL.md`. The engine is host-tested in
 `crates/unseamless-core/src/guide.rs`; the committed guides are in `…/guide/guides.rs`; the
 game-side binding is `crates/unseamless-coop/src/features/rig_guide.rs` + `coop/overlay.rs`.
 

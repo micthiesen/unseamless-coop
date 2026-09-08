@@ -7,11 +7,7 @@
 # (rig/Deck/in-game validation, a judgment call). Never for progress updates.
 # High-priority Pushover push to his phone.
 #
-# The .human-notified marker it writes lets the quiet-check backstop recognize
-# "this stop was already announced" and skip its generic "fleet quiet" push for
-# the SAME stop (same-stop dedup, not a blanket window -- see quiet-check).
-# Multiple explicit pings are allowed (Michael doesn't mind concurrent pushes);
-# set NOTIFY_HUMAN_RATE_SECS > 0 to opt into a minimum gap between pushes.
+# NOTIFY_HUMAN_RATE_SECS optionally sets a minimum gap between pushes.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,8 +29,6 @@ if [ "$RATE_SECS" -gt 0 ] && [ -f "$marker" ]; then
   fi
 fi
 
-# pushover exits nonzero on a real send failure; under set -e that skips the
-# marker touch -- correct, since a FAILED explicit ping must not suppress the
-# quiet-check backstop (which is then the delivery of record for this stop).
+# Record successful delivery for optional rate limiting.
 "$SELF/../notify/pushover" "$msg" "unseamless: needs you" 1
 touch "$marker"

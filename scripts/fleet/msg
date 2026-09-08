@@ -1,31 +1,9 @@
 #!/usr/bin/env bash
-# msg <tmux-session> <text...>   (or `-`/no args to read the message from stdin)
-#
-# Deliver a message to another fleet Claude session. The message lands as a normal
-# user turn in the target, delivered in-process through its inspector socket by the
-# one complex piece, scripts/fleet/_inject (see that file for the mechanism). This
-# replaces the old inbox+lifecycle-hook+wake-sentinel transport: delivery is now
-# instant (no waiting for a Stop/SessionStart hook), the target need not be poked
-# with a typed sentinel, and a draft left in the target's input box is saved and
-# restored rather than gating delivery. If the target is mid-turn, the message
-# queues and runs at the end of the current turn, exactly like typing would.
-#
-# Targets must be launched with BUN_INSPECT (worker-new / orch-start do this); the
-# socket lives at $UNSEAMLESS_FLEET_DIR/insp/<session>.sock. Convention:
-#   msg usc-orch                 "[worker:auth] need a rig run for the save hook"
-#   msg usc-worker-auth          "[orchestrator] rig says the hook fired; proceed"
-#
-# For a codex target the transport is different: the Codex TUI is a Rust binary
-# with no inspector socket, so delivery is a tmux bracketed paste into the target
-# pane + Enter (see the codex branch below). Which transport applies is resolved
-# PER TARGET (a mixed fleet can have codex workers under a claude default and
-# vice versa): a worker's own .harness marker decides for usc-worker-*, the
-# fleet default (scripts/fleet/harness) for usc-orch — the orchestrator always
-# runs the default.
+# Submit a normal user turn through tmux bracketed paste and Enter.
+# Keep the destination composer empty; a paste appends to any existing draft.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FLEET_DIR="${UNSEAMLESS_FLEET_DIR:-$HOME/.local/share/unseamless-fleet}"
 # shellcheck source=scripts/fleet/_harness
 source "$SELF/_harness"
 
@@ -34,14 +12,10 @@ if [ -z "$sess" ]; then
   echo "usage: msg <tmux-session> <text...>   (or pipe text on stdin)" >&2
   exit 2
 fi
-# Only ever target fleet sessions, so a typo can't deliver into an unrelated pane.
 if ! [[ "$sess" =~ ^usc-(orch|worker-[a-z0-9][a-z0-9_-]*)$ ]]; then
   echo "msg: refusing target '$sess' -- only fleet sessions (usc-orch, usc-worker-<name>) allowed" >&2
   exit 2
 fi
-# Text source: args, or stdin. `-` is the explicit stdin sentinel, matching worker-new — without it
-# a `msg <sess> - <<'EOF'` heredoc (the documented way to pass a brief with backticks/quotes) sends
-# the literal "-" and silently drops the heredoc, which is exactly what it looks like: nothing.
 if [ "$#" -eq 1 ] && [ "$1" = "-" ]; then
   text="$(cat)"
 elif [ "$#" -gt 0 ]; then
@@ -51,31 +25,17 @@ else
 fi
 if [ -z "$text" ]; then echo "msg: empty message" >&2; exit 2; fi
 
-# Resolve the TARGET's harness: a worker's .harness marker (spawn pin, global
-# fallback) so a per-worker --harness override or a mid-fleet default toggle
-# can't route the message over the wrong transport; usc-orch is always the
-# fleet default (the orchestrator has no override).
 if [[ "$sess" =~ ^usc-worker-(.+)$ ]]; then
   target_harness="$(fleet_worker_harness "${BASH_REMATCH[1]}")"
 else
-  target_harness="$(fleet_harness)"
+  target_harness="$(fleet_orchestrator_harness)"
 fi
 
-# Codex target: deliver by tmux bracketed paste + Enter. Verified live: the
-# paste lands in the composer and Enter submits it as a normal user turn, and a
-# message sent while the target is mid-turn queues and runs when the turn ends
-# (same as typing). Two caveats vs the claude injector: a draft sitting in the
-# target's composer is NOT preserved (the paste appends to it and Enter submits
-# the combined text), and a TUI still booting can drop the paste -- if a worker
-# was spawned seconds ago, retry shortly. Multi-line text is fine: bracketed
-# paste (-p) keeps newlines literal in the composer.
 if [ "$target_harness" = "codex" ]; then
   if ! tmux has-session -t "$sess" 2>/dev/null; then
     echo "msg: $sess is offline (no tmux session); cannot deliver" >&2
     exit 1
   fi
-  # Per-process buffer name: a fixed name races when two msg calls overlap (the
-  # second load-buffer overwrites before the first paste-buffer fires).
   buf="usc-msg-$$"
   printf '%s' "$text" | tmux load-buffer -b "$buf" -
   tmux paste-buffer -p -t "$sess" -b "$buf" -d
@@ -83,37 +43,4 @@ if [ "$target_harness" = "codex" ]; then
   tmux send-keys -t "$sess" Enter
   echo "msg: delivered to $sess (tmux paste)"
   exit 0
-fi
-
-sock="$FLEET_DIR/insp/$sess.sock"
-if [ ! -S "$sock" ]; then
-  echo "msg: $sess is offline (no inspector socket at $sock); cannot deliver" >&2
-  exit 1
-fi
-
-# _inject does the work: connect, locate the prompt UI in the live React tree, submit
-# the message as a turn, preserve any draft. Its exit code is the delivery result.
-#
-# Scrub BUN_INSPECT from the child's env. This script runs *inside* a fleet Claude
-# whose own env carries BUN_INSPECT=ws+unix://.../<that session>.sock (worker-new /
-# orch-start set it so the session exposes its inspector). bun honors BUN_INSPECT in
-# EVERY child process, so an un-scrubbed `bun _inject` re-binds the caller's own
-# inspector path on startup -- unlinking the caller's live socket and leaving a dead
-# orphan file, after which nobody can `msg` the caller until it restarts. The injector
-# only ever *connects* to the target's socket (--sock); it never needs its own
-# inspector, so dropping BUN_INSPECT is free and stops the self-clobber. (Re-derive:
-# `BUN_INSPECT=ws+unix:///tmp/x.sock bun -e 0` creates /tmp/x.sock -- bun binds it in
-# any child.)
-if env -u BUN_INSPECT bun "$SELF/_inject" --sock "$sock" -- "$text"; then
-  echo "msg: delivered to $sess (live turn)"
-else
-  rc=$?
-  if [ "$rc" -eq 8 ]; then
-    echo "msg: $sess has a stale inspector socket -- the file exists but nothing is accepting on it." >&2
-    echo "msg: the session restarted (or its socket was clobbered) and can't be reached on demand;" >&2
-    echo "msg: restart it via orch-start / worker-open to rebind a fresh socket." >&2
-  else
-    echo "msg: delivery to $sess failed (rc=$rc); is it mid-restart? retry shortly" >&2
-  fi
-  exit "$rc"
 fi

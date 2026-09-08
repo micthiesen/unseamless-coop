@@ -33,7 +33,7 @@
 //!
 //! ## Clean-room
 //! Everything here is grounded in the public SDK (the charted FSM enums/fields) or in our own
-//! observations; no upstream ERSC code or decompiler output is transcribed (CLAUDE.md > Clean-room).
+//! observations; no upstream ERSC code or decompiler output is transcribed (AGENTS.md > Clean-room).
 //!
 //! ## Lifetime & safety
 //! The entry hooks (when live) follow the same invariants as [`crate::saves`]: installed once on the

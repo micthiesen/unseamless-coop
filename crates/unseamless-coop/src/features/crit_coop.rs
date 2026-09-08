@@ -77,7 +77,7 @@ impl Feature for CritCoop {
         let _ = crate::sdk::with_instance_mut::<WorldChrMan, _>(|wcm| {
             for chr in wcm.open_field_chr_set.base.characters() {
                 // Skip a mid-load/teardown, half-wired `ChrIns` before dereferencing its module
-                // pointers: `characters()` yields entries regardless of load status (the CLAUDE.md
+                // pointers: `characters()` yields entries regardless of load status (the AGENTS.md
                 // UAF caveat), and `modules.action_flag` is a double pointer-chase. Mirrors the
                 // `chr_flags1c8.is_active()` gate in `sdk::with_active_main_player`.
                 if !chr.chr_flags1c8.is_active() {
